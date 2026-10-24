@@ -7,7 +7,7 @@
 - Identical source/destination subtree object: `190d724fb6354a4410a45154e96a885638da8398`.
 - Tracked paths: 1,028. Extracted commits: 211, including 172 merges.
 - Migration date: October 24, 2026.
-- Source removal and storage policy: [Buster issue #378](https://github.com/buster14a/buster/issues/378).
+- Source removal and storage policy: [Buster PR #379](https://github.com/buster14a/buster/pull/379), tracking [issue #378](https://github.com/buster14a/buster/issues/378).
 
 ## History extraction
 
@@ -46,3 +46,27 @@ as merged evidence. In particular, Buster PRs #369 and #375 contained additional
 measurement material at migration time. Their owners should publish that material
 here and replace its links before merging; Buster's required storage check rejects
 reintroducing the retired path.
+
+## Buster integration
+
+PR #379 merged normally on October 24, 2026 as
+`a7741e836353642041aca0e3c653f38226153358`. Its first parent is the original source
+snapshot; its second parent is the reviewed migration head
+`f8d41c13d77229d8b3516aa7713bf41ed794d66b`. The merge tree equals the reviewed PR
+tree, contains no `docs/measurements` path, and retains the original source
+snapshot in its ancestry. Buster history was not rewritten.
+
+The [PR's 9700X run](https://github.com/buster14a/buster/actions/runs/40087337637)
+passed, including the external pinned harness checkout and the matched
+branch-sizing qualification. The [PR storage check](https://github.com/buster14a/buster/actions/runs/40087337716)
+and [main storage check](https://github.com/buster14a/buster/actions/runs/40087791922)
+also passed. The [post-merge hardware run](https://github.com/buster14a/buster/actions/runs/40087791915)
+records the default-branch hardware verification.
+
+Buster's active main ruleset `25225502` requires both `Measurement storage policy`
+and `Build and execute on Ryzen 7 9700X`, from GitHub Actions app `15368`.
+Only the storage context was appended; existing rules and bypass settings were
+preserved. The storage workflow runs even for documentation-only PRs and rejects
+all tracked paths at or under `docs/measurements`, including ignored files forced
+into Git, a file replacing the directory, and a symlink. `.gitignore`, contributor
+instructions and immutable evidence links reinforce the same boundary.
