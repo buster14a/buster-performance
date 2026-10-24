@@ -45,3 +45,7 @@ Representative token counts are 16,184 / 28,505 / 705,670, with vector occupancy
 Earlier host `raw` and `raw2` logs and their original recipes/source metadata are preserved under [historical](historical) as diagnostic historical results. Their snapshot labels/source provenance differ from the fresh composed campaign; do not present them as exact candidate evidence. [pr375-initial.patch](pr375-initial.patch) preserves the original experiment, and [qualified-fused-production.patch](qualified-fused-production.patch) preserves the relevant qualified production change. The original compiler source retains its licenses and notices in [the qualified checkout](https://github.com/buster14a/buster/tree/0c55c026cccc7e62b4e8e90c802e31d693a99c89).
 
 A future variant needs new frozen whole-driver qualification. This rejected flag is not retained as an indefinite user option. `SHA256SUMS` covers the campaign payload, including the original artifact ZIP; the summary itself is retained by its Git commit.
+
+## Final integration
+
+The retained-path cleanup passed required native and storage CI at head `aca9ba491fd260b6ed642a5ed3b4ad6785583d0a` and merged as `1402e80a6f124fdfeb77c0ec76ff1bf0223ea9e5`, closing #335. The actual and tested merge have identical parents and tree. [The integration receipt](integration/README.md) preserves the complete native log, structured metadata, explicit 512-pragma regression results and main-containment evidence. Post-merge main CI is tracked separately from the successful exact-tree PR validation.
