@@ -1,0 +1,1301 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 3e77e9b..3aacc94 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -1106,9 +1106,16 @@ must be exactly the expected one:
+   10,000 branches, which grow its table;
+ - `ab`: the rotating order, and runs that succeed, fail and can't start, with
+   two argument lists, and through a lock (`env`) pinned to an allowed CPU.
++- `time-runs`: shell commands that log their order, which must be the
++  warm-ups' then each run's rotated one, statuses kept as the first warm-up's
++  (0 and 3), one that changes after it (a failure per run), and an executable
++  that can't start.
+ 
+ The commands are `ab [--rounds N] [--cpu N] [--lock PATH] TREE... --
+-ARGUMENT... [-- ARGUMENT...]...`, `hot-loops FUNCTION DISASSEMBLY SAMPLES
++ARGUMENT... [-- ARGUMENT...]...`, `time-runs [--runs N] [--warmups N]
++[--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list
++ARGUMENT...]...` (whole processes of this executable in rotated order, with
++their wall time, rusage, peak resident set and page faults; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
+ [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
+ FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
+ ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
+diff --git a/docs/profiling.md b/docs/profiling.md
+index 1ab9e70..7bedc49 100644
+--- a/docs/profiling.md
++++ b/docs/profiling.md
+@@ -60,6 +60,24 @@ The noise sets which comparison to use.
+   itself under the lock. The output is each run's, after a heading (`== round 3 tree ../mine config [...]`); it exits
+   with status 1 if a run fails. For a small difference, time one loop (`--only`, about 0.1 s a run) over 15 rounds,
+   and look at an outlier with `perf stat` before believing it.
++- **Whole drivers: `time-runs` under `ab`.** A change to a phase that a few percent of a compile takes has to show in
++  the whole driver, a fresh process each time, startup, page faults and teardown included (#335). `time-runs` runs
++  this executable once per argument list in each run, the lists in an order that rotates by run, after one warm-up
++  each, and reports every process's wall time (fork to `wait4`), user and system time, peak resident set and page
++  faults, then each list's medians:
++
++  ```sh
++  ./build/compiler ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh ../mine \
++      -- time-runs --runs 21 --list parse -fsyntax-only file.c --list parse -fsyntax-only --parser-keywords file.c
++  ./build/compiler ab --rounds 5 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh ../main ../mine \
++      -- time-runs --runs 21 --after-scalar 200 --list -fsyntax-only file.c
++  ```
++
++  Its lists start at `--list`, since `ab` takes `--` for its own. Two lists in one binary compare an option; two
++  trees under `ab` compare builds. `--after-scalar MS` runs an untimed scalar loop for MS ms before each timed process,
++  on the same CPU, the state a compiler starts in after lighter work; `--executable PATH` times another program. A
++  process whose exit status isn't its list's first warm-up's fails the command. Compare the five rounds' medians:
++  their spread is the noise.
+ 
+ ## Counting in the process
+ 
+diff --git a/src/buster/compiler/c_parser.c b/src/buster/compiler/c_parser.c
+index a1e058e..60e52ba 100644
+--- a/src/buster/compiler/c_parser.c
++++ b/src/buster/compiler/c_parser.c
+@@ -536,12 +536,78 @@ static void parse_tokens_from_output_scalar(const PPTokens* output, ParseTokens*
+     parse_tokens_pad(tokens);
+ }
+ 
++// Gives the identifiers among output tokens [first, end) their keyword kinds, as pp_resolve_keywords_scalar does: the
++// fused conversion's resolution of what it doesn't store (a pragma's tokens) and its scalar twin's of every token.
++static void parse_resolve_keywords(PPTokens* output, const uint8_t* keyword_kinds, uint32_t first, uint32_t end)
++{
++    for (uint32_t i = first; i < end; i += 1)
++    {
++        if (output->kinds[i] == C_TOKEN_RAW_IDENTIFIER && output->values[i] < BUSTER_PP_KEYWORD_TABLE)
++        {
++            output->kinds[i] = keyword_kinds[output->values[i]];
++        }
++    }
++}
++
++// The fused conversion's twin (#335): pp_resolve_keywords_scalar over a token, or over a whole pragma from its '#', then
++// parse_convert_token of it.
++static void parse_tokens_from_output_fused_scalar(PPTokens* output, const uint8_t* keyword_kinds, ParseTokens* tokens)
++{
++    uint32_t written = 0;
++    tokens->pragma_count = 0;
++    uint32_t i = 0;
++    while (i < output->count)
++    {
++        uint32_t end = i;
++        const bool pragma = output->kinds[i] == C_TOKEN_HASH && (output->flags[i] & BUSTER_PP_START_OF_LINE) != 0 && parse_pragma_at(output, i, &end);
++        parse_resolve_keywords(output, keyword_kinds, i, pragma ? end : i + 1);
++        i = parse_convert_token(output, i, tokens, &written);
++    }
++    tokens->count = written;
++    parse_tokens_pad(tokens);
++}
++
++// The keyword kinds of the identifiers among the `live` tokens from `i`, `identifiers` of them, whose values are
++// `values` (16 a group), as pp_resolve_keywords_vector looks them up: stored back into the output, and returned with
++// the block's other kinds from `kinds`.
++static inline __attribute__((always_inline)) __m512i parse_resolve_keywords_block(PPTokens* output, const uint8_t* keyword_kinds, uint32_t i, uint64_t identifiers,
++                                                                                  const __m512i* values, __m512i kinds)
++{
++    const __m512i table0 = _mm512_loadu_si512(keyword_kinds);
++    const __m512i table1 = _mm512_loadu_si512(keyword_kinds + 64);
++    const __m512i table2 = _mm512_loadu_si512(keyword_kinds + 128);
++    const __m512i table3 = _mm512_loadu_si512(keyword_kinds + 192);
++    __m512i looked = _mm512_setzero_si512();
++    uint64_t small = 0;
++    for (uint32_t group = 0; group < 4; group += 1)
++    {
++        const __mmask16 lanes = (__mmask16)(identifiers >> (group * 16));
++        const __mmask16 keywords = _mm512_mask_cmplt_epu32_mask(lanes, values[group], _mm512_set1_epi32(BUSTER_PP_KEYWORD_TABLE));
++        const __m128i indices = _mm512_cvtepi32_epi8(values[group]);
++        const __m512i wide = _mm512_zextsi128_si512(indices);
++        const __m128i lower = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table0, wide, table1));
++        const __m128i upper = _mm512_castsi512_si128(_mm512_permutex2var_epi8(table2, wide, table3));
++        const __m128i kinds_here = _mm_mask_blend_epi8(_mm_movepi8_mask(indices), lower, upper);
++        looked = group == 0 ? _mm512_inserti32x4(looked, kinds_here, 0)
++               : group == 1 ? _mm512_inserti32x4(looked, kinds_here, 1)
++               : group == 2 ? _mm512_inserti32x4(looked, kinds_here, 2)
++                            : _mm512_inserti32x4(looked, kinds_here, 3);
++        small |= (uint64_t)keywords << (group * 16);
++    }
++    _mm512_mask_storeu_epi8(output->kinds + i, small, looked);
++    return _mm512_mask_blend_epi8(small, kinds, looked);
++}
++
+ // The output's tokens as the parser's: kinds through parse_kind_table, names for identifiers and each token's index in
+ // the output, 64 tokens at a time. A run of tokens without a '#', a PRAGMA_END or a `::` is stored as it is, with one
+ // table lookup (two vpermi2b for the table's halves, picked by the kind's bit 7) and masked stores; each of those
+ // three goes through parse_convert_token. `tokens` has room for twice the output's tokens (every one a `::`) and its
+ // pragmas, with the padding on both sides.
+-static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
++//
++// With `keyword_kinds` (fused, #335's experiment: the preprocessor left its keywords to it, PPOptions.parser_keywords),
++// each block's identifiers first get their keyword kinds as pp_resolve_keywords_vector gives them, stored back into the
++// output for its other readers, and a pragma's tokens, which the parser doesn't store, get theirs one by one.
++static inline __attribute__((always_inline)) void parse_tokens_convert(PPTokens* output, const uint8_t* keyword_kinds, ParseTokens* tokens, bool fused)
+ {
+     const __m512i table0 = _mm512_load_si512(parse_kind_table);
+     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
+@@ -555,6 +621,9 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
+     {
+         const uint32_t left = output->count - i;
+         const __mmask64 live = left >= 64 ? ~(__mmask64)0 : _bzhi_u64(~0ull, left);
++        // The block's ends, its identifiers and their values come from the kinds as they are, so that only the grammar
++        // kinds wait for the fused conversion's keyword lookup (a keyword's kind is past the specials' and in the
++        // identifiers' range: what an earlier block resolved reads alike).
+         const __m512i kinds = _mm512_maskz_loadu_epi8(live, output->kinds + i);
+         const uint64_t special = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_HASH)) |
+                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)) |
+@@ -562,33 +631,55 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
+         // The run before the first special token, or the whole block.
+         const uint32_t run = special != 0 ? (uint32_t)__builtin_ctzll(special) : (left >= 64 ? 64 : left);
+         const __mmask64 stored = _bzhi_u64(~0ull, run);
+-        const __m512i low = _mm512_permutex2var_epi8(table0, kinds, table1);
+-        const __m512i high = _mm512_permutex2var_epi8(table2, kinds, table3);
+-        const __m512i parse = _mm512_mask_blend_epi8(_mm512_movepi8_mask(kinds), low, high);
++        // Identifiers' and keywords' values are their IdentIds. The fused conversion resolves the run's: every other token
++        // is a special, a pragma's (resolved one by one below) or the next block's.
++        const uint64_t raw = _mm512_mask_cmpeq_epi8_mask(stored, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++        const uint64_t identifiers = raw | (_mm512_mask_cmpge_epu8_mask(stored, kinds, _mm512_set1_epi8(BUSTER_PP_KIND_KEYWORD)) &
++                                            _mm512_mask_cmplt_epu8_mask(stored, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)));
++        __m512i values[4];
++        for (uint32_t group = 0; group < 4; group += 1)
++        {
++            values[group] = _mm512_maskz_loadu_epi32((__mmask16)(identifiers >> (16 * group)), output->values + i + 16 * group);
++        }
++        const __m512i resolved = fused && raw != 0 ? parse_resolve_keywords_block(output, keyword_kinds, i, raw, values, kinds) : kinds;
++        const __m512i low = _mm512_permutex2var_epi8(table0, resolved, table1);
++        const __m512i high = _mm512_permutex2var_epi8(table2, resolved, table3);
++        const __m512i parse = _mm512_mask_blend_epi8(_mm512_movepi8_mask(resolved), low, high);
+         _mm512_mask_storeu_epi8(tokens->kinds + written, stored, parse);
+         _mm512_mask_storeu_epi8(tokens->flags + written, stored, _mm512_maskz_loadu_epi8(live, output->flags + i));
+-        // Identifiers' and keywords' values are their IdentIds.
+-        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(stored, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER)) |
+-                                     (_mm512_mask_cmpge_epu8_mask(stored, kinds, _mm512_set1_epi8(BUSTER_PP_KIND_KEYWORD)) &
+-                                      _mm512_mask_cmplt_epu8_mask(stored, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)));
+         for (uint32_t group = 0; group < 4; group += 1)
+         {
+             const __mmask16 in_run = (__mmask16)(stored >> (16 * group));
+-            const __m512i names = _mm512_maskz_loadu_epi32((__mmask16)(identifiers >> (16 * group)), output->values + i + 16 * group);
+-            _mm512_mask_storeu_epi32(tokens->names + written + 16 * group, in_run, names);
++            _mm512_mask_storeu_epi32(tokens->names + written + 16 * group, in_run, values[group]);
+             _mm512_mask_storeu_epi32(tokens->sources + written + 16 * group, in_run, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)(i + 16 * group))));
+         }
+         written += run;
+         i += run;
+         if (special != 0)
+         {
+-            i = parse_convert_token(output, i, tokens, &written);
++            const uint32_t next = parse_convert_token(output, i, tokens, &written);
++            if (fused && next > i + 1)
++            {
++                parse_resolve_keywords(output, keyword_kinds, i + 1, next);
++            }
++            i = next;
+         }
+     }
+     tokens->count = written;
+     parse_tokens_pad(tokens);
+ }
+ 
++static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
++{
++    // The plain conversion never stores into the output.
++    parse_tokens_convert((PPTokens*)output, 0, tokens, false);
++}
++
++static void parse_tokens_from_output_fused(PPTokens* output, const uint8_t* keyword_kinds, ParseTokens* tokens)
++{
++    parse_tokens_convert(output, keyword_kinds, tokens, true);
++}
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // The tree
+ //
+@@ -11819,7 +11910,11 @@ static bool parse_prepare_meanings(Parser* parser, InternTable* table)
+ // of memory (parser->fatal); the diagnostics are in parser->diagnostics (parse_print_diagnostics prints them).
+ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
+ {
+-    const PPTokens* output = &pp->output;
++    PPTokens* output = &pp->output;
++    // A run with PPOptions.parser_keywords left the keywords to this conversion; whatever happens here, the output has
++    // them when it returns, as its other readers (diagnostics, history, the checker) expect.
++    const bool fused = pp->keywords_pending;
++    pp->keywords_pending = false;
+     bool result = output->count <= BUSTER_PARSE_MAX_TOKENS / 2;
+     const uint64_t capacity = 2 * (uint64_t)output->count + 64;
+     parser->diagnostic_count = 0;
+@@ -11844,9 +11939,21 @@ static bool parse_translation_unit(Parser* parser, Preprocessor* pp)
+         result = tokens->flags != 0;
+         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
+     }
++    if (!result && fused)
++    {
++        pp_resolve_keywords(pp);
++    }
+     if (result)
+     {
+-        if (parser->options.scalar)
++        if (fused && parser->options.scalar)
++        {
++            parse_tokens_from_output_fused_scalar(output, pp->keyword_kinds, &parser->tokens);
++        }
++        else if (fused)
++        {
++            parse_tokens_from_output_fused(output, pp->keyword_kinds, &parser->tokens);
++        }
++        else if (parser->options.scalar)
+         {
+             parse_tokens_from_output_scalar(output, &parser->tokens);
+         }
+diff --git a/src/buster/compiler/c_parser_benchmark.c b/src/buster/compiler/c_parser_benchmark.c
+index af9c39f..e54cc5b 100644
+--- a/src/buster/compiler/c_parser_benchmark.c
++++ b/src/buster/compiler/c_parser_benchmark.c
+@@ -337,6 +337,8 @@ struct ParseBenchmarkFile
+     const char* path;
+     // The preprocessor's output, which the input's conversion reads, and the parser with the file's tokens.
+     PPTokens output;
++    // The output's kinds as pp_run_file leaves them, before the keyword pass: the handoff's rows start from them.
++    uint8_t* raw_kinds;
+     Parser parser;
+     ParseFallback fallback;
+ };
+@@ -350,6 +352,10 @@ typedef enum ParseBenchmarkTimed
+ {
+     PARSE_TIMED_INPUT_TWIN,
+     PARSE_TIMED_INPUT,
++    PARSE_TIMED_HANDOFF_TWIN,
++    PARSE_TIMED_HANDOFF,
++    PARSE_TIMED_FUSED_TWIN,
++    PARSE_TIMED_FUSED,
+     PARSE_TIMED_SCALAR_PARSER,
+     PARSE_TIMED_TWINS,
+     PARSE_TIMED_VECTOR,
+@@ -383,6 +389,10 @@ static const char* const parse_benchmark_timed_names[PARSE_TIMED_COUNT] =
+ {
+     "input-twin",
+     "input",
++    "handoff-twin",
++    "handoff",
++    "fused-twin",
++    "fused",
+     "scalar-parser",
+     "twins",
+     "vector",
+@@ -455,6 +465,8 @@ struct ParseBenchmark
+     ParseDiagnostic* diagnostics;
+     uint32_t diagnostic_capacity;
+     ParseTokens converted;
++    // The language mode's keyword kinds (pp->keyword_kinds), for the handoff's rows.
++    uint8_t keyword_kinds[BUSTER_PP_KEYWORD_TABLE] __attribute__((aligned(64)));
+     Arena scratch;
+     // K5's result for the file the stages are on, which the fallback reads; whether the file is past K4's 16-bit keys.
+     bool statements_ok;
+@@ -476,6 +488,64 @@ static ParseInput parse_benchmark_input(ParseBenchmark* bench, ParseBenchmarkFil
+     };
+ }
+ 
++// One file's handoff by `which` (#335), from its output's kinds as pp_run_file leaves them: the keyword pass then the
++// conversion, as the drivers run them (PARSE_TIMED_HANDOFF, and their twins), or the fused conversion
++// (PPOptions.parser_keywords; PARSE_TIMED_FUSED, and its twin). The output's kinds end resolved either way.
++static void parse_benchmark_handoff(ParseBenchmark* bench, ParseBenchmarkFile* file, ParseBenchmarkTimed which)
++{
++    static Preprocessor pp;
++    pp.output = file->output;
++    memcpy(pp.keyword_kinds, bench->keyword_kinds, sizeof(pp.keyword_kinds));
++    switch (which)
++    {
++        case PARSE_TIMED_HANDOFF_TWIN:
++            pp_resolve_keywords_scalar(&pp);
++            parse_tokens_from_output_scalar(&pp.output, &bench->converted);
++            break;
++        case PARSE_TIMED_HANDOFF:
++            pp_resolve_keywords_vector(&pp);
++            parse_tokens_from_output(&pp.output, &bench->converted);
++            break;
++        case PARSE_TIMED_FUSED_TWIN: parse_tokens_from_output_fused_scalar(&pp.output, bench->keyword_kinds, &bench->converted); break;
++        default: parse_tokens_from_output_fused(&pp.output, bench->keyword_kinds, &bench->converted); break;
++    }
++}
++
++// Whether every handoff row gives every file the drivers' tokens (the parser's, from pp_run's resolved output) and
++// leaves the output's kinds resolved as pp_run did.
++static bool parse_benchmark_check_handoff(ParseBenchmark* bench)
++{
++    bool same = true;
++    for (uint32_t f = 0; same && f < bench->file_count; f += 1)
++    {
++        ParseBenchmarkFile* file = &bench->files[f];
++        const ParseTokens* tokens = &file->parser.tokens;
++        uint8_t* resolved = malloc((uint64_t)file->output.count + 1);
++        same = resolved != 0;
++        if (same)
++        {
++            memcpy(resolved, file->output.kinds, file->output.count);
++        }
++        for (uint32_t which = PARSE_TIMED_HANDOFF_TWIN; same && which <= PARSE_TIMED_FUSED; which += 1)
++        {
++            memcpy(file->output.kinds, file->raw_kinds, file->output.count);
++            parse_benchmark_handoff(bench, file, (ParseBenchmarkTimed)which);
++            const ParseTokens* got = &bench->converted;
++            same = memcmp(file->output.kinds, resolved, file->output.count) == 0 && got->count == tokens->count && got->pragma_count == tokens->pragma_count &&
++                   memcmp(got->kinds, tokens->kinds, tokens->count) == 0 && memcmp(got->names, tokens->names, (uint64_t)tokens->count * 4) == 0 &&
++                   memcmp(got->sources, tokens->sources, (uint64_t)tokens->count * 4) == 0 && memcmp(got->flags, tokens->flags, tokens->count) == 0 &&
++                   memcmp(got->pragma_sources, tokens->pragma_sources, (uint64_t)tokens->pragma_count * 4) == 0 &&
++                   memcmp(got->pragma_positions, tokens->pragma_positions, (uint64_t)tokens->pragma_count * 4) == 0;
++            if (!same)
++            {
++                fprintf(stderr, "%s: the handoff's %s row differs from the drivers' tokens\n", file->path, parse_benchmark_timed_names[which]);
++            }
++        }
++        free(resolved);
++    }
++    return same;
++}
++
+ // Runs a whole path over every file.
+ static void parse_benchmark_run_path(ParseBenchmark* bench, ParseBenchmarkTimed which)
+ {
+@@ -626,7 +696,22 @@ static void parse_benchmark_time(ParseBenchmark* bench, uint32_t passes, int32_t
+     {
+         for (uint32_t which = PARSE_TIMED_INPUT_TWIN; which <= PARSE_TIMED_VECTOR; which += 1)
+         {
+-            if (only < 0 || only == (int32_t)which)
++            const bool handoff = which >= PARSE_TIMED_HANDOFF_TWIN && which <= PARSE_TIMED_FUSED;
++            if (handoff && (only < 0 || only == (int32_t)which))
++            {
++                // Per file, from the kinds pp_run_file leaves, put back outside the time.
++                ParseBenchmarkSample total = { 0 };
++                for (uint32_t f = 0; f < bench->file_count; f += 1)
++                {
++                    ParseBenchmarkFile* file = &bench->files[f];
++                    memcpy(file->output.kinds, file->raw_kinds, file->output.count);
++                    const ParseBenchmarkSample before = parse_benchmark_sample(&counters);
++                    parse_benchmark_handoff(bench, file, (ParseBenchmarkTimed)which);
++                    parse_benchmark_accumulate(&total, before, parse_benchmark_sample(&counters), &overhead);
++                }
++                samples[which][pass == 0 ? 0 : pass - 1] = total;
++            }
++            else if (only < 0 || only == (int32_t)which)
+             {
+                 ParseBenchmarkSample total = { 0 };
+                 const ParseBenchmarkSample before = parse_benchmark_sample(&counters);
+@@ -824,6 +909,15 @@ int run_parser_benchmark(int argc, char** argv)
+             // make among them: kept for every file, a corpus of hundreds of files would exhaust the address space.
+             file->output = pp.output;
+             pp.output = (PPTokens){ 0 };
++            // Keyword kinds come only from the keyword pass, so the kinds before it are these.
++            memcpy(bench.keyword_kinds, pp.keyword_kinds, sizeof(bench.keyword_kinds));
++            file->raw_kinds = loaded ? malloc((uint64_t)file->output.count + 1) : 0;
++            loaded = loaded && file->raw_kinds != 0;
++            for (uint32_t t = 0; loaded && t < file->output.count; t += 1)
++            {
++                const uint8_t kind = file->output.kinds[t];
++                file->raw_kinds[t] = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END ? C_TOKEN_RAW_IDENTIFIER : kind;
++            }
+             pp_release(&pp);
+             intern_release(&table);
+             arena_release(&file->parser.scratch);
+@@ -873,6 +967,7 @@ int run_parser_benchmark(int argc, char** argv)
+             bench.tree.depths = bench.tree.depths != 0 ? bench.tree.depths + BUSTER_PARSE_TOKEN_PADDING : 0;
+             bench.tree.parents = bench.tree.parents != 0 ? bench.tree.parents + BUSTER_PARSE_TOKEN_PADDING : 0;
+         }
++        loaded = loaded && parse_benchmark_check_handoff(&bench);
+         if (loaded)
+         {
+             parse_benchmark_time(&bench, passes, only, repeat, set);
+@@ -882,6 +977,7 @@ int run_parser_benchmark(int argc, char** argv)
+         {
+             parse_release(&bench.files[f].parser);
+             pp_tokens_release(&bench.files[f].output);
++            free(bench.files[f].raw_kinds);
+         }
+         arena_release(&shared);
+         arena_release(&bench.scratch);
+diff --git a/src/buster/compiler/c_parser_test.c b/src/buster/compiler/c_parser_test.c
+index 7b62369..87d1325 100644
+--- a/src/buster/compiler/c_parser_test.c
++++ b/src/buster/compiler/c_parser_test.c
+@@ -1672,6 +1672,359 @@ static uint32_t parse_test_tree_only(const Parser* full, Preprocessor* pp, const
+ // must read the same tokens and give the same outcome, and on a valid unit the same tree, with the tree's invariants
+ // and postorders; then each kernel against its twin. *outcome gets the vector path's outcome. Returns the number of
+ // failures.
++// ---------------------------------------------------------------------------------------------------------------------
++// The handoff (#335)
++
++// A column of `bytes` bytes ending exactly at a PROT_NONE page, so that a read or write past its last element faults; a
++// column of none points at the page itself. parse_test_handoff_release unmaps it.
++static uint8_t* parse_test_handoff_column(uint64_t bytes)
++{
++    const uint64_t page = 4096;
++    const uint64_t room = (bytes + page - 1) & ~(page - 1);
++    uint8_t* mapping = mmap(0, room + page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++    uint8_t* result = 0;
++    if (mapping != MAP_FAILED && (room == 0 || mprotect(mapping, room, PROT_READ | PROT_WRITE) == 0))
++    {
++        result = mapping + room - bytes;
++    }
++    return result;
++}
++
++static void parse_test_handoff_release(uint8_t* column, uint64_t bytes)
++{
++    const uint64_t page = 4096;
++    const uint64_t room = (bytes + page - 1) & ~(page - 1);
++    if (column != 0)
++    {
++        munmap(column + bytes - room, room + page);
++    }
++}
++
++// An output stream's tokens, from `state`: identifiers whose ids are keywords' (below the table), other predefined
++// names', and names past them, other tokens, `::`, a '#' inside a line, pragmas ('#' starting a line, its tokens and
++// PRAGMA_END) and a '#' that starts a line with no PRAGMA_END before the next line, as a macro may make. `forced`
++// puts a special token (by `special`) at token `at`, unless at is past the count.
++static void parse_test_handoff_stream(PPTokens* output, uint32_t count, uint64_t* state, uint32_t at, uint32_t special)
++{
++    const uint8_t others[] = { C_TOKEN_L_PAREN, C_TOKEN_R_PAREN, C_TOKEN_SEMI, C_TOKEN_COMMA, C_TOKEN_COLON, C_TOKEN_NUMERIC_CONSTANT, C_TOKEN_STRING_LITERAL };
++    uint32_t i = 0;
++    while (i < count)
++    {
++        const uint64_t r = parse_test_random(state);
++        const uint32_t pick = i == at ? 20 + special : (uint32_t)(r % 24);
++        uint8_t kind = C_TOKEN_RAW_IDENTIFIER;
++        uint32_t value = 0;
++        uint8_t flags = (uint8_t)((r >> 8) % 4 == 0 ? BUSTER_PP_START_OF_LINE : 0) | (uint8_t)((r >> 10) % 2 == 0 ? BUSTER_PP_SPACE : 0);
++        uint32_t length = 1;
++        if (pick < 8)
++        {
++            value = 1 + (uint32_t)((r >> 16) % (BUSTER_PP_KEYWORD_TABLE + 8));
++        }
++        else if (pick < 11)
++        {
++            value = BUSTER_PP_KEYWORD_TABLE + (uint32_t)((r >> 16) % 100000);
++        }
++        else if (pick < 19)
++        {
++            kind = others[(r >> 16) % sizeof(others)];
++        }
++        else if (pick == 19 || pick == 20)
++        {
++            kind = C_TOKEN_COLONCOLON;
++        }
++        else if (pick == 21)
++        {
++            kind = C_TOKEN_HASH;
++            flags &= (uint8_t)~BUSTER_PP_START_OF_LINE;
++        }
++        else
++        {
++            // A pragma, or a '#' starting a line with none, of up to 70 tokens (past a block), some identifiers.
++            kind = C_TOKEN_HASH;
++            flags |= BUSTER_PP_START_OF_LINE;
++            length = 1 + (uint32_t)((r >> 16) % 70);
++        }
++        // A group ends before the forced token.
++        length = at > i && at < i + length ? at - i : length;
++        output->kinds[i] = kind;
++        output->values[i] = value;
++        output->flags[i] = flags;
++        const bool pragma = pick == 22 || (pick == 23 && (r >> 40) % 2 == 0);
++        uint32_t j = 1;
++        while (j < length && i + j < count)
++        {
++            const uint64_t t = parse_test_random(state);
++            const bool last = j + 1 == length || i + j + 1 == count;
++            output->kinds[i + j] = last && pragma ? BUSTER_PP_KIND_PRAGMA_END : t % 3 == 0 ? C_TOKEN_COMMA : C_TOKEN_RAW_IDENTIFIER;
++            output->values[i + j] = output->kinds[i + j] == C_TOKEN_RAW_IDENTIFIER ? 1 + (uint32_t)((t >> 8) % (BUSTER_PP_KEYWORD_TABLE + 8)) : 0;
++            // A pragma's tokens never start a line; a '#' without PRAGMA_END ends where a token does.
++            output->flags[i + j] = !pragma && last ? BUSTER_PP_START_OF_LINE : (uint8_t)((t >> 20) % 2 == 0 ? BUSTER_PP_SPACE : 0);
++            j += 1;
++        }
++        i += j;
++    }
++    output->count = count;
++}
++
++// The handoff's oracle: the output as the keyword pass and the conversion must leave it and give it to the parser,
++// from C's rules for the language mode (c_name_is_keyword, not the preprocessor's table), the pragma's shape, and
++// parse_kind_table and parse_keyword_kinds for the kinds. Writes the resolved kinds to `resolved` and the parser's
++// tokens to `tokens` (unpadded).
++static void parse_test_handoff_oracle(const PPTokens* output, CLanguage language, uint8_t* resolved, ParseTokens* tokens)
++{
++    for (uint32_t i = 0; i < output->count; i += 1)
++    {
++        const uint32_t id = output->values[i];
++        const bool keyword = output->kinds[i] == C_TOKEN_RAW_IDENTIFIER && id != 0 && id < BUSTER_PP_KEYWORD_TABLE && id < C_NAME_COUNT && c_name_is_keyword(id, language);
++        resolved[i] = keyword ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : output->kinds[i];
++    }
++    uint32_t w = 0;
++    tokens->pragma_count = 0;
++    uint32_t i = 0;
++    while (i < output->count)
++    {
++        const uint8_t kind = resolved[i];
++        uint32_t end = i + 1;
++        bool pragma = false;
++        if (kind == C_TOKEN_HASH && (output->flags[i] & BUSTER_PP_START_OF_LINE) != 0)
++        {
++            while (end < output->count && resolved[end] != BUSTER_PP_KIND_PRAGMA_END && (output->flags[end] & BUSTER_PP_START_OF_LINE) == 0)
++            {
++                end += 1;
++            }
++            pragma = end < output->count && resolved[end] == BUSTER_PP_KIND_PRAGMA_END;
++        }
++        if (pragma)
++        {
++            tokens->pragma_sources[tokens->pragma_count] = i;
++            tokens->pragma_positions[tokens->pragma_count] = w;
++            tokens->pragma_count += 1;
++            i = end + 1;
++        }
++        else
++        {
++            uint8_t parse_kind = parse_kind_table[kind];
++            const bool is_keyword = kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END;
++            if (is_keyword)
++            {
++                parse_kind = PARSE_KIND_UNKNOWN;
++                for (uint32_t k = 0; k < sizeof(parse_keyword_kinds) / sizeof(parse_keyword_kinds[0]); k += 1)
++                {
++                    parse_kind = parse_keyword_kinds[k].name == output->values[i] ? parse_keyword_kinds[k].kind : parse_kind;
++                }
++            }
++            tokens->kinds[w] = kind == C_TOKEN_COLONCOLON ? PARSE_KIND_COLON : parse_kind;
++            tokens->names[w] = kind == C_TOKEN_RAW_IDENTIFIER || is_keyword ? output->values[i] : 0;
++            tokens->sources[w] = i;
++            tokens->flags[w] = output->flags[i];
++            w += 1;
++            if (kind == C_TOKEN_COLONCOLON)
++            {
++                tokens->kinds[w] = PARSE_KIND_COLON;
++                tokens->names[w] = 0;
++                tokens->sources[w] = i;
++                tokens->flags[w] = BUSTER_PARSE_COLONCOLON_SECOND;
++                w += 1;
++            }
++            i += 1;
++        }
++    }
++    tokens->count = w;
++}
++
++// Whether the conversion's tokens are the oracle's, the padding around them PARSE_KIND_END and zeros.
++static bool parse_test_handoff_same(const ParseTokens* got, const ParseTokens* expected)
++{
++    bool same = parse_test_compare_tokens(got, expected) == BUSTER_PARSE_NONE;
++    for (uint32_t p = 0; same && p < BUSTER_PARSE_TOKEN_PADDING; p += 1)
++    {
++        const int64_t before = -1 - (int64_t)p;
++        const uint64_t after = (uint64_t)got->count + p;
++        same = got->kinds[before] == PARSE_KIND_END && got->kinds[after] == PARSE_KIND_END && got->names[before] == 0 && got->names[after] == 0 &&
++               got->sources[before] == 0 && got->sources[after] == 0 && got->flags[before] == 0 && got->flags[after] == 0;
++    }
++    return same;
++}
++
++// The handoff on generated output streams: every count from 0 to 200 and some to 5,000, with a special token ('#'
++// inside a line, a pragma's '#', a '#' with no PRAGMA_END, or `::`) forced at each of the blocks' edges (0, 62 to 66,
++// 126 to 130, 190 to 194), each stream's columns ending at a PROT_NONE page. Four paths, each from the stream as the
++// preprocessor left it: the keyword pass's vector path and the conversion's, their twins, the fused conversion
++// (PPOptions.parser_keywords) and its twin. Each must give the oracle's resolved kinds and parser tokens, with the
++// padding; a read or a write past a column faults.
++static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
++{
++    uint32_t failures = 0;
++    uint64_t cases = 0;
++    static Preprocessor pp;
++    static Parser parser;
++    memset(&pp, 0, sizeof(pp));
++    pp.vectorized = true;
++    for (uint32_t id = 0; id < BUSTER_PP_KEYWORD_TABLE; id += 1)
++    {
++        pp.keyword_kinds[id] = id < C_NAME_COUNT && c_name_is_keyword(id, language) ? (uint8_t)(BUSTER_PP_KIND_KEYWORD + id - 1) : C_TOKEN_RAW_IDENTIFIER;
++    }
++    const ParseOptions options = { 0 };
++    const uint32_t edges[] = { 0, 62, 63, 64, 65, 66, 126, 127, 128, 129, 130, 190, 191, 192, 193, 194, BUSTER_PARSE_NONE };
++    uint64_t state = seed ^ 0x335335335ull;
++    const bool ready = parse_initialize(&parser, &options, language);
++    for (uint32_t count = 0; ready && count <= 5000 && failures < 8; count += count < 200 ? 1 : 397)
++    {
++        const uint64_t capacity = 2 * (uint64_t)count + 64;
++        uint8_t* kinds = parse_test_handoff_column(count);
++        uint8_t* flags = parse_test_handoff_column(count);
++        uint8_t* values = parse_test_handoff_column((uint64_t)count * 4);
++        uint8_t* original = malloc((uint64_t)count + 1);
++        uint8_t* resolved = malloc((uint64_t)count + 1);
++        ParseTokens expected = {
++            .kinds = malloc(capacity),
++            .names = malloc(capacity * 4),
++            .sources = malloc(capacity * 4),
++            .flags = malloc(capacity),
++            .pragma_sources = malloc(((uint64_t)count + 1) * 4),
++            .pragma_positions = malloc(((uint64_t)count + 1) * 4),
++        };
++        ParseTokens got = {
++            .kinds = parse_column(&parser, 0, capacity, 1),
++            .names = parse_column(&parser, 1, capacity, 4),
++            .sources = parse_column(&parser, 2, capacity, 4),
++            .pragma_sources = parse_column(&parser, 3, (uint64_t)count + 1, 4),
++            .pragma_positions = parse_column(&parser, 4, (uint64_t)count + 1, 4),
++            .flags = parse_column(&parser, 10, capacity, 1),
++            .capacity = (uint32_t)capacity,
++        };
++        const bool allocated = kinds != 0 && flags != 0 && values != 0 && original != 0 && resolved != 0 && expected.kinds != 0 && expected.names != 0 && expected.sources != 0 &&
++                               expected.flags != 0 && expected.pragma_sources != 0 && expected.pragma_positions != 0 && got.kinds != 0 && got.names != 0 && got.sources != 0 &&
++                               got.pragma_sources != 0 && got.pragma_positions != 0 && got.flags != 0;
++        failures += !allocated;
++        for (uint32_t e = 0; allocated && e < sizeof(edges) / sizeof(edges[0]) && failures < 8; e += 1)
++        {
++            for (uint32_t special = 0; special < (edges[e] == BUSTER_PARSE_NONE ? 1u : 4u); special += 1)
++            {
++                pp.output = (PPTokens){ .kinds = kinds, .flags = flags, .values = (uint32_t*)values, .count = count, .capacity = count };
++                parse_test_handoff_stream(&pp.output, count, &state, edges[e], special);
++                memcpy(original, kinds, count);
++                parse_test_handoff_oracle(&pp.output, language, resolved, &expected);
++                for (uint32_t path = 0; path < 4; path += 1)
++                {
++                    memcpy(kinds, original, count);
++                    memset(got.kinds - BUSTER_PARSE_TOKEN_PADDING, 0x5a, capacity + 2 * BUSTER_PARSE_TOKEN_PADDING);
++                    switch (path)
++                    {
++                        case 0:
++                            pp_resolve_keywords_vector(&pp);
++                            parse_tokens_from_output(&pp.output, &got);
++                            break;
++                        case 1:
++                            pp_resolve_keywords_scalar(&pp);
++                            parse_tokens_from_output_scalar(&pp.output, &got);
++                            break;
++                        case 2: parse_tokens_from_output_fused(&pp.output, pp.keyword_kinds, &got); break;
++                        default: parse_tokens_from_output_fused_scalar(&pp.output, pp.keyword_kinds, &got); break;
++                    }
++                    const uint32_t kind = parse_test_first_byte(kinds, resolved, count);
++                    if (kind != BUSTER_PARSE_NONE || !parse_test_handoff_same(&got, &expected))
++                    {
++                        static const char* const names[] = { "keyword pass and conversion", "their twins", "fused conversion", "fused twin" };
++                        parse_test_report("handoff: %s differs from the oracle on %u tokens (special %u at %u), first resolved kind at %u\n", names[path], count, special,
++                                          edges[e], kind);
++                        failures += 1;
++                    }
++                    cases += 1;
++                }
++            }
++        }
++        parse_test_handoff_release(kinds, count);
++        parse_test_handoff_release(flags, count);
++        parse_test_handoff_release(values, (uint64_t)count * 4);
++        free(original);
++        free(resolved);
++        free(expected.kinds);
++        free(expected.names);
++        free(expected.sources);
++        free(expected.flags);
++        free(expected.pragma_sources);
++        free(expected.pragma_positions);
++    }
++    parse_release(&parser);
++    memset(&pp, 0, sizeof(pp));
++    printf("handoff: %llu streams by 4 paths against the oracle, %u failures\n", (unsigned long long)cases / 4, failures);
++    return failures;
++}
++
++// Whether two parsers of one unit agree on everything the drivers read: errors, tokens, diagnostics and, for a unit
++// without errors, the tree. Returns the number of differences, reported under `label`.
++static uint32_t parse_test_same_parse(const Parser* a, const Parser* b, const char* path, const char* label)
++{
++    uint32_t result = 0;
++    const uint32_t token = parse_test_compare_tokens(&a->tokens, &b->tokens);
++    bool same = a->errors == b->errors && a->fatal == b->fatal && a->diagnostic_count == b->diagnostic_count && token == BUSTER_PARSE_NONE;
++    for (uint32_t d = 0; same && d < a->diagnostic_count; d += 1)
++    {
++        const ParseDiagnostic* x = &a->diagnostics[d];
++        const ParseDiagnostic* y = &b->diagnostics[d];
++        same = x->token == y->token && x->argument == y->argument && x->message == y->message && x->place == y->place && x->error == y->error;
++    }
++    if (same && a->errors == 0)
++    {
++        const uint64_t count = a->tokens.count;
++        same = memcmp(a->tree.roles, b->tree.roles, count) == 0 && memcmp(a->tree.parents, b->tree.parents, count * sizeof(uint32_t)) == 0 &&
++               memcmp(a->tree.depths, b->tree.depths, count * sizeof(uint32_t)) == 0;
++    }
++    if (!same)
++    {
++        parse_test_report("%s: %s differs from the plain handoff (first token %u)\n", path, label, token);
++        result += 1;
++    }
++    return result;
++}
++
++// #335's fused handoff on one unit: the file preprocessed again with PPOptions.parser_keywords, which must leave its
++// keywords pending, then parsed by the vector path and, from another run, by the scalar parser through the fused
++// conversion and its twin. Each must parse as `vector` and `scalar` (the plain handoff of `plain`'s output) did, and
++// leave the output's kinds as `plain`'s keyword pass left them.
++static uint32_t parse_test_fused(const char* path, const PPOptions* options, const Parser* vector, const Parser* scalar, const Preprocessor* plain)
++{
++    uint32_t failures = 0;
++    static InternTable table;
++    static Preprocessor pp;
++    static Parser fused;
++    PPOptions requested = *options;
++    requested.parser_keywords = true;
++    for (uint32_t path_kind = 0; path_kind < 2; path_kind += 1)
++    {
++        const ParseOptions parse_options = { .scalar = path_kind == 1 };
++        if (intern_initialize(&table) && pp_initialize(&pp, &requested, &table) && parse_initialize(&fused, &parse_options, options->language))
++        {
++            const bool ran = pp_run(&pp, path);
++            if (!ran || !pp.keywords_pending || pp.output.count != plain->output.count)
++            {
++                parse_test_report("%s: the fused run didn't leave the output's keywords to the parser (%u tokens, plain %u)\n", path, pp.output.count, plain->output.count);
++                failures += 1;
++            }
++            else
++            {
++                parse_translation_unit(&fused, &pp);
++                const uint32_t kinds = parse_test_first_byte(pp.output.kinds, plain->output.kinds, pp.output.count);
++                if (pp.keywords_pending || kinds != BUSTER_PARSE_NONE)
++                {
++                    parse_test_report("%s: the fused conversion left the output's kinds otherwise than the keyword pass, first at output token %u\n", path, kinds);
++                    failures += 1;
++                }
++                failures += parse_test_same_parse(&fused, path_kind == 1 ? scalar : vector, path, path_kind == 1 ? "the fused scalar twin" : "the fused vector path");
++            }
++        }
++        else
++        {
++            failures += 1;
++        }
++        parse_release(&fused);
++        pp_release(&pp);
++        intern_release(&table);
++    }
++    return failures;
++}
++
+ static uint32_t parse_test_check_file(const char* path, const PPOptions* options, ParseTestOutcome* outcome, ParseTestKernelTally* tally)
+ {
+     uint32_t failures = 0;
+@@ -1713,6 +2066,7 @@ static uint32_t parse_test_check_file(const char* path, const PPOptions* options
+                 }
+                 failures += parse_test_check_kernels(&vector, &scalar, &pp, path, tally);
+             }
++            failures += parse_test_fused(path, options, &vector, &scalar, &pp);
+         }
+         parse_release(&scalar);
+         parse_release(&vector);
+@@ -2589,6 +2943,10 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
+     { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--bogus", 1, "unknown argument: --bogus\nusage: compiler [-fsyntax-only] ", true },
+     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-gnu-keywords", 0, "", false },
+     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
++    // #335's fused handoff: the parser's conversion resolves the keywords, and the preprocessor's failures still do.
++    { PARSE_TEST_DRIVER_TEXT, "int x;\n", "--parser-keywords", 0, "", false },
++    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--parser-keywords", 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
++    { PARSE_TEST_DRIVER_TEXT, "#error stop\nint x\n", "--parser-keywords", 1, "%s:1:2: error: stop\n", false },
+ };
+ 
+ // Whether a run of case `c` did what it must.
+@@ -2775,6 +3133,10 @@ static uint32_t parse_test_driver(const char* directory)
+         char* invalid[] = { paths[2] };
+         failures += parse_test_driver_limits(valid, 1, capture, shared, "a valid file");
+         failures += parse_test_driver_limits(invalid, 1, capture, shared, "an invalid file");
++        char* fused_valid[] = { "--parser-keywords", paths[0] };
++        char* fused_invalid[] = { "--parser-keywords", paths[2] };
++        failures += parse_test_driver_limits(fused_valid, 2, capture, shared, "a valid file with --parser-keywords");
++        failures += parse_test_driver_limits(fused_invalid, 2, capture, shared, "an invalid file with --parser-keywords");
+     }
+     if (shared != MAP_FAILED)
+     {
+@@ -2936,6 +3298,7 @@ static int run_parser_tests(int argument_count, char** arguments)
+     {
+         failures += parse_test_check_postorder_self(&arena);
+         failures += parse_test_check_k6_tables();
++        failures += parse_test_check_handoff(options.language, seed);
+         failures += parse_test_check_snippets(directory, clang);
+         failures += clang != 0 ? parse_test_check_oracle(directory, clang) : 0;
+         failures += parse_test_check_fixtures(directory);
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index e36c641..e2ba800 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -310,6 +310,10 @@ struct PPOptions
+     bool no_guard_skip;
+     // The location space's size, for tests that run out of it (--location-limit N; 0 is the whole 4 GB).
+     uint32_t location_limit;
++    // --parser-keywords: a successful run leaves the output's identifiers to the parser, whose input conversion gives
++    // the keywords their kinds in pp->output in the same pass as its columns (parse_translation_unit; #335's
++    // experiment). Only the drivers that parse the output set it; -E and assembly ignore it.
++    bool parser_keywords;
+     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
+     FILE* diagnostics;
+ };
+@@ -1056,6 +1060,9 @@ struct Preprocessor
+     PPOptions options;
+     InternTable* table;
+     bool vectorized;
++    // The output's identifiers wait for the parser's conversion to resolve its keywords (PPOptions.parser_keywords):
++    // until parse_translation_unit takes them, pp->output's keywords are still C_TOKEN_RAW_IDENTIFIER.
++    bool keywords_pending;
+     uint32_t refine_flags;
+     // The prefixed literals the language mode doesn't have, by kind (pp_split_kinds).
+     uint64_t split_kinds;
+@@ -13887,14 +13894,20 @@ static bool pp_run_prelude(Preprocessor* pp)
+     return result;
+ }
+ 
+-// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
++// Runs the main file, then gives the output's keywords their kinds, or on success with PPOptions.parser_keywords leaves
++// them to the parser's conversion (keywords_pending). Returns false if there were errors.
+ static bool pp_run_main(Preprocessor* pp, uint32_t file)
+ {
+     pp->main_file = file;
+     pp->include_depth = 0;
+     pp_run_file(pp, file);
+-    pp_resolve_keywords(pp);
+-    return pp->errors == 0 && !pp->fatal;
++    const bool result = pp->errors == 0 && !pp->fatal;
++    pp->keywords_pending = result && pp->options.parser_keywords && !pp->options.assembly;
++    if (!pp->keywords_pending)
++    {
++        pp_resolve_keywords(pp);
++    }
++    return result;
+ }
+ 
+ // Preprocesses the main file: the prelude (pp_run_prelude), then the file. The output is pp->output, with keywords'
+@@ -15445,6 +15458,10 @@ static bool pp_parse_options(int count, char** arguments, PPOptions* options, Ar
+         {
+             options->clang_features = true;
+         }
++        else if (strcmp(argument, "--parser-keywords") == 0)
++        {
++            options->parser_keywords = true;
++        }
+         else if (strcmp(argument, "-ffreestanding") == 0)
+         {
+             options->freestanding = true;
+@@ -15616,6 +15633,8 @@ static __attribute__((unused)) int run_preprocessor_command(int count, char** ar
+     bool markers = true;
+     const bool parsed = arena.base != 0 && pp_parse_options(count, arguments, &options, &arena, &input, &output, &markers);
+     options.expansion_starts = markers;
++    // -E prints the output itself: its keywords are resolved by the run, never left to a parser.
++    options.parser_keywords = false;
+     if (arena.base == 0)
+     {
+         fprintf(stderr, "fatal error: can't reserve memory\n");
+@@ -15779,7 +15798,7 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
+         const bool directory = search && (strncmp(argument, "-I", 2) == 0 || strcmp(argument, "-isystem") == 0 || strcmp(argument, "-iquote") == 0 ||
+                                           strcmp(argument, "-idirafter") == 0);
+         if (!directory && !pp_own_option_with_value(argument) && strcmp(argument, "--buster-headers") != 0 && strcmp(argument, "--scalar") != 0 &&
+-            strcmp(argument, "--clang-features") != 0)
++            strcmp(argument, "--clang-features") != 0 && strcmp(argument, "--parser-keywords") != 0)
+         {
+             result[n] = arguments[i];
+             n += 1;
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index b78355c..7535ff6 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -1145,7 +1145,7 @@ static int main_command(int argc, char** argv, bool* found)
+     }
+     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
+              (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
+-              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0))
++              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
+     {
+         result = run_profile_command(argc - 1, argv + 1);
+     }
+diff --git a/src/buster/compiler/profile.c b/src/buster/compiler/profile.c
+index bd7f30e..6c10f58 100644
+--- a/src/buster/compiler/profile.c
++++ b/src/buster/compiler/profile.c
+@@ -10,6 +10,7 @@
+ //   build/compiler label-spills FUNCTION TAG INPUT.s OUTPUT.s
+ //   build/compiler spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]
+ //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
++//   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list ARGUMENT...]...
+ //
+ // - ab runs `TREE/build/compiler ARGUMENT...` (or TREE itself, when it is a file) for every tree, every argument list
+ //   and every round, the trees in an order that rotates by round, each run pinned to --cpu and under --lock (the
+@@ -31,6 +32,13 @@
+ // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
+ //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
+ //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
++// - time-runs times whole processes of this executable (or --executable), one per argument list in each run, the lists
++//   in an order that rotates by run, after warm-up runs in list order: each one's wall time from fork to wait4's
++//   return, its user and system time, peak resident set and page faults, from wait4's rusage, every run's line and
++//   each list's medians. With --after-scalar MS, an untimed scalar loop runs MS ms before each timed process, on the
++//   same CPU, the state a compiler starts in after lighter work. Each process's output goes to /dev/null, and its exit
++//   status must be the one its list's first warm-up had. Each list starts at a `--list` (not `--`, which separates
++//   ab's own lists), so that ab, which pins it and takes the lock per run, can run it to compare whole drivers (#335).
+ //
+ // Each tool's work is a function of its input texts that writes its report into a ProfileReport (profile_hot_loops,
+ // profile_label_spills, profile_spill_report, profile_branch_misses), which profile_test.c checks, and ab's order is
+@@ -38,7 +46,8 @@
+ //
+ // Layout, in this order: the report (ProfileReport, profile_print), reading text (profile_line and the others), the
+ // disassembly (ProfileDisassembly, profile_disassembly_read, profile_jump_target), hot-loops, label-spills,
+-// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), and the commands (run_profile_command).
++// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_runs), and the commands
++// (run_profile_command).
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
+@@ -53,6 +62,8 @@
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
+ #include <sys/wait.h>
++#include <sys/resource.h>
++#include <time.h>
+ 
+ // Every command's arena: the input files and what it builds from them. Its pages are committed only as they are touched.
+ #define BUSTER_PROFILE_ARENA_CAPACITY (64ull << 30)
+@@ -1598,6 +1609,265 @@ static uint64_t profile_ab_run(Arena* arena, const ProfileAb* ab)
+     return failures;
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------------------
++// time-runs
++
++static bool profile_count_option(const char* text, uint64_t* value);
++
++// Where profile_spin's state goes, so that its loop isn't removed.
++static volatile uint64_t profile_spin_sink;
++
++// One timed process: wall time from fork to wait4's return, and wait4's rusage and status.
++typedef struct ProfileTimed ProfileTimed;
++struct ProfileTimed
++{
++    uint64_t wall_ns;
++    uint64_t user_us;
++    uint64_t system_us;
++    uint64_t peak_kb;
++    uint64_t minor_faults;
++    uint64_t major_faults;
++    int status;
++};
++
++typedef struct ProfileTimeRuns ProfileTimeRuns;
++struct ProfileTimeRuns
++{
++    const char* executable;
++    // Argument lists, as ab's: list l is arguments[starts[l]] to arguments[starts[l] + counts[l] - 1].
++    char* const* arguments;
++    const uint64_t* starts;
++    const uint64_t* counts;
++    uint64_t list_count;
++    uint64_t runs;
++    uint64_t warmups;
++    uint64_t after_scalar_ms;
++    int output;
++};
++
++static uint64_t profile_now_ns(void)
++{
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
++}
++
++// Integer work for `ms` milliseconds: lighter code than a compiler's vector phases, which lets the core's clock settle
++// as it does before them.
++static void profile_spin(uint64_t ms)
++{
++    const uint64_t end = profile_now_ns() + ms * 1000000ull;
++    uint64_t state = 0x9e3779b97f4a7c15ull;
++    uint64_t now = ms != 0 ? profile_now_ns() : end;
++    while (now < end)
++    {
++        for (uint32_t i = 0; i < 4096; i += 1)
++        {
++            state ^= state << 13;
++            state ^= state >> 7;
++            state ^= state << 17;
++        }
++        now = profile_now_ns();
++    }
++    profile_spin_sink = state;
++}
++
++// Runs `executable` with `argv` (argv[0] the executable) once, its standard streams on /dev/null.
++static ProfileTimed profile_time_one(const char* executable, char* const* argv)
++{
++    ProfileTimed result = { .status = -1 };
++    const uint64_t start = profile_now_ns();
++    const pid_t child = fork();
++    if (child == 0)
++    {
++        const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
++        if (null != -1 && dup2(null, STDIN_FILENO) != -1 && dup2(null, STDOUT_FILENO) != -1 && dup2(null, STDERR_FILENO) != -1)
++        {
++            execv(executable, argv);
++        }
++        _exit(127);
++    }
++    struct rusage usage;
++    int status = 0;
++    if (child != -1 && wait4(child, &status, 0, &usage) == child)
++    {
++        result = (ProfileTimed){
++            .wall_ns = profile_now_ns() - start,
++            .user_us = (uint64_t)usage.ru_utime.tv_sec * 1000000ull + (uint64_t)usage.ru_utime.tv_usec,
++            .system_us = (uint64_t)usage.ru_stime.tv_sec * 1000000ull + (uint64_t)usage.ru_stime.tv_usec,
++            .peak_kb = (uint64_t)usage.ru_maxrss,
++            .minor_faults = (uint64_t)usage.ru_minflt,
++            .major_faults = (uint64_t)usage.ru_majflt,
++            .status = status,
++        };
++    }
++    return result;
++}
++
++// The median of `count` values, sorted in place (insertion sort: a few dozen runs).
++static uint64_t profile_median(uint64_t* values, uint64_t count)
++{
++    for (uint64_t i = 1; i < count; i += 1)
++    {
++        const uint64_t value = values[i];
++        uint64_t j = i;
++        while (j > 0 && values[j - 1] > value)
++        {
++            values[j] = values[j - 1];
++            j -= 1;
++        }
++        values[j] = value;
++    }
++    return count != 0 ? values[count / 2] : 0;
++}
++
++// The warm-ups in list order, then the runs, each with every list in turn from an order that rotates by run
++// (profile_ab_tree's), then each list's medians. Returns how many processes failed: an exit status other than its
++// list's first warm-up's, a signal, or a process that didn't start (status 127, or no wait).
++static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
++{
++    uint64_t failures = 0;
++    const uint64_t mark = arena->length;
++    ProfileTimed* timed = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileTimed, t->runs * t->list_count + 1);
++    int* expected = BUSTER_ARENA_PUSH_ARRAY(arena, int, t->list_count + 1);
++    uint64_t* values = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, t->runs + 1);
++    uint64_t longest = 0;
++    for (uint64_t l = 0; l < t->list_count; l += 1)
++    {
++        longest = t->counts[l] > longest ? t->counts[l] : longest;
++    }
++    char** argv = BUSTER_ARENA_PUSH_ARRAY(arena, char*, longest + 2);
++    const bool ready = timed != 0 && expected != 0 && values != 0 && argv != 0;
++    failures += !ready;
++    for (uint64_t run = 0; ready && run < t->warmups + t->runs; run += 1)
++    {
++        const bool warmup = run < t->warmups;
++        for (uint64_t position = 0; position < t->list_count; position += 1)
++        {
++            const uint64_t l = warmup ? position : profile_ab_tree(run - t->warmups, position, t->list_count);
++            argv[0] = (char*)t->executable;
++            for (uint64_t a = 0; a < t->counts[l]; a += 1)
++            {
++                argv[1 + a] = t->arguments[t->starts[l] + a];
++            }
++            argv[1 + t->counts[l]] = 0;
++            profile_spin(warmup ? 0 : t->after_scalar_ms);
++            const ProfileTimed one = profile_time_one(t->executable, argv);
++            const bool exited = one.status != -1 && WIFEXITED(one.status) && WEXITSTATUS(one.status) != 127;
++            if (warmup && run == 0)
++            {
++                expected[l] = one.status;
++            }
++            const bool same = exited && one.status == expected[l];
++            failures += !same;
++            if (!warmup)
++            {
++                timed[(run - t->warmups) * t->list_count + l] = one;
++                dprintf(t->output, "run %llu list %llu: %.3f ms wall, %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major, status %d%s\n",
++                        (unsigned long long)(run - t->warmups + 1), (unsigned long long)(l + 1), (double)one.wall_ns / 1e6, (double)one.user_us / 1e3,
++                        (double)one.system_us / 1e3, (unsigned long long)one.peak_kb, (unsigned long long)one.minor_faults, (unsigned long long)one.major_faults,
++                        exited ? WEXITSTATUS(one.status) : -1, same ? "" : " (FAILED: another status than the first warm-up's)");
++            }
++            else if (!same)
++            {
++                dprintf(t->output, "warm-up %llu list %llu: FAILED (status %d)\n", (unsigned long long)(run + 1), (unsigned long long)(l + 1), exited ? WEXITSTATUS(one.status) : -1);
++            }
++        }
++    }
++    for (uint64_t l = 0; ready && t->runs != 0 && l < t->list_count; l += 1)
++    {
++        uint64_t medians[6];
++        for (uint32_t field = 0; field < 6; field += 1)
++        {
++            for (uint64_t r = 0; r < t->runs; r += 1)
++            {
++                const ProfileTimed* one = &timed[r * t->list_count + l];
++                const uint64_t fields[6] = { one->wall_ns, one->user_us, one->system_us, one->peak_kb, one->minor_faults, one->major_faults };
++                values[r] = fields[field];
++            }
++            medians[field] = profile_median(values, t->runs);
++        }
++        // values holds the sorted major faults now; the wall times' extremes again.
++        for (uint64_t r = 0; r < t->runs; r += 1)
++        {
++            values[r] = timed[r * t->list_count + l].wall_ns;
++        }
++        profile_median(values, t->runs);
++        dprintf(t->output, "list %llu [", (unsigned long long)(l + 1));
++        for (uint64_t a = 0; a < t->counts[l]; a += 1)
++        {
++            dprintf(t->output, "%s%s", a == 0 ? "" : " ", t->arguments[t->starts[l] + a]);
++        }
++        dprintf(t->output, "]: %llu runs, median %.3f ms wall (%.3f to %.3f), %.3f ms user, %.3f ms system, %llu KB peak, %llu minor faults, %llu major\n",
++                (unsigned long long)t->runs, (double)medians[0] / 1e6, (double)values[0] / 1e6, (double)values[t->runs - 1] / 1e6, (double)medians[1] / 1e3,
++                (double)medians[2] / 1e3, (unsigned long long)medians[3], (unsigned long long)medians[4], (unsigned long long)medians[5]);
++    }
++    dprintf(t->output, "time-runs: done, %llu failed processes\n", (unsigned long long)failures);
++    arena_pop_to(arena, mark);
++    return failures;
++}
++
++static int run_time_runs_command(Arena* arena, int argc, char** argv)
++{
++    ProfileTimeRuns t = { .executable = "/proc/self/exe", .runs = 21, .warmups = 1, .output = STDOUT_FILENO };
++    bool valid = true;
++    int i = 1;
++    while (valid && i < argc && strcmp(argv[i], "--list") != 0)
++    {
++        uint64_t value = 0;
++        if (strcmp(argv[i], "--runs") == 0 && i + 1 < argc && profile_count_option(argv[i + 1], &value) && value <= 1000)
++        {
++            t.runs = value;
++        }
++        else if (strcmp(argv[i], "--warmups") == 0 && i + 1 < argc && profile_decimal(profile_string(argv[i + 1]), &value) && value >= 1 && value <= 1000)
++        {
++            t.warmups = value;
++        }
++        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc && profile_decimal(profile_string(argv[i + 1]), &value) && value <= 10000)
++        {
++            t.after_scalar_ms = value;
++        }
++        else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
++        {
++            t.executable = argv[i + 1];
++        }
++        else
++        {
++            valid = false;
++        }
++        i += 2;
++    }
++    uint64_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc);
++    uint64_t* counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)argc);
++    valid = valid && i < argc && starts != 0 && counts != 0;
++    while (valid && i < argc)
++    {
++        // At a `--list`: a list starts after it.
++        starts[t.list_count] = (uint64_t)(i + 1);
++        counts[t.list_count] = 0;
++        i += 1;
++        while (i < argc && strcmp(argv[i], "--list") != 0)
++        {
++            counts[t.list_count] += 1;
++            i += 1;
++        }
++        t.list_count += 1;
++    }
++    t.arguments = argv;
++    t.starts = starts;
++    t.counts = counts;
++    int result = 1;
++    if (!valid || t.list_count == 0)
++    {
++        fprintf(stderr, "usage: time-runs [--runs N] [--warmups N] [--after-scalar MS] [--executable PATH] --list ARGUMENT... [--list ARGUMENT...]...\n");
++    }
++    else
++    {
++        result = profile_time_runs(arena, &t) == 0 ? 0 : 1;
++    }
++    return result;
++}
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // The commands
+ 
+@@ -1892,6 +2162,10 @@ static int run_profile_command(int argc, char** argv)
+     {
+         result = run_ab_command(&arena, argc, argv);
+     }
++    else if (strcmp(argv[0], "time-runs") == 0)
++    {
++        result = run_time_runs_command(&arena, argc, argv);
++    }
+     else
+     {
+         result = run_profile_text_command(&arena, &report, argc, argv);
+diff --git a/src/buster/compiler/profile_test.c b/src/buster/compiler/profile_test.c
+index 57722a8..1da23f2 100644
+--- a/src/buster/compiler/profile_test.c
++++ b/src/buster/compiler/profile_test.c
+@@ -615,6 +615,61 @@ static void profile_test_ab(ProfileTest* test)
+                          "ab: done, 1 failed runs\n");
+ }
+ 
++// time-runs on shell commands that log their order into a file: the warm-ups in list order, then each run's lists from
++// an order that rotates by run; statuses kept as the first warm-up's (0 and 3) pass, and one that changes after it
++// fails each run, as does a list that can't start.
++static void profile_test_time_runs(ProfileTest* test)
++{
++    test->cases += 1;
++    char directory[] = "/tmp/buster-time-runs-XXXXXX";
++    bool ok = mkdtemp(directory) != 0;
++    char log[64];
++    char flag[64];
++    char first[160];
++    char second[160];
++    char changing[160];
++    snprintf(log, sizeof(log), "%s/log", directory);
++    snprintf(flag, sizeof(flag), "%s/flag", directory);
++    snprintf(first, sizeof(first), "echo a >> %s", log);
++    snprintf(second, sizeof(second), "echo b >> %s; exit 3", log);
++    snprintf(changing, sizeof(changing), "test -e %s && exit 1; touch %s", flag, flag);
++    char* arguments[] = { "-c", first, "-c", second, "-c", changing };
++    const uint64_t starts[] = { 0, 2, 4 };
++    const uint64_t counts[] = { 2, 2, 2 };
++    const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
++    ProfileTimeRuns t = {
++        .executable = "/bin/sh",
++        .arguments = arguments,
++        .starts = starts,
++        .counts = counts,
++        .list_count = 2,
++        .runs = 3,
++        .warmups = 1,
++        .after_scalar_ms = 1,
++        .output = null,
++    };
++    ok = ok && null != -1 && profile_time_runs(&test->arena, &t) == 0;
++    String8 text = ok ? profile_read_file(&test->arena, log) : (String8){ 0 };
++    ok = ok && text.length == 16 && memcmp(text.pointer, "a\nb\na\nb\nb\na\na\nb\n", 16) == 0;
++    t.starts = starts + 2;
++    t.list_count = 1;
++    ok = ok && profile_time_runs(&test->arena, &t) == 3;
++    t.executable = "/nonexistent/compiler";
++    ok = ok && profile_time_runs(&test->arena, &t) == 4;
++    if (null != -1)
++    {
++        close(null);
++    }
++    unlink(log);
++    unlink(flag);
++    rmdir(directory);
++    if (!ok)
++    {
++        test->failures += 1;
++        printf("  time-runs: FAILED\n");
++    }
++}
++
+ // Runs argv with its output into `output` (a path), and returns whether it exited with status 0.
+ static bool profile_test_command(char* const* argv, const char* output)
+ {
+@@ -798,6 +853,7 @@ static int run_profile_tests(int argc, char** argv)
+         profile_test_program(&test);
+         profile_test_entry_program(&test);
+         profile_test_ab(&test);
++        profile_test_time_runs(&test);
+         printf("test-profile: %llu checks, %llu failed\n", (unsigned long long)test.cases, (unsigned long long)test.failures);
+         result = test.failures == 0 ? 0 : 1;
+         arena_release(&test.report.arena);
