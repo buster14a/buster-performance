@@ -61,7 +61,13 @@ passed, including the external pinned harness checkout and the matched
 branch-sizing qualification. The [PR storage check](https://github.com/buster14a/buster/actions/runs/40087337716)
 and [main storage check](https://github.com/buster14a/buster/actions/runs/40087791922)
 also passed. The [post-merge hardware run](https://github.com/buster14a/buster/actions/runs/40087791915)
-records the default-branch hardware verification.
+reported success for all 59 executed steps (three conditional steps skipped),
+including the tests and final benchmark, but GitHub marked the job cancelled at
+its existing 10-minute execution limit. Its annotation reads: "The job has
+exceeded the maximum execution time of 10m0s". This is not a green main workflow.
+The [pre-migration main run](https://github.com/buster14a/buster/actions/runs/40082566008)
+at the original source snapshot hit the same limit. The migration retains that
+existing time budget; addressing the full main suite's duration is separate work.
 
 Buster's active main ruleset `25225502` requires both `Measurement storage policy`
 and `Build and execute on Ryzen 7 9700X`, from GitHub Actions app `15368`.
