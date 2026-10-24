@@ -12,11 +12,12 @@ shared libraries beside its dynamic PIEs, and take a dynamic PIE's own IFUNCs
 | `tree394` | `bb2e0cb` | #405 as first pushed |
 | `treemain394` | `505985b` | main that #405 was measured against (the writer's A/B) |
 | `tree394r` | `a077498` | #405 after its review's fixes (`4ea67a9`), merged with main |
+| `tree394rr` | `4113e38` | #405 after its re-reviews' fixes (merged as `1d0f5e3`, which only rewraps comments) |
 
 Each tree is its commit's `git archive`; `source-*.sha256` is the SHA-256 of
 each of its files, which match the archives of those commits byte for byte.
 The `build/compiler` SHA-256s are in `host.txt` (`tree394`, then
-`treemain394`) and `review/compiler.sha256`.
+`treemain394`), `review/compiler.sha256` and `rereview/compiler.sha256`.
 
 Host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1, GCC 16.2.1, GNU ld
 2.47, lld 23.1.1, mold 3.0.0, wild 0.10.0, CPU 2 at the performance governor,
@@ -142,6 +143,64 @@ The review's two findings, fixed in `4ea67a9`:
 The review's changes are in the conversion's refusal and the corpus test; the
 benchmarks above measured the first tree, whose link paths are the same but
 for the refusal's two name lookups.
+
+## The re-reviews' fixes
+
+Two re-reviews found that the startup the conversion trusted to apply a static
+link's `IRELATIVE` relocations was recognized by names that any input can
+mention. The first found that a name's presence counted. `5c61f88` replaced
+it with a chain of references from the entry's object, which the second
+broke: a `_start` of its own with an inert `.quad __libc_start_main` makes
+`libc.a`'s `libc-start.o` join, which refers on to `__rela_iplt_start`.
+`4113e38` recognizes glibc's startup by the files its code comes from:
+
+- the entry must be defined by the system's `crt1.o` (`rcrt1.o` for a static
+  PIE), the first library directory's;
+- `__libc_start_main` must be defined by a member of the system's `libc.a`;
+- each is compared by device and inode with the file the resolution opened,
+  from the `fstat` that maps each input;
+- in a static PIE, `_dl_relocate_static_pie` must come from `libc.a`, and so
+  must glibc 2.44's `_dl_relocate_static_pie_ifunc`;
+- the names whose places the startup reads must be left to the linker.
+
+Any other startup needs `--startup-applies-irelative`.
+
+`rereview/` has that tree (`source-tree394rr.sha256`, its 560 files byte for
+byte `git archive 4113e38`), built and checked on the 9700X by
+`rereview/phase394rr.sh`, each step its own lock acquisition:
+
+- `rereview/test-foreign.log`: `test-foreign --cross-check`, every section
+  passing. The driver's 9,810 checks add the new cases in both static modes.
+  - Refused: an inert `_start` in the start file's place with the real
+    `libc.a`, on 1 and 3 lanes; the re-review's two-object chain without libc;
+    the real start file with a `__libc_start_main` of the test's own; and a
+    byte-identical copy of the start file.
+  - Linked and run: `main` calling an IFUNC after the real start file, and
+    through a symbolic link to it on 3 lanes.
+
+  A mutant that compares no identities (built locally at `-O1`) fails the
+  eight refusals' 32 checks.
+- `rereview/corpus.log`: `test-foreign-corpus` with SQLite, Lua and this
+  repository's compiler: 843 checks, 0 failures.
+- `rereview/startup-cost.log` (`rereview/measure9700x.sh`, pinned to CPU 2):
+  what the check costs. A static hello world compiled by GCC was linked by
+  `link-foreign --time` against the system's `libc.a`, 41 interleaved runs
+  with and without `--startup-applies-irelative`, which skips the system
+  files' lookups. Medians, in milliseconds:
+
+  | Kind | link | convert | `copies` phase |
+  | --- | ---: | ---: | ---: |
+  | static, checked | 1.147 | 0.399 | 0.006 |
+  | static, with the option | 1.140 | 0.394 | 0.001 |
+  | static PIE, checked | 1.166 | 0.403 | 0.007 |
+  | static PIE, with the option | 1.161 | 0.397 | 0.001 |
+
+  The `copies` phase (the conversion's last steps, the IFUNC refusal among
+  them) holds the check: 5 to 6 µs, two `stat` searches of the library
+  directories (six calls on this host's layout). It runs only for a static
+  link with an IFUNC that a fixup reaches. A first version reused the runtime
+  search, with its 1 GB arena and every crt object's and archive's probes; on
+  a 7940HS it cost 0.11 ms of this link, against 0.02 ms for the `stat`s.
 
 ## Limitations
 
