@@ -346,7 +346,51 @@ disassembly receipt for the final prefix-head image.
 Final comparison: frozen main `5863eeda` versus `6c72299`, using the complete
 `current-base` and `prefix-head` binaries. Each row's independent processes
 rotate tree order by round; each child takes the ordinary shared lock. The
-remaining startup, short-file and sustained-work comparisons are still running.
+startup comparison is still running; all throughput comparisons below are complete.
+
+The [complete sustained table samples](raw/prefix-ab-steady-3rounds.log) use
+the repository benchmark's fixed `znver5` target, three independently locked
+processes per image and condition, each reporting the median of 21 samples of
+10,000 tables.
+The C-source scalar twin may be auto-vectorized by Clang. Each table cell below
+is the median of the three process medians, followed by their full range;
+elapsed changes compare those aggregate medians.
+
+| Preceding predefinitions | Path | Baseline ns/table (range of process medians) | Head ns/table (range of process medians) | Head elapsed change |
+| --- | --- | ---: | ---: | ---: |
+| None | Scalar C source | 390.90 (388.40–391.07) | 386.18 (385.81–392.25) | -1.207% |
+| None | Explicit AVX-512 | 306.75 (304.14–309.72) | 306.85 (305.90–314.08) | +0.033% |
+| 100 ms | Scalar C source | 420.47 (420.05–421.97) | 416.34 (413.85–419.27) | -0.982% |
+| 100 ms | Explicit AVX-512 | 407.12 (405.89–407.14) | 404.65 (403.24–407.79) | -0.607% |
+
+The steady vector point estimate is slightly higher with overlapping ranges;
+its three paired elapsed changes are +0.579%, +0.033% and +1.408%. The preceding-
+work vector point estimate is lower, with one of three paired increases and
+overlapping ranges. These observations do not establish a uniform throughput
+gain or prove a small regression absent. Cycles and every sample remain in the
+receipt. This is the complete compiler image, distinct from the isolated C
+policy probe above. Performance acceptance remains pending.
+
+The same completed three-round receipt includes `benchmark-backend`: every
+image reports the same 2,008 functions, 262,874 typed entries, 303,116 records,
+1,171,371 emitted bytes and 9,414 deferred entries. All six runs pass with
+identical reported retired instruction counts per entry (two decimal places).
+
+| Backend path | Baseline ns/entry (range of process medians) | Head ns/entry (range of process medians) | Head elapsed change | Instructions/entry, both images |
+| --- | ---: | ---: | ---: | ---: |
+| Vector | 14.32 (14.31–14.34) | 14.36 (14.35–14.36) | +0.279% | 169.31 |
+| Scalar | 41.96 (41.89–41.99) | 41.84 (41.83–41.87) | -0.286% | 574.35 |
+| Sizing | 1.13 (1.11–1.13) | 1.11 (1.11–1.13) | -1.770% | 12.65 |
+| Encode | 0.89 (0.88–0.89) | 0.87 (0.86–0.88) | -2.247% | 17.78 |
+
+The vector increase appears in all three paired elapsed comparisons
+(+0.209%, +0.139%, +0.349%), with disjoint process-median ranges. Median cycles
+per entry rise from 79.40 to 79.55 (+0.189%); the full six cycle observations
+are 79.40/79.48/79.30 at baseline and 79.47/79.55/79.62 at head.
+This small measured cost is explicitly unaccepted pending the user's approval.
+Identical reported instruction counts and unchanged backend implementation sources do
+not prove its cause. The other paths' timing decreases do not establish
+uniform gains; their complete paired samples remain in the receipt.
 
 The [frozen SQLite checker comparison](raw/prefix-ab-sqlite-5rounds.log)
 completed five rounds, 21 fresh processes per image per round, with zero failed
@@ -366,6 +410,28 @@ process observations overlap (baseline 149.136–152.469 ms; head
 147.881–150.971 ms), and the raw receipt preserves every value. All five paired
 process medians favor the candidate. This is a measured whole-image observation,
 not attribution of the improvement to a specific source edit.
+
+The [short-file compile comparison](raw/prefix-ab-compile-5rounds.log) completes
+five rounds per condition, 21 fresh processes per image per round, 420 successful
+processes total. It compiles the frozen original `runtime.c` with `--verify
+-march=x86-64 -c`; the second condition performs 100 ms of scalar work before
+each child process. No observation is discarded.
+
+| Round | Baseline normal, ms | Head normal, ms | Baseline after scalar, ms | Head after scalar, ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 2.724 | 2.782 | 2.666 | 2.712 |
+| 2 | 2.690 | 2.691 | 2.877 | 2.695 |
+| 3 | 2.684 | 2.681 | 2.706 | 2.674 |
+| 4 | 2.742 | 2.763 | 2.655 | 2.670 |
+| 5 | 2.697 | 2.696 | 3.234 | 2.746 |
+
+Normal median of process medians: 2.697 → 2.696 ms (-0.037%), with process-median
+ranges 2.684–2.742 and 2.681–2.782 ms. After the scalar control: 2.706 → 2.695 ms
+(-0.407%), ranges 2.655–3.234 and 2.670–2.746 ms. Both conditions have mixed
+paired changes and overlapping ranges; these observations do not establish a
+compile-speed improvement. The individual-process ranges and all statuses are
+retained in the raw receipt. In particular, the baseline 3.234 ms process median
+after scalar work remains included rather than removed as an outlier.
 
 ## Generated program, code size and runtime
 
@@ -394,7 +460,7 @@ produced by pre-prefix `30e7bbc`; the final compiler emits the exact same bytes,
 as the final identity receipt establishes. No remeasurement of identical
 program bytes is represented as a new experiment.
 
-| Profile | Baseline median of process medians, ms | Head median of process medians, ms | Baseline range, ms | Head range, ms |
+| Profile | Baseline median of process medians, ms | Head median of process medians, ms | Baseline range of process medians, ms | Head range of process medians, ms |
 | --- | ---: | ---: | ---: | ---: |
 | x86-64 | 2.029 | 2.032 | 2.029–2.031 | 2.031–2.034 |
 | x86-64-v3 | 2.028 | 2.029 | 2.028–2.029 | 2.026–2.029 |
@@ -403,8 +469,8 @@ program bytes is represented as a new experiment.
 The raw nine `release-runtime-ab-r*-*.log` files retain every observation and
 zero-failure result. These are timings of byte-identical programs with small
 process-timing variation, not an optimization claim or broad runtime acceptance.
-The explicit SSE/VEX/EVEX native policy fixtures provide separate positive and
-negative ISA execution coverage beyond this integer workload.
+The explicit SSE/VEX/EVEX native policy fixtures provide separate positive
+execution and negative ISA-policy rejection coverage beyond this integer workload.
 
 ## Measured bounded experiments
 

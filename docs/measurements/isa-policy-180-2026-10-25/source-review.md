@@ -66,6 +66,28 @@ Final reviewed SHA256 values:
 | `policy-instructions.c` | `68ec66ee236dcfba2934a4e20ea97f707a3fc94870c98a223253709a5268bddb` |
 | `syntax-prefix.c` | `fcc045e2c86c8f9d4b03d742ee80add6938335cbe889fd1c041ec204f96fdba9` |
 
+The later read-only evidence audit independently matched the final hosted CI
+receipt to head `6c72299`, synthetic merge `78c91f99` and base `b4230905`, including
+75/75 commands and the no-recursion graph. It verified all ten SQLite checker
+summaries and 210 successful process statuses, the five paired deltas and
+150.045 → 149.006 ms aggregate medians. It also matched all nine paired runtime
+receipts, exact output identities, the 161-byte/50-instruction object audit,
+FNV and linked-executable sizes. Corrected wording identifies the runtime ranges
+as ranges of process medians and distinguishes positive native execution from
+negative policy rejection before encoding. Older source/probe labels and the
+later #423 merge boundary were corrected.
+
+Further read-only audits matched every sustained table/backend median, range,
+paired direction, workload total and cycle count to the completed receipt.
+The vector backend's +0.279% elapsed / +0.189% cycle increases are explicitly
+unaccepted; reported instruction counts retain their two-decimal precision.
+The benchmark reports one median from 21 samples, rather than 21 separate
+medians. The reviewer then recomputed all 20 short-file summaries directly
+from 420 individual successful observations, confirming the medians, min/max,
+aggregate changes, mixed paired directions and retained 3.234 ms observation.
+No further wording or arithmetic issue remained. The unfinished startup
+campaign is outside these completed evidence audits.
+
 Material limits remain: sampled canonical operands in the GAS differential;
 linear executable-section auditing; an incomplete encoder catalogue;
 Tier0's production guard owned by #136/#133; and separate full corpus,
