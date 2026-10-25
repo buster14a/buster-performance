@@ -132,3 +132,6 @@ contains 9,000,000 ns for CPU 2 / TID 100 and 3,000,000 ns for CPU 3 / TID 101.
 publisher. A deployed generation pins its exact reviewed evidence commit and
 Buster source revision. Publication and actual deployed-browser/load acceptance
 are separate receipts; a locally sealed artifact does not by itself close #390.
+
+The [deployed generation receipt](DEPLOYMENT.md) records the live first-party
+site, reproducible publication, final browser checks and scoped load/memory costs.
