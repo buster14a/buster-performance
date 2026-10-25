@@ -1,0 +1,122 @@
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -523,7 +523,9 @@
+     return ir_typed_emit(sink, IR_CALL, result_type, input->call_targets[call], descriptor, BUSTER_IR_NONE, 0);
+ }
+ 
+-static IrSizes ir_typed_emit_function(const Tier0Function* input, IrType result_type, const IrTypedPlan* plan, const Arena* scratch, const uint8_t* ops, const uint8_t* types, uint32_t* stack, uint8_t* classes, IrFunction* output)
++// Instantiate one shared replay with and without dynamic effects. Ordinary functions retain the established
++// dispatch and register pressure; the feature decision is made once during the existing input-validation pass.
++static __attribute__((always_inline)) inline IrSizes ir_typed_replay(const Tier0Function* input, IrType result_type, const IrTypedPlan* plan, const Arena* scratch, const uint8_t* ops, const uint8_t* types, uint32_t* stack, uint8_t* classes, IrFunction* output, bool dynamic)
+ {
+     IrTypedSink sink = {
+         .output = output,
+@@ -596,6 +598,27 @@
+             const uint8_t class = input->classes[i];
+             const IrType type = (IrType)types[i];
+             const uint64_t value = input->values[i];
++            if (dynamic && kind >= BUSTER_TYPED_ALLOCA)
++            {
++                if (kind == BUSTER_TYPED_ALLOCA)
++                {
++                    const uint32_t address = ir_typed_emit(&sink, IR_ALLOCA, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++                    stack[depth - 1] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++                    classes[depth - 1] = BUSTER_TYPED_CLASS_U64;
++                }
++                else if (kind == BUSTER_TYPED_STACK_SAVE)
++                {
++                    stack[depth] = ir_typed_emit(&sink, IR_STACK_SAVE, IR_I64, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++                    classes[depth] = BUSTER_TYPED_CLASS_U64;
++                    depth += 1;
++                }
++                else
++                {
++                    depth -= 1;
++                    ir_typed_emit(&sink, IR_STACK_RESTORE, IR_VOID, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++                }
++                continue;
++            }
+             switch (kind)
+             {
+             case BUSTER_TYPED_CONST:
+@@ -691,22 +714,6 @@
+             case BUSTER_TYPED_DISCARD:
+                 depth -= 1;
+                 break;
+-            case BUSTER_TYPED_ALLOCA:
+-            {
+-                const uint32_t address = ir_typed_emit(&sink, IR_ALLOCA, IR_PTR, stack[depth - 1], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+-                stack[depth - 1] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+-                classes[depth - 1] = BUSTER_TYPED_CLASS_U64;
+-                break;
+-            }
+-            case BUSTER_TYPED_STACK_SAVE:
+-                stack[depth] = ir_typed_emit(&sink, IR_STACK_SAVE, IR_I64, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+-                classes[depth] = BUSTER_TYPED_CLASS_U64;
+-                depth += 1;
+-                break;
+-            case BUSTER_TYPED_STACK_RESTORE:
+-                depth -= 1;
+-                ir_typed_emit(&sink, IR_STACK_RESTORE, IR_VOID, stack[depth], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+-                break;
+             case BUSTER_TYPED_COPY:
+                 ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value);
+                 depth -= 2;
+@@ -789,6 +796,16 @@
+     return sink.sizes;
+ }
+ 
++static __attribute__((noinline)) IrSizes ir_typed_emit_ordinary(const Tier0Function* input, IrType result_type, const IrTypedPlan* plan, const Arena* scratch, const uint8_t* ops, const uint8_t* types, uint32_t* stack, uint8_t* classes, IrFunction* output)
++{
++    return ir_typed_replay(input, result_type, plan, scratch, ops, types, stack, classes, output, false);
++}
++
++static __attribute__((noinline)) IrSizes ir_typed_emit_dynamic(const Tier0Function* input, IrType result_type, const IrTypedPlan* plan, const Arena* scratch, const uint8_t* ops, const uint8_t* types, uint32_t* stack, uint8_t* classes, IrFunction* output)
++{
++    return ir_typed_replay(input, result_type, plan, scratch, ops, types, stack, classes, output, true);
++}
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // Entry points
+ 
+@@ -796,6 +813,7 @@
+ {
+     const uint64_t output_mark = output->length;
+     const uint64_t scratch_mark = scratch->length;
++    bool dynamic = false;
+     IrCheck check = {0};
+     const bool supported_result = result_type == IR_VOID || result_type == IR_I8 || result_type == IR_I16 || result_type == IR_I32 || result_type == IR_I64 || result_type == IR_F32 || result_type == IR_F64;
+     if (output == scratch || result == 0 || input == 0 || !supported_result || symbol_count == 0)
+@@ -879,6 +897,10 @@
+             check.error = IR_ERROR_OPERAND;
+             check.instruction = i;
+         }
++        else if (kind >= BUSTER_TYPED_ALLOCA)
++        {
++            dynamic = true;
++        }
+     }
+     IrTypedPlan plan = {0};
+     uint8_t* ops = 0;
+@@ -909,11 +931,19 @@
+     if (check.error == IR_OK)
+     {
+         ir_typed_classify(input, ops, types, vector);
+-        const IrSizes sizes = ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
++        const IrSizes sizes = dynamic ? ir_typed_emit_dynamic(input, result_type, &plan, scratch, ops, types, stack, classes, 0)
++                                     : ir_typed_emit_ordinary(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
+         check.error = ir_create(output, &sizes, &candidate);
+         if (check.error == IR_OK)
+         {
+-            ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
++            if (dynamic)
++            {
++                ir_typed_emit_dynamic(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
++            }
++            else
++            {
++                ir_typed_emit_ordinary(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
++            }
+             candidate.symbol_count = symbol_count;
+             check = vector ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+         }
