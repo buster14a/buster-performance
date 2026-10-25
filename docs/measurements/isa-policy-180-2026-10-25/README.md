@@ -1,8 +1,13 @@
 # Generated ISA policy #180: October 25, 2026
 
 Qualification record for [Buster PR #421](https://github.com/buster14a/buster/pull/421).
-Functional qualification is complete. Final whole-compiler performance comparisons
-are still running; performance acceptance remains pending.
+Corrected head `174c435` passes fresh optimized/sanitizer checks and hosted CI.
+The controlled whole-compiler A/B campaign measured `6c72299`; a reviewed full-binary comparison
+shows identical production code, data and layout at the corrected head, with
+only test-only code and the build ID changed. Timings remain labelled with the
+actually measured revision. Performance acceptance remains blocked on the user's
+explicit approval of the recorded costs. PR #421 remains draft and unmerged;
+issue #180 remains open.
 
 ## Independent scope and executed checks
 
@@ -33,9 +38,10 @@ identifies the backend-only test entry point. Full builtin lowering (#148),
 function target attributes (#147) and full c-testsuite/SQLite generation
 acceptance (#145/#146) remain outside this claim. Issue #180 stays open.
 
-At the frozen candidate, the manual optimized and full ASan/UBSan
-`test-x86-target` commands both pass. The optimized build takes 40.9 seconds;
-the fully instrumented build takes 71.4 seconds. These are single build
+At corrected head `174c435`, the manual optimized and full ASan/UBSan
+`test-x86-target` commands both pass, now enforcing zero Tier0 refusals.
+Both assembler cross-checks also pass. The optimized build takes 40.3 seconds;
+the fully instrumented build takes 75.8 seconds. These are single build
 observations, not comparative build-throughput measurements. Checks include:
 
 | Check | Executed result |
@@ -52,9 +58,9 @@ observations, not comparative build-throughput measurements. Checks include:
 | Native SSE/VEX/EVEX kernels | 40/40/41 bytes, exact twin encoders, actual execution, lower-profile rejection before emission |
 | GNU as architecture differential | 17,577 exact comparisons; 144 explicitly reported external-oracle coverage gaps |
 | Final optimized and sanitizer assembler cross-checks | Each passes 1,873,323 checks |
-| Existing focused compiler suites, pre-prefix revision `30e7bbc` | Encoder, semantics, assembler, Tier0 and Tier1 pipeline: all five pass in 7.9 seconds; final integrated CI separately passes all 75 commands |
+| Existing focused compiler suites, pre-prefix revision `30e7bbc` | Encoder, semantics, assembler, Tier0 and Tier1 pipeline: all five pass in 7.9 seconds; corrected-head integrated CI separately passes all 79 commands |
 | Manual nonrecursive policy, pre-prefix revision `30e7bbc` | 42 translation units, 25,690 functions, 150,638 calls, zero unapproved cycles; three existing allowed fuzz-generator cycles; final integrated CI graph recorded below |
-| c-testsuite baseline/v3/v4 | Each passes all 219 required programs; one explicit unsupported long-double case, zero failures |
+| c-testsuite baseline/v3/v4, executed at `6c72299` | Each passes all 219 required programs; one explicit unsupported long-double case, zero failures; retained for unchanged production paths through the static boundary below |
 | ELF auditor self-tests | Baseline/VEX/EVEX positives, ISA negatives, separated sections and malformed bounds pass |
 
 These are manual 9700X checks, not workspace-host tests or hosted CI results.
@@ -63,6 +69,23 @@ Workspace checks are limited to source review, Git/source identities and
 
 ## Hosted CI
 
+[Corrected-head 9700X run 40217751570](https://github.com/buster14a/buster/actions/runs/40217751570)
+passes for `174c435539c3970558561e94b1f08445aa6d3c01`: **79 of 79 commands** in
+52.9 seconds, zero failed or unstarted commands. Its
+[measurement-storage check](https://github.com/buster14a/buster/actions/runs/40217751578)
+also passes. The complete receipt is
+[ci-174c435-run-40217751570.log](raw/ci-174c435-run-40217751570.log).
+CI checks synthetic merge `aa775ff261381d5a4bac73630bb55e663cb63b4e`, combining
+this head with main `bf774e7077e60e2c3ccba753a693eb332a740387`. The graph has 42
+translation units, 26,282 functions, 154,841 calls, zero unapproved cycles and
+three existing allowed fuzz-generator cycles. On this newer integration image,
+the target test audits 1,955 Tier0 templates per profile and enforces zero
+refusals. CI pins the external first-party performance fixtures to
+`1c0523ac42bb2f33e212226cf94626ac942ee4d2`. This integration includes later work
+from other owners; its benchmark observations are separate from the frozen
+manual baseline/head comparisons.
+
+The measured candidate's earlier
 [Final 9700X run 40201651984](https://github.com/buster14a/buster/actions/runs/40201651984)
 passed for PR head `6c722994e9dfccc9d6047235191d761376b6b3d1`:
 75 of 75 test commands passed in 47.4 seconds. Its
@@ -116,15 +139,23 @@ PR remains unmerged as requested.
   architectural-refusal diagnostics and GAS CPU-feature taxonomy. The final
   policy revision explicitly aligns the requirement array to 64 bytes, avoiding split
   cache-line loads as the surrounding compiler image changes.
-- Final candidate: `6c722994e9dfccc9d6047235191d761376b6b3d1`, tree
+- Measured candidate: `6c722994e9dfccc9d6047235191d761376b6b3d1`, tree
   `3f6c4956fb6f369c220e889bfb179c80641d854f`. It adds only two equivalent
   first-character prechecks to the syntax whitelist. The original C experiment
   checks unchanged admission over all 8,352 forms and measures its benefit;
   full-image qualification is separate. No target legality or tuning changes.
+- Corrected current candidate: `174c435539c3970558561e94b1f08445aa6d3c01`, tree
+  `b9cc157b1ab5591ebdff8f989d5153c5645b9b7c`. Its only source delta from the
+  measured candidate adds `&& refused == 0` to the policy-owned Tier0 fixture.
+  Earlier executions observed zero refusals but did not enforce zero. The
+  corrected test has fresh optimized, sanitizer and hosted CI passes. Production
+  binary equality and the exact measurement-reuse boundary are recorded below.
 - [Current baseline source/build input hashes](current-base-source-sha256.txt)
-  and [final candidate hashes](prefix-head-source-sha256.txt) identify the manual
-  checkouts. A post-commit tracked-source manifest matches the actual remote
-  final sources exactly. The [pre-prefix hashes](release-head-source-sha256.txt),
+  and [measured candidate hashes](prefix-head-source-sha256.txt) identify the manual
+  checkouts at the measured revision. The corrected head has its own
+  [guard-head source manifest](raw/guard-head-source-sha256.txt), checked against
+  both actual optimized and sanitizer source directories. The
+  [pre-prefix hashes](release-head-source-sha256.txt),
   other source manifests and initial
   binary identities belong to their named development builds, not final
   qualification. The current-base/prefix-head pair is the final whole-compiler
@@ -184,6 +215,11 @@ result is substituted for target evidence.
   all 8,352 forms, checking unfiltered decisions and target-filtered table
   identity. Its three repeated measurements isolate the admission pass;
   full initialization and whole-compiler acceptance use the final binary.
+- `sanitize-compiler.c` is an original C driver adapter for the corrected head's
+  full sanitizer build. It appends the four recorded flags to every ordinary
+  compile/link command and executes the absolute real Clang driver, retaining
+  the repository build source list and linker choice. It adds no production
+  dependency.
 
 Example harness builds, each under its own ordinary host lock:
 
@@ -210,7 +246,8 @@ Final reviewed SHA-256 values are:
 
 - `x86_target_forms.c`: `190e2e7d38b82b2dfc68a4d4143f7ace8e81a99c1ee2798e33a093597b7c4d74`.
 - `x86_target_policy_test.c`: `11a5962b22cb4f8eb82f1062c3db5e0a9c729313564ef30e2b0b89be83d7b079`.
-- `x86_target_selection_test.c`: `05d6658c4c2b499436606b8c34bf5c872a6a2d27b61fdcf0bd0f01444e917ee1`.
+- Current `x86_target_selection_test.c`: `777745ec28a8acdfe28f714ba9fa2da9df325ec16d71af41e6e763d4263f8f23`.
+- Measured `6c72299` selector test: `05d6658c4c2b499436606b8c34bf5c872a6a2d27b61fdcf0bd0f01444e917ee1`.
 - `x86_match.c`: `17a689e24e87873c73db5783401f18b1f0105ec2004d69c5105838c82ac32fdd`.
 - Original instruction-count probe v2: `68ec66ee236dcfba2934a4e20ea97f707a3fc94870c98a223253709a5268bddb`.
 - Original ELF auditor: `287a86aed79b1f77cd8be970fa936ec33f685b87f7c2eb167bd795a045e48537`.
@@ -259,8 +296,10 @@ env ISA180_COMPILER=/FROZEN/build/compiler ISA180_PROFILE=x86-64 \
 
 The final comparison commands run from `current-base`, with sibling frozen
 checkouts. The actual host prefix is `~/buster-fast-bench/codex-180-20261025-`;
-`prefix-asan` contains the final fully instrumented build. `release-*` logs
-record the pre-prefix candidate; `prefix-*` logs record the final candidate.
+`guard-asan` contains the corrected head's fully instrumented build;
+`prefix-asan` contains measured `6c72299`'s sanitizer build. `release-*` logs
+record the pre-prefix candidate; `prefix-*` logs record measured `6c72299`;
+`guard-*` logs record corrected `174c435` validation.
 Substitute the frozen checkouts for these paths when reproducing. `ab` takes the ordinary lock
 for each child and rotates tree order by round:
 
@@ -306,7 +345,7 @@ waiting. The old `ab-target-3rounds.log` and `ab-end-to-end-5rounds.log` contain
 only a first heading/lock wait, stopped when the baseline changed.
 The f280e0f/88cc33c/609c482/2004c727/a233cdc receipts are development observations, including
 partial A/B campaigns stopped when the oracle changed. Qualification uses the
-explicitly named final candidate's `prefix-*` logs and results below. The
+explicitly named measured candidate's `prefix-*` logs and results below. The
 isolated policy probe retains its `release-*` name because its included sources
 are identical at the final head, as explained above.
 
@@ -322,7 +361,7 @@ unmultiplexed counters and a valid clock; scalar/vector tables matched.
 | Scalar C source | 6,367.0219 | 6,367.0219 | 395.6562–406.8341 | 386.3156–392.8389 |
 | Explicit AVX-512 | 6,803.0217 | 6,803.0217 | 314.4749–318.1929 | 298.9617–306.2655 |
 
-Retired work is identical. These timing ranges describe the isolated C probe;
+Reported retired work matches at four decimal places. These timing ranges describe the isolated C probe;
 its code and data placement differ from the compiler executable. They do not
 establish whole-compiler throughput or causal attribution to alignment.
 The baseline probe's three included repository sources are byte-identical to
@@ -336,17 +375,132 @@ Requirements remain 66,816 bytes, per-target eligibility 8,352 bytes and each
 instruction 16 bytes. The final optimized compiler is 35,441,547 bytes versus
 35,404,246 at baseline: +37,301 bytes (0.105%), principally added test/oracle
 coverage. Exact executable hashes, text/data/BSS sizes and source hashes are in
-[the final binary receipt](raw/prefix-binary-identities.txt). The aligned
+[the measured-prefix binary receipt](raw/prefix-binary-identities.txt) and
+[corrected-head receipt](raw/guard-binary-identities.txt). The aligned
 pre-prefix and earlier development loop disassemblies are
 [retained](raw/release-table-alignment-disassembly.txt); this is not a
-disassembly receipt for the final prefix-head image.
+disassembly receipt for the measured prefix-head image.
+
+## Corrected-head validation and evidence boundary
+
+The old GitHub review thread identified a real coverage omission: matching
+scalar/vector depth refusals were counted but could still let the audit pass.
+The one-line correction now requires `refused == 0`; any refusal fails the
+deterministic fixture. The
+[thread](https://github.com/buster14a/buster/pull/421#discussion_r4370465273)
+records the fix, independent review and fresh execution evidence and is resolved.
+
+On the actual 9700X, fresh optimized and full ASan/UBSan `test-x86-target`
+commands pass on `174c435`. At every baseline/v3/v4 profile they report 1,951
+templates, 96 functions / 26,448 records and zero refusals with the assertion
+enforced. Optimized and sanitizer `test-assembler --cross-check` each pass
+1,873,323 checks. See `guard-head-*` and `guard-asan-*` raw logs, the
+[current source manifest](raw/guard-head-source-sha256.txt) and both successful
+source checks. All 42 sanitizer compile commands include the requested flags;
+the original reviewed C adapter `sanitize-compiler.c` appends them to each
+ordinary build command, including linking, without changing the source list.
+
+The [binary receipt](raw/guard-binary-identities.txt) identifies the current
+optimized image as SHA256
+`59c036d826c90c9a6ba2f65956f4beb4efd432f19062704627c91f67c0d46ee2`
+and ASan/UBSan image as
+`0393cca6f24fa3fde8b1664ac842b3d4dab370e03961557ddcc164ccd7ed80e3`.
+The optimized image is still 35,441,547 bytes, with unchanged text/data/BSS sizes.
+
+Full-file static comparison with the measured image found exactly 1,195
+differing bytes: 31 inside the build-ID payload, 1,164 inside the explicitly
+invoked `run_x86_target_selection_tests` function. Every other byte matches.
+Program headers, section headers and complete symbol tables match exactly;
+all production instructions/data, addresses, mappings and unwind metadata are
+identical. The test function is only reached by `test-x86-target` and is outside
+the measured production commands. The source reviewer independently repeated
+this static check on both actual binaries. See the
+[scope/commands](raw/guard-binary-equivalence.txt),
+[complete byte differences](raw/guard-vs-prefix.cmp.txt),
+[program headers](raw/guard-program-headers.txt) and
+[section headers](raw/guard-section-headers.txt).
+
+The `6c72299` performance and three-profile c-testsuite receipts are retained as
+evidence for these unchanged production paths, with their original measured or
+executed revision labels. They are not new direct `174c435` timings or new
+executions of the full three-profile corpus matrix. The changed test code and
+consumers of binary identity lie outside that reuse boundary; corrected-test,
+sanitizer and integration-CI validation are recorded separately above. No
+performance approval follows from binary equivalence.
 
 ## Final whole-compiler measurements
 
 Final comparison: frozen main `5863eeda` versus `6c72299`, using the complete
 `current-base` and `prefix-head` binaries. Each row's independent processes
 rotate tree order by round; each child takes the ordinary shared lock. The
-startup comparison is still running; all throughput comparisons below are complete.
+startup and throughput comparisons below are complete; no command is left running
+from this measurement campaign.
+
+The [expanded startup comparison](raw/prefix-ab-startup-15rounds.log) completes
+all 60 independently locked commands: 15 rotating rounds, two binaries, two
+configurations. Every command succeeds. The one-table configuration fixes
+`znver5`, selects only the explicit AVX-512 builder, performs 100 ms of
+predefinitions before each sample and reports the median of 21 samples of one
+table. This measures one eligibility-table operation after preceding work,
+not complete process startup.
+
+The assembler configuration fixes `x86-64-v4` and the mixed workload: 256
+functions, 9,984 instructions, 153,295 source bytes. Each process reports one
+initialization observation, including encoder and matcher initialization,
+then scalar/vector stage medians from 21 interleaved warm passes. Initialization
+is not a median of 21 initialization trials.
+
+| Round | One-table baseline, ns | One-table head, ns | Assembler init baseline, ms | Assembler init head, ms |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 381 | 410 | 0.712 | 0.732 |
+| 2 | 381 | 411 | 0.702 | 0.741 |
+| 3 | 391 | 411 | 0.722 | 0.769 |
+| 4 | 410 | 401 | 0.757 | 0.810 |
+| 5 | 381 | 401 | 0.764 | 0.924 |
+| 6 | 381 | 401 | 0.796 | 0.768 |
+| 7 | 391 | 411 | 0.794 | 0.950 |
+| 8 | 411 | 421 | 0.743 | 0.789 |
+| 9 | 411 | 451 | 0.803 | 0.773 |
+| 10 | 381 | 411 | 0.605 | 0.776 |
+| 11 | 391 | 411 | 0.671 | 0.721 |
+| 12 | 381 | 411 | 0.637 | 0.662 |
+| 13 | 400 | 411 | 0.680 | 0.704 |
+| 14 | 381 | 421 | 0.635 | 0.801 |
+| 15 | 391 | 430 | 0.744 | 0.673 |
+
+One-table medians: 391 → 411 ns (+20 ns, +5.115%); ranges of process medians
+381–411 and 401–451 ns. Fourteen paired increases and one decrease give a median
+paired increase of 20 ns; individual paired changes span -9 to +40 ns.
+Median reported cycles rise 2,292 → 2,435 (+6.239%), with ranges 2,249–2,588
+and 2,382–2,634. The ranges overlap; the paired direction and absolute cost are
+retained rather than declaring the shift absent.
+
+Assembler initialization medians: 0.722 → 0.769 ms (+47 microseconds, +6.510%).
+The 15 individual observations span 0.605–0.803 and 0.662–0.950 ms; 12 paired
+increases and three decreases give a median paired increase of 46 microseconds
+and paired range -71 to +171 microseconds. These are one-time initialization
+observations, separate from warm pass throughput. Every image reports the same
+419,496-byte index, 16,816,496-byte work arena and 99,760-byte benchmark ELF.
+
+| Warm assembler pass | Baseline median, ms (range of process medians) | Head median, ms (range of process medians) | Head elapsed change |
+| --- | ---: | ---: | ---: |
+| Scalar | 3.631 (3.586–3.686) | 3.580 (3.514–3.709) | -1.405% |
+| Vector | 1.400 (1.386–1.451) | 1.398 (1.379–1.434) | -0.143% |
+
+Each warm path has ten paired decreases and five increases. Both ranges overlap;
+these observations do not establish a uniform assembler throughput gain.
+The raw receipt retains every stage and total. Adding an initialization
+observation to a warm-pass median would be a derived estimate, not a measured
+cold end-to-end assembly, so no such sum is presented as an experiment.
+
+The recorded one-table, assembler initialization and vector-backend increases
+remain **unaccepted pending the user's explicit approval**. The candidate adds
+verified legality coverage for current selector families and rejects unknown
+forms, with stable consumer interfaces and unchanged table/record sizes. These
+functional benefits are the proposed justification for considering the costs;
+improvements in other measurements do not approve them. No performance limit
+has been relaxed. Further source or integration changes need fresh qualification
+against their own exact baseline/head images.
 
 The [complete sustained table samples](raw/prefix-ab-steady-3rounds.log) use
 the repository benchmark's fixed `znver5` target, three independently locked
@@ -413,8 +567,8 @@ not attribution of the improvement to a specific source edit.
 
 The [short-file compile comparison](raw/prefix-ab-compile-5rounds.log) completes
 five rounds per condition, 21 fresh processes per image per round, 420 successful
-processes total. It compiles the frozen original `runtime.c` with `--verify
--march=x86-64 -c`; the second condition performs 100 ms of scalar work before
+processes total. It compiles the frozen original `runtime.c` with
+`--verify -march=x86-64 -c`; the second condition performs 100 ms of scalar work before
 each child process. No observation is discarded.
 
 | Round | Baseline normal, ms | Head normal, ms | Baseline after scalar, ms | Head after scalar, ms |
@@ -438,11 +592,11 @@ after scalar work remains included rather than removed as an outlier.
 The frozen original unsigned-arithmetic program returns
 `14213000051299467171`, matching Clang's baseline reference. Every baseline/v3/v4
 baseline and pre-prefix executable ran successfully and matched that output.
-The final compiler was then used to rebuild each profile: every final object
+Measured compiler `6c72299` was then used to rebuild each profile: every resulting object
 and linked executable is byte-identical to the corresponding baseline and
 pre-prefix output. See the
 [pre-prefix identities](raw/release-runtime-object-identities.txt) and
-[final identities](raw/prefix-runtime-object-identities.txt).
+[measured `6c72299` identities](raw/prefix-runtime-object-identities.txt).
 
 - Every object: SHA256 `698a969cba29381ba4d167b660b106b5e47e76eb2c706823c580e20543a6a845`.
 - Every linked executable: SHA256 `4a81f4d5c91b7409b59f7343b520d0bd661e8270cfc4b5c8cb8bcdac84668259`.
@@ -456,8 +610,9 @@ Three independently locked paired runtime processes per profile run each image
 21 times. Each process uses `time-runs --executable /usr/bin/env` with separate
 baseline/head lists; those lists rotate within the process. Reported wall time
 includes the common process/`env` dispatch cost. The timed head executable was
-produced by pre-prefix `30e7bbc`; the final compiler emits the exact same bytes,
-as the final identity receipt establishes. No remeasurement of identical
+produced by pre-prefix `30e7bbc`; measured `6c72299` emits the exact same bytes,
+as its identity receipt establishes. These are not new `174c435` runtime
+executions. No remeasurement of identical
 program bytes is represented as a new experiment.
 
 | Profile | Baseline median of process medians, ms | Head median of process medians, ms | Baseline range of process medians, ms | Head range of process medians, ms |
@@ -502,7 +657,7 @@ each measuring 21 rotating passes of 10,000 complete tables on CPU 2:
 | Scalar C source | 6,367.0219 | 6,367.0219 | 394.0020–395.1272 | 390.5115–393.7266 |
 | Explicit AVX-512 | 6,803.0217 | 6,803.0217 | 318.4884–324.1490 | 317.0277–322.7123 |
 
-Retired work is identical. The explicit-vector timing ranges overlap; these
+Reported retired work matches at four decimal places. The explicit-vector timing ranges overlap; these
 observations do not establish whole-compiler speed. Both tables retain their sizes: 66,816 bytes of requirements
 and 8,352 bytes of per-target eligibility. The 16-byte instruction format is
 unchanged. The scalar C source is allowed to be vectorized by Clang, matching
