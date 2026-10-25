@@ -101,3 +101,13 @@ The output directory must be new. Both revision arguments must identify the
 actual source used. A failed conversion does not produce a sealed site catalog.
 Reproducibility and full census/foreign validation are recorded separately from
 these source-level probes.
+
+`history/` is the deterministic generation from adapter source
+`3a2e4beb211247af590e1c1d30c32dcbe4cf382d` and Buster
+`696eba5d231fd5e39a5be93eed24e768a1096646`, with the fixed import timestamp
+`2026-10-25T10:46:20Z`. Both fresh runs produced identical bytes. Native
+validation passed for the census and foreign-string manifests, including
+7,308 exact foreign typed cells. The independent original browser reader also
+retained all 191,789 source cells exactly. `history-validation.json` records the
+scope and distinguishes that module integration probe from actual browser UI
+and physical-host qualification.
