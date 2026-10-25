@@ -8,7 +8,8 @@ and are not current acceptance evidence.
 - Buster source: `d7b07d3f71338b0844323fbf24b88c7bf11bff33`.
 - Reference fixture archive: `8188065389d89b49b6ac5c683c1ec78e1b0dc85b`.
 - Frozen original inputs: `d3453eb2099d1e4dcd9c997720fcf6e0d86b81ea`.
-- Native acceptance harness: `validate.c` in this directory.
+- Native acceptance harness at the schema-writer checkpoint: `validate.c`.
+- Original 180-check foundation harness for Buster `d7b07d3`: `validate-foundation.c`.
 
 The subsequent schema-writer checkpoint is Buster
 `696eba5d231fd5e39a5be93eed24e768a1096646`. Its
@@ -42,6 +43,9 @@ unit identity, negative/zero baselines and the matched-pair estimator. The test
 module runs directly in a browser, with no project test framework.
 
 Reproduce the native checks from a Buster checkout:
+
+Use Buster `696eba5d231fd5e39a5be93eed24e768a1096646` for `validate.c`, or
+`d7b07d3f71338b0844323fbf24b88c7bf11bff33` for `validate-foundation.c`.
 
 ```sh
 bash tools/performance/build.sh
