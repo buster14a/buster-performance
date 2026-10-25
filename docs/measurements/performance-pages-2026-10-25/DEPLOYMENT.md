@@ -105,5 +105,18 @@ and actual source/assembly content remain explicit unknowns.
 Exact-head required 9700X run 40201880940 and storage checks passed. Normal merge,
 main containment, deployment and browser acceptance are separate receipts.
 Merged-main run 40202588050 was pending in the shared main/9700X queue when this
-receipt was created; no pass is inferred from PR or Pages success. Final
-integration acceptance is recorded separately after completion.
+receipt was created; no pass is inferred from PR or Pages success.
+
+`main-acceptance.json` and its original logs now record successful focused
+qualification of the exact integrated source on the approved 9700X: a separately
+locked build and test action, exact source/evidence Git-archive commit comments
+and hashes, native readers/import/profile checks, all frozen partitions and the
+successful no-sampling launcher. This is the integrated performance acceptance;
+the separate full compiler post-merge CI remains pending and is not claimed green.
+The first operator attempt stopped before tests because the optional `hostname`
+utility was missing; replacing it with the existing `uname -n` was the only
+change. The failed attempt is retained. The independent symbol oracle's original
+GNU nm 2.47 output is now retained in `symbol-oracle-nm.txt.gz` as well.
+The raw test log and nm output use deterministic archival gzip to preserve their
+exact original bytes, including trailing whitespace; decoded bytes were compared
+to the originals. This encoding is not an application/build dependency.
