@@ -1,6 +1,6 @@
 # Independent source review
 
-Reviewed Buster candidate: `30e7bbc860056779b0e9fa3f426565e1bc010ec4`.
+Reviewed Buster candidate: `6c722994e9dfccc9d6047235191d761376b6b3d1`.
 Reviewer: independent read-only Codex agent `isa_policy_review`, separate from
 the implementation writer. The reviewer performed no builds, tests,
 measurements, remote-host operations or GitHub mutations. Executed results in
@@ -43,8 +43,16 @@ Findings addressed before freezing:
 - Explicit 64-byte requirement-table alignment matches repository conventions
   and keeps each full eight-row SIMD load within one cache line. Table extent,
   contents, bounds, APIs and the 16-byte instruction representation are unchanged.
-  Attribution of earlier timing shifts to alignment was an inference until the
-  implementing session's final locked A/B measurements.
+  Attribution of earlier timing shifts to alignment remains an inference;
+  final locked A/B measurements determine performance acceptance.
+- The two VEX/EVEX whitelist prechecks are necessary conditions for equality
+  with the compared strings. The enclosing `name[0] == 'v'` condition makes
+  `name[1]` safe, including the one-character string case. Admission is
+  unchanged. The original C experiment copies the exact old/proposed functions,
+  checks all 8,352 forms and target-filtered tables, uses valid clocks and
+  positive unmultiplexed counters, rotates measurement order, and prevents
+  compiler elision. Its scope is the supported-name admission pass, excluding
+  roles/buckets and other full-initialization work.
 
 Final reviewed SHA256 values:
 
@@ -53,8 +61,10 @@ Final reviewed SHA256 values:
 | `x86_target_forms.c` | `190e2e7d38b82b2dfc68a4d4143f7ace8e81a99c1ee2798e33a093597b7c4d74` |
 | `x86_target_policy_test.c` | `11a5962b22cb4f8eb82f1062c3db5e0a9c729313564ef30e2b0b89be83d7b079` |
 | `x86_target_selection_test.c` | `05d6658c4c2b499436606b8c34bf5c872a6a2d27b61fdcf0bd0f01444e917ee1` |
+| `x86_match.c` | `17a689e24e87873c73db5783401f18b1f0105ec2004d69c5105838c82ac32fdd` |
 | `audit-elf.c` | `287a86aed79b1f77cd8be970fa936ec33f685b87f7c2eb167bd795a045e48537` |
 | `policy-instructions.c` | `68ec66ee236dcfba2934a4e20ea97f707a3fc94870c98a223253709a5268bddb` |
+| `syntax-prefix.c` | `fcc045e2c86c8f9d4b03d742ee80add6938335cbe889fd1c041ec204f96fdba9` |
 
 Material limits remain: sampled canonical operands in the GAS differential;
 linear executable-section auditing; an incomplete encoder catalogue;
