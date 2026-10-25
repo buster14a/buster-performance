@@ -383,6 +383,31 @@ main integration is qualified separately below.
 
 ## Protected integration
 
-Pending normal protected merge and its exact-main CI receipt. The code and
-resource qualification above is complete; this evidence PR remains draft until
-that receipt is appended.
+[Implementation PR #416](https://github.com/buster14a/buster/pull/416) merged
+normally at `2026-10-25T10:40:48Z` as
+`18c1746fddb34fac93408cce7c8226dbc657a6ff`. Its parents are main
+`5863eeda331dacaa1371e1fe9ca1456e9d0039ca` and qualified implementation head
+`0812f29cf0269cf849aec643a3d5d81505e63888`. Its complete tree is
+`01dc911e672d0aa834dc6222290d1ea481338f38`, equal to the independently reproduced
+normal merge tree. Main contains both the implementation head and merge commit.
+The original signed implementation commits remain intact; the new merge carries
+the configured maintainer certification too. No protection bypass was used.
+
+`source-main.sha256` pins all 458 source/example/build files of the composed main
+commit, including main's unrelated preprocessor history changes. The separate
+exact-main [9700X run 40185767413](https://github.com/buster14a/buster/actions/runs/40185767413)
+**passed all 74 commands, zero failed/not started**, and every required benchmark
+step. Its assembler checks passed **1,873,795 checks, zero failures** at seed 1,
+fuzz 2000. All **16 GCC/Clang corpus cases** again passed GNU object comparison,
+execution and explicit unwind checks. Both sparse-CFI inputs again reported the
+same 149,336 retained bytes and 48-byte `.eh_frame`.
+[Measurement storage policy 40185767414](https://github.com/buster14a/buster/actions/runs/40185767414)
+also passed for this exact merge commit.
+
+The complete raw main log is `logs/ci-40185767413.log`; `main-ci.json` and
+`main-storage-ci.json` retain the successful exact-revision job/step receipts.
+`integration-receipt.txt` records the protected composition, main containment and
+final acceptance counters. Main was still exactly `18c1746f` when this receipt
+was checked. GitHub closed #233 automatically through the implementation PR's
+Fixes link. Code, target-host resource and protected-main qualification are
+complete, with the scope/measurement limits above preserved.
