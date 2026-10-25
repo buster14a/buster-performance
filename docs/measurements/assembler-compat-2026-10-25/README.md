@@ -63,7 +63,8 @@ corpus, and GNU Binutils 2.47 supplied `as`.
 | Review-corrected Buster, `0812f29` | `1384ea96c7f2108d0ef7b0e5bc17295d4209fa20ec9277b6c8f8237a0b465c95` |
 | Review-corrected focused ASan/UBSan assembler | `9f54db8f8dd5f0e8b26bbbc04dac9ff9a9abcbc09e4e252d9ddf58ae48235d9b` |
 | Whole-process resource helper | `f3373dbd14b48fce26b4baefff52d2fcddac2bfed3cc7df09ed13bc6e2c96fc7` |
-| Current-main baseline Buster, `5863eed` | `9e74bdb733704bdd6298659fe739ecd819182c8728e429ca187af0e55c6a621e` |
+| Later-main reference Buster, `5863eed` | `9e74bdb733704bdd6298659fe739ecd819182c8728e429ca187af0e55c6a621e` |
+| PR-base Buster, `1976405` | `048677da2f38d005a25cd8b0db923629d648d10b550b2857f0e20f464c146316` |
 
 Every target build, test and measurement acquired
 `~/buster-fast-bench/exclusive.sh` separately, with an owner, title and PR/issue
@@ -287,8 +288,12 @@ Each control process runs pinned to CPU 2 under a separate lock, for example:
 ```
 
 The supported mixed/register-only single-section controls and shared default
-writer are paired against current main `5863eeda331dacaa1371e1fe9ca1456e9d0039ca`,
-built independently with the same optimized build options. The frozen compiler
+writer are paired against PR base `19764052487c941cb88e8de391471daeffe39f05`,
+built independently with the same optimized build options. These endpoints
+differ only by the compatibility PR's 13 files. Additional reference controls
+use later main `5863eeda331dacaa1371e1fe9ca1456e9d0039ca`; that source includes
+unrelated preprocessor changes, so its comparison is not an isolated attribution
+of compatibility cost. The frozen compiler
 assembly with nonzero CFI is paired against the earlier complete compatible
 implementation `de1de66`; main cannot accept that source or the `--input`
 benchmark option. Additional `de1de66` mixed/register/writer controls are retained
@@ -300,3 +305,84 @@ not repeated-process statistical bounds or a general regression-free claim.
 Only the earlier three-process frozen-input campaign qualifies the grouping
 speedup. Object-byte counts are reported alongside timing; assembler-local
 symbol elision legitimately changes synthetic object metadata from main.
+
+For mixed input (256 functions, 9,984 instructions, 153,295 source bytes):
+
+| Revision | Scalar total ms | Vector total ms | Retained work bytes | ELF bytes | Process wall ms | Peak RSS KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| PR base `1976405` | 3.622 | 1.387 | 16,816,496 | 99,760 | 120.103 | 23,704 |
+| Later main reference `5863eed` | 3.641 | 1.418 | 16,816,496 | 99,760 | 113.600 | 21,540 |
+| Earlier compatible `de1de66` | 3.608 | 1.463 | 17,454,496 | 76,064 | 113.851 | 25,484 |
+| Final `0812f29` | 3.712 | 1.454 | 17,503,712 | 76,064 | 123.770 | 23,844 |
+
+The isolated PR-base/final mixed pair reads 0.067 ms (4.8%) higher vector time
+and 4.1% more retained work arena with compatibility enabled. The later-main
+reference reads 2.5% lower vector time than the final endpoint. The final process
+also incurred one major fault (the other captured processes incurred none); whole-process wall
+time includes such startup effects. This pair is not evidence of a statistically
+significant timing change. The object reduction reflects temporary-symbol
+elision, rather than omitted code or data; the independent GNU/runtime corpus
+checks establish semantics separately.
+
+For register-only input (256 functions, 8,448 instructions, 115,261 source bytes):
+
+| Revision | Scalar total ms | Vector total ms | Retained work bytes | ELF bytes | Process wall ms | Peak RSS KiB |
+| --- | --- | --- | --- | --- | --- | --- |
+| PR base `1976405` | 3.138 | 1.102 | 13,039,928 | 53,112 | 109.236 | 23,776 |
+| Later main reference `5863eed` | 3.167 | 1.111 | 13,039,928 | 53,112 | 96.110 | 21,584 |
+| Earlier compatible `de1de66` | 3.257 | 1.149 | 13,549,864 | 45,288 | 98.863 | 23,440 |
+| Final `0812f29` | 3.136 | 1.139 | 13,585,768 | 45,288 | 97.103 | 21,772 |
+
+The isolated PR-base/final register-only pair reads 0.037 ms (3.4%) higher
+vector time, effectively unchanged scalar time, and 4.2% more retained work
+arena. These small supported inputs expose a compatibility cost; the large
+multi-section result does not imply that every input improves.
+
+The default shared writer uses 64 objects, averaging 2,613 relocations, 1,208
+symbols, 19 sections and 165.5 KiB written per object at every endpoint (the
+benchmark prints sizes to 0.1 KiB). It validates repeat-build determinism before
+timing. Its raw logs preserve prepare/build, pipeline build, filesystem floors
+and both write modes. This benchmark does not expose a logical arena high-water
+mark; whole-process RSS is measured by the same wrapper.
+
+| Revision | Build us/object | Build + in-place write us/object | Build + new-file write us/object | Process wall ms | Peak RSS KiB |
+| --- | --- | --- | --- | --- | --- |
+| PR base `1976405` | 12.96 | 24.32 | 37.53 | 153.289 | 34,760 |
+| Later main reference `5863eed` | 13.07 | 24.41 | 37.50 | 181.029 | 34,632 |
+| Earlier compatible `de1de66` | 13.56 | 24.85 | 38.07 | 155.862 | 36,336 |
+| Final `0812f29` | 13.05 | 24.31 | 37.40 | 152.912 | 34,608 |
+
+The isolated PR-base/final writer pair reads 0.09 us/object (0.7%) higher build
+time, essentially equal build-plus-in-place-write time, and slightly lower
+whole-process wall/RSS at the final endpoint. A single process per endpoint
+does not establish a statistical regression or improvement.
+
+For the frozen 2,048-function compiler input (24,575 instructions, 927,660 source
+bytes, nonzero CFI), the final current-head recheck is:
+
+| Revision | Scalar total ms | Vector total ms | Vector encode/Link ms | Vector CFI ms (included) | Retained work bytes | ELF bytes | Process wall ms | Peak RSS KiB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Earlier compatible `de1de66` | 53.998 | 50.228 | 45.351 | 0.061 | 88,232,056 | 695,224 | 2,297.646 | 60,332 |
+| Final `0812f29` | 8.756 | 5.109 | 0.429 | 0.066 | 87,705,912 | 695,224 | 317.086 | 56,780 |
+
+The final event-based CFI bound reduces retained arena usage below both the
+earlier compatible implementation (by 526,144 bytes) and the grouping checkpoint
+(by 722,816 bytes). The actual measured process peaks are reported separately;
+they do not support inferring RSS from logical arena reservation. Final CFI is
+about 1.3% of vector whole-assembler time in this recheck. Object sizes match;
+the earlier grouping checkpoint's full frozen-object identity and the final
+16-case corpus object identity are the separate byte-identity receipts.
+
+All 14 resource-control processes exited zero. `logs/r-*.log` and their paired
+`.rss.txt` files preserve each reading. `source-prbase.sha256` and
+`source-later-main.sha256` pin the two baseline builds; `resource-identities.txt`
+records successful post-run source-manifest checks, all four executable hashes,
+the resource helper's source/binary hashes and frozen input hashes. The corpus
+and CI acceptance use the final implementation source pin above; subsequent
+main integration is qualified separately below.
+
+## Protected integration
+
+Pending normal protected merge and its exact-main CI receipt. The code and
+resource qualification above is complete; this evidence PR remains draft until
+that receipt is appended.
