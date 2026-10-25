@@ -23,3 +23,11 @@ terms in [`LICENSES/LLVM.txt`](LICENSES/LLVM.txt). Other existing embedded notic
 and the full source portion inventory continue to apply. Imported patches and
 harnesses that include source components use those components under their
 retained terms; this archive does not relabel them as wholly original material.
+
+`docs/measurements/msvc-vector-415-2026-10-25/review-acceptance/predefines.h`
+is a Clang 23.1.1 predefined-macro dump generated with the exact command recorded
+in that report. It retains LLVM's Apache-2.0 WITH LLVM-exception terms and the
+existing `LICENSES/LLVM.txt`. The report's C log tools are original project
+material. Frozen system headers and corpus implementation bodies remain
+external runtime inputs; this record incorporates their manifests and package
+provenance, not their implementation.

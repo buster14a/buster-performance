@@ -42,11 +42,20 @@ Windows-target `clang-cl /TC /std:c11 /O2` compiled the full lexer wrapper to a 
 
 ## Performance acceptance and CI
 
+The [completed review acceptance supplement](review-acceptance/README.md) records
+twelve three-round repository `ab` matrices on frozen inputs: all lexer modes
+requested by review, SQLite/main.c preprocessor phases, and whole-driver
+preprocessing/parsing in ordinary and `--after-scalar 200` conditions with peak
+RSS. All 432 measured driver subprocesses exited successfully. Across all
+sixteen comparisons, the largest absolute difference of wall-time medians was
+0.59%; the largest peak-RSS median difference was 16 KB. The report retains
+counters, run-to-run ranges, complete logs and reproduction commands.
+
 Native performance is preserved by **complete executable identity**, not by treating small timing differences between differently placed functions as an optimization. The normal original and final executables compare equal after identical section inspection; their as-built hashes also matched. No speedup is claimed.
 
 The repeated same-binary variant logs are retained as correctness and code-placement controls. Baseline and identical-source control copies have the same generated code; their small timing differences illustrate placement and runtime noise. A diagnostic intrinsic-only copy has different Clang timings, which do not establish native Microsoft compiler performance.
 
-An additional separate-executable A/B attempt was stopped while queueing after its first baseline run, once complete executable identity had been established. Its partial log is retained as `final/production-ab-incomplete.log.gz` for completeness and is **not** counted as a completed comparative timing experiment. It is not necessary to infer parity from that incomplete run: the normal compiler machine code and data are identical.
+An earlier separate-executable A/B attempt was stopped while queueing after its first baseline run. Its partial log is retained as `final/production-ab-incomplete.log.gz` for completeness and is **not** counted as a completed comparative timing experiment. The completed review acceptance supplement above supersedes that attempt.
 
 [PR CI run 40180197108](https://github.com/buster14a/buster/actions/runs/40180197108) passed for final PR head `cf147dc3257615680a7e694ffc25d87a3cc2576b`. The full CI log is retained as `final/ci-final.log.gz`.
 
