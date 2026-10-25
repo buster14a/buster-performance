@@ -46,7 +46,7 @@ Native performance is preserved by **complete executable identity**, not by trea
 
 The repeated same-binary variant logs are retained as correctness and code-placement controls. Baseline and identical-source control copies have the same generated code; their small timing differences illustrate placement and runtime noise. A diagnostic intrinsic-only copy has different Clang timings, which do not establish native Microsoft compiler performance.
 
-An additional separate-executable A/B attempt was stopped while queueing after its first baseline run, once complete executable identity had been established. Its partial log is retained for completeness and is **not** counted as a completed comparative timing experiment. It is not necessary to infer parity from that incomplete run: the normal compiler machine code and data are identical.
+An additional separate-executable A/B attempt was stopped while queueing after its first baseline run, once complete executable identity had been established. Its partial log is retained as `final/production-ab-incomplete.log.gz` for completeness and is **not** counted as a completed comparative timing experiment. It is not necessary to infer parity from that incomplete run: the normal compiler machine code and data are identical.
 
 [PR CI run 40180197108](https://github.com/buster14a/buster/actions/runs/40180197108) passed for final PR head `cf147dc3257615680a7e694ffc25d87a3cc2576b`. The full CI log is retained as `final/ci-final.log.gz`.
 
