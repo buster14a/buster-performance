@@ -42,6 +42,15 @@ Windows-target `clang-cl /TC /std:c11 /O2` compiled the full lexer wrapper to a 
 
 ## Performance acceptance and CI
 
+The [current-main integration supplement](integration-main-d748ca9/README.md)
+also qualifies main `d748ca959b3726593897fe7678169d1b2f91351c` with unchanged PR
+head `cf147dc3257615680a7e694ffc25d87a3cc2576b`. Fresh locked 9700X builds of
+that main and its synthetic integration produce byte-identical complete
+35,477,836-byte executables, including the 20,238,738-byte `.text`, `.rodata`
+and `.data.rel.ro`. This satisfies the second review's integration identity
+gate for that exact pair. The original absolute timings below remain tied
+to their original revisions.
+
 The [completed review acceptance supplement](review-acceptance/README.md) records
 twelve three-round repository `ab` matrices on frozen inputs: all lexer modes
 requested by review, SQLite/main.c preprocessor phases, and whole-driver
