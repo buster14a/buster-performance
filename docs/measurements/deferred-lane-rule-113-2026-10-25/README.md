@@ -1,7 +1,7 @@
 # How many lanes the deferred reader runs, 2026-10-25
 
-The 9700X's measurements for the Buster pull request from branch `claude/sad-jennings-4b8631` (issue
-[#113](https://github.com/buster14a/buster/issues/113)), the follow-up to PR
+The 9700X's measurements for Buster PR [#448](https://github.com/buster14a/buster/pull/448), from branch
+`claude/sad-jennings-4b8631` (issue [#113](https://github.com/buster14a/buster/issues/113)), the follow-up to PR
 [#432](https://github.com/buster14a/buster/pull/432)'s review, which asked that the deferred reader cap its lanes "to the
 amount of body work". #432 ran min(`--lanes`, bodies) lanes, and a lane copies the top level's reader when it takes its
 first part ([the earlier record](../deferred-lanes-432-2026-10-25/README.md)). Units of a few small bodies still read
