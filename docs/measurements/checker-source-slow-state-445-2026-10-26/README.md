@@ -7,8 +7,10 @@ record](https://github.com/buster14a/buster-performance/tree/421dfb22cf4f2aa5326
 in six of the head's nine processes and in about one of main's thirteen, at the
 same clock. This record has the answer: the page offset at which Linux puts a
 process's initial stack, which address space randomization draws per process,
-puts the checker's stack slots on addresses whose low 12 bits alias the data it
-stores, in main and in #424's head alike.
+in main and in #424's head alike. At the slow offsets the processes take more
+store-to-load conflicts, consistent with the checker's stack slots sharing
+their low 12 bits with the data it stores (4K aliasing), though the record
+doesn't identify the loads and stores ("More store-to-load conflicts").
 
 ## Executables and inputs
 
@@ -96,12 +98,13 @@ pointer), rounded up to 16.
 ## The decision
 
 No fix for #424: its head has main's slow offsets and slowdowns, and the
-driver varies by at most 1.5% with the offset. The benchmark's per-process
-spread is a measurement hazard: compare its medians over many processes, or
-fix the offset (`setarch -R` and an environment of a chosen length, as
-`procbench`'s `norandom` and `pad` do) and compare builds at several offsets.
-Removing the aliasing itself (which stack slots meet which stores) would be a
-change to the checker's body loop of its own.
+driver varies by at most 1.5% over its own sweep of offsets. The benchmark's
+per-process spread is a measurement hazard: compare its medians over many
+processes, or fix the offset (`setarch -R` with the same argument and
+environment bytes, as `procbench`'s `norandom` and `pad` give them, each
+process's startstack checked) and compare builds at several offsets. Removing
+the conflicts at their source (which loads wait on which stores, 4K aliasing or
+not) would be a change to the checker's body loop of its own.
 
 ## Limitations
 
