@@ -170,6 +170,10 @@ empty and is left out).
   workers' reservation of a scratch arena in the conversion and again in the
   write (a reservation is an `mmap` and two `madvise`s).
 
+- **The outputs** (`outputs501.txt`): each case's last output by every
+  command of both campaigns, main's, the head's, the switch build's in both
+  settings and the final head's, on eight lanes and on one, has one sha256.
+
 ## The decision: the workers keep their scratch arenas
 
 The switch build's two settings, one binary, paired over the first
