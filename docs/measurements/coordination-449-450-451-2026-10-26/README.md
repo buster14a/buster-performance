@@ -127,6 +127,10 @@ five pairs, while preserving 33 positive build-median ratios and 34 positive pai
 Tiny positive observations and earlier rejected candidates are retained, not normalized or discarded. The largest
 positive confirmation ratio is 1.5749% on 24 tokens. This supports no repeatable measured regression under the recorded
 protocol, not universal or per-sample speedups. Submitted-head CI remains separate from manual acceptance.
+Signed head `00a63096` in [PR #498](https://github.com/buster14a/buster/pull/498) subsequently passed all three
+CI checks, including native run `40375078592`. Its source/build/CI trees exactly match measured `1d2b12c6`;
+only final documentation changed. There are no outstanding source-review findings. This coordinator has
+not merged the PR.
 
 The coordinator's manual measurement campaigns entered the shared host queue in this order:
 

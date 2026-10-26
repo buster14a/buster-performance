@@ -13,6 +13,13 @@ scheduling and the lane-count rule remain outside this change. Exact35 includes
 merged #449 and current checker fixes; later unrelated revisions are outside
 this manual comparison. Submitted-head integration CI is a separate gate.
 
+Delivery [PR #498](https://github.com/buster14a/buster/pull/498), signed head
+`00a63096f77f435fcf59ad8b531a12bd997e2f30`, passes all three CI checks,
+including the native job in [run 40375078592](https://github.com/buster14a/buster/actions/runs/40375078592).
+Its source/build/CI trees are identical to measured `1d2b12c6`; only final
+documentation changed. The [exact-head receipt](cold/ci-submitted-head.json)
+and [delivery proof](cold/delivery-proof.md) preserve that distinction.
+
 | SQLite metric | Before | After |
 | --- | ---: | ---: |
 | One-lane dispatch | 7,204 ns | 391 ns |

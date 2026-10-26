@@ -5,8 +5,12 @@ campaign and a predeclared five-round repeat of every eligible corpus unit
 support manual performance acceptance: one-lane affinity calls are removed,
 SQLite whole-reader medians improve, and no repeatable measurable regression
 is detected by this protocol. Positive observations remain in the record;
-not every individual measurement improved. Submitted-head integration CI
-remains a separate delivery gate.
+not every individual measurement improved. Submitted head `00a63096` passes
+all three integration CI checks, including the native 9700X job in
+[run 40375078592](https://github.com/buster14a/buster/actions/runs/40375078592).
+The [exact-head receipt](ci-submitted-head.json) is separate from the manual
+measurement data; [delivery proof](delivery-proof.md) confirms identical
+source/build/CI trees after the final documentation commit.
 
 ## Source pair and scope
 
@@ -241,6 +245,6 @@ zero effect. The cold record contains 2758 timed processes in six bounded
 holds, all successful, plus separate preparation/acceptance.
 
 Instruction counts and whole-process RSS are not outputs of this checker
-timing harness. Exact submitted-head integration CI remains a separate gate.
+timing harness. Exact submitted-head integration CI passed as recorded above.
 The tracked guide records these results with an immutable evidence link.
 Arena/costliest-part follow-ups remain separate. No automatic merge is authorized.
