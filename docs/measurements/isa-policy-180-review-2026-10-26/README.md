@@ -1,6 +1,8 @@
 # ISA policy review follow-up — issue 180 / PR 421
 
-Qualification in progress. This report addresses review
+Source fixes, final functional qualification and measured comparisons are complete.
+Independent source and final evidence review are complete; findings are addressed.
+This report addresses review
 [5652658592](https://github.com/buster14a/buster/pull/421#pullrequestreview-5652658592)
 by source changes and new measurements; it does not infer approval of a cost.
 The PR remains draft, open and unmerged. The
@@ -123,7 +125,7 @@ There is no runtime CPU fallback.
 ## Final functional qualification
 
 [Normal build](raw/final-build.log) and
-[full sanitizer build](raw/final-asan-build.log) complete at 86. All42 ordinary
+[full sanitizer build](raw/final-asan-build.log) complete at 86. All 42 ordinary
 units compile. Observed normal/sanitizer durations are 28.5/52.1 s; main598's
 normal build is 28.4 s. These single observations are build receipts, not
 controlled build-throughput acceptance. The original reviewed C sanitizer
@@ -132,7 +134,21 @@ after ordinary flags. Source SHA256:
 `2b68184e7c9af24f29ba2dad24be045812e1fb42d56660b942f07483d2261dc6`;
 binary SHA256:
 `6c336080f6d472e383767c4c84a131c4eb2b79a7bbe3d3c3d72c1aadeeafb8df`.
-The final source/archive→image manifest and 42-unit flag receipt are pending.
+[Host provenance](raw/final-host-provenance.log), expected source manifests
+([main: 474 files](raw/main-source-files.sha256), [final: 477 files](raw/final-source-files.sha256))
+and full host checks ([main](raw/manifest-main.log), [final](raw/manifest-final.log),
+[final-ASan](raw/manifest-final-asan.log)) bind both frozen source directories.
+All hashes match the expected clean Git source/build.sh path sets.
+The [instrumentation summary](raw/final-instrumentation-summary.json) checks 42
+unique entries per image: normal builds end in -O3; every sanitizer entry ends
+in -O1 and contains all three instrumentation/frame/recovery flags.
+The untouched [main](raw/main-compile-commands.json),
+[final](raw/final-compile-commands.json) and
+[ASan](raw/final-asan-compile-commands.json) receipts are Clang -MJ comma-terminated
+object fragments; analysis removes the final trailing comma, then wraps the
+fragments in an array. The original receipts are not JSON arrays. Final ASan image SHA256 is
+`e7d6bdf06475fae1662b68a6557bfb9f5318900435fd830b7769a7a4afc8a978`.
+The recorded tools are Clang 23.1.1, GCC 16.2.1 and the installed Wild version.
 
 Fresh [normal target](raw/final-target.log) and
 [sanitizer target](raw/final-asan-target.log) each pass:
@@ -165,8 +181,54 @@ could not find the source of its 16 external cases. The corrected 333 invocation
 passed; final86 then passed both complete suites. The failed invocation
 qualifies no corpus and is retained as a failure.
 
-Final-source projection compile controls, six frozen C-corpus runs and fresh
-generated-program artifact audits are pending at this checkpoint.
+Final-source [definition positive](raw/projection-definition-positive.log) and
+[declaration positive](raw/projection-declaration-positive.log) compile controls
+return 0. Their [definition negative](raw/projection-definition-negative.log) and
+[declaration negative](raw/projection-declaration-negative.log) each return 1
+at the actual production static assertion, with AVX512BF16 deliberately outside
+the compact projection. Both fail for the intended guard, not missing includes
+or unrelated syntax.
+
+All six current-source corpus runs pass 220/220, with zero unsupported, failed
+or not-run cases: [main baseline](raw/corpus-main-x86-64.log),
+[main v3](raw/corpus-main-x86-64-v3.log), [main v4](raw/corpus-main-x86-64-v4.log),
+[final baseline](raw/corpus-final-x86-64.log),
+[final v3](raw/corpus-final-x86-64-v3.log), [final v4](raw/corpus-final-x86-64-v4.log).
+They use c-testsuite `5c7275656d751de0e68b2d340a95b5681858ed07` and identical frozen
+220-case subset SHA256 `cf2301d719f1377d91921faec7f888883abaedb75ea2577893c9731414b7d54c`.
+The unchanged original C profile adapter injects the explicit target, while
+cross-checks compare compiler paths, execute programs and test system linking.
+This is not an ISA audit of every emitted corpus object.
+
+The original C ELF auditor is rebuilt against final86, and its
+[self-test](raw/audit-helper-selftest.log) passes baseline/VEX/EVEX positives,
+lower-profile negatives, section gaps, truncated headers and bounds.
+Fresh baseline/v3/v4 objects from both images pass all six audits
+([final v4 receipt](raw/audit-final-x86-64-v4.log)). Each has 161 executable bytes/
+50 instructions, exact independent scalar/vector decoder records, valid
+operands and configured ISA eligibility; FNV1a64 `d384614d5b244074`.
+Fresh executable builds and all six executions match a freshly compiled Clang
+reference: 14213000051299467171. [Artifact provenance](raw/generated-artifact-provenance.log)
+confirms all six object SHA256 values are
+`cf0bc0708b9f00a4319c6d8701ac79c2fb9aaf0affa66ee8c6683176bfefa47d`,
+and all six executable values are
+`4a81f4d5c91b7409b59f7343b520d0bd661e8270cfc4b5c8cb8bcdac84668259`.
+Linked text/data/BSS is 1,253/468/1 bytes each. GNU size's object 167-byte
+"text" includes six non-executable read-only bytes; it is not 167 instruction
+bytes. Fresh generation, decoder checks and executions establish deterministic
+identity across both sources and the three profiles.
+
+Generated runtime timing reuse is explicit: the exact linked hash matches the
+[historically timed payload](https://github.com/buster14a/buster-performance/tree/85541498e98b254582c143bef3b5af49c098e611/docs/measurements/isa-policy-180-2026-10-25#generated-program-code-size-and-runtime).
+That campaign has three paired processes/profile, 21 executions/image/process:
+baseline medians 2.029/2.032 ms, v3 2.028/2.029 ms, v4 2.029/2.029 ms.
+Those are historical observations of these exact bytes, **not fresh 86 timings**.
+There is no newly generated instruction stream to qualify for this fixture.
+No runtime speedup or broad runtime-neutrality claim is inferred.
+
+Only Buster-produced executable sections are audited; foreign CRT/libc code is
+outside that audit. Separate native SSE/VEX/EVEX fixtures force the optional
+ISA levels; this unsigned-arithmetic runtime alone does not exercise them.
 
 ## CI and independent review
 
@@ -188,8 +250,12 @@ full matcher validation, checked/direct regression, linkage, visibility/
 alignment, standalone fallback, future projection assertions, independence
 and sanitizer feature names. No executions or source edits were performed
 by that reviewer. The reviewer independently recomputes all 15-round summary
-fields and confirms final normal/sanitizer suite receipts. Final evidence
-review is ongoing; source review does not approve a performance cost.
+fields and confirms final normal/sanitizer suite receipts. Evidence
+review independently recomputes every completed table/assembler/whole/hot
+summary, including all 840 successful timed-child values and the retained
+first-round C outliers. Final provenance/counter/artifact review also passes.
+The [independent review receipt](independent-review.md) records its scope and
+addressed findings. No review approves a performance cost.
 
 ## Final repeated table and assembler measurements
 
@@ -216,9 +282,91 @@ final 0.545–0.762 ms); the median is not a uniform gain. Vector ranges overlap
 estimate is explicit and unapproved; this is neither a vector gain nor
 proof of uniform neutrality.
 
-The five-round whole-driver campaign, three-round hot-path campaign and
-three-round assembler instruction-count control are running. No preliminary
-whole-driver value is presented as acceptance.
+## Final whole-process comparisons
+
+[Whole raw log](raw/ab-final-whole-5rounds.log) and
+[all values/ranges/directions](raw/final-whole-summary.json): 40 AB children,
+each with 21 timed subprocesses and the ordinary untimed warmup. All 840
+timed subprocesses return 0; every driver and the AB footer report zero failures.
+These are medians of five process medians, preserving all first-round outliers.
+
+| Configuration | Wall ms, base→final | Change | Pairs lower/higher | Peak KiB, base→final | Minor faults, base→final |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| One-function assembly | 1.389→1.278 | -7.991% | 5/0 | 14,912→15,524 | 175→185 |
+| Verified short C object | 2.733→2.633 | -3.659% | 4/1 | 37,836→36,740 | 521→535 |
+| Same C after 100 ms scalar work | 2.711→2.651 | -2.213% | 4/1 | 37,832→36,748 | 521→535 |
+| Frozen SQLite checking | 147.760→147.983 | **+0.151%** | **0/5** | 597,404→596,280 | 1,446→1,460 |
+
+Conditioning is outside child timers. Wall includes the whole spawned command;
+peak is the independent median of child ru_maxrss values (KiB), not the RSS
+of the median-wall child, a sum, or steady-state RSS.
+All major faults are 0. Source/headers and complete options are frozen in raw
+configuration headings; SQLite is syntax/type checking, not emitted SQLite code.
+
+The SQLite process-median ranges are disjoint:
+147.715–147.803 versus 147.856–148.141 ms. Individual child ranges overlap;
+neither fact erases the five paired increases. The earlier SQLite regression
+therefore persists at +.150920%. One-function peak RSS grows 612 KiB/+4.104% in
+every pair. Its ranges 14,908–14,916 versus 15,520–15,576 KiB are disjoint.
+Minor faults rise in every paired round of all four configurations.
+These costs are unapproved. C/SQLite peak-memory decreases and other latency
+gains do not offset them. The two short-C first-round head medians 2.889/3.149 ms
+remain included; their gains are not uniform across pairs.
+
+## Bulk kernels, backend and instruction controls
+
+[Hot raw log](raw/ab-final-hot-3rounds.log) and
+[complete summary](raw/final-hot-summary.json) cover 18 successful AB runs.
+The bulk table protocol uses 21 trials of 10,000 tables/sample, distinct from
+the one-table 15-round protocol.
+
+| Quantity | Base→final | Change | Paired lower/higher/equal |
+| --- | ---: | ---: | ---: |
+| Plain scalar table, ns | 391.63→385.17 | -1.650% | 3/0/0 |
+| Plain vector table, ns | 320.56→129.38 | -59.639% | 3/0/0 |
+| Conditioned scalar table, ns | 439.74→418.60 | -4.807% | 3/0/0 |
+| Conditioned vector table, ns | 411.81→131.22 | -68.136% | 3/0/0 |
+| Tier 0 vector, ns/typed entry | 14.54→14.51 | -0.206% | 3/0/0 |
+| Tier 0 scalar, ns/typed entry | 41.63→41.87 | **+0.577%** | **0/3/0** |
+| Branch sizing, ns/typed entry | 1.11→1.11 | 0.000% | 1/0/2 |
+| Encoding, ns/typed entry | 0.87→0.87 | 0.000% | 1/1/1 |
+
+Every backend process has identical workload metadata: 2,008 functions,
+262,874 entries, 303,116 records, 1,171,371 bytes and 9,414 deferred entries.
+Vector timing ranges overlap. Scalar ranges 41.56–41.64 versus 41.76–41.93
+do not overlap, and every pair rises; that +.576507% remains unapproved.
+Reported instructions/entry are 169.82/571.32/12.62/17.78 at displayed two-decimal
+precision, not a proof of exact instruction-count identity or a causal/
+throttling explanation.
+
+[Actual assembler command counters](raw/ab-final-assembler-instructions-3rounds.log)
+and [counter summary](raw/final-counter-summary.json) use three rotating pairs
+under perf, which reports 100.00% running; --no-scale preserves raw counts.
+For 2,048 functions/79,872 instructions, both paths warm up on pass 0 and the
+scalar path runs 21 timed passes. Median retired user instructions fall
+19,509,208,105→18,315,174,427 (-6.120%, all three pairs lower).
+This includes startup, generation, both warmups, validation, object writing
+and all timed passes; it is not a counter isolated to matching/sizing or the
+256-function timing workload. No nested counter user is wrapped.
+
+The [additional SQLite counter control](raw/sqlite-instructions-3rounds.log)
+measures the same checking command in three separate pairs:
+instructions 1,713,352,364→1,713,302,849 (-.002890%, all three lower),
+cycles 679,634,850→680,103,063 (+.068892%, one lower/two higher).
+All counter samples report 100.00% running. These are different samples from the
+five-round wall campaign, and do not reverse its +.151% result or establish a
+cause for it.
+
+The original standalone C [policy counter control](raw/policy-counter-3rounds.log)
+is rebuilt against each frozen source. Across three rotating pairs, scalar
+instructions/table stay 6367.0219; vector counts fall 6803.0217→2802.0215
+(-58.812%, all three lower). Each process checks scalar/vector equality and
+21 rotating passes; counter unavailability/multiplexing fails rather than
+becoming zero. This is an isolated same-source control, not the production
+executable or its linking/data-ownership context, and its ns values are not
+acceptance substitutes. Its printed 66,816 requirement bytes mean only the
+full64 reference, not combined requirement storage.
+
 
 ## Footprint and remaining acceptance
 
@@ -251,15 +399,21 @@ Virtual .bss does not cancel a physical RSS cost. The
 [three-round screen](raw/ab-initial-3rounds.log) is preliminary and includes
 333/e1 checkpoints; final86 matches e1 but its final whole-driver campaign
 is separate. One-function assembly in that screen has median RSS
-13,632→15,528 KiB (+1,896 KiB). This remains an unapproved observation.
+13,632→15,528 KiB (+1,896 KiB). The screen remains preliminary; the final five-round result above is the
+current comparison. Both observed memory costs remain visible, with their
+separate sampling contexts.
 
 ## Commands and ownership boundary
 
 Frozen host directories share prefix
 `/home/david/buster-fast-bench/codex-180-review-20261026-`:
 main is 598, final/final-asan are 86, sized is 1a02, shared is 333, alias is 8fced
-and loop is e1. Archives remain frozen after builds. The final C controller
-is main598's compiler, outside an outer lock:
+and loop is e1. Archives remain frozen after builds. [Exact commands and statuses](raw/final-commands-and-status.json) preserve all
+four actual performance campaigns, final functional commands, the post-campaign
+fixtures/counters and the artifact snapshot. [Post-campaign commands](raw/post-campaign-commands.txt)
+and [46 expected statuses](raw/post-campaign-results.json) distinguish the two
+intentional compile failures from passing commands.
+The final C controller is main598's compiler, outside an outer lock:
 
 ```sh
 EXCLUSIVE_OWNER=codex-180-review EXCLUSIVE_TITLE="PR421 final table/assembler 598/86" \
@@ -292,6 +446,10 @@ with their existing owners. #424 merged and released its claim; it is not an
 active blocker here. Further encoder-storage redesign would be new scope,
 not an outstanding fix promised by that owner.
 
-Remaining acceptance: finish/review final evidence, and fix remaining costs
-or obtain the user's explicit exception. Correctness CI, historical timings
-and separate wins do not waive the original limits. Keep draft and unmerged.
+Remaining acceptance: fix the observed SQLite/scalar-backend/vector-assembly
+point estimates, assembly RSS, minor-fault and .text costs, or obtain the user's
+explicit exception. The vector-assembly estimate has mixed directions;
+SQLite/scalar-backend/RSS have consistently higher paired results. Causes of
+the residual latency/memory differences have not been independently established.
+Correctness CI, historical timings and separate wins do not waive the original
+limits. Keep draft and unmerged.
