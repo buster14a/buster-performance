@@ -271,7 +271,14 @@ The final candidate's raw local logs and commands are in
 [final/local-validation/](final/local-validation/); prototype baseline/sanitizer
 comparisons remain in root [local-validation/](local-validation/). Native runtime
 acceptance, image identities and final measurements all pass the strict reader.
-CI status must be checked on the eventual submitted head. No tests or thresholds
+Submitted head `29e8e720721c942d60f2f3dfd943276accb74653` passed all four CI checks,
+including the native 9700X job in [run 40354818145](https://github.com/buster14a/buster/actions/runs/40354818145).
+The exact-head receipt is [final/ci-submitted-head.json](final/ci-submitted-head.json).
+[PR #491](https://github.com/buster14a/buster/pull/491) was merged externally at
+16:20:01 UTC as `8177fdf9986c282337ede1d16b33a5fc85121b52`; this coordinator did not merge it.
+The [submitted-head review](https://github.com/buster14a/buster/pull/491#pullrequestreview-5655305299)
+found no actionable correctness blockers or requested changes.
+No tests or thresholds
 are weakened, and no PR is automatically merged.
 
 ## Recompute final results

@@ -6,16 +6,17 @@ validation and Benchpress were sufficient; independent cloud validation was not 
 
 | Scope | Claim | Branch | Compiler revision |
 | --- | --- | --- | --- |
-| #450 | [claim](https://github.com/buster14a/buster/issues/450#issuecomment-6413009928) | `codex/450-one-lane-dispatch` | prototype `b14e096a2c72db145143123f4b566da3729ab102`; helper follow-up `e2de00e9c0a485c4e13cfd0ff13489b67066fa99` |
+| #450 | [claim](https://github.com/buster14a/buster/issues/450#issuecomment-6413009928) | `codex/450-one-lane-dispatch` | affinity candidate `638442081ae1b9134ed2dee1ca0fcc8b3933e4b0`; rejected direct/helper/outlined trials retained |
 | #449 | [claim](https://github.com/buster14a/buster/issues/449#issuecomment-6413010319) | `codex/449-label-address-hot-loops` | qualified source `f7af14f10cfb38fcbc384dcb2584ed846fe33860`; prototype `c79bc86e249de2d33c3dd89cd9bbda471888daef` retained |
 | #451, part 1 only | [claim](https://github.com/buster14a/buster/issues/451#issuecomment-6413010697) | `codex/451-part1-window-process-cost` | unchanged `9de3d30ba437b381394095d7a77635a2e877435d` |
 
 The primary comparisons use baseline `9de3d30ba437b381394095d7a77635a2e877435d`. During qualification the #113
-enum-fixed-state correction merged as `31c4ced26abcf0393e8c8f4f138e42dfe1952ee4`; #450's helper follow-up includes
-that correction and is compared against that exact new baseline. The original #113 arena/costliest-part follow-ups
+enum-fixed-state correction merged as `31c4ced26abcf0393e8c8f4f138e42dfe1952ee4`; #450's follow-ups include
+that correction and are compared against that exact new baseline. The original #113 arena/costliest-part follow-ups
 had released their claims. #450 changes neither arenas nor assignment of the costliest part. Parts 2 and 3 of #451
 are outside this campaign. The completed documentation-only [#451 part 1 PR](https://github.com/buster14a/buster/pull/462)
-was merged outside this coordinator; the coordinator did not merge it.
+was merged outside this coordinator. [#449 PR #491](https://github.com/buster14a/buster/pull/491) likewise
+merged externally after all four submitted-head CI checks passed. The coordinator did not merge either PR.
 
 ## Coding and validation host
 
@@ -103,18 +104,35 @@ No PR is automatically merged.
 identity/receipt checks and all 840 timed plus 220 counted processes. Frozen SQLite instructions are
 1,718,752,973 → 1,688,577,437; wall is 147.964 → 146.825 ms and RSS 598,300 → 598,208 KiB. Required Lua and
 label-dispatch wall/RSS observations show no consistent new cost. The record retains the local baseline oracle
-and broader sanitizer findings separately; submitted-head CI remains a separate gate.
+and broader sanitizer findings separately. Submitted head `29e8e720` passed all four CI checks, including
+native run `40354818145`; the code PR merged externally as `8177fdf9` at 16:20:01 UTC.
 
 #450's direct-context prototypes remain unaccepted. Both the helper on `31c4ced2` and the outlined-phase experiment
 pass correctness, but their whole SQLite medians increase. Their complete negative evidence is retained. The
-issue's alternative of avoiding redundant affinity writes in the existing lane-team path is under investigation;
-no acceptance is claimed for that unfinished candidate.
+issue's alternative of avoiding redundant affinity writes in the existing lane-team path is candidate `63844208`.
+Its native lane/fixture/corpus checks and all eight bounded measurement groups passed, and all 226 source,
+binary and input digest rows agree before/after. It nevertheless remains unaccepted: one-lane SQLite dispatch
+is still 4,439 ns, and repeated whole-reader regressions remain. The complete rejected record is retained.
+A new checker-only count-one cold-utility trial uses exact baseline `35f26f68`, containing merged #449 and
+current checker fixes. Its local code-shape proof and subsequent qualification are separate work.
 
-The completed measurement sequence so far is 40 individual holds for #451, 508 for the first #450 prototype,
-30 for the first #449 candidate, nine for the #449 attribution, five approved grouped holds for the #450 helper,
-five grouped holds for the final #449 candidate, then five for the outlined #450 trial: 602 measurement holds.
-This excludes separate builds, source preparation, correctness and identity captures, and B's paired preflight
-group. All completed grouped measurement holds last at most 38 seconds; the #449 groups last 11–12 seconds.
+The coordinator's manual measurement campaigns entered the shared host queue in this order:
+
+| Order | Scope and candidate | Measurement lock holds |
+| --- | --- | ---: |
+| 1 | #451 part 1, whole files versus windows | 40 |
+| 2 | #450 direct-context prototype | 508 |
+| 3 | #449 first candidate | 30 |
+| 4 | #449 predicate ablation, attribution only | 9 |
+| 5 | #450 helper, rejected | 5 |
+| 6 | #449 final control-mask candidate | 5 |
+| 7 | #450 outlined-phase trial, rejected | 5 |
+| 8 | #450 affinity-check candidate, including three general-lane pairs | 8 |
+| Total | Eight sequential campaigns | 610 |
+
+This excludes separate builds, source preparation, correctness and identity captures, B's paired preflight
+group, and separate CI qualification jobs. All completed grouped measurement holds last at most 38 seconds;
+the #449 groups last 11–12 seconds. Affinity holds last 37, 25, 2, 2, 4, 5, 5 and 4 seconds, all exit zero.
 
 Publication filtering removes only queued-wait owner/title/link metadata (which can contain other sessions' private
 links). Local FIFO grant IDs, CPU grants and elapsed waits, acquired host-lock receipts, commands, observations,

@@ -5,8 +5,15 @@ and **did not pass performance acceptance**. Correctness and source identity
 passed, but positive whole-reader changes persisted. The bounded
 `d4db297d` experiment outlined the existing deferred-only phase and also failed
 native timing acceptance; its complete results are retained under [outlined/](outlined/README.md).
-Neither direct-path experiment is accepted. Further work is assessing the issue's
-existing-lane-path alternative. Source-order normalization is not acceptance.
+Neither direct-path experiment is accepted. The generic affinity-check candidate
+`63844208` also remains unaccepted: SQLite dispatch falls from 7,013 to 4,439 ns,
+but repeated 00182.c/one-lane and 00204.c/adaptive readings increase in every pair.
+Its full data and native/local gates are in [affinity/](affinity/README.md).
+The next bounded trial uses the existing count-one unpinned cold utility on an
+exact `35f26f68` baseline, including merged #449 and current checker fixes.
+Source-order normalization is not acceptance. This page retains the original
+direct/helper methods; [direct-context-README.md](direct-context-README.md)
+preserves its previous snapshot.
 
 The change runs an adaptive one-lane reading on the calling thread in a saved
 one-lane context. It preserves the caller's `Lane` and unfinished `lane_take`
