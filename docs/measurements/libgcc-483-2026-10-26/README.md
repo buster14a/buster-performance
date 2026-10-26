@@ -13,7 +13,11 @@ whole process.
 - main: `ff8936bef4460465c827e8afd4221714d3d1c284`, the branch's merge base once it merged main.
 - run 1, the branch: `959a85389a195858edc211181361e474563332d6`: libgcc.a with the room closure
   (`bind_capacity_needed`) and the refusal of morestack.o's unwinder.
-- final, the branch: `8bc6ee1c5005eb259498c679dfea1ede21c3bac2`: also bounds `bind_begin`'s room for overrides.
+- final, the branch: `03c3bd286b9f2997d3958a7ea9e1d982dc3f3736`: also bounds
+  `bind_begin`'s room for overrides. Its tree,
+  `43011eca181397f876458bf24d54cad33d3ab545`, is that of
+  `8bc6ee1c5005eb259498c679dfea1ede21c3bac2`, which the first version of this
+  record named: that commit's message was amended before it was pushed.
 
 `manifest-*.sha256` list every file of `build.sh`, `src` and `tests` of
 `git archive` of main and of the final branch; the trees measured on the
