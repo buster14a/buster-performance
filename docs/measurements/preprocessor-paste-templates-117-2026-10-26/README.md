@@ -151,3 +151,37 @@ a rescan). Of the 3,529 left, 3,490 have arguments that are expanded first (math
   slowdown is smaller (0.2-0.5 ms), with the same signature in `perf stat`.
 - The counting build's census and the instruction counts of the PR's description are the laptop's (Ryzen 9 7940HS),
   not this host's.
+
+## Addendum: what the checker's slowdown is
+
+The owner held #473 until the `-fsyntax-only` slowdown was understood. On the final pair:
+
+- **Counters.** `perf stat -r 11` of the front end and the back end, by turns (two groups of six: front-end and
+  back-end dispatch stalls, mispredicted branches, op-cache misses, decoder ops, instruction-cache misses, resyncs,
+  `stli_other`, loads not complete, instruction reads from L2) differ by at most about 1% between the two binaries, and
+  the front-end stall slots are lower with the PR (1,314-1,316 million against 1,336-1,337 million). With six counters
+  at once, the cycles themselves overlapped (686.4 and 689.8 million on main, 689.9 and 687.5 million with the PR).
+- **Where the cycles go.** A profile of 16 compiles each (`perf record -e cycles:u -c 100003`) has 111,626 samples on
+  main and 112,057 with the PR. The increase is in unchanged checker code: `check_literal_number_plain` +333 samples
+  (+18%), `check_input_resolve_range` +300, `check_action_operand` +167, `check_input_expressions` +166; the PR's own
+  `pp_plan_operators` and `pp_finish_operators` take 155, against `pp_substitute`'s 86 fewer. Most of
+  `check_literal_number_plain`'s samples (74% on main, 79% with the PR) land on one store, after an 8-byte load of a
+  stack temporary whose tail clang zeroed with two overlapping 8-byte stores: a store-to-load forward that fails on
+  every integer literal. The hot checker functions also start at different offsets on each main commit
+  (`check_input_expressions` at 32 in `3b025c7`, 48 in `dd982df`, and 0 with the PR).
+- **A control with another change to the checker.** `scripts/literal.patch` has `check_literal_integer` write its
+  fields into the caller's result, which removes the temporary and the failed forward, and 0.8 million instructions.
+  `scripts/queue23.sh` built it on main and on the PR (`main-dd982df-lit`, `518ded56...`; `cand-5d2c540-lit`,
+  `30bf63c5...`) and timed the four builds by turns (`logs/placement/`):
+
+| `-fsyntax-only` of `sqlite3.c` | User cycles, two rounds | User instructions | Wall time, three rounds |
+| --- | ---: | ---: | ---: |
+| `main-dd982df` | 678.8, 679.4 million | 1,713.2 million | 147.467-147.765 ms |
+| `cand-5d2c540` | 680.8, 681.7 million | 1,711.5 million | 147.907-148.176 ms |
+| `main-dd982df-lit` | 680.7, 681.5 million | 1,712.4 million | 147.634-147.976 ms |
+| `cand-5d2c540-lit` | 681.2, 682.7 million | 1,710.7 million | 147.756-147.999 ms |
+
+The literal change takes 0.8 million instructions out of main and makes it 1.3-2.7 million cycles slower, as much as
+the PR. So the whole compile moves by about 0.3% in either direction with any change that moves the checker's code,
+including one that only removes work; the PR's 0.2-0.5 ms is within that. In this queue the PR's head took 1.4-2.9
+million cycles more than main, less than the 2.0-3.2 million of the final pair's first queue.
