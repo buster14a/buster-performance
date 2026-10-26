@@ -1,8 +1,10 @@
 # ISA policy optimization follow-up — issue 180 / PR 421
 
-Work in progress. This campaign follows the user's request to optimize the
-previously unaccepted costs. It does not approve a regression or supersede the
-[historical qualification](../isa-policy-180-2026-10-25/README.md) yet.
+This campaign completes the independent optimization and bounded qualification
+at the frozen revisions below. It follows the user's request to optimize the
+previously unaccepted costs. Remaining costs are explicitly unapproved, and
+PR 421 remains draft/unmerged. The [earlier qualification](../isa-policy-180-2026-10-25/README.md)
+is historical; no old observation is relabelled as a new run.
 
 ## Revisions and ownership
 
@@ -74,7 +76,7 @@ executed-source claims. No result is represented as a rerun of the mirrors.
   `50.59060 -> 47.84865`, `51.11859 -> 41.32752`,
   `51.45992 -> 40.80765` microseconds/init; reported instructions/init
   `1214088.2100 -> 1104158.1700`. This measures the three-line move alone;
-  final-image acceptance remains pending.
+  that warm experiment alone did not establish final-image acceptance.
 - `policy-kernels-screen.c` preserves the actually executed source of
   `raw/kernels-r1.log` before its alignment correction. Its XOR variant is
   neutral/slower; sign-mask is promising but not retained yet.
@@ -344,6 +346,119 @@ address regions. Address geometry alone does not establish physical backing.
 - [Final source hashes and tree](final-source-sha256.txt) bind the implementation
   and tests to `ad08d94`.
 
+The [read-only mapping diagnostic](raw/final-init-mappings.log) starts each
+actual image under GDB and stops at `x86_match_initialize`, after encoder
+initialization and before matcher writes. Both backtraces identify the
+assembler command; `/proc` records tracing-stop state and the matching
+TracerPid. The C observer finds exactly one matching inferior and reports
+success after flushing its output. No debugger timing is used as performance
+evidence.
+
+| At that stop, KiB | Main | Head |
+| --- | ---: | ---: |
+| RSS of anonymous mapping containing the default templates | 4,096 | 6,144 |
+| AnonHugePages of that mapping | 4,096 | 6,144 |
+| Entire inferior VmRSS | 8,432 | 10,620 |
+| Entire inferior RssAnon | 4,252 | 6,300 |
+| Entire inferior RssFile | 4,180 | 4,320 |
+
+This observes an additional 2 MiB of anonymous huge-page backing at that
+specific point, consistent with the address-region geometry. It does not
+attribute an elapsed-time percentage or substitute for the separately measured
+whole-process peak RSS. No host THP, linker or allocator setting was changed.
+
+
+## Frozen source corpus and generated programs
+
+The [six source-corpus runs](raw/final-corpus-six-profiles.log) use c-testsuite
+commit `5c7275656d751de0e68b2d340a95b5681858ed07` and the unchanged frozen subset.
+Baseline/v3/v4 on both images each pass **220/220**, with zero unsupported,
+failed or not-run cases. `--cross-check` compares direct/scalar output, executes
+the programs and checks linking through the system compiler. The pinned
+`profile-compiler.c` adapter injects one explicit ISA; raw commands record the
+exact compiler path/profile for each invocation. These are fresh compile/
+execution results, not an assertion that every emitted corpus object received
+a complete external ISA audit.
+
+The [final generated builds](raw/final-generated-build.log) compile the frozen
+original unsigned-arithmetic program with `--verify` into both objects and
+executables at baseline/v3/v4 for each image, and compile a fresh Clang
+reference. The [validation suite](raw/final-generated-validation.log) passes:
+
+- All six Buster executables return `14213000051299467171`, matching Clang.
+- All six objects have SHA256
+  `cf0bc0708b9f00a4319c6d8701ac79c2fb9aaf0affa66ee8c6683176bfefa47d`.
+- All six executables have SHA256
+  `4a81f4d5c91b7409b59f7343b520d0bd661e8270cfc4b5c8cb8bcdac84668259`.
+- Every object's executable section is 161 bytes/50 instructions. Independent
+  scalar/vector decoder records agree and every record passes the configured
+  ISA/operand check. The supplementary FNV receipt is `d384614d5b244074`.
+- The audit's self-test covers baseline/VEX/EVEX positives, lower-profile
+  negatives, section gaps, truncated headers and invalid ranges.
+- Each linked executable has text/data/BSS of 1,253/468/1 bytes. GNU size's
+  object “text” of 167 includes six bytes of non-executable read-only data;
+  it is not 167 instruction bytes.
+
+The audit includes Buster-produced executable ELF sections. The linked CRT and
+system-library code is foreign code outside that instruction audit. The
+separate native SSE/VEX/EVEX policy fixtures force instructions at the three
+levels; this integer runtime program alone does not exercise optional SIMD.
+
+**Runtime evidence reuse is explicit.** The linked-executable SHA is identical
+to the programs already timed on the approved host in the
+[pinned historical report](https://github.com/buster14a/buster-performance/tree/85541498e98b254582c143bef3b5af49c098e611/docs/measurements/isa-policy-180-2026-10-25#generated-program-code-size-and-runtime).
+That campaign has three paired processes per profile, each image run 21 times:
+baseline process-median medians 2.029/2.032 ms, v3 2.028/2.029 ms, and v4
+2.029/2.029 ms. Those observations are historical timings of these exact
+program bytes, **not fresh ad08d94 timings**. Fresh generation, decoder audits
+and executions above establish the identity boundary. There is no generated
+program code change to time; repeating identical images would add process/
+machine variation rather than qualify a new instruction stream. No runtime
+speedup or broad runtime neutrality is inferred from the old timing samples.
+
+## Commands, helper provenance and scope
+
+All compiler builds use the repository's ordinary command:
+
+```sh
+BUSTER_DEBUG_INFO=0 EXCLUSIVE_OWNER=codex-180-opt ~/buster-fast-bench/exclusive.sh ./build.sh
+```
+
+The sanitizer C adapter appends the four recorded flags; all 42 compile entries
+are saved. The actual host directories are
+`/home/david/buster-fast-bench/codex-180-opt-20261026-main`,
+`...-gs-final` and `...-gs-asan`. The source archives are exact Git trees,
+with no source mutation after their build. Each functional command takes its
+own ordinary lock; the generated-output validation is one bounded fixture suite.
+
+The final paired controller is the baseline compiler, invoked outside an
+outer lock so each child acquires it independently:
+
+```sh
+./build/compiler ab --rounds 15 --cpu 2 --lock ~/buster-fast-bench/exclusive.sh \
+  ../codex-180-opt-20261026-main ../codex-180-opt-20261026-gs-final \
+  -- benchmark-x86-target --only avx512 --after-predefines 100 --iterations 1 \
+  -- benchmark-assembler
+```
+
+The other AB raw headers preserve every expanded configuration and argument.
+The hot campaign uses three rounds of plain/conditioned `benchmark-x86-target`
+and `benchmark-backend`. The whole-process campaign uses five rounds of
+`time-runs --runs 21`: one-function assembly, verified C object compilation
+plain/after 100 ms scalar conditioning, and frozen SQLite checking with its
+three pinned header directories. No lock spans that campaign.
+
+The final original C helpers reuse the sources at evidence commit
+`85541498e98b254582c143bef3b5af49c098e611`: `policy-instructions.c`,
+`audit-elf.c`, `profile-compiler.c`, `sanitize-compiler.c` and `runtime.c`.
+Counter/audit helpers use `clang -std=gnu17 -O3 -march=native -fwrapv
+-funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror -I FROZEN/src`;
+the counter helper is built separately against each revision, the audit helper
+against final source. The profile/sanitizer adapters and original
+`snapshot-inferior.c` use `-std=gnu17 -O2 -Wall -Wextra -Werror`.
+All helper builds and all executions use the approved host's lock.
+No Python, imported implementation or new dependency was introduced.
+
 ## Independent source review
 
 A separate read-only reviewer checked the marker equivalence, reserved bits,
@@ -356,6 +471,11 @@ row extraction and guarded FS/GS initializer received independent source
 review, including the full-entry oracle for ordinary and fixup copies.
 The same reviewer checked all completed final-image statistics, command/status
 receipts, sanitizer compile entries, current CI, corpus and footprint census.
+The closing review also verified all generated-object/image identities and
+fresh executions, the linked-image boundary for historical runtime reuse,
+both stopped-inferior mapping receipts and whitespace-only prototype mirrors
+against their exact archived source snapshots. No actionable source or
+evidence correctness finding remains.
 This is source/evidence review; the reviewer ran no compiler or measurements
 and supplied no formal GitHub approval or performance exception.
 
@@ -372,8 +492,46 @@ The existing 8352-form count exercises a 32-row remainder of batch 64, but no
 tail smaller than eight rows. That generic tail has source review rather than
 execution coverage in this fixed-count probe.
 
-## Remaining acceptance
+## Acceptance status and ownership handoff
 
-Generated-output/runtime and mapping receipts, evidence publication and the
-closing independent audit of those last receipts are pending.
-PR 421 remains draft and unmerged; no prior measured cost is approved.
+The original table, initialization and vector-backend costs are replaced by
+the new frozen-current-main measurements above. Those paths now improve in
+the reported comparisons. This does not approve the remaining costs:
+
+- Warm scalar assembler reference: +1.373%, with 14/15 process pairs rising.
+- SQLite checking: +.177%, with all five process-median pairs rising.
+- One-function peak RSS: +776 KiB (+5.246%); minor faults rise consistently
+  in the tested whole-process configurations.
+- Executable +549,322 bytes (+1.654%), including .text +429,327 (+2.340%)
+  and the disclosed read-only/data growth. The .bss virtual extent decreases;
+  that is separate from measured RSS.
+
+The proposed justification for considering these costs is concrete: this slice
+adds fail-closed classification for current selector families and independent
+negative coverage, keeps exact scalar references and all 16-byte records, and
+reduces the measured table/startup/short-compile costs. That rationale is a
+proposal, not the user's explicit approval. Other improvements do not approve
+a regression. No existing acceptance threshold or tolerance is relaxed.
+**PR 421 stays draft and unmerged until remaining costs are fixed or explicitly
+approved.** No formal source-review approval or performance exception is claimed.
+
+The production configured-target guard for Tier 0 and its C producer remains
+with #136/#133. Existing stable interfaces remain:
+
+* `x86_target_forms(&target, allowed)` builds X86_FORM_COUNT eligibility bytes once.
+* `x86_target_validate(allowed, records, count)` returns the first invalid/
+  unsupported record or count; use it at the final external/selector boundary.
+
+Tier 1 already consumes the shared table. The independent Tier 0 tests do not
+replace its production guard. Full builtin lowering (#148), function targets
+(#147) and the new vector/intrinsic producer claim
+[#136 comment 6414744497](https://github.com/buster14a/buster/issues/136#issuecomment-6414744497)
+remain with their existing owners. All 6,741 unclassified canonical forms stay
+denied, including on native; future families require explicit rows, feature
+projection extension where needed and independent negative tests. This slice
+does not close #180 or take integration/merge ownership.
+
+All requested independent source changes and bounded validation are complete.
+The closing handoff records the final evidence commit, review status and claim
+release on #180 and #421. No compiler work was run locally, no new dependency
+was added and no shared-host reservation or benchmark remains active.
