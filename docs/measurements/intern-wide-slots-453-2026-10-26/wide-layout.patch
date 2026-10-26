@@ -1,0 +1,250 @@
+diff --git a/src/buster/compiler/c_intern.c b/src/buster/compiler/c_intern.c
+index cad0d46a..ddccf946 100644
+--- a/src/buster/compiler/c_intern.c
++++ b/src/buster/compiler/c_intern.c
+@@ -412,10 +412,25 @@ static __attribute__((unused)) bool c_name_is_keyword(IdentId id, CLanguage lang
+ 
+ // A bucket is a 64-byte line of four 16-byte slots. A slot holds the first BUSTER_INTERN_PREFIX_BYTES bytes of its
+ // spelling, zero past the spelling's end, then the spelling's IdentId (0 in an empty slot).
++#ifndef BUSTER_INTERN_WIDE_SLOTS
++#define BUSTER_INTERN_WIDE_SLOTS 0
++#endif
++#if BUSTER_INTERN_WIDE_SLOTS
++#define BUSTER_INTERN_BUCKET_SLOTS 3
++#define BUSTER_INTERN_SLOT_BYTES 20
++#define BUSTER_INTERN_PREFIX_BYTES 16
++#define BUSTER_INTERN_PREFIX_DWORDS 0x3DEF
++#define BUSTER_INTERN_SLOT_CARRY 0x0421
++#define BUSTER_INTERN_ID_DWORDS 0x4210
++#else
+ #define BUSTER_INTERN_BUCKET_SLOTS 4
+ #define BUSTER_INTERN_SLOT_BYTES 16
+-#define BUSTER_INTERN_BUCKET_BYTES (BUSTER_INTERN_BUCKET_SLOTS * BUSTER_INTERN_SLOT_BYTES)
+ #define BUSTER_INTERN_PREFIX_BYTES 12
++#define BUSTER_INTERN_PREFIX_DWORDS 0x7777
++#define BUSTER_INTERN_SLOT_CARRY 0x1111
++#define BUSTER_INTERN_ID_DWORDS 0x8888
++#endif
++#define BUSTER_INTERN_BUCKET_BYTES 64
+ // A spelling up to this long is identified by its slot's prefix alone: its zero-padded prefix has a zero at its length,
+ // where any other spelling with the same first bytes has a byte or ends at the same place.
+ #define BUSTER_INTERN_SHORT_LENGTH (BUSTER_INTERN_PREFIX_BYTES - 1)
+@@ -607,7 +622,12 @@ static uint64_t intern_hash_bytes(const uint8_t* bytes, uint64_t length)
+ // A key for intern_bucket_matches: the spelling's first 16 bytes (zero past its end) in each 128-bit lane.
+ BUSTER_INLINE __m512i intern_bucket_key(__m128i first_bytes)
+ {
++#if BUSTER_INTERN_WIDE_SLOTS
++    const __m512i words = _mm512_inserti32x4(_mm512_set1_epi32(-1), first_bytes, 0);
++    return _mm512_permutexvar_epi32(_mm512_setr_epi32(0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 0, 1, 2, 3, 4, 4), words);
++#else
+     return _mm512_broadcast_i32x4(first_bytes);
++#endif
+ }
+ 
+ // The slots of a bucket whose prefix is the key's: bit 4s + 3 for slot s, which is the index of the dword that holds its
+@@ -615,14 +635,14 @@ BUSTER_INLINE __m512i intern_bucket_key(__m128i first_bytes)
+ // add carries into its bit 3, and less otherwise.
+ BUSTER_INLINE uint32_t intern_bucket_matches(__m512i bucket, __m512i key)
+ {
+-    const uint32_t equal = _mm512_mask_cmpeq_epi32_mask(0x7777, bucket, key);
+-    return (equal + 0x1111) & 0x8888;
++    const uint32_t equal = _mm512_mask_cmpeq_epi32_mask(BUSTER_INTERN_PREFIX_DWORDS, bucket, key);
++    return (equal + BUSTER_INTERN_SLOT_CARRY) & BUSTER_INTERN_ID_DWORDS;
+ }
+ 
+ // The empty slots of a bucket: bit 4s + 3 for slot s (its id is 0).
+ BUSTER_INLINE uint32_t intern_bucket_empties(__m512i bucket)
+ {
+-    return _mm512_mask_cmpeq_epi32_mask(0x8888, bucket, _mm512_setzero_si512());
++    return _mm512_mask_cmpeq_epi32_mask(BUSTER_INTERN_ID_DWORDS, bucket, _mm512_setzero_si512());
+ }
+ 
+ // The id in the slot that bit `bit` (4s + 3) names, in the bucket at `bucket`: its dword `bit`.
+@@ -670,9 +690,20 @@ static bool intern_lay_out(InternTable* table, Arena* arena, uint64_t buckets)
+     return result;
+ }
+ 
+-// Puts `slot` (a spelling's prefix and id; the spelling has `hash` and is known to be absent) in the first empty slot of
+-// its probe sequence: its bucket, then the next ones.
+-static void intern_place(InternTable* table, __m128i slot, uint64_t hash)
++// Writes slot `bit` (its id's dword) of `bucket`: the prefix from `first`, then `id`.
++BUSTER_INLINE void intern_store_slot(uint8_t* bucket, uint32_t bit, __m128i first, IdentId id)
++{
++#if BUSTER_INTERN_WIDE_SLOTS
++    _mm_storeu_si128((__m128i*)(bucket + (bit - 4) * 4), first);
++    memcpy(bucket + bit * 4, &id, sizeof(id));
++#else
++    _mm_storeu_si128((__m128i*)(bucket + (bit - 3) * 4), _mm_insert_epi32(first, (int)id, 3));
++#endif
++}
++
++// Puts spelling `id` (its first bytes `first`; the spelling has `hash` and is known to be absent) in the first empty
++// slot of its probe sequence: its bucket, then the next ones.
++static void intern_place(InternTable* table, __m128i first, IdentId id, uint64_t hash)
+ {
+     uint64_t bucket = hash & table->bucket_mask;
+     uint32_t empties = 0;
+@@ -682,19 +713,12 @@ static void intern_place(InternTable* table, __m128i slot, uint64_t hash)
+         empties = intern_bucket_empties(_mm512_load_si512(bucket_bytes));
+         if (empties != 0)
+         {
+-            // Bit 4s + 3 is slot s's id.
+-            _mm_storeu_si128((__m128i*)(bucket_bytes + ((uint32_t)__builtin_ctz(empties) - 3) * 4), slot);
++            intern_store_slot(bucket_bytes, (uint32_t)__builtin_ctz(empties), first, id);
+         }
+         bucket = (bucket + 1) & table->bucket_mask;
+     }
+ }
+ 
+-// The slot of spelling `id` from its first 16 bytes (`first`, zero past its end): the first BUSTER_INTERN_PREFIX_BYTES,
+-// then the id in place of the rest.
+-BUSTER_INLINE __m128i intern_slot(__m128i first, IdentId id)
+-{
+-    return _mm_insert_epi32(first, (int)id, BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId));
+-}
+ 
+ // Doubles the buckets (and the spans' room) and places every spelling again.
+ static bool intern_grow(InternTable* table)
+@@ -715,7 +739,7 @@ static bool intern_grow(InternTable* table)
+         {
+             const uint8_t* bytes = table->records + table->spans[id].offset;
+             const uint32_t length = table->spans[id].length;
+-            intern_place(&grown, intern_slot(intern_first_bytes(bytes, length), id), intern_hash_bytes(bytes, length));
++            intern_place(&grown, intern_first_bytes(bytes, length), id, intern_hash_bytes(bytes, length));
+         }
+         // The first buckets are in the record arena, which keeps them (`arena` has no capacity then).
+         arena_release(&table->arena);
+@@ -748,7 +772,7 @@ static IdentId intern_insert(InternTable* table, const uint8_t* bytes, uint32_t
+         record[length] = 0;
+         table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
+         table->count += 1;
+-        intern_place(table, intern_slot(intern_first_bytes(bytes, length), result), hash);
++        intern_place(table, intern_first_bytes(bytes, length), result, hash);
+     }
+     return result;
+ }
+@@ -849,7 +873,7 @@ static IdentId intern_find_or_add_vector(InternTable* table, const uint8_t* byte
+         table->count += 1;
+         // intern_place takes the bucket's index as the hash, but in a table that has just grown.
+         const uint64_t place = table->bucket_mask == probed_mask ? home : intern_hash_vector(spelling, length);
+-        intern_place(table, intern_slot(_mm512_castsi512_si128(spelling), result), place);
++        intern_place(table, _mm512_castsi512_si128(spelling), result, place);
+     }
+     return result;
+ }
+@@ -871,8 +895,7 @@ BUSTER_INLINE IdentId intern_add_in_bucket(InternTable* table, __m512i spelling,
+         _mm512_mask_storeu_epi8(record, _bzhi_u64(~0ull, length + 1), spelling);
+         table->spans[result] = (InternSpan){ .offset = (uint32_t)(record - table->records), .length = length };
+         table->count += 1;
+-        // Bit 4s + 3 is slot s's id.
+-        _mm_storeu_si128((__m128i*)(bucket + ((uint32_t)__builtin_ctz(empties) - 3) * 4), intern_slot(_mm512_castsi512_si128(spelling), result));
++        intern_store_slot(bucket, (uint32_t)__builtin_ctz(empties), _mm512_castsi512_si128(spelling), result);
+     }
+     return result;
+ }
+@@ -999,11 +1022,10 @@ struct InternBulk
+ // prefix is written after it is taken: nothing reads a prefix until every lane has placed its spellings, and a lane looks
+ // only at the ids to find empty slots. The probe sequence is intern_place's, so a probe that passes a bucket finds it
+ // full, as a lookup expects.
+-static void intern_place_shared(InternTable* table, __m128i slot, uint64_t hash)
++static void intern_place_shared(InternTable* table, __m128i first, IdentId id, uint64_t hash)
+ {
+-    const IdentId id = (IdentId)_mm_extract_epi32(slot, BUSTER_INTERN_PREFIX_BYTES / sizeof(IdentId));
+     uint8_t prefix[BUSTER_INTERN_SLOT_BYTES];
+-    _mm_storeu_si128((__m128i*)prefix, slot);
++    _mm_storeu_si128((__m128i*)prefix, first);
+     uint64_t bucket = hash & table->bucket_mask;
+     bool placed = false;
+     while (!placed)
+@@ -1088,7 +1110,7 @@ static __attribute__((unused)) void intern_bulk_replace(InternTable* table, cons
+             const InternSpan span = table->spans[batch + i];
+             if (batch + i != 0)
+             {
+-                intern_place_shared(table, intern_slot(intern_first_bytes(table->records + span.offset, span.length), batch + i), hashes[i]);
++                intern_place_shared(table, intern_first_bytes(table->records + span.offset, span.length), batch + i, hashes[i]);
+             }
+         }
+     }
+@@ -1102,7 +1124,7 @@ static __attribute__((unused)) void intern_bulk_add(InternTable* table, IdentId
+     memcpy(record, bytes, length);
+     record[length] = 0;
+     table->spans[id] = (InternSpan){ .offset = offset, .length = length };
+-    intern_place_shared(table, intern_slot(intern_first_bytes(bytes, length), id), hash);
++    intern_place_shared(table, intern_first_bytes(bytes, length), id, hash);
+ }
+ 
+ // The table with the spellings intern_bulk_begin made room for, once every lane has added them.
+diff --git a/src/buster/compiler/c_refine.c b/src/buster/compiler/c_refine.c
+index ce45792f..0d92039a 100644
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -526,7 +526,11 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
+ // (ids are below BUSTER_INTERN_MAX_IDS), so that a compare of every dword finds only the prefixes' matches.
+ BUSTER_INLINE __m128i refine_key(__m128i first)
+ {
++#if BUSTER_INTERN_WIDE_SLOTS
++    return first;
++#else
+     return _mm_or_si128(first, _mm_setr_epi32(0, 0, 0, -1));
++#endif
+ }
+ 
+ // The id in the slot of `bucket` whose prefix is the key's (refine_key's), or 0 if no slot's is: the first match, which
+@@ -538,7 +542,7 @@ BUSTER_INLINE IdentId refine_probe(const uint8_t* bucket, __m128i key)
+ {
+     const __m512i slots = _mm512_load_si512(bucket);
+     const __mmask16 equal = _mm512_cmpeq_epi32_mask(slots, intern_bucket_key(key));
+-    const __mmask16 matches = _kand_mask16(_kadd_mask16(equal, 0x1111), 0x8888);
++    const __mmask16 matches = _kand_mask16(_kadd_mask16(equal, BUSTER_INTERN_SLOT_CARRY), BUSTER_INTERN_ID_DWORDS);
+     return (IdentId)_mm_cvtsi128_si32(_mm512_castsi512_si128(_mm512_maskz_compress_epi32(matches, slots)));
+ }
+ 
+@@ -752,7 +756,8 @@ BUSTER_INLINE void refine_hash_batch(const InternTable* table, const uint8_t* so
+         const __m512i group_lengths = _mm512_maskz_permutexvar_epi32(0x1111, spread, _mm512_castsi128_si512(four));
+         __m512i first_lanes;
+         const __m512i group_hashes = intern_hash_vectors4_short(ab, cd, group_lengths, zero_lanes, &first_lanes);
+-        _mm512_store_si512(keys + j, _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
++        // Four keys at once, each refine_key's.
++        _mm512_store_si512(keys + j, BUSTER_INTERN_WIDE_SLOTS ? first_lanes : _mm512_or_si512(first_lanes, _mm512_set4_epi32(-1, 0, 0, 0)));
+         _mm512_store_si512(offsets + 2 * j, _mm512_and_si512(_mm512_slli_epi64(group_hashes, 6), _mm512_set1_epi64((long long)offset_mask)));
+     }
+     // Their buckets' prefetches, from the offsets stored. Moving each group's four offsets out of its vector as it was
+diff --git a/src/buster/compiler/c_refine_test.c b/src/buster/compiler/c_refine_test.c
+index e646f066..7266414f 100644
+--- a/src/buster/compiler/c_refine_test.c
++++ b/src/buster/compiler/c_refine_test.c
+@@ -1381,11 +1381,12 @@ static bool refine_check_probe(void)
+     if (result)
+     {
+         uint32_t* bucket = (uint32_t*)(mapping + page_bytes - BUSTER_INTERN_BUCKET_BYTES);
++        const uint32_t words = BUSTER_INTERN_PREFIX_BYTES / 4;
+         const uint32_t prefix[4] = {
+             0x64636261,
+             0x68676665,
+             0x6c6b6a69,
+-            UINT32_MAX,
++            words == 4 ? 0x706f6e6du : UINT32_MAX,
+         };
+         const __m128i key = _mm_loadu_si128((const __m128i*)prefix);
+         for (uint32_t high = 0; high < 2; high += 1)
+@@ -1395,14 +1396,15 @@ static bool refine_check_probe(void)
+                 IdentId expected = 0;
+                 for (uint32_t slot = 0; slot < BUSTER_INTERN_BUCKET_SLOTS; slot += 1)
+                 {
+-                    const uint32_t matches = (pattern >> (3 * slot)) & 7;
+-                    for (uint32_t word = 0; word < 3; word += 1)
++                    const uint32_t all = (1u << words) - 1;
++                    const uint32_t matches = (pattern >> (words * slot)) & all;
++                    for (uint32_t word = 0; word < words; word += 1)
+                     {
+-                        bucket[4 * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
++                        bucket[(words + 1) * slot + word] = prefix[word] ^ (uint32_t)(((matches >> word) & 1) == 0);
+                     }
+                     const IdentId id = high != 0 ? BUSTER_INTERN_MAX_IDS - 4 + slot : slot + 1;
+-                    bucket[4 * slot + 3] = id;
+-                    if (expected == 0 && matches == 7)
++                    bucket[(words + 1) * slot + words] = id;
++                    if (expected == 0 && matches == all)
+                     {
+                         expected = id;
+                     }
