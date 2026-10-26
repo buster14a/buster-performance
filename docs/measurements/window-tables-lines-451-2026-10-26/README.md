@@ -144,7 +144,9 @@ whole from its end, where main's forward scan stopped at its first chunk. The pu
   is doubled unlexed, as one without a line end is. The reviewed head lexed such a window to its end, and the next
   window lexed the long line's start again.
 - `94ae0608`: the bound is 16 KB rather than 4 KB, and `pp_directive_places` skips groups of eight words without a
-  directive.
+  directive. It was pushed as `1a33796b`, the same tree with its message corrected: separate builds of the two bounds
+  took `long-lines.c` alike (5.027 and 5.021 ms in all, `review2.log`), so the 4 KB bound's cost against main that the
+  first message gave was the builds' layout and the places' compress.
 
 Its files are in `review/`.
 
