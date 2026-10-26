@@ -18,7 +18,6 @@ to its recorded ad08/551 revisions and remains historical.
 | Normal composition with main | `40d9e7b48d5ac9f809f9a879fd6a11c51b348870` | `f44d9ee8166238e5a1737d35abe4c76eb690aa79` |
 | Scalar sizing control | `1a02c486950df6dcdc3c86fae073088df398b9cc` | `8b22f2f50a9004b83ac8e8de4c65376dbd421157` |
 | Shared immutable-table checkpoint | `33362346129e38cd9d8319c0ea6954a5aad17544` | `904d38642c072c041dc1710f38ae577e3ebbe791` |
-
 | Unretained restrict-helper experiment | `8fced8d112837115d889c9e64296f73355cf0c03` | `b6c6661d4ce656f25f7cd897ea9b482fc11a24df` |
 | Independent row-loop checkpoint | `e1f2cdfaa8250400bc3ceaabbc877af70c011df3` | `42c79fd43909080a8b78d644f66bbd101a70a451` |
 | **Final directly qualified source** | **`86a9bbdc58370706604f77794d4561e10febe4d3`** | **`ff394cd5bb5e1add2bd075ab18f3fb415e971925`** |
@@ -142,17 +141,18 @@ Fresh [normal target](raw/final-target.log) and
 - 513 feature configurations, target/output overlap, unaligned buffers,
   sentinels, raw/reserved bits and negative first-failure checks.
 - 434 cached matcher configurations against uncached syntax plus scalar ISA eligibility.
-- Every 16-bit encoded form value at all six profiles;7,872 randomized admitted records.
+- Every 16-bit encoded form value at all six profiles; 7,872 randomized admitted records.
 - 396 FMA forms across 1,272 relevant feature subsets.
 - Native CPUID `0x1fffffffffffffff`, Zen 5 recognition and synthetic OS/XCR0 negatives.
-- 708 Clang/GCC feature checks, 26 complete Clang preambles and 11 bounded
-  builtin-query/option/tuning fixtures.
+- 708 Clang/GCC feature checks and 26 complete Clang preambles.
+- 12 builtin-query/option/tuning fixtures: six profile queries, one ordering/
+  tuning case and five invalid options. The query table contains 11 builtin names.
 - 17,577 GNU as comparisons, with 144 explicitly counted external AVX512VL/FMA
   oracle gaps rather than a loosened policy.
-- Baseline/v3/v4 each audit all 1,960 Tier0 templates and 96 functions/26,448
-  records with zero depth refusals; both Tier1 covers and allocators pass.
+- Baseline/v3/v4 each audit all 1,960 Tier 0 templates and 96 functions/26,448
+  records with zero depth refusals; both Tier 1 covers and allocators pass.
 - Native SSE/VEX/EVEX cases emit 40/40/41 bytes, execute and match the oracle;
-  lower-profile instructions are rejected before encoding.
+  VEX/EVEX records are rejected under lower ISA profiles before encoding.
 
 Fresh [normal assembler](raw/final-assembler.log) and
 [sanitizer assembler](raw/final-asan-assembler.log) each pass **1,882,483 checks,
@@ -196,8 +196,10 @@ review is ongoing; source review does not approve a performance cost.
 [Raw 15-round campaign](raw/ab-final-table-assembler-15rounds.log);
 [all values, ranges and paired directions](raw/final-15round-summary.json).
 Actual normal optimized main598/final86 images, 60 child processes:
-15 per image/configuration. Table construction follows 100 ms of predefines
-work; the ordinary two-path assembler uses 21 timed passes per process.
+15 per image/configuration. Each table process reports the median of 21
+one-table timings, each preceded by 100 ms of predefines work outside its timer.
+Cold initialization is one observation per process. Each warm assembler row
+is the median of 21 interleaved passes of the ordinary two-path benchmark.
 
 | Quantity | Base median | Final median | Change | Paired lower / higher / equal |
 | --- | ---: | ---: | ---: | ---: |
@@ -208,7 +210,7 @@ work; the ordinary two-path assembler uses 21 timed passes per process.
 
 The previous scalar-assembly regression is reversed in every paired round
 against the new frozen baseline. Table construction improves in every pair.
-Cold init ranges overlap and are bimodal (base 0.651–0.803 ms,
+Cold init observations vary and their ranges overlap (base 0.651–0.803 ms,
 final 0.545–0.762 ms); the median is not a uniform gain. Vector ranges overlap
 (1.459–1.495 / 1.450–1.511 ms) with mixed directions. Its positive point
 estimate is explicit and unapproved; this is neither a vector gain nor
