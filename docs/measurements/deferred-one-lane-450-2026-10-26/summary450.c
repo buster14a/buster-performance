@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_ROWS 4096
+#define MAX_ROWS 8192
 #define MAX_ROUNDS 16
 
 typedef struct Row Row;

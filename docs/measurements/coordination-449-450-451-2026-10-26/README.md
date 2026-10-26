@@ -6,7 +6,7 @@ validation and Benchpress were sufficient; independent cloud validation was not 
 
 | Scope | Claim | Branch | Compiler revision |
 | --- | --- | --- | --- |
-| #450 | [claim](https://github.com/buster14a/buster/issues/450#issuecomment-6413009928) | `codex/450-one-lane-dispatch` | affinity candidate `638442081ae1b9134ed2dee1ca0fcc8b3933e4b0`; rejected direct/helper/outlined trials retained |
+| #450 | [claim](https://github.com/buster14a/buster/issues/450#issuecomment-6413009928) | `codex/450-one-lane-dispatch` | qualified source `1d2b12c658807f466b989bcdfe2cdf548c1812d5`; rejected direct/helper/outlined/affinity trials retained |
 | #449 | [claim](https://github.com/buster14a/buster/issues/449#issuecomment-6413010319) | `codex/449-label-address-hot-loops` | qualified source `f7af14f10cfb38fcbc384dcb2584ed846fe33860`; prototype `c79bc86e249de2d33c3dd89cd9bbda471888daef` retained |
 | #451, part 1 only | [claim](https://github.com/buster14a/buster/issues/451#issuecomment-6413010697) | `codex/451-part1-window-process-cost` | unchanged `9de3d30ba437b381394095d7a77635a2e877435d` |
 
@@ -14,7 +14,9 @@ The primary comparisons use baseline `9de3d30ba437b381394095d7a77635a2e877435d`.
 enum-fixed-state correction merged as `31c4ced26abcf0393e8c8f4f138e42dfe1952ee4`; #450's follow-ups include
 that correction and are compared against that exact new baseline. The original #113 arena/costliest-part follow-ups
 had released their claims. #450 changes neither arenas nor assignment of the costliest part. Parts 2 and 3 of #451
-are outside this campaign. The completed documentation-only [#451 part 1 PR](https://github.com/buster14a/buster/pull/462)
+are outside this campaign. The final #450 pair uses exact main `35f26f68d7caa9bf5f6248822100a51c06e2c878`,
+including merged #449 and current checker fixes. It was integrated once, without chasing later unrelated revisions.
+The completed documentation-only [#451 part 1 PR](https://github.com/buster14a/buster/pull/462)
 was merged outside this coordinator. [#449 PR #491](https://github.com/buster14a/buster/pull/491) likewise
 merged externally after all four submitted-head CI checks passed. The coordinator did not merge either PR.
 
@@ -80,10 +82,12 @@ wrapper, and releases between groups. A timeout is a failed group, never an acce
 acceptance occupy separate holds from measurements. Unrelated CI jobs
 interleaved at these boundaries, causing substantial queue waits, and never overlapped our locked commands.
 
-The coordinator's FIFO measurement campaigns are #451 part 1, then #450, then #449. Separate record directories
+The primary FIFO measurement campaigns are #451 part 1, then #450, then #449; the complete follow-up order appears
+below. Separate record directories
 contain each command, exact input and compiler identity, repetitions, raw observations and report-reader source.
 The original baseline was built once and reused across the primary comparisons. The changed #450 baseline needs one
-new native build, as does its helper candidate. An explicitly invalid-for-production #449 predicate ablation is built
+new native build, reused across three trial heads. Final #450 qualification uses a new exact35 baseline and its
+minimal cold-utility candidate, built once each. An explicitly invalid-for-production #449 predicate ablation is built
 separately and used only for attribution on label-free inputs. No identical source revision receives duplicate full builds.
 
 ## CI resource guard
@@ -113,8 +117,16 @@ issue's alternative of avoiding redundant affinity writes in the existing lane-t
 Its native lane/fixture/corpus checks and all eight bounded measurement groups passed, and all 226 source,
 binary and input digest rows agree before/after. It nevertheless remains unaccepted: one-lane SQLite dispatch
 is still 4,439 ns, and repeated whole-reader regressions remain. The complete rejected record is retained.
-A new checker-only count-one cold-utility trial uses exact baseline `35f26f68`, containing merged #449 and
-current checker fixes. Its local code-shape proof and subsequent qualification are separate work.
+The checker-only count-one cold-utility candidate `1d2b12c6`, on exact baseline `35f26f68`, passes manual acceptance.
+Local sanitizer validation has 56 fixtures/891 checks and no findings; native lane/deferred tests, all 220 C programs
+and frozen SQLite agree. A fresh 42-unit graph has no disallowed cycles or split variables. The original 568 measurements
+and a predeclared full 219-unit five-pair confirmation (2,190 additional processes) all exit zero; all 226 identity rows
+remain unchanged. SQLite one-lane dispatch is 7,204 → 391 ns, small dispatch 30–40 ns, and whole-reader medians are
+120.29 → 119.66 ns/token on one lane and 104.09 → 103.84 on eight. The complete confirmation has no unit slower in all
+five pairs, while preserving 33 positive build-median ratios and 34 positive paired medians with mixed signs.
+Tiny positive observations and earlier rejected candidates are retained, not normalized or discarded. The largest
+positive confirmation ratio is 1.5749% on 24 tokens. This supports no repeatable measured regression under the recorded
+protocol, not universal or per-sample speedups. Submitted-head CI remains separate from manual acceptance.
 
 The coordinator's manual measurement campaigns entered the shared host queue in this order:
 
@@ -128,11 +140,15 @@ The coordinator's manual measurement campaigns entered the shared host queue in 
 | 6 | #449 final control-mask candidate | 5 |
 | 7 | #450 outlined-phase trial, rejected | 5 |
 | 8 | #450 affinity-check candidate, including three general-lane pairs | 8 |
-| Total | Eight sequential campaigns | 610 |
+| 9 | #450 existing-cold-utility candidate, exact35/1d2 | 5 |
+| 10 | #450 predeclared complete five-pair corpus confirmation | 1 |
+| Total | Ten sequential campaigns | 616 |
 
 This excludes separate builds, source preparation, correctness and identity captures, B's paired preflight
 group, and separate CI qualification jobs. All completed grouped measurement holds last at most 38 seconds;
 the #449 groups last 11–12 seconds. Affinity holds last 37, 25, 2, 2, 4, 5, 5 and 4 seconds, all exit zero.
+Final cold-utility groups last 37/24/1/2/3 seconds; the complete corpus confirmation lasts 36 seconds. All exit zero
+and stay below the approved 60-second cap with the 55-second timeout and 1-second forced-cleanup allowance.
 
 Publication filtering removes only queued-wait owner/title/link metadata (which can contain other sessions' private
 links). Local FIFO grant IDs, CPU grants and elapsed waits, acquired host-lock receipts, commands, observations,
