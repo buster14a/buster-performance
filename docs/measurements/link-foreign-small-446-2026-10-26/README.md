@@ -132,10 +132,13 @@ switches (`analysis-switches.txt`). Each script's log is beside it
   (`outputs-check.txt`). In the campaign, the quarter of the affected case's
   runs with the lowest effective clock (2.10 GHz) took 2,747 µs with 29.1 M
   cycles, and the quarter with the highest (2.71 GHz) 2,331 µs with 32.0 M:
-  the slower runs took fewer cycles, not more, at a lower clock. The cores but
-  CPU 2 sit idle in the 20 ms before each run and wake slowly (the linker
-  design's "How long to wait before sleeping"), where a one-thread run on
-  CPU 2 runs at an effective 4.8 GHz.
+  the slower runs took fewer cycles, not more. That is consistent with lower
+  clocks on the cores but CPU 2, idle in the 20 ms before each run (the linker
+  design's "How long to wait before sleeping" measured them waking slowly),
+  where a one-thread run on CPU 2 runs at an effective 4.8 GHz; but the
+  effective clock also falls with the lanes' waits, and the record has no
+  frequency per core, so it doesn't separate the clocks from the threads'
+  waiting and scheduling.
 - **The process around the link** took 0.65 ms of a run's 2.65 ms, in both
   builds (the wall time less `--time`'s whole: 0.650, 0.660 and 0.650 ms):
   the process's start before `link-foreign`'s first stage and its end after
@@ -177,8 +180,9 @@ switches (`analysis-switches.txt`). Each script's log is beside it
 
 A non-regression: no fix. #424's +4.4% came from three rounds whose spread,
 for this case, is that of main against itself. A small link on its threads
-runs at the clock its cores woke into, which the order of the commands and
-what ran before them decide by several percent: such a comparison needs main
+varies by several percent with the order of the commands and what ran before
+them, through the cores' idle states and clocks and its threads' waits and
+scheduling: such a comparison needs main
 against itself in the same rounds, and an order in which each build takes each
 place equally. Apart from #424, `link-foreign` pays for three cold lane groups
 per link, which a command-owned team (#306's) would start once.

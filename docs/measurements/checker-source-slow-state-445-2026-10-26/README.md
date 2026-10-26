@@ -62,26 +62,29 @@ pointer), rounded up to 16.
 ## Results
 
 - **The offset decides, and both builds share it.** In the sweep, body
-  checking ran 3 to 13% slower with the stack 208 to 656 bytes into its page
-  (but at 528), 4% at 2,832, and 1.5–2% at 1,232 to 1,296 and 3,088; elsewhere
+  checking ran 3 to 13% slower at seven of the sampled offsets from 208 to 656
+  bytes into its page (all but 528, which ran at the fast offsets' speed), 4%
+  at 2,832, and 1.5–2% at 1,232 to 1,296 and 3,088; elsewhere
   it ran at 49.3–49.9 ns per node. Main and the head have the same slow offsets
   with the same slowdowns, in both sweeps (8 of 64 offsets each over 2%).
-- **The mechanism is store-to-load conflicts.** With the stack 208 to 656
+- **More store-to-load conflicts.** At those seven offsets from 208 to 656
   bytes into its page the processes took 95 to 121 million store-to-load
   conflicts (`ls_bad_status2.stli_other`, loads that couldn't complete for an
   older store), and at 2,832 about 88 million, against 77 to 84 million at the
   other offsets (91 at one), with the same instructions, dTLB walks (29,000 to
   32,000 in the slow processes, a median of 30,400 in the others) and 1.2 GB of
-  huge pages in every process: loads whose addresses share
-  their low 12 bits with older stores' (4K aliasing between the stack slots and
-  the data the loop stores) waiting on them.
+  huge pages in every process. That is consistent with loads whose addresses
+  share their low 12 bits with older stores' (4K aliasing between the stack
+  slots and the data the loop stores) waiting on them, but the event counts
+  every load that couldn't take an older store's data, and this record doesn't
+  identify the loads and stores (an IBS sample of their addresses would).
 - **Its incidence.** In the campaign's 32 randomized processes, 8 were over 2%
   slower, four of each build, each with its stack in or beside the sweep's
   bands: main at 368, 384, 640 and 1,200, the head at 192, 272, 640 and 2,800.
   Without randomization (the stack at 2,128 with the harness's environment) all
-  32 ran at 49.45–50.24. So about one process in four is slowed, in either
-  build: #424's six of nine for the head was an uneven draw (about 1% likely
-  under this rate), not a property of its code.
+  32 ran at 49.45–50.24. So 8 of 32 randomized processes were slowed in this
+  campaign, in either build: #424's six of nine for the head was an uneven
+  draw (about 1% likely at that rate), not a property of its code.
 - **The whole driver doesn't feel it.** `-fsyntax-only` of the same source
   took 148.4–151.5 ms (main) and 149.3–152.1 ms (the head) over all 64 offsets,
   median 150.0: body checking is about a tenth of the driver, run once, where
@@ -99,6 +102,11 @@ change to the checker's body loop of its own.
 
 ## Limitations
 
+- What the conflicts are: see "More store-to-load conflicts". A comparison at
+  one offset needs both builds' processes at that offset, which the same
+  argument and environment bytes give (the two executables' paths here have
+  the same length) and `/proc/PID/stat`'s startstack, which `procbench`
+  records, confirms.
 - The sweep's resolution is 64 bytes; the campaign's 16-byte offsets show the
   bands a little wider than the sweep (192 and 2,800 are slow, at their edges).
 - The lock's messages ("exclusive.sh: waiting" and their title, link and pull
