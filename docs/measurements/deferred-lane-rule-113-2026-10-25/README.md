@@ -9,8 +9,10 @@ slower on eight lanes than on one. The PR runs one lane, and one more per `BUSTE
 of the bodies' tokens beyond twice the largest body's, no more than bodies. These runs measure what a lane costs (the
 grid), choose the rule and its count from it, and compare the rule with main's on eight lanes against one (before and
 after). On the way they found the benchmark's order of its three readings favouring the reading on more lanes by up
-to 3%, which the PR also fixes; the comparisons that decide are made with the fix. Cited by Buster's
-`docs/c-deferred-bodies.md` ("How many lanes").
+to 3%, which the PR also fixes; the comparisons that decide are made with the fix. The PR's review then found the
+benchmark's wake-up figure counting the partition's own work, and its default of 21 passes short of whole groups of
+the six orders: log 9 measures what a lane costs again with the wake-up timed alone and `lane_run`'s dispatch apart.
+Cited by Buster's `docs/c-deferred-bodies.md` ("How many lanes").
 
 ## Sources and inputs
 
@@ -19,6 +21,7 @@ to 3%, which the PR also fixes; the comparisons that decide are made with the fi
 | `probe` | `14d59dad`: main at `2cb92998` (#432 merged) with the lane costs reported (`copy=`, `wake=`, `body_tokens=`); main's rule, min(`--lanes`, bodies) | 469 | `3771d03cb4673287d9e392a80c9a1bc1dec37330a216f0db0c0c67613d35481c` |
 | `rule` | `c0f78d10`: `probe` with the rule, `CheckDeferred.every_lane`, `--every-lane`, `active=` and `largest_body=` | 469 | `6d7d6c279b9eea7f1c5296445052f66aa2f130ff6f9f7d4cabd24efe440d3b28` |
 | `balanced` | `8c538df3`: `rule` with the benchmark's passes in all six orders of its three readings | 469 | `e785f739d114549a3859f2e93fe9025ccc9b01a845ce74aa1b4acfc56eccc6a1` |
+| `timed` | `b412aa53`: `balanced` after the PR's review: the wake-up from the first lane's arrival at the partition to the last one's (`wake=`), `lane_run`'s dispatch apart (`dispatch=`), `--passes` a multiple of six | 469 | `774d22eb9d009e162e9bb29dd452948d525db98872d83c5be4e0fc2bf6a33e43` |
 
 Each manifest (`source-*.sha256`) lists the SHA-256 of `build.sh` and of every file under `src/` of the tree (what the
 build reads), and the host's trees, apart from `build/`, match them. Each was built on the host by Buster's
@@ -67,13 +70,17 @@ is the median of the passes, in nanoseconds per token. A lock hold covered one r
   units, five rounds.
 - `logs/log8.txt` (`scripts/queue8.sh`): `balanced` and `balanced-every` on eight lanes on c-testsuite's 220 programs,
   one round.
+- `logs/log9.txt` (`scripts/queue9.sh`, with `step9.sh` and `round9.sh`): `timed`'s build and `test-checker-deferred`
+  on the host, then `timed-every` on 2 and 8 lanes and `balanced-every` on 8 on the six units of "What a lane costs",
+  three rounds; `scripts/costs9.awk` reads it.
 
-`scripts/rows.awk`, `summary.awk`, `rule.awk` and `compare.awk` make the tables below from the logs. The lock's waiting
+`scripts/rows.awk`, `summary.awk`, `rule.awk`, `compare.awk` and `costs9.awk` make the tables below from the logs. The lock's waiting
 messages went to files of their own, which aren't published; the logs are as the runs wrote them. Two earlier starts
 of the grid with a lock hold per run (11 and 10 runs) were stopped for taking too long against CI's jobs and aren't
 published either. `queue4.sh` waited for `queue1.sh` by its PID, `queue5.sh` was started once `queue4.sh` was done,
 `chain3.sh` started `queue3.sh` once `queue2.sh` was done, and `queue6.sh` starts `queue7.sh`, which starts
-`queue8.sh`. The runs before `rule` was built used the same `runs.sh` with a third field for `--lane-tokens` that none
+`queue8.sh`. `queue9.sh` ran alone, after the PR's review, with a lock hold for the build, one for the tests and one
+per round. The runs before `rule` was built used the same `runs.sh` with a third field for `--lane-tokens` that none
 of them passed.
 
 ## Results
@@ -87,7 +94,7 @@ and change against the grid's best, with `largest.tsv`, each unit's largest body
 
 Medians over three rounds of each process's medians:
 
-| Unit | A copy alone (µs) | On average, 2 lanes | 8 lanes | The first lane's wait at the partition, 8 lanes (µs) | A body token's walk, 1 lane (ns) | On 8, the lanes' mean |
+| Unit | A copy alone (µs) | On average, 2 lanes | 8 lanes | The first lane's time in the partition, 8 lanes (µs) | A body token's walk, 1 lane (ns) | On 8, the lanes' mean |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
 | `h16x1` | 31 | 50 | 176 | 13 | 17.6 | 45.4 |
 | `h16x19` | 50 | 99 | 251 | 14 | 14.7 | 28.2 |
@@ -97,9 +104,42 @@ Medians over three rounds of each process's medians:
 | `sqlite3.c` | 345 | 451 | 845 | 26 | 22.0 | 35.1 |
 
 A copy alone and the walks on one lane are the 8-lane processes' one-lane readings; the averages on 2 lanes are the
-2-lane processes'. The wait is 13 to 28 µs in most runs and 2 to 3 µs in the rest. On two lanes, the woken lane's walk of a body token
-takes 1.8 to 2.05 times the first lane's: two equal bodies of 24,965 tokens average 22.2 ns over the two lanes, where
-the first lane alone takes 14.9 (`h2x480`), so the woken lane takes about 29.5.
+2-lane processes'. The time in the partition (`probe`'s `wake=`) is 13 to 28 µs in most runs and 2 to 3 µs in the
+rest: the first lane's wait there for the others, with the partition's own work, which log 9 takes apart. On two
+lanes, the woken lane's walk of a body token takes 1.8 to 2.05 times the first lane's: two equal bodies of 24,965
+tokens average 22.2 ns over the two lanes, where the first lane alone takes 14.9 (`h2x480`), so the woken lane takes
+about 29.5.
+
+### What a lane costs, timed apart (log 9)
+
+The PR's review found `wake=` counting the partition's own work, the first lane's share of the boundaries and its
+order of the parts: a reading on one lane, which waits for no one, reported 481 ns in CI's run. `timed` reports the
+wait alone, from the first lane's arrival at the partition to the last one's (`wake=`), and `lane_run`'s dispatch, from
+its call to the first lane's arrival (`dispatch=`: the first lane's pinning, and the others' wake calls). Log 9 runs
+`timed-every` on 2 and 8 lanes and `balanced-every`, whose `wake=` is the old figure, on 8, on the grid's six units,
+three rounds, each run a process of its own (24 passes, 12 for `sqlite3.c`). The medians over the rounds, in
+microseconds (`tables/costs9-summary.tsv` has the ranges, `tables/costs9.tsv` every process):
+
+| Unit | Dispatch, 1 lane | 2 lanes | 8 lanes | Wait at the partition, 2 lanes | 8 lanes | The last lane's arrival after `lane_run`'s call, 2 lanes | 8 lanes | The old figure, 1 lane | 8 lanes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `h16x1` | 0.8 | 1.3 | 3.2 | 2.0 | 12.8 | 3.2 | 15.8 | 0.1 | 12.4 |
+| `h16x19` | 1.5 | 2.6 | 5.0 | 15.1 | 13.6 | 17.7 | 18.7 | 0.1 | 13.9 |
+| `h16x154` | 5.3 | 8.0 | 11.8 | 19.7 | 17.9 | 28.0 | 29.7 | 0.5 | 18.3 |
+| `x16x19` (thirty headers) | 2.6 | 4.7 | 7.2 | 16.4 | 14.5 | 21.1 | 21.4 | 0.3 | 14.7 |
+| `b16x19` (none) | 0.7 | 1.1 | 3.0 | 2.0 | 12.9 | 3.1 | 16.0 | 0.1 | 13.7 |
+| `sqlite3.c` | 7.5 | 10.7 | 15.1 | 24.4 | 20.8 | 34.8 | 35.9 | 0.5 | 27.5 |
+
+The dispatch on one lane is the 8-lane processes' one-lane readings' (the 2-lane processes' are within 0.2 µs); the
+last lane's arrival is the median of each process's dispatch and wait together; the old figure is `balanced-every`'s
+in the same rounds. On one lane `timed`'s `wake=` is 0 in every reading, where the old figure was 0.1 to 0.5 µs, the
+partition's work alone. On eight, the old figure comes within 1 µs of the wait on the synthetic units (−0.4 to
++0.8) and 6.7 µs above it on `sqlite3.c`, whose 2,608 bodies the partition cuts into parts. `lane_run` wakes the
+others before the first lane enters, so on eight lanes their wake-up runs partly during the dispatch, and the last
+lane arrives about as long after `lane_run`'s call as on two; but on two lanes, `h16x1`'s and `b16x19`'s other lane
+woke in 2 µs in five rounds of six (their readings take under a millisecond, 0.84 and 0.96 ms on one lane). The
+dispatch on one lane, two system calls that pin the first lane, grows with the unit read before it, from 0.6 to
+7.5 µs. The copies come out as in the grid: alone 31 to 343 µs, on average 52 to 456 µs with two lanes and 195 to
+864 µs with eight.
 
 ### The rule's count (the grids, logs 1, 4, 5 and 6)
 
