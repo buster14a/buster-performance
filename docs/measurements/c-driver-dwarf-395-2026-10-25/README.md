@@ -6,7 +6,7 @@ The 9700X's validation and measurements of
 the C driver's `-g`. Its reviews asked what the feature costs a compile without
 `-g` (main against the pull request), what `-g` adds, and what the `-g` unit
 costs the build and the executable. The owner then asked for no second unit
-(2026-10-26): rows7 to rows9 measure the one-unit versions against main.
+(2026-10-26): rows7 to rows10 measure the one-unit versions against main.
 
 | Run | Tree | Commit | Against | What it is |
 | --- | --- | --- | --- | --- |
@@ -17,13 +17,14 @@ costs the build and the executable. The owner then asked for no second unit
 | `rows7-739b4b4/` | `part1` | `739b4b4` | `8530606` | one unit: only the lowering's entry compiled twice |
 | `rows8-29306d5/` | `part1` | `29306d5` | `8530606` | its loop over tasks compiled twice too, only `-g`'s keeping the tokens |
 | `rows9-6063f75/` | `part1` | `6063f75` | `8530606` | the tasks' work inlined into both copies of the loop |
+| `rows10-7ec73f3/` | `part1` | `7ec73f3` | `8530606` | the same inlining forced on the definitions |
 
 `5863eed` is the pull request's merge base, `4f4a0bf` main when it was merged
 for rows5 and rows6, and `8530606` main when it was last merged. Each tree is its commit's `git archive`, sent by tar; `source-*.sha256`
 holds the SHA-256 of each of its files, which match the commit's archive byte for
 byte. `binaries-*.sha256` holds the executables' and the input's. The scripts that
 ran each run are its `queue.sh` (and `timed-build.py` for the builds of rows5 and
-rows7 to rows9, and rows8's `cycles8.sh`).
+rows7 to rows10, and rows8's `cycles8.sh`).
 
 Host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1, GCC 16.2.1, CPU 2 at
 the performance governor. Each step took the shared lock on its own, through
@@ -47,7 +48,7 @@ snapshot.
 - Instructions and cycles: `perf stat -r 21` of the same compile pinned to CPU 2,
   in user mode, three rounds alternating the trees; the instruction counts repeat to
   a few instructions.
-- The build (rows5, rows7 to rows9): `build.sh` under `timed-build.py`, which
+- The build (rows5, rows7 to rows10): `build.sh` under `timed-build.py`, which
   reports the wall time and its children's CPU time and largest resident set
   (`getrusage(RUSAGE_CHILDREN)`), alternating main and the pull request three times
   without debug info (and for rows5 once with it); then `size` and the file's size.
@@ -155,7 +156,7 @@ link with `-g`, as `--scalar` does (rows6, below).
 - main (`4f4a0bf`) has no `-g` in the C driver: its compile with `-g` writes no
   DWARF and retires about the same instructions as without.
 
-### One unit: rows7 to rows9
+### One unit: rows7 to rows10
 
 `739b4b4` removes the second unit: the default C command handles `-g` in the
 checker's unit, and only the lowering's entry, `check_program_lower`, is compiled
@@ -164,7 +165,12 @@ lowering's loop over tasks twice too and moves the token work into `-g`'s copy,
 which settles the tokens lazily where the token changes, so that the entry writer,
 the push and the expansion are main's code. `6063f75` forces inline, into both
 copies of the loop, the six functions of the tasks that clang inlines into a loop
-it compiles once.
+it compiles once, with `[[clang::always_inline]]` at the calls; the compiler's own
+parser, which the 9700X job runs over its sources, takes no `[[...]]` attributes
+before C23, so `7ec73f3` makes those functions `always_inline` themselves, and the
+lowering calls `tier0_validate_inline`, the body that `tier0_validate` wraps. That
+gives clang's inliner a slightly different program: 0.3 million instructions more
+than `6063f75` without `-g`, 0.5 million fewer with it.
 
 | Without `-g`, against `8530606` | main | pull request | Change |
 | --- | ---: | ---: | ---: |
@@ -180,6 +186,10 @@ it compiles once.
 | cycles | 200.2 M | 201.3 M | +0.57% |
 | wall time | 48.25 ms (48.04 to 48.28) | 48.43 ms (48.37 to 48.52) | +0.37% |
 | peak RSS | 277,188 KB | 278,348 KB | +0.4% |
+| `7ec73f3`: user instructions | 619,840,383 | 619,863,234 | +0.004% |
+| cycles | 199.9 M | 201.3 M | +0.70% |
+| wall time | 48.16 ms (48.04 to 48.23) | 48.36 ms (48.00 to 48.54) | +0.42% |
+| peak RSS | 277,184 KB | 277,216 KB | 0.0% |
 
 - Every head compiles the program into main's executable, byte for byte
   (`perfstat.log`'s last line).
@@ -194,38 +204,39 @@ it compiles once.
   clang left out of line six functions it inlines into the loop it compiles once.
   The rest of the difference is spread thin over functions this change doesn't
   touch.
-- `6063f75` inlines them as main does: cycles +0.57% and wall time +0.37%, within
-  the 1% either way that where the code lands moved the earlier heads by.
-- rows7 to rows9 passed `check-call-graph`, `test-check-debug --cross-check` (2,101
+- `6063f75` and `7ec73f3` inline them as main does: cycles +0.57% and +0.70%, wall
+  time +0.37% and +0.42%, within the 1% either way that where the code lands moved
+  the earlier heads by.
+- rows7 to rows10 passed `check-call-graph`, `test-check-debug --cross-check` (2,101
   checks at `739b4b4`, 2,373 from `29306d5`, with the call tokens' check),
   `test-checker --seed 133` (249,187), `test-tier0 --cross-check` (174,220),
   `test-debug --cross-check` and `test-checker-driver` (1,567), every one with 0
   failures.
 
-| `-g` at `6063f75` | Without `-g` | With `-g` | Change |
+| `-g` at `7ec73f3` | Without `-g` | With `-g` | Change |
 | --- | ---: | ---: | ---: |
-| user instructions | 619,562,340 | 645,673,184 | +4.2% |
-| cycles | 201.3 M | 216.2 M | +7.4% |
-| wall time | 48.45 ms (48.38 to 48.50) | 51.91 ms (51.82 to 51.97) | +7.1% |
-| peak RSS | 278,344 KB | 293,452 KB | +15,108 KB |
+| user instructions | 619,863,234 | 645,163,962 | +4.1% |
+| cycles | 201.3 M | 216.5 M | +7.5% |
+| wall time | 48.39 ms (48.34 to 48.48) | 51.87 ms (51.65 to 51.89) | +7.2% |
+| peak RSS | 277,220 KB | 292,360 KB | +15,140 KB |
 
 `-g`'s copy settles the tokens as it pops each task, which costs it more than
 saving them with every push did (`f34ac83`: +3.3% instructions, +3.05 ms); a
 compile without `-g` pays nothing for it.
 
-| Build, without debug info (3 each) | main | `6063f75` | Change |
+| Build, without debug info (3 each) | main | `7ec73f3` | Change |
 | --- | ---: | ---: | ---: |
-| wall time | 27.56 s (27.55 to 27.67) | 28.25 s (28.20 to 28.33) | +2.5% |
-| CPU time | 214.68 s (214.67 to 214.69) | 215.63 s (215.57 to 215.86) | +0.44% |
-| largest compiler process | 563,980 KB | 567,532 KB | +0.6% |
-| `build/compiler` text | 22,073,153 B | 22,201,376 B | +0.58% |
-| `build/compiler` file | 33,253,094 B | 33,388,419 B | +0.41% |
+| wall time | 27.72 s (27.55 to 27.77) | 28.36 s (28.36 to 28.51) | +2.3% |
+| CPU time | 214.99 s (214.80 to 215.00) | 215.74 s (215.46 to 215.78) | +0.35% |
+| largest compiler process | 563,420 KB | 566,920 KB | +0.6% |
+| `build/compiler` text | 22,073,153 B | 22,203,360 B | +0.59% |
+| `build/compiler` file | 33,253,094 B | 33,390,403 B | +0.41% |
 
 - The build's wall time is its longest unit's, the checker's, which compiles the
-  lowering and its loop twice: 28.1 to 28.2 s against main's 27.4 to 27.6 s
-  (`build.sh`'s report in each `build-*.log`).
+  lowering and its loop twice: 28.2 to 28.4 s against main's 27.4 to 27.7 s
+  (`build.sh`'s report in each `build-*.log`; rows9's `6063f75`, 28.1 to 28.2 s).
 - The second unit had cost +10.5% of CPU time and +10.3% of text (rows5, before
-  #424's homes); one unit costs +0.44% and +0.58%.
+  #424's homes); one unit costs +0.35% and +0.59%.
 
 ## Limitations
 
