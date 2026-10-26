@@ -1,6 +1,6 @@
 # What two initializer fixes cost checking, 2026-10-26
 
-buster14a/buster's branch `claude/checker-main-c-initializers`, stacked on #480 (`claude/checker-main-c`), fixes two
+[buster14a/buster#495](https://github.com/buster14a/buster/pull/495), branch `claude/checker-main-c-initializers`, stacked on [#480](https://github.com/buster14a/buster/pull/480) (`claude/checker-main-c`), fixes two
 initializer bugs that this compiler's own `main.c` hit (#126, #133, #129): the size of an array of unknown size whose
 elements are structs from subscripts and members (`check_init_root_type`), and compound literals in a block-scope
 static's initializer (`check_init_compound`). Both are on the initializer's path, which every unit's initializers take.

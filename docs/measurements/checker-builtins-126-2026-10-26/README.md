@@ -1,6 +1,6 @@
 # What the builtins of this compiler's own main.c cost checking, 2026-10-26
 
-buster14a/buster's branch `claude/checker-main-c-builtins` checks the builtins this compiler's own `main.c` calls
+[buster14a/buster#496](https://github.com/buster14a/buster/pull/496), branch `claude/checker-main-c-builtins`, checks the builtins this compiler's own `main.c` calls
 (#126, #148, #133). Two of its changes are on the checker's default path: `check_graph_builtin_op` asks the atomic
 read/modify/write module for a builtin's rule, and the reader counts the graph's builtin call records 32 tokens at a time
 (`check_input_builtin_capacity`). This measures them on the frozen `sqlite3.c`, which calls none of the new builtins.
