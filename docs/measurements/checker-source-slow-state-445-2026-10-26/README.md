@@ -53,8 +53,11 @@ pointer), rounded up to 16.
   second; with cycles, instructions, dTLB walks and store-to-load conflicts
   (`r0224`, `ls_bad_status2.stli_other`). `out445s/`.
 - **The driver's sweep** (`driver445-0.list`, `driver445-1.list`,
-  `driver445.sh`): the C driver's `-fsyntax-only` of the same source at the
-  same 64 offsets, three processes each, by both executables.
+  `driver445.sh`): the C driver's `-fsyntax-only` of the same source with the
+  same 64 paddings, three processes each, by both executables. Its arguments
+  put its stack 32 bytes further into the page than the benchmark's: its
+  offsets are 48 to 4,080 bytes, every 64th, where the sweep's are 16 to
+  4,048.
 
 `analyze445.py` reads the campaign (`analysis-campaign.txt`), and
 `sweep445.py` both sweeps (`analysis-sweeps.txt`).
@@ -86,8 +89,8 @@ pointer), rounded up to 16.
   campaign, in either build: #424's six of nine for the head was an uneven
   draw (about 1% likely at that rate), not a property of its code.
 - **The whole driver doesn't feel it.** `-fsyntax-only` of the same source
-  took 148.4–151.5 ms (main) and 149.3–152.1 ms (the head) over all 64 offsets,
-  median 150.0: body checking is about a tenth of the driver, run once, where
+  took 148.4–151.5 ms (main) and 149.3–152.1 ms (the head) over its own 64
+  offsets (each 32 bytes past one of the sweep's), median 150.0: body checking is about a tenth of the driver, run once, where
   the benchmark repeats it 84 times in a process.
 
 ## The decision
