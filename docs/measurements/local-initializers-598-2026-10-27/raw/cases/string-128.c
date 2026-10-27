@@ -1,0 +1,1 @@
+unsigned initialized(unsigned i){unsigned char a[128]="abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvw";return a[i%128];}
