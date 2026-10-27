@@ -4,7 +4,7 @@ buster14a/buster's branch `claude/serene-merkle-0f3988`, which lifts Tier 0's an
 aligned past 16 bytes for [buster14a/buster#136](https://github.com/buster14a/buster/issues/136) (realigned frames in
 Tier 0; the producer's objects, parameters, variable-length arrays and structs by value aligned past 16), measured
 against main on the 9700X (AMD Ryzen 7 9700X, Zen 5; Linux 6.18.50-2-lts, clang 23.1.1, perf 7.2.9, CPU 2's
-`performance` governor, boost on). Four of the branch's heads were measured; the pull request's numbers are the last
+`performance` governor, boost on). Five of the branch's heads were measured; the pull request's numbers are the last
 series', the branch with main merged in against that main.
 
 ## The trees
@@ -20,11 +20,13 @@ in the tree sent.
 | final | `af005fc725e4c8b0e8991c22c39f596ff9f6aa23` | `2315e9f1` | the fix and a test program of `c_check_program_test.c`'s |
 | mainpad | main's tree, changed | | the layout control: 14,928 bytes of `.skip` at the start of `tier0_benchmark.c`'s code (`queue-pad.sh` makes it) |
 | main2 | `bbe59b7f4a5b635fa12fc875c6551e3a3dd40b7d` | `9683de41` | main for the last series, 54 commits past `b7b1f7af` |
-| merged | `acb5131481a2470b29f0b551b76f33d35690ef8f` | `c6fcaa65` | final with main2 merged in: the pull request's head when measured |
+| merged | `acb5131481a2470b29f0b551b76f33d35690ef8f` | `c6fcaa65` | final with main2 merged in |
+| main3 | `51bf882baf051f2a208a8fdef697a23e257cb09a` | `34674295` | main for the last series, past #538 (a unit's functions compiled on lanes) |
+| merged3 | `3932bcf8380829b983d123e8a93ab32bbe0ae3a9` | `8bf68a45` | merged and two commits of docs with main3 merged in: the pull request's head when measured |
 
 ## How each series ran
 
-Each series' queue script (`queue.sh`, `queue-fix.sh`, `queue-final.sh`, `queue-merged.sh`; `queue-pad.sh` and
+Each series' queue script (`queue.sh`, `queue-fix.sh`, `queue-final.sh`, `queue-merged.sh`, `queue-merged3.sh`; `queue-pad.sh` and
 `queue-pad-scalar.sh` for the control) built its trees with `BUSTER_DEBUG_INFO=0 ./build.sh`, each build under a hold of
 the shared lock (`~/buster-fast-bench/exclusive.sh`), and for the branch's later trees ran `test-tier0` and `test-unwind`
 (`*-tier0.log`, `*-unwind.log`). It wrote each executable's defined symbols and sizes (`nm -S`) and their difference
@@ -33,7 +35,7 @@ with main's (`functions-diff*.txt`, `comm -3`: main's left, the branch's indente
 cycles:u,instructions:u,branch-misses:u,L1-icache-load-misses:u,ic_tag_hit_miss.instruction_cache_miss:u`;
 `counters*/`: the fix's, final's and the last series' queues, final's and the last's of `--only scalar` too, in a hold
 of its own; head's counters were a command of their own, `counters/command.sh`), then ran rounds of its round script
-(`round.sh`, `round-fix.sh`, `round-final.sh`, `round-merged.sh`), each under one hold of the lock, the trees' order
+(`round.sh`, `round-fix.sh`, `round-final.sh`, `round-merged.sh`, `round-merged3.sh`), each under one hold of the lock, the trees' order
 alternating (main first in odd rounds), pinned to CPU 2:
 
 - `benchmark-backend` (medians of 21 passes of the generated programs: 2,008 functions, 262,874 typed entries, 303,116
@@ -49,7 +51,58 @@ Then it compared the two trees' last objects (`cmp`). `queue*.log` are the scrip
 lock's waiting lines, which name other sessions' private links, is left out. `summarize.py RESULTS MAIN HEAD` makes the
 round tables below from a `results*/` directory, and `counters.py DIRECTORY` the counters' from a `counters*/` one.
 
-## The pull request's numbers: main2 against merged
+## The pull request's numbers: main3 against merged3
+
+`queue-merged3.sh` built both trees, ran merged3's `test-tier0` (206,571 checks, 0 failed) and `test-unwind` (passed)
+on the 9700X, took the counters, then ran 6 rounds of `round-merged3.sh` (`results-merged3/`). The driver compiles a
+unit's functions on as many lanes as the CPUs it may run on since #538, so `-c` pinned to CPU 2 compiles on one lane,
+as before. Medians of the rounds, [the fastest, the slowest]:
+
+| Measure | main3 | merged3 | merged3/main3 |
+| --- | ---: | ---: | ---: |
+| benchmark-backend, vector path: ns per entry | 14.40 [14.36, 14.44] | 14.55 [14.53, 14.57] | 1.010 |
+| cycles per entry | 79.83 [79.64, 79.99] | 80.63 [80.57, 80.71] | 1.010 |
+| instructions per entry | 169.85 | 170.86 | 1.006 |
+| the vector path alone: ns per entry | 14.13 [14.12, 14.16] | 14.29 [14.25, 14.32] | 1.012 |
+| cycles per entry | 78.29 [78.23, 78.47] | 79.21 [78.96, 79.36] | 1.012 |
+| the scalar path: ns per entry | 41.49 [41.43, 41.58] | 42.15 [41.97, 42.18] | 1.016 |
+| cycles per entry | 229.99 [229.64, 230.23] | 233.49 [232.70, 233.67] | 1.015 |
+| instructions per entry | 570.95 | 573.75 | 1.005 |
+| `-c sqlite3.c`: ms | 186.74 [186.44, 187.11] | 186.69 [186.37, 187.06] | 1.000 |
+| instructions | 2,190,634,296 | 2,192,558,391 | 1.0009 |
+| cycles | 881,422,126 [880,527,443, 884,458,576] | 882,079,107 [880,644,090, 883,512,116] | 1.001 |
+
+Both trees' `sqlite3.c` objects are the same bytes (`queue-merged3.log`, `objects.sha256`). The counters
+(`counters-merged3/`), each tree twice, the second time in the other order:
+
+| Tree | Path | ns per entry | Cycles | Instructions | Branch misses | L1i misses | ic_tag misses |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| main3 | vector | 14.17, 14.17 | 688.6M, 687.8M | 1,577.9M, 1,578.1M | 9.21M, 9.08M | 3.51M, 3.60M | 45.1M, 45.9M |
+| merged3 | vector | 14.29, 14.28 | 693.8M, 694.5M | 1,585.5M, 1,585.5M | 9.26M, 9.18M | 3.53M, 3.58M | 45.9M, 46.5M |
+| main3 | scalar | 41.27, 41.26 | 1,509.5M, 1,506.1M | 3,751.7M, 3,753.8M | 25.13M, 25.27M | 2.60M, 2.52M | 55.3M, 57.7M |
+| merged3 | scalar | 41.72, 41.87 | 1,523.5M, 1,524.2M | 3,771.3M, 3,767.3M | 25.14M, 25.26M | 2.42M, 2.47M | 38.9M, 39.4M |
+
+On this layout the branch's 1.01 instructions per entry more show as 1.0% more of the vector path's cycles, with as
+many L1i misses as main3's; on main2's they didn't show at all (below), from the same Tier 0 code. `-c sqlite3.c`'s
+time is main3's, at 1.92M (0.09%) more instructions: "Where `-c sqlite3.c`'s instructions go" has them.
+
+## Where `-c sqlite3.c`'s instructions go
+
+On the laptop, exact counts of `-c sqlite3.c`'s user instructions (`variants/instructions.txt`, with the commands)
+place the 1.93M there: the checker alone (`-fsyntax-only`) differs by 988 instructions, and the head with main's
+`c_check_program_lower.c` (`variants/exp0.patch`) is 0.65M past main: the rest of the branch, whose code on `-c`'s
+path is Tier 0's per-function work. The other 1.28M are
+how clang compiles `check_lower_part`, the lowering's function into which `check_lower_part_body`, with its loops over
+a function's parameters and locals, is inlined (since #538): undoing the branch's edit of the locals' rule alone
+(`exp2.patch`) leaves 0.06M of them, undoing the parameters' rule's alone (`exp1.patch`) 0.51M, and undoing the
+variable-length arrays' allocation's (`exp3.patch`) all of them; with the two rules as main has them and their rare
+cases in a cold helper (`out-of-line.patch`), 1.06M are left. The edits are small and their code runs once per
+declaration, so the instructions are clang's code for the rest of the function, which moves with any edit of the body
+(the function's size doesn't follow the counts: the head with main's file compiles it larger than main does). Every
+variant writes main's object. The pull request keeps the head's code: the cost is 0.06% of the compile's
+instructions, and none of its time.
+
+## The first merge: main2 against merged
 
 `queue-merged.sh` built both trees, ran the merged head's `test-tier0` (206,571 checks, 0 failed) and `test-unwind`
 (passed) on the 9700X, took the counters, then ran 6 rounds of `round-merged.sh` (`results-merged/`). Medians of the
@@ -88,8 +141,8 @@ that was layout too (below).
 
 ## The tests' times
 
-`queue-tests.sh` ran each test of the 9700X job that the branch changes, and `test-tier0` alone, twice for each of main2
-and merged, the trees' order alternating by round, each test's pair under one hold of the lock (`time-test.sh`), on CPUs
+`queue-tests.sh` ran, on main2 and merged, each test of the 9700X job that the branch changes, and `test-tier0` alone,
+twice for each tree, the trees' order alternating by round, each test's pair under one hold of the lock (`time-test.sh`), on CPUs
 0 to 7 one at a time as the job runs its tests (`BUSTER_PARALLEL_JOBS=1`), from the tree's root, timed by the wall clock
 (`tests-merged/times.txt`; the outputs beside it). Seconds:
 
