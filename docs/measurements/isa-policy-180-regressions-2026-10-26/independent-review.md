@@ -285,3 +285,5 @@ separately. The independent reviewer finds no semantic change in the loop
 restoration. Storage-address arithmetic is checked, including64bytes before
 the first template; addresses alone do not prove alias causality. Second-control
 timings and the third data-alignment candidate remain unaccepted/incomplete.
+
+Candidate3 and reader batching review (2026-10-27): independent read-only source review found no correctness issue in the five storage-alignment changes or selected-count reader bounds. Native8/8, graph, dump and BSS+105088 receipts agree; no RSS/timing causality claim follows. Review requested a separate54/36 parser fixture and strengthening its out-of-range case to append an invalid index while retaining all valid indices. Both changes are implemented;12ASan/UBSan checks pass. Actual54-row measured campaign qualification remains pending.

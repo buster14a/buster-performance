@@ -161,7 +161,9 @@ int main(int argc, char** argv)
     Sample sample = {.round = 1};
     if (okay)
     {
-        okay &= complete_batch(argv[1], batch) && !complete_batch(root, batch);
+        okay &= complete_batch(argv[1], batch, BUSTER_RECEIPT_PLAIN_BATCH_SIZE) && !complete_batch(root, batch, BUSTER_RECEIPT_PLAIN_BATCH_SIZE);
+        checks += 1;
+        okay &= !complete_batch(argv[1], batch, BUSTER_RECEIPT_PLAIN_BATCH_SIZE + 1);
         checks += 1;
         okay &= !empty_file(root);
         checks += 1;

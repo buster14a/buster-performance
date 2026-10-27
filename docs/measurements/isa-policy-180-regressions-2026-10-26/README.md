@@ -56,10 +56,16 @@ The candidate initial screen is complete: all24 medians improve2.77–5.18%
 against ac57. Its full-batch control is also complete: all12plain medians cost
 1.01–3.60% against main74, and all12conditioned cases exceed main-again. This
 candidate is rejected despite its partial-batch win. A second private control
-restores main's remainder loop; native8/8 and clean-oracle localSan8/8 pass,
-while its long-stream screen is running. An isolated page-alignment candidate
-is queued for native qualification; recorded addresses do not establish alias
-causality. Backend, policy, initialization and
+restores main's remainder loop; native8/8 and clean-oracle localSan8/8 pass.
+It is also rejected: all12plain medians cost0.84–3.81% against main74. Five
+batches/240children were retained; round3/after30 was never launched.
+An isolated candidate strengthens five storage alignments from64 to4096 without
+changing array extents, entries or readiness. Native8/8, graph and dump pass;
+local sanitizer tests are queued. BSS grows105,088bytes versus the rejected
+tail candidate, while file/text sizes match it. The first48-child diagnostic
+batch improves small calls about4%, but full-batch results remain mixed,
+including an unaccepted cost. Repeated controls are pending; addresses alone
+do not establish alias causality. Backend, policy, initialization and
 fresh generated-program timings remain pending the retained candidate decision. Current physical CI40546104621 passes82/82 commands on its actual integration
 revision10f2c5d9f2 (ac57 into8fcf19cee49cdc54e53602b67dc94ad70ec7eb6c).
 The full1,070,307-byte log and SHA256 receipt are retained. Historical receipts
@@ -72,6 +78,13 @@ Native image sizes fall34,093,877 to31,587,441 bytes; text falls19,286,020 to
 Production configured-target boundary adoption remains with #136/#133. This
 slice does not take over producer, preprocessor, builtin-lowering or tuning
 implementation. #180 remains open.
+
+The receipt reader now supports separately configured plain/conditioned batch
+counts below64. Legacy12/36 modes pass25checks each, and their complete1728-row
+summary remains byte identical. Separate54/36 synthetic fixtures pass12ASan/UBSan
+checks, including the last valid command, extra out-of-range, duplicate and
+missing rows. No measured54-row campaign has run. Future larger batches keep
+the original observation counts/timers and require distinct provenance.
 
 ## Historical campaigns and candidates
 

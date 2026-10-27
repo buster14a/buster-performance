@@ -17,10 +17,14 @@
 #ifndef BUSTER_RECEIPT_BATCH_SIZE
 #define BUSTER_RECEIPT_BATCH_SIZE 12
 #endif
+#ifndef BUSTER_RECEIPT_PLAIN_BATCH_SIZE
+#define BUSTER_RECEIPT_PLAIN_BATCH_SIZE BUSTER_RECEIPT_BATCH_SIZE
+#endif
 #ifndef BUSTER_RECEIPT_AFTER_MS
 #define BUSTER_RECEIPT_AFTER_MS 100
 #endif
 _Static_assert(BUSTER_RECEIPT_BATCH_SIZE > 0 && BUSTER_RECEIPT_BATCH_SIZE < 64, "receipt mask capacity");
+_Static_assert(BUSTER_RECEIPT_PLAIN_BATCH_SIZE > 0 && BUSTER_RECEIPT_PLAIN_BATCH_SIZE < 64, "plain receipt mask capacity");
 
 typedef struct Sample
 {
@@ -100,7 +104,7 @@ static double median(double* values, unsigned count)
     return values[count / 2];
 }
 
-static bool complete_batch(const char* root, const char* batch)
+static bool complete_batch(const char* root, const char* batch, unsigned batch_count)
 {
     char path[2048];
     const char* metadata[] = {"image-identities.sha256", "image-inodes.txt", "harness-check.log", "commands.list"};
@@ -139,11 +143,12 @@ static bool complete_batch(const char* root, const char* batch)
         okay &= errno == 0;
         okay &= closedir(directory) == 0;
     }
-    return okay && files == 2 * BUSTER_RECEIPT_BATCH_SIZE + 7;
+    return okay && files == 2 * batch_count + 7;
 }
 
 static bool read_sample(const char* root, const char* batch, unsigned command, const char* label, Sample* sample)
 {
+    const unsigned batch_count = sample->condition != 0 ? BUSTER_RECEIPT_BATCH_SIZE : BUSTER_RECEIPT_PLAIN_BATCH_SIZE;
     char path[2048];
     char line[4096] = {0};
     snprintf(path, sizeof(path), "%s/%s/exit.txt", root, batch);
@@ -176,8 +181,8 @@ static bool read_sample(const char* root, const char* batch, unsigned command, c
             }
         }
         const uint64_t index = values[1];
-        okay &= parsed && values[0] == sample->round && index < BUSTER_RECEIPT_BATCH_SIZE && (seen & (UINT64_C(1) << index)) == 0 && values[3] == 0 && values[4] == 0 && values[5] == 0 && values[6] != 0 && values[6] <= UINT64_C(90000000000) && values[7] != 0 && values[7] <= UINT64_C(90000000) && values[8] <= UINT64_C(90000000) && values[9] != 0 && values[13] != 0 && strcmp(fields[14], "-1") == 0 && strcmp(fields[15], "-1") == 0 && strcmp(fields[16], "-1") == 0;
-        if (parsed && index < BUSTER_RECEIPT_BATCH_SIZE)
+        okay &= parsed && values[0] == sample->round && index < batch_count && (seen & (UINT64_C(1) << index)) == 0 && values[3] == 0 && values[4] == 0 && values[5] == 0 && values[6] != 0 && values[6] <= UINT64_C(90000000000) && values[7] != 0 && values[7] <= UINT64_C(90000000) && values[8] <= UINT64_C(90000000) && values[9] != 0 && values[13] != 0 && strcmp(fields[14], "-1") == 0 && strcmp(fields[15], "-1") == 0 && strcmp(fields[16], "-1") == 0;
+        if (parsed && index < batch_count)
         {
             seen |= UINT64_C(1) << index;
         }
@@ -192,7 +197,7 @@ static bool read_sample(const char* root, const char* batch, unsigned command, c
             sample->values[8] = (double)values[10];
         }
     }
-    okay &= seen == (UINT64_C(1) << BUSTER_RECEIPT_BATCH_SIZE) - 1 && matches == 1;
+    okay &= seen == (UINT64_C(1) << batch_count) - 1 && matches == 1;
     if (file != 0)
     {
         okay &= !ferror(file);
@@ -266,7 +271,8 @@ int main(int argc, char** argv)
             parsed &= unsigned_number(fields[i], &numbers[i]);
         }
         Sample sample = {0};
-        okay = parsed && strlen(fields[0]) < sizeof(batch) && strlen(fields[8]) < sizeof(label) && numbers[1] >= 1 && numbers[1] <= 3 && numbers[2] <= 1 && numbers[3] <= 3 && numbers[4] <= 2 && numbers[5] < 12 && numbers[6] < (numbers[2] != 0 ? 1u : 3u) && numbers[7] < BUSTER_RECEIPT_BATCH_SIZE && count < SAMPLE_COUNT;
+        const unsigned batch_count = numbers[2] != 0 ? BUSTER_RECEIPT_BATCH_SIZE : BUSTER_RECEIPT_PLAIN_BATCH_SIZE;
+        okay = parsed && strlen(fields[0]) < sizeof(batch) && strlen(fields[8]) < sizeof(label) && numbers[1] >= 1 && numbers[1] <= 3 && numbers[2] <= 1 && numbers[3] <= 3 && numbers[4] <= 2 && numbers[5] < 12 && numbers[6] < (numbers[2] != 0 ? 1u : 3u) && numbers[7] < batch_count && count < SAMPLE_COUNT;
         if (okay)
         {
             strcpy(batch, fields[0]);
@@ -279,7 +285,7 @@ int main(int argc, char** argv)
             sample.copy = (unsigned)numbers[6];
             const unsigned command = (unsigned)numbers[7];
             bool* slot = &slots[sample.round - 1][sample.condition][sample.flags][sample.role][sample.placement][sample.copy];
-            okay = !*slot && complete_batch(argv[1], batch) && read_sample(argv[1], batch, command, label, &sample);
+            okay = !*slot && complete_batch(argv[1], batch, batch_count) && read_sample(argv[1], batch, command, label, &sample);
             *slot = true;
             groups[(((sample.round - 1) * 2 + sample.condition) * 4 + sample.flags) * 3 + sample.role] += 1;
             samples[count++] = sample;
