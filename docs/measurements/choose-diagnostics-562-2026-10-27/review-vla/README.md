@@ -61,6 +61,28 @@ the transferred checkout; the verification log and compiler binary hash are
 retained alongside the build/checker logs. Required GitHub CI remains a
 separate gate.
 
+## Integration after #561 landed
+
+When #561 merged as main `43030b8905e471520141ce3e6d63deb2caab99f3`,
+GitHub retargeted #588 to main. Merge
+`369c5c56a7fd8a80dae30abdf663b792bf0588d8` preserves both includes in the
+sole conflict: this change's x86 source-context helper and main's new
+naked-function helper. No other source required a manual merge resolution.
+The resulting PR diff still contains only the six #562 source/test/document
+files. The source manifest and verification, commit record, binary hash and
+integration logs have `review-main-` prefixes.
+
+At this integrated head, the optimized local build succeeds and
+`test-checker --seed 133` executes 260,103 checks, including all 88 x86
+fixtures. Only the same four pre-existing Clang 23.1.4 fpclassify execution
+oracle disagreements remain. The count also includes main's newer tests;
+it is not substituted for the earlier review-head count.
+
+On the locked 9700X with Clang 23.1.1, the integrated head's optimized build
+also succeeds and its `test-checker --seed 133` run passes all 260,103 checks
+with zero failures. The required GitHub workflow remains separately queued;
+these are manual results at the recorded source/binary identities.
+
 Reproduce the nine exploratory probes from a scratch directory:
 
 ```sh
