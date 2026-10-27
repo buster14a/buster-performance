@@ -101,6 +101,9 @@ from frozen manual main35. The [raw job log](raw/ci-40422280997-test.log) and
 [job/revision summary](raw/ci-40422280997-summary.json) preserve that boundary.
 Hosted measurement-storage CI 40422281063 also passes. CI correctness and its
 informational timings do not replace controlled performance acceptance.
+Raw logs preserve original whitespace, including GitHub timestamp-only lines;
+unfiltered diff whitespace checks report those lines. Source/docs/list whitespace
+checks exclude raw receipts, whose byte hashes remain unchanged.
 
 ## Current static footprint
 
