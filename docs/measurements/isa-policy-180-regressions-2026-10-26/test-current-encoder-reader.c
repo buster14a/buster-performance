@@ -110,6 +110,17 @@ static bool fixture_copy(const char* source, const char* destination, unsigned m
             memcpy(cursor, "nan", 3);
         }
     }
+    else if (okay && (mutation == 8 || mutation == 9))
+    {
+        char* cursor = strchr(text, '\n');
+        okay &= cursor != 0 && cursor[1] == '1';
+        while (okay && cursor != 0 && cursor[1] != 0)
+        {
+            okay &= cursor[1] == '1';
+            cursor[1] = '3';
+            cursor = mutation == 9 ? strchr(cursor + 1, '\n') : 0;
+        }
+    }
     FILE* output = okay ? fopen(destination, "wb") : 0;
     okay &= output != 0 && fwrite(text, 1, size, output) == size;
     if (output != 0)
@@ -121,11 +132,11 @@ static bool fixture_copy(const char* source, const char* destination, unsigned m
 
 int main(int argc, char** argv)
 {
-    bool okay = argc == 2;
+    bool okay = argc == 2 || argc == 3;
     char temporary[] = "/tmp/buster421-reader-XXXXXX";
     char* root = okay ? mkdtemp(temporary) : 0;
     okay &= root != 0;
-    const char* batch = "current-encoder-r1-plain-f0-b00";
+    const char* batch = argc == 3 ? argv[2] : "current-encoder-r1-plain-f0-b00";
     char directory[1024], source[2048], destination[2048];
     if (okay)
     {
@@ -160,15 +171,32 @@ int main(int argc, char** argv)
         okay &= !read_sample(root, batch, 0, "main-p00-c0", &sample);
         checks += 1;
         sample.flags = 0;
-        for (unsigned mutation = 1; mutation <= 7; mutation += 1)
+        for (unsigned mutation = 1; mutation <= 8; mutation += 1)
         {
-            const char* name = mutation == 1 || mutation == 5 || mutation == 6 ? "processes.tsv" : "1-main-p00-c0-0.out";
+            const char* name = mutation == 1 || mutation == 5 || mutation == 6 || mutation == 8 ? "processes.tsv" : "1-main-p00-c0-0.out";
             snprintf(source, sizeof(source), "%s/%s/%s", argv[1], batch, name);
             snprintf(destination, sizeof(destination), "%s/%s", directory, name);
             okay &= fixture_copy(source, destination, mutation) && !read_sample(root, batch, 0, "main-p00-c0", &sample);
             checks += 1;
             okay &= fixture_copy(source, destination, 0);
         }
+        // --first 3 numbers both captures and TSV rows as round 3. These are
+        // temporary parser fixtures, never measured campaign receipts.
+        snprintf(source, sizeof(source), "%s/%s/1-main-p00-c0-0.out", argv[1], batch);
+        snprintf(destination, sizeof(destination), "%s/3-main-p00-c0-0.out", directory);
+        okay &= fixture_copy(source, destination, 0);
+        snprintf(destination, sizeof(destination), "%s/3-main-p00-c0-0.err", directory);
+        FILE* third_error = fopen(destination, "wb");
+        okay &= third_error != 0 && fclose(third_error) == 0;
+        snprintf(source, sizeof(source), "%s/%s/processes.tsv", argv[1], batch);
+        snprintf(destination, sizeof(destination), "%s/processes.tsv", directory);
+        okay &= fixture_copy(source, destination, 9);
+        sample.round = 3;
+        okay &= read_sample(root, batch, 0, "main-p00-c0", &sample);
+        checks += 1;
+        okay &= fixture_copy(source, destination, 0) && !read_sample(root, batch, 0, "main-p00-c0", &sample);
+        checks += 1;
+        sample.round = 1;
         const char* numbers[] = {"0", "18446744073709551615", "18446744073709551616", "-1", "+1", " 1", "1x", ""};
         for (unsigned i = 0; i < sizeof(numbers) / sizeof(numbers[0]); i += 1)
         {
@@ -198,6 +226,10 @@ int main(int argc, char** argv)
             snprintf(destination, sizeof(destination), "%s/%s", directory, empty[i]);
             unlink(destination);
         }
+        snprintf(destination, sizeof(destination), "%s/3-main-p00-c0-0.out", directory);
+        unlink(destination);
+        snprintf(destination, sizeof(destination), "%s/3-main-p00-c0-0.err", directory);
+        unlink(destination);
         rmdir(directory);
         rmdir(root);
     }

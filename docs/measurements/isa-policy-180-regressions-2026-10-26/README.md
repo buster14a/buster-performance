@@ -19,7 +19,7 @@ classifies1,667/8,352 forms and denies all6,685 unknowns. Matcher cache identity
 now includes reg/rm/syntax in addition to its previous four inputs. Independent
 source review found a segmented movq tie-break defect: using the raw form mask
 retained FS/GS offsets. Both candidates now use the existing x86_form_row
-normalization; eight positive/negative byte comparisons against GNU as cover
+normalization; eight valid encoding cases compared byte-for-byte with GNU as cover
 high-base loads/stores. The two intermediate fixture mistakes and failed runs
 are retained; the final fixture has real newlines and a GNU object symbol label.
 
@@ -28,10 +28,20 @@ and all six programs are byte identical between the two sources, match fresh
 ClangO0 output, and pass the conservative pinned ISA audit. This proves no
 code-generation difference on this corpus, not a runtime speedup.
 
-The three final whole-compiler placement/copy rounds are complete. Independent
-receipt review and final summaries are pending. The encoder campaign is running;
+The three final whole-compiler placement/copy rounds are complete:1,944 timed
+rows, all status0, positive counters and no major faults. Short-C cycles fall
+3.06793%,2.92037%,3.05087%; SQL syntax/check cycles are+0.04183%,-0.14752%,
+-0.02638% (baseline-again+0.16665%,-0.01881%,-0.08113%). SQL memory is lower
+by320/252/260KiB and two minor faults. Raw conservative placement/copy bounds
+and exact matched summaries are both preserved; mixed tiny SQL directions
+establish no speedup or neutrality. Independent receipt review confirms all966 summary values and raw status/counter
+checks. The static address census verifies all24 images and72 selected addresses:
+both active encoder kernels and the backend runner move by every exact requested
+shift, covering all four mod64 phases available at16-byte alignment. The encoder campaign is running;
 backend, policy, initialization and fresh generated-program timings follow it
-sequentially. Current physical CI40546104621 is in progress. Historical receipts
+sequentially. Current physical CI40546104621 passes82/82 commands on its actual integration
+revision10f2c5d9f2 (ac57 into8fcf19cee49cdc54e53602b67dc94ad70ec7eb6c).
+The full1,070,307-byte log and SHA256 receipt are retained. Historical receipts
 below retain their original revisions and do not qualify this final head.
 
 Native image sizes fall34,093,877 to31,587,441 bytes; text falls19,286,020 to
