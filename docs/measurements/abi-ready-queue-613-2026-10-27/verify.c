@@ -21,7 +21,6 @@ static bool compile(const char* executable, const char* source, const char* obje
         arguments[count++] = "--predefines";
         arguments[count++] = "/var/lib/buster-9700x/corpora/preprocessor-391e729af658/provenance/gnu17-pinned-predefines.txt";
         arguments[count++] = "--clang-features";
-        arguments[count++] = "--no-default-config";
         arguments[count++] = "--target=x86_64-linux-gnu";
         arguments[count++] = "-march=znver5";
         arguments[count++] = "-std=gnu17";
