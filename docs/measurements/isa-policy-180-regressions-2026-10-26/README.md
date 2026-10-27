@@ -1,12 +1,20 @@
 # PR421 remaining-performance fixes
 
-Current compiler head is 597ee55, pushed to draft PR421. Leave it open/unmerged.
-No performance exception is requested or accepted. Native qualification, local
-sanitizers and fresh changed-head CI pass. Six-round controls are complete;
-encoding remains unapproved. Direct-policy and matched-invocation follow-up
-are complete. A simple function-alignment prototype is rejected for selection
-costs; a dedicated-section prototype is still unpublished and being qualified.
-Completed c051 controls and every exploratory result remain separate campaigns.
+Current compiler head is df02bc1065eb2da98e21eed723087b7d65c3eed2, tree
+8b6d18febae93beb1168499f46f8465ed846b230, pushed to draft PR421. Leave it
+open/unmerged. The current frozen baseline is a66f863878d28cd2c242b81a3544fc47d35f5996.
+Both images pass the manual normal 9700X build and all eight focused suites.
+Current-head local ASan/UBSan is 7/8: an empty-shape overread also reproduces
+on pinned main; owner coordination is pending. Required current-head 9700X CI
+is queued, not green. No performance exception is requested or accepted.
+
+Three current placement/fresh-copy whole-C rounds are complete: verified short-C
+user cycles fall 3.22–3.36%; SQLite checking user-cycle point costs are +0.03%,
++0.08% and +0.15%. Those positive costs are retained and remain unaccepted.
+The independent encoder placement/copy campaign is queued/running under ordinary
+per-batch shared locks. Backend synthetic timing is deferred for the inherited
+ASan defect. Earlier sections retain each named historical source and campaign;
+older wins or CI results never qualify this head.
 
 ## Frozen sources and images
 
@@ -17,7 +25,7 @@ Completed c051 controls and every exploratory result remain separate campaigns.
 | Constructor-only control | c0cc199a7e601ecbeb537d8429fc3b23afb300ec | edaf0db06401ad02eba7c9d5e7ff428d084e24d0 |
 | Rejected shared-descriptor candidate | 8cde401861c4a5b5cc9d80b8df21f04e9312eefe | 3e5255568d0e2cbf4e6e701964edd3badaecce3c |
 | Previous caller-table candidate | c051292af035c9a957158fcd8c20a2d50d1e3839 | 1de637e4626eca8eda071cad57c800481a5e42b9 |
-| Current hybrid candidate | 597ee55a09f9257a22ba62be9f4e9940692a4929 | eea4aadc698e343720850838896892ae421149fc |
+| Historical hybrid candidate | 597ee55a09f9257a22ba62be9f4e9940692a4929 | eea4aadc698e343720850838896892ae421149fc |
 
 The published pre-follow-up head is 86a9bbdc58370706604f77794d4561e10febe4d3.
 Its [previous qualification](../isa-policy-180-review-2026-10-26/README.md)
@@ -451,9 +459,9 @@ variant remain unchanged; generated-program ISA and data-storage alignment
 remain unchanged. #180 claims 6440428642 and 6441745311 record this narrow
 scope extension after refreshed encoder ownership checks.
 
-## Single-group remainder-loop candidate
+## Single-group remainder-loop refinement
 
-Unpublished cb56f1cb638c3cec2207048be268138e1083aab4, tree
+Committed cb56f1cb638c3cec2207048be268138e1083aab4, tree
 f52ed93ecd943c4afa1b2f8f1b0fb5b23c88a08e, starts from597 and skips the second
 full-group loop when groups equals one: the first loop has already exhausted
 the identical condition. Groups greater than one retain the remainder loop.
@@ -517,9 +525,7 @@ reference. The old unshifted campaigns remain historical and retain every cost;
 they are not relabeled or discarded. The new [frozen qualification plan](raw/current-qualification-plan.json)
 builds current main and composed head normally, with twelve backend placements
 spread over a page (0 through3696, step336) for subsequent copy controls. These
-are measurement images; production source gains no padding. Builds, tests,
-final-copy/placement timing and fresh CI for this source remain pending. The
-head's full local sanitizer build is queued through the shared core scheduler.
+are measurement images; production source gains no padding. Manual builds/tests and whole-C placement/copy controls are complete. Fresh required CI is queued. Local sanitizer results and their inherited blocker are recorded below.
 
 ## Exploratory history and rejected costs
 
@@ -606,10 +612,36 @@ taken. Configured-target production-guard adoption remains with#136/#133;
 the target policy interfaces and explicit record checks remain the handoff.
 This PR does not close#180.
 
-PR535 is separately owned and open at eb996944af47331c5433508775021275f95cff11
-when checked at 10:02 UTC. It adds baseline x87/MXCSR/XCHG/PCMPEQD rows and
-XSAVE-gated XGETBV, plus admitted matcher names. Whichever PR integrates second
-must carry those rows into its canonical representation and repeat the ISA
-positive/negative checks. This performance slice edits neither its matcher nor
-its row additions. #136/#133 retain production configured-target guard adoption;
+#535 has merged as079af33a391de0d10740bc9768b6ece5f46b8740. Current head preserves all twelve concrete rows in the canonical representation and repeats positive/negative checks. Open #565 owns further inline-assembly rows; whichever PR integrates second must carry those rows forward. #136/#133 retain production configured-target guard adoption;
 future lowering/builtin/per-function-target integrations remain with their owners.
+
+## Current df02 qualification and whole-C controls
+
+[Native provenance](raw/current-native-provenance.json), [normal qualification plan](raw/current-qualification-plan.json), and both extracted current-base/head-qualification receipts freeze Clang23.1.1/Wild0.10 and the exact source/image hashes. Both have41 unique final-O3 units, no debug/sanitizers; base482/head485 source checks. All eight suites pass, head graph41 units/23549 functions/140856 calls/zero unallowed cycles/three allowed/zero split variables. Complete five-mode16035840-byte dumps match SHA256a7672bd6a6c4796f780d5a9c274b6c68a46889e77d1595df2ce665e82d4d6cd7. Current policy classifies1615/8352 forms;6737 unknowns remain denied.
+
+| Ordinary native bytes | Main a66f | Head df02 |
+| --- | ---: | ---: |
+| File | 33836035 | 31327807 |
+| .text | 19082812 | 18860172 |
+| .rodata | 3484051 | 3196834 |
+| .data.rel.ro | 10479008 | 8477984 |
+| .bss | 252835617 | 249142881 |
+
+[Local sanitizer summary](raw/current-head-local-asan-summary.json):41 final-O1 instrumented units build successfully; seven suites pass, one fails. The selector fixture visits the catalog's empty string, reading shape[1] at tier0_generate.c:3117 beyond it. A minimal C reproduction, commands and original logs in raw/current-table-probe-* fail on both frozen main and head. This is not a sanitizer pass or a waived defect. [Coordination](https://github.com/buster14a/buster/issues/136#issuecomment-6444716477) requests the active owner's one-line fix or permission; the claimed file is not edited. [Proposed patch](proposed-empty-shape-guard.patch) is not applied. Synthetic backend timing remains deferred.
+
+[Emitted-program proof](raw/current-generated-proof-retry1-command.json): both images at baseline/v3/v4 emit identical objects (SHA2562056c6d309380ad3e83b683d076f379887622f977b283580d9579c00b7d711ee) and programs (d1d3722f28d5a5b5178a14d3c202dc69d66e12a9e7a90add2c3c361660ccd3ae). All six pass independent scalar/vector decoding and profile audit (161 executable bytes/50 instructions) and native output matches fresh ClangO0 result14213000051299467171. The first setup stopped127 because rg is not installed on the host, before any fixture; its failed receipt stays separate from the successful find-based retry. This is one fixture, not broad code-quality acceptance.
+
+[Whole-C plan](raw/current-whole-copies-plan.json) and raw/current-whole-copies-{1,2,3} retain three rounds, each main/head/main-again at12 checker placements,3 fresh full-written equal-path tmpfs copies,3 timed runs plus one warmup per slot, two workloads. Production images are placement0; other placements are measurement-only shifts0..3696 step336, with no source padding. Each rebuild reproduces the production SHA byte-for-byte. CPU2, normal ASLR, separate shared lock per round; outer user PMU counts only whole compiler processes, never nested benchmark windows.
+
+| Current workload / metric | Round1 head/main | Round2 | Round3 |
+| --- | ---: | ---: | ---: |
+| SQLite syntax/check wall | +0.01% | +0.03% | +0.06% |
+| SQLite syntax/check user cycles | +0.03% | +0.08% | +0.15% |
+| Verified short-C object wall | -1.80% | -1.63% | -1.73% |
+| Verified short-C object user cycles | -3.36% | -3.22% | -3.32% |
+
+All1944 timed children exit0;648 warmup slots precede them. Percentages above are rounded from the C tool's reports. Independent review verifies all1944 statuses, positive counters, zero major faults, all648 slot upper medians/extrema, aggregate medians and cycle spreads. SQL peak RSS costs are +96/+92/+80KiB and minor faults +1 each round; short-C instructions decrease6.01704%. SQL instructions decrease, but SQL cycles have three positive point estimates, exceeding the aggregate repeated-reference cost in rounds2/3. Placement/copy intervals include zero and the profiling guide describes about0.2% three-round resolution; this does not prove neutrality or waive these positive costs. Short-C cycle placement intervals are entirely negative (-4.18..-2.30%, -3.77..-2.68%, -4.12..-2.61%). All wall outliers and resource observations stay in the logs.
+
+The encoder campaign [frozen plan](raw/current-encoder-copies-plan.json) uses the pinned first-party C procbench24f54c2,12 placements, fresh copies, rotated main/head/main-again, all four offsets/fixup states and a65537-record stream in129-record sections. Three plain rounds use three copies per placement/role; three scalar-conditioned100ms rounds use one new copy per placement/role/round. Every process has21 internal measured passes and a warmup; no external PMU competes with internal counters. Lock separately per12-process batch. Pending/partial captures are not accepted results.
+
+At15:06UTC, current-head required physical qualification is queued (run40525040722; admission says P2 normal/not admitted); hosted changes/storage guards passed. Overall workflow success does not establish execution. Historical597 CI remains separate.

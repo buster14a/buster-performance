@@ -202,3 +202,11 @@ unaccepted. The current-main merge preserves all12 concrete #535 rows, exactly
 four newly classified in the canonical table. XSAVE is low bit16 and survives
 the compact projection unchanged. The reviewer's duplicate table-build call
 was removed in df02bc. New placement/copy qualification remains separate.
+
+## Current df02 / pinned main a66f audit
+
+The read-only reviewer rechecked all1944 timed whole-C rows (648 per round): every status0, positive cycles/instructions, no major faults. All648 slot medians/extrema and every printed aggregate median and exact cycle spread match strict upper medians. SQLite head/main cycles are +0.03072%, +0.08004%, +0.15177%; main-again -0.03307%, +0.02213%, +0.03305%. SQLite wall costs from displayed ms are +0.00625%, +0.03282%, +0.05628%; peak RSS +96/+92/+80KiB and one extra minor fault each round. Placement/copy ranges span zero; the three positive cycle directions and resource costs remain unaccepted. Short-C cycles fall3.3644%,3.2214%,3.3225%; instructions fall6.01704% each round.
+
+The current generated retry proof independently matches all six full-file SHA256s, objects2056c6d309380ad3e83b683d076f379887622f977b283580d9579c00b7d711ee/programsd1d3722f28d5a5b5178a14d3c202dc69d66e12a9e7a90add2c3c361660ccd3ae. The161-byte/50-instruction executable section FNV remains d384614d5b244074; current whole files differ from historicalcf0b/4a81 artifacts, so historical whole-process runtime measurements do not qualify these current programs. All six current outputs match the fresh ClangO0 reference.
+
+The reviewer verifies41 instrumented local units, seven passing suites and the one selector-audit failure. Direct pinned-base/head probes both reproduce the identical tier0_generate.c:3117 empty-shape global overread. The summary correctly labels this inherited defect and pending owner coordination; no sanitizer pass or waiver is inferred. Encoder campaign arithmetic and final CI remain pending.
