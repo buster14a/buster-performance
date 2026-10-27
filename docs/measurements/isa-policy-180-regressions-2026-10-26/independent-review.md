@@ -72,5 +72,100 @@ globally counted rather than unique terminal footers, nonfinite-number
 acceptance and unchecked output errors. These are fixed before any completed
 screen is summarized. The reader additionally checks child rotation and
 reported ranges. Current partial input deliberately fails with zero JSON
-output. Review of the revised reader and its final positive/mutation checks
-remain pending. The measurement controller and raw data are unchanged.
+output. Follow-up review found two further finite/percentage edge cases, also
+fixed before qualification. All ten retained positive/mutation checks now pass:
+real summary byte equality, missing success footer, failed child, wrong list,
+nonfinite CFI, compensated duplicate footer, wrong child order, zero baseline,
+percentage overflow and output failure. These are reader fixtures, not samples.
+The measurement controller and original raw data are unchanged.
+
+## 597ee55 hybrid candidate
+
+Read-only review of the complete 21-addition/one-deletion production delta found
+no actionable correctness issue. DRIVER, ASSEMBLER, BACKEND and CHECKER retain
+static descriptions; CHECKER is the real C source pipeline. X86 supplies the
+hidden immutable canonical table for four other main units. Wild localizes the
+canonical definition, and each caller's mutable storage/readiness and legacy
+properties remain private. Standalone inclusions retain static catalogues.
+
+The reviewer checked all 42 native and 42 local sanitizer compile records,
+481 source hashes for each build, seven passing suites per build, graph
+42 units/23,845 functions/141,528 calls/zero unallowed cycles/three existing
+allowed cycles/zero split variables, complete five-mode output and generated
+baseline/v3/v4 artifacts. Local Zen4 instrumentation remains diagnostic only.
+The full expected dump size/hash and generated object/executable hashes match.
+
+Static census arithmetic matches: five main plus fifteen standalone descriptor
+arrays, exactly four fewer 334,080-byte arrays than c051. File size falls
+1,336,504 bytes versus c051 and 2,556,604 versus main35; .text matches c051 and
+is 3,056 bytes below main35. Full linked FUNC symbol sequences match c051 in
+address, size, binding, visibility, section and name. Five nonempty selected
+consumer disassemblies match after normalizing only RIP data displacements and
+comments. Both x86_validate snapshots are empty because no symbol is emitted;
+they establish no validation-codegen equivalence. Equal section sizes alone
+would not prove byte equivalence. PMD-span geometry is not residency or cause.
+
+The existing unmodified 518-line procbench source and its license were checked
+at performance commit 24f54c2f6a214c67bd83d791b4ff3acebef0c4a8. Source SHA256
+12be4d95da5915fb43af696ae6abc304b27e341a5d57285469ad36ce05f7dac3 and
+native tool SHA256 94d7c1ff56e666a3065a3577bdda5c7fa2cf2535a3bd0de5254fddd5a12745aa
+match the receipts. External procbench counters include kernel and user;
+backend inner counters exclude kernel/hypervisor and retain no enabled/running
+times. A positive external counter without a multiplexing marker is not a
+backend PMU enabled/running receipt.
+
+All 71 preliminary summary metrics reproduce from three raw TSVs and all
+27 backend/nine large-assembler captures. All 792 timed and 36 warmup statuses
+are zero; 801 externally counted rows (1,602 counter values) are positive with
+no multiplexing marker. Captured stderr is empty. Every compiler/runtime and
+harness/input identity check matches.
+
+The reviewer explicitly preserves adverse hybrid-versus-c051 observations:
+ASM1 wall +0.791%, RSS +2,076 KiB; large-ASM wall +5.724% with mixed paired
+direction and RSS +2,080 KiB. In contrast, hybrid-versus-main is lower for
+those medians. The unchanged c051 scalar path shifts from 41.255 to 50.54 ns,
+cycles 228.645 to 280.08, with displayed instructions unchanged at 571.32.
+Same corpus/compiler/harness identities do not explain its cause. The apparent
+18.3% hybrid advantage over that slower state is not an established source
+improvement. Final six-round controls and their acceptance review are pending.
+
+No reviewer built or executed either compiler or any measurement. No review
+grants a performance exception or authorizes merging.
+
+## Completed six-round 597 controls and active-code inspection
+
+Independent recomputation reproduces all 72 metrics from six raw TSVs and all
+captures, including 18 single-process cold-init observations. Every 1,584 timed
+child and 72 warmup exits zero. All 54 backend and 18 large-assembler captures
+have empty stderr; 1,602 externally counted rows have positive counters with no
+multiplexing marker. Input hashes, compiler/runtime identities and six role
+permutations match. Medians, midpoint A/A references, paired percentages and
+above/below-both counts reproduce exactly.
+
+The remaining encoding observation is 0.875 to 0.885 ns/entry (+1.142857%),
+five increases/one decrease, four above both baseline medians. Cycles increase
+4.845 to 4.905 (+1.238%), five above both, while displayed instructions remain
+17.78. Identical runtime executable hashes do not explain its +0.663833% offset.
+Neither cost is waived. Initialization is one observation per process, not a
+21-pass median. Fresh CI40483449001 passes 84/84 on integration965f163c72,
+separate from the frozen manual images.
+
+The exact nonempty main-versus-597 backend slices match after relocation
+normalization: x86_encode_16 has 1,425 instructions, tier0_benchmark_run 1,378,
+its counter reader 72, and tier0_tables_open 5,222. Instruction order,
+register/immediate operands and relative instruction offsets are identical;
+three measured-caller tail references move only assertion diagnostic strings.
+The top-level benchmark's inlined construction/build_template calls become
+x86_build_nonlegacy_templates before timing; the measured helper sequence stays
+intact. x86_encode_16 is the active 16-record-batch encoder, distinct from
+16-bit mode and from the previously captured 64-record variant. This establishes
+code structure, not equal time or a causal explanation for address effects.
+No timed hot-source change is justified by this evidence.
+
+The proposed env-C comparison is a justified invocation-context test. Relative
+execution changes CWD alongside argv0 and AT_EXECFN, so success cannot isolate
+any one of them as the cause. Record resolved symlinks and image hashes.
+Outer wall/resource/counter observations include env, directory changes and
+the extra exec; the same helper does not prove identical overhead. Backend
+inner windows remain separate and have no external PMU group. Preserve all
+earlier observations and analyze this new protocol separately.

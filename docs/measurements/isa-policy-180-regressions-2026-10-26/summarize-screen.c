@@ -105,7 +105,8 @@ int main(int argc, char** argv)
         {
             double init = 0;
             char label[16];
-            double a, b, c, d, e, f, g;
+            double a, b, c, d, e, f, g, h = 0;
+            int fields = 0;
             unsigned run, list, rss, minor, major;
             int status;
             if (config == 0 && strncmp(line, "assembler mixed:", 16) == 0)
@@ -122,18 +123,19 @@ int main(int argc, char** argv)
             {
                 valid &= put(0, image, round, init);
             }
-            else if (sscanf(line, "%15s %lf %lf %lf %lf %lf %lf %lf", label, &a, &b, &c, &d, &e, &f, &g) == 8)
+            else if ((fields = sscanf(line, "%15s %lf %lf %lf %lf %lf %lf %lf %lf", label, &a, &b, &c, &d, &e, &f, &g, &h)) >= 8)
             {
                 valid &= isfinite(a) && isfinite(b) && isfinite(c) && isfinite(d) && isfinite(e) && isfinite(f) && isfinite(g);
                 valid &= a >= 0 && b >= 0 && c >= 0 && d >= 0 && e >= 0 && f >= 0 && g >= 0;
                 const unsigned variant = strcmp(label, "vector") == 0 ? 0 : strcmp(label, "scalar") == 0 ? 1 : strcmp(label, "sizing") == 0 ? 2 : strcmp(label, "encode") == 0 ? 3 : 4;
                 if (variant < 4 && config == 1)
                 {
-                    valid &= b > 0 && c > 0;
+                    valid &= fields == 8 && b > 0 && c > 0;
                     valid &= put(3 + variant, image, round, a) && put(7 + variant, image, round, c);
                 }
                 else if (variant < 2 && config == 0)
                 {
+                    valid &= fields == 9 && isfinite(h) && h >= 0;
                     valid &= put(variant == 0 ? 2 : 1, image, round, g);
                 }
             }
@@ -256,7 +258,11 @@ int main(int argc, char** argv)
             char percentage[64] = "null";
             if (base != 0 || head == 0)
             {
-                snprintf(percentage, sizeof(percentage), "%.9g", base != 0 ? 100 * (head / base - 1) : 0);
+                const double change = base != 0 ? 100 * (head / base - 1) : 0;
+                if (isfinite(change))
+                {
+                    snprintf(percentage, sizeof(percentage), "%.9g", change);
+                }
             }
             printf("    \"%s\": {\"main\": [%.9g, %.9g, %.9g], \"head\": [%.9g, %.9g, %.9g], \"mainMedian\": %.9g, \"headMedian\": %.9g, \"changePercent\": %s, \"lower\": %u, \"higher\": %u, \"equal\": %u}%s\n", metric_names[m], values[m][0][0], values[m][0][1], values[m][0][2], values[m][1][0], values[m][1][1], values[m][1][2], base, head, percentage, lower, higher, ROUNDS - lower - higher, m + 1 < METRICS ? "," : "");
         }

@@ -340,11 +340,16 @@ precision, not a proof of exact instruction-count identity or a causal/
 throttling explanation.
 
 [Actual assembler command counters](raw/ab-final-assembler-instructions-3rounds.log)
-and [counter summary](raw/final-counter-summary.json) use three rotating pairs
+and [counter summary](raw/final-counter-summary.json) use three fixed-order pairs
 under perf, which reports 100.00% running; --no-scale preserves raw counts.
 For 2,048 functions/79,872 instructions, both paths warm up on pass 0 and the
 scalar path runs 21 timed passes. Median retired user instructions fall
 19,509,208,105→18,315,174,427 (-6.120%, all three pairs lower).
+Protocol correction: these perf-wrapper invocations use one perf tree and
+two configurations, so image order does not rotate. The separate policy-helper
+experiment below rotates its two actual trees. The counts and paired directions
+are unchanged; these counter samples do not establish a causal wall-time result.
+
 This includes startup, generation, both warmups, validation, object writing
 and all timed passes; it is not a counter isolated to matching/sizing or the
 256-function timing workload. No nested counter user is wrapped.
