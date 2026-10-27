@@ -1,0 +1,219 @@
+diff --git a/src/buster/compiler/foreign_debug.c b/src/buster/compiler/foreign_debug.c
+index 71ea1216..9b6e50aa 100644
+--- a/src/buster/compiler/foreign_debug.c
++++ b/src/buster/compiler/foreign_debug.c
+@@ -160,6 +160,9 @@ struct ForeignDebugSection
+     uint64_t size;
+     const uint64_t* bases;
+     const uint64_t* resolved;
++    // Experimental #607: one-based input index shifted left once, with the pool in bit zero.
++    const uint32_t* string_inputs;
++    const ForeignStrings* string_pools;
+     ForeignDebugRecords records;
+ };
+ 
+@@ -219,6 +222,7 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
+             const SymbolId target = index != 0 && index < object->symbol_count ? object->symbols[index] : 0;
+             uint64_t value = executable_debug_tombstone(section_kind, relocation_kind);
+             bool written = true;
++            bool mapped = true;
+             if (index == 0)
+             {
+                 value = (uint64_t)relocation.r_addend;
+@@ -227,6 +231,15 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
+             {
+                 // A place in a debug section: its section's place in its output section, the symbol's and the addend.
+                 value = section->bases[target_section] + symbol.st_value + (uint64_t)relocation.r_addend;
++                if (section->string_inputs != 0 && section->string_inputs[target_section] != 0)
++                {
++                    const uint32_t mapped_input = section->string_inputs[target_section];
++                    const uint32_t pool = mapped_input & 1;
++                    const uint64_t offset = symbol.st_value + (uint64_t)relocation.r_addend;
++                    uint32_t translated = 0;
++                    mapped = foreign_strings_offset(&section->string_pools[pool], (mapped_input >> 1) - 1, offset, &translated);
++                    value = translated;
++                }
+             }
+             else if (target != 0)
+             {
+@@ -240,11 +253,11 @@ static ForeignLinkResult foreign_debug_relocate(const ForeignDebugSection* secti
+             }
+             // A 4-byte field's value: R_X86_64_32's unsigned, R_X86_64_DTPOFF32's signed (lld's checkUInt and checkInt).
+             const bool fits = !written || width == 8 || (type == R_X86_64_DTPOFF32 ? value + UINT64_C(0x80000000) <= UINT32_MAX : value <= UINT32_MAX);
+-            if (written && fits)
++            if (written && fits && mapped)
+             {
+                 memcpy(section->bytes + relocation.r_offset, &value, width);
+             }
+-            if (!fits || (sectioned && module_offset))
++            if (!fits || !mapped || (sectioned && module_offset))
+             {
+                 result = foreign_debug_failure(section, FOREIGN_LINK_ERROR_UNSUPPORTED, IMPORT_ERROR_UNSUPPORTED, i, type);
+             }
+@@ -461,6 +474,8 @@ struct ForeignDebugPlan
+     // sections.
+     uint64_t** bases;
+     uint64_t** resolved;
++    uint32_t** string_inputs;
++    ForeignStrings string_pools[2];
+     uint8_t* bytes[BUSTER_EXECUTABLE_DEBUG_KINDS];
+     uint64_t sizes[BUSTER_EXECUTABLE_DEBUG_KINDS];
+     // Each output section's alignment: its contributions' largest, as GNU ld and lld align it.
+@@ -471,6 +486,105 @@ struct ForeignDebugPlan
+     ForeignLinkResult* relocation_results;
+ };
+ 
++// Experimental, deliberately conservative admission: complete, one-byte, alignment-one string sections of the two
++// eligible kinds, with no relocatable contents. No production option or unsupported-input fallback is added here.
++// This is a complete pipeline cost experiment, using the existing producer and its per-contribution interior map.
++static ForeignLinkResult foreign_debug_merge_strings(ForeignDebugPlan* plan, const Foreign* foreign, Arena* arena)
++{
++    ForeignLinkResult result = { 0 };
++    Scratch scratch = scratch_begin(arena);
++    ForeignStringInput* inputs = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, ForeignStringInput, (uint64_t)plan->contribution_count + 1);
++    plan->string_inputs = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t*, foreign->object_count);
++    result.error = inputs != 0 && plan->string_inputs != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
++    for (uint32_t id = 0; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
++    {
++        plan->string_inputs[id] = 0;
++    }
++    for (uint32_t pool = 0; result.error == FOREIGN_LINK_ERROR_NONE && pool < 2; pool += 1)
++    {
++        const uint32_t kind = (pool == 0 ? EXECUTABLE_SECTION_DEBUG_STR : EXECUTABLE_SECTION_DEBUG_LINE_STR) - EXECUTABLE_SECTION_DEBUG_INFO;
++        uint32_t count = 0;
++        bool eligible = true;
++        for (uint32_t c = 0; eligible && c < plan->contribution_count; c += 1)
++        {
++            const ForeignDebugContribution* contribution = &plan->contributions[c];
++            if (contribution->kind == kind)
++            {
++                const ForeignObject* object = &foreign->objects[contribution->object];
++                const Elf64_Shdr header = import_section_header(&object->elf, contribution->section);
++                uint64_t size = 0;
++                uint64_t alignment = 0;
++                String8 stream = { 0 };
++                foreign_debug_extent(object, &header, &size, &alignment, &stream);
++                eligible = header.sh_entsize == 1 && alignment == 1 && (header.sh_flags & (SHF_MERGE | SHF_STRINGS)) == (SHF_MERGE | SHF_STRINGS);
++                if (eligible)
++                {
++                    inputs[count++] = (ForeignStringInput){ .bytes = plan->bytes[kind] + contribution->base, .size = (uint32_t)size };
++                }
++            }
++        }
++        for (uint32_t r = 0; eligible && r < plan->relocation_count; r += 1)
++        {
++            eligible = plan->relocations[r].kind != kind;
++        }
++        const uint64_t mark = arena->length;
++        ForeignStrings* strings = &plan->string_pools[pool];
++        if (eligible && count > 1)
++        {
++            const ForeignStringsError error = foreign_strings_build(inputs, count, foreign->path, arena, strings);
++            result.error = error == FOREIGN_STRINGS_ERROR_NONE ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_UNSUPPORTED;
++        }
++        if (strings->bytes != 0 && strings->size < plan->sizes[kind])
++        {
++            uint32_t index = 0;
++            for (uint32_t c = 0; result.error == FOREIGN_LINK_ERROR_NONE && c < plan->contribution_count; c += 1)
++            {
++                const ForeignDebugContribution* contribution = &plan->contributions[c];
++                if (contribution->kind == kind)
++                {
++                    const uint32_t id = contribution->object;
++                    const uint32_t sections = foreign->objects[id].elf.section_count;
++                    if (plan->string_inputs[id] == 0)
++                    {
++                        plan->string_inputs[id] = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, sections);
++                        result.error = plan->string_inputs[id] != 0 ? FOREIGN_LINK_ERROR_NONE : FOREIGN_LINK_ERROR_MEMORY;
++                        if (plan->string_inputs[id] != 0)
++                        {
++                            memset(plan->string_inputs[id], 0, (uint64_t)sections * sizeof(uint32_t));
++                        }
++                    }
++                    if (result.error == FOREIGN_LINK_ERROR_NONE)
++                    {
++                        plan->string_inputs[id][contribution->section] = ((index + 1) << 1) | pool;
++                        index += 1;
++                    }
++                }
++            }
++            plan->bytes[kind] = strings->bytes;
++            plan->sizes[kind] = strings->size;
++        }
++        else
++        {
++            arena_pop_to(arena, mark);
++            *strings = (ForeignStrings){ 0 };
++        }
++    }
++    for (uint32_t id = 0; result.error == FOREIGN_LINK_ERROR_NONE && id < foreign->object_count; id += 1)
++    {
++        const ForeignObject* object = &foreign->objects[id];
++        for (uint32_t symbol = 1; plan->string_inputs[id] != 0 && plan->resolved[id] != 0 && symbol < object->symbols.count; symbol += 1)
++        {
++            const Elf64_Sym value = import_symbol(&object->symbols, symbol);
++            if (value.st_shndx < object->elf.section_count && plan->string_inputs[id][value.st_shndx] != 0)
++            {
++                plan->resolved[id][symbol] = BUSTER_FOREIGN_DEBUG_LEFT << 62;
++            }
++        }
++    }
++    scratch_end(scratch);
++    return result;
++}
++
+ // An item and its cost, which the passes' orders are sorted by: costliest first, then by the item.
+ typedef struct ForeignDebugCost ForeignDebugCost;
+ struct ForeignDebugCost
+@@ -721,6 +835,8 @@ static void foreign_debug_relocation_section(ForeignDebugPlan* plan, const Forei
+         .size = relocations->size,
+         .bases = plan->bases[relocations->object],
+         .resolved = plan->resolved[relocations->object],
++        .string_inputs = plan->string_inputs != 0 ? plan->string_inputs[relocations->object] : 0,
++        .string_pools = plan->string_pools,
+         .records = {
+             .offsets = plan->records.offsets + first,
+             .addends = plan->records.addends + first,
+@@ -796,6 +912,10 @@ static ForeignLinkResult foreign_debug_build(ForeignLink* output, const Foreign*
+         foreign_debug_contribute(&plan, foreign, item);
+         result = plan.contribution_results[item];
+     }
++    if (result.error == FOREIGN_LINK_ERROR_NONE)
++    {
++        result = foreign_debug_merge_strings(&plan, foreign, arena);
++    }
+     for (uint32_t item = 0; result.error == FOREIGN_LINK_ERROR_NONE && item < plan.relocation_count; item += 1)
+     {
+         foreign_debug_relocation_section(&plan, output, foreign, item);
+diff --git a/src/buster/compiler/foreign_link_lanes.c b/src/buster/compiler/foreign_link_lanes.c
+index 9223cc54..a2b2e645 100644
+--- a/src/buster/compiler/foreign_link_lanes.c
++++ b/src/buster/compiler/foreign_link_lanes.c
+@@ -409,6 +409,10 @@ static void foreign_link_lane(void* argument)
+     if (lane == 0 && state->debug && build->result.error == FOREIGN_LINK_ERROR_NONE)
+     {
+         build->result = foreign_debug_first_failure(state->debug_plan.contribution_results, state->debug_plan.contribution_count);
++        if (build->result.error == FOREIGN_LINK_ERROR_NONE)
++        {
++            build->result = foreign_debug_merge_strings(&state->debug_plan, build->foreign, build->arena);
++        }
+     }
+     if (foreign_link_lanes_proceed(state) && state->debug)
+     {
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index 837452c3..b7b3af0d 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -267,11 +267,11 @@ int run_snapshot_benchmark(int argc, char** argv);
+ #include "buster/compiler/foreign_unwind.c"
+ #include "buster/compiler/foreign_unwind_benchmark.c"
+ #include "buster/compiler/foreign_gc.c"
++#include "buster/compiler/foreign_strings.c"
+ #include "buster/compiler/foreign_link.c"
+ #include "buster/compiler/foreign_gc_link.c"
+ #include "buster/compiler/foreign_unwind_dedup.c"
+ #include "buster/compiler/foreign_unwind_dedup_link.c"
+-#include "buster/compiler/foreign_strings.c"
+ #include "buster/compiler/foreign_strings_link.c"
+ #include "buster/compiler/foreign_driver.c"
+ #include "buster/compiler/foreign_test.c"
