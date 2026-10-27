@@ -94,7 +94,16 @@ parent instructions plus3897B/610helper instructions, versus13009B/1976
 for ac57. All four full-loop opcode/memory histograms match, with no cursor
 spills; writeback is after loop exit. The baseline four memcpy relocations are
 counted with objdump-dr, since unresolved object calls cannot be counted by
-callee names alone. NativeClang23.1.1 allocation and timing remain unverified.
+callee names alone. The corrected native retry now passes8/8 suites, the41-unit nonrecursive
+graph check and the exact16,035,840-byte five-mode dump. Source identity
+checks cover644files and41finalO3units. Native imageSHA is ce52741ac24fc38848d9181518eacb33a5028208d4afdf6e1c5e6ab2bd2d2ea7.
+Actual native parent/helper sizes and counts match the local result. Backend
+and checker parents shrink6345→3221bytes, but adding their3837-byte helper
+raises the combined backend footprint by713bytes/132static instructions. Full
+backend loops retain224/199instructions. Whole-image text falls46,864bytes,
+rodata rises20,128bytes and file falls21,452bytes versus ac57; BSS is unchanged.
+Its sole performance controller is running the prepared mixed screen. No
+candidate has been promoted and no timing acceptance follows.
 
 The receipt reader now supports separately configured plain/conditioned batch
 counts below64. Legacy12/36 modes pass25checks each, and their complete1728-row
