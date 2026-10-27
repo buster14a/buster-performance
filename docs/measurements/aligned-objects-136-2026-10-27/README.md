@@ -86,6 +86,27 @@ realignment), and has fewer L1i misses than main2, where against `b7b1f7af` it h
 units' code, the benchmark's unit with it. The scalar twin's difference is 1.0% here against final's 3.8%, so most of
 that was layout too (below).
 
+## The tests' times
+
+`queue-tests.sh` ran each test of the 9700X job that the branch changes, and `test-tier0` alone, twice for each of main2
+and merged, the trees' order alternating by round, each test's pair under one hold of the lock (`time-test.sh`), on CPUs
+0 to 7 one at a time as the job runs its tests (`BUSTER_PARALLEL_JOBS=1`), from the tree's root, timed by the wall clock
+(`tests-merged/times.txt`; the outputs beside it). Seconds:
+
+| Test | main2 | merged |
+| --- | ---: | ---: |
+| `test-tier0` | 1.24, 1.24 | 1.61, 1.62 |
+| `test-tier0 --cross-check` | 11.26, 11.30 | 14.50, 14.63 |
+| `test-unwind --cross-check` | 0.41, 0.43 | 0.67, 0.74 |
+| `test-check-debug --cross-check` | 1.53, 1.53 | 1.67, 1.65 |
+| `test-calling-convention --cross-check` | 5.24, 5.20 | 5.24, 5.20 |
+| `test-checker --seed 133` | 11.28, 11.29 | 11.46, 11.61 |
+
+Every run passed (`test-checker`: 254,809 checks for merged, 254,682 for main2, no failure). The job runs
+`test-tier0 --cross-check` rather than `test-tier0` alone, so its test step grows by about 4 s: 3.3 s of it the
+cross-check's new shape, 60 programs with objects aligned past 16 bytes compiled by clang -O0 and run against Tier 0's
+code as the other shapes' 60 are, and 0.37 s the 300 programs of the shape itself.
+
 ## The earlier heads, against main at `b7b1f7af`
 
 Medians of their rounds (head 3 and the fix 5, each queue stopped then for the next tree's; final 6), the ranges in
