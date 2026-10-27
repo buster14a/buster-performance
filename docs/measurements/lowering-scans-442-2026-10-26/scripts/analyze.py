@@ -24,6 +24,8 @@ for label, files in (('all', common), ('same-output', same), ('differing', commo
             row.append(f'{t}={statistics.median(vals):,.0f} [{min(vals):,.0f}..{max(vals):,.0f}]')
         print(f'  {s:8s} ' + '  '.join(row))
         for t in trees[1:]:
+            if any(total(r, base, s, files) == 0 for r in rounds):
+                print(f'           {t} vs {base}: n/a (a round of {base} sums to 0)'); continue
             ds = [100 * (total(r, t, s, files) / total(r, base, s, files) - 1) for r in rounds]
             print(f'           {t} vs {base}: paired rounds {", ".join(f"{x:+.2f}%" for x in ds)}  median {statistics.median(ds):+.2f}%')
 diff = sorted(common - same)

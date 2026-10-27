@@ -23,4 +23,4 @@ for g, keep in groups.items():
     print(f'== {g}: {len(files)} files')
     for i, k in enumerate(keys):
         b = sum(floor[base][n][i] for n in files)
-        print(f'  {k:12s} ' + '  '.join(f'{t}={sum(floor[t][n][i] for n in files):,.0f} ({100*(sum(floor[t][n][i] for n in files)/b-1):+.1f}%)' for t in trees))
+        print(f'  {k:12s} ' + '  '.join(f'{t}={sum(floor[t][n][i] for n in files):,.0f} ({(f'{100*(sum(floor[t][n][i] for n in files)/b-1):+.1f}%' if b else 'n/a')})' for t in trees))

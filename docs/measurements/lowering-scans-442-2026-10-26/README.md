@@ -6,11 +6,11 @@ for it to be removed or explained. This record compares main just before #418's 
 started and the change that #442's work made, on the same harness, then attributes the cost by stage, by profile and by
 ablation. It is cited by Buster's `docs/c-lowering.md` ("Whole-unit passes after checking").
 
-**This is not 9700X evidence.** The session that made it ran in a cloud container on an Intel Xeon, without the
-9700X, its shared lock or hardware counters (`manifests/host.txt`, `manifests/host-second.txt`). Its times are this
-host's, and its smaller differences are within what this host's noise and the builds' code placement move
-(below, "Limitations"). The large ones repeat on two hosts, in every round. The 9700X record #442 asks for is still to
-be made; `scripts/` makes it there (below, "Reproducing").
+**Two hosts' evidence.** Most of this record was made in a cloud container on an Intel Xeon, without the 9700X, its
+shared lock or hardware counters (`manifests/host.txt`, `manifests/host-second.txt`): the attribution, the profiles,
+the ablations and the first A/B. The paired A/B that #442 asks for was then run on the 9700X, under its shared lock,
+pinned to CPU 2 (below, "On the 9700X", and `9700x/`). The two agree in direction and on the large differences; the
+small ones are the 9700X's to decide.
 
 Three comparisons, kept apart:
 
@@ -101,6 +101,65 @@ The synthetic units (`logs/floor-synthetic.txt`, 4 rounds), against `main`:
 Each synthetic unit but the plain ones writes other names than `main`'s (longer ones: `function.name`, `.N`), so
 the same work is the plain units'.
 
+## On the 9700X
+
+`9700x/` holds two paired runs on the approved Ryzen 7 9700X (`9700x/*/manifests/host.txt`: kernel 6.18.50, clang
+23.1.1), each made by its queue script (`9700x/four-trees/queue442.sh`, `9700x/merged/queue442b.sh`): every build
+and every run took the shared lock on its own (`exclusive.sh`), each run pinned to CPU 2 (`taskset -c 2`) with 101
+passes, the trees' order rotating by round, a 10 s pause between runs for waiting CI jobs. Every run exited 0 and
+lowered its warm-up's counts and bytes (`progress.log`). The trees are `git archive`s with `scripts/emit_ab.c`
+registered, as above, without the `mwaitx` shim; `manifests/source-*.sha256` and `manifests/trees.txt` identify each
+tree and executable.
+
+| Run | Trees (Buster commits) | Rounds |
+| --- | --- | --- |
+| `four-trees` | `main` `3bfb4a72`, `pr` `54703dcf`, `head` `7e3782ad`, `new` `8a81ea9f` (#517's head before its merge with main: `cb935a7` and the review's fixes) | c-testsuite 6, synthetic 4 |
+| `merged` | `mainnow` `335424b1` (main), `merged` `29cb281f` (#517 merged with it, after #151's lanes) | c-testsuite 6, synthetic 4 |
+
+c-testsuite, the sum of the 220 programs' floors (`9700x/floor-four-trees.txt`, `9700x/floor-merged.txt`):
+
+| Subset | Stage | `main` (ns) | `pr` | `head` | `new` | | `mainnow` (ns) | `merged` |
+| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| all 220 | total | 1,856,242 | +1.8% | +4.6% | **−17.3%** | | 2,014,957 | **−19.8%** |
+| | selection | 288,024 | −3.3% | −1.7% | −42.1% | | 281,795 | −42.3% |
+| | emission | 1,456,435 | +2.9% | +6.1% | −13.8% | | 1,619,165 | −17.1% |
+| | publication | 24,748 | +0.8% | +2.7% | +2.3% | | 25,689 | −0.5% |
+| | object | 69,916 | +2.2% | +2.7% | +2.7% | | 72,059 | −1.2% |
+| same output, 216 (220 for `merged`) | total | 1,718,753 | +1.7% | +4.4% | −17.5% | | 2,014,957 | −19.8% |
+| output differs, 4 | total | 137,489 | +2.8% | +6.6% | −14.7% | | | |
+| under 300 tokens, 154 | total | 474,650 | +0.7% | +4.7% | +0.9% | | 523,443 | −2.5% |
+| 300 to 3,000 tokens, 6 | total | 77,004 | +1.8% | +5.6% | −10.8% | | 83,417 | −15.0% |
+| 3,000 tokens or more, 60 | total | 1,304,588 | +2.2% | +4.5% | −24.3% | | 1,408,097 | −26.5% |
+
+(The 9700X's system headers give the programs other token counts than the Xeon's: 6 and 60 files in the upper
+buckets, against 20 and 46.) Paired rounds, the sums of each run's per-file medians (`9700x/analysis-*.txt`): `pr`
+against `main` +0.8 to +2.7% (median +1.7%), `head` +3.8 to +5.0% (+4.5%), `new` −16.9 to −17.9% (−17.3%) in every
+round; `merged` against `mainnow` −18.4 to −19.8% (−19.7%) in every round. Per file (`9700x/distribution-*.txt`),
+`new` against `main` p10 −34.7%, p50 +0.4%, p90 +2.7%, and under 300 tokens p50 +1.2% (+25 ns a file); `merged`
+against `mainnow` p10 −34.4%, p50 −3.0%, p90 +0.8%, and under 300 tokens p50 −1.5%.
+
+The synthetic units (`9700x/floor-synthetic*.txt`), the floor's total against `main` and against `mainnow`:
+
+| Unit | `pr` | `head` | `new` | `merged` against `mainnow` |
+| --- | ---: | ---: | ---: | ---: |
+| statics, 200 / 2,000 | +4.4% / +3.8% | +9.7% / +9.8% | +3.0% / +3.1% | −4.2% / −4.9% |
+| collisions, 200 / 2,000 | +5.7% / +6.9% | +11.2% / +12.4% | +4.2% / +5.2% | −4.6% / −5.2% |
+| literals, 200 / 2,000 | +5.3% / +6.0% | +9.7% / +10.8% | +0.8% / +1.1% | −7.3% / −7.9% |
+| plain, 200 / 2,000 | +0.3% / −0.2% | +6.1% / +5.8% | +0.6% / +0.9% | −4.0% / −3.7% |
+
+So on the 9700X #418's merge cost +1.8% of the path's time on c-testsuite (+0.7% under 300 tokens, +2.2% from 3,000),
+and main had grown to +4.6% by the time #442's work started. #442's change takes the path 17.3% under main before
+#418 and 19.8% under main after #151's lanes, every round of both, and wholly through the selection and the
+emission. Under 300 tokens it ends +0.9% against main before #418 (−3.6% against `head`, −2.5% against current main):
+the fixed cost on the smallest units above, about 25 ns a file. On the synthetic units, whose few tokens leave the
+whole-unit passes little to cost, `new` stays +3.0 to +5.2% above main before #418 on the statics and the
+collisions, whose made names #418 writes as clang does (longer than main's, and in the collisions taken first by
+asm labels), and within 1.1% on the literals and the plain units; against current main every synthetic unit is
+3.7 to 7.9% faster. `merged` is `new` merged with main at `335424b1`, whose changes since `head` include #151's
+lanes. #517's later merges with main (`57ee3a3`, `ce9b2c7`) bring main's further changes and adapt the two passes
+over every token that main added since (the objects a unit defines, and its naked functions) to the declaring
+tokens; they were not measured again.
+
 ## Where the time went
 
 **Whole-unit passes.** A profile of `head` (`profiles/`, `scripts/sampler.c`, an `LD_PRELOAD`ed sampler on a 100 µs
@@ -173,9 +232,10 @@ failures, generated executables against this host's clang, are `head`'s too), wi
 
 ## Limitations
 
-- Not the 9700X: an Intel Xeon @ 2.10 GHz in a cloud VM, without the shared lock, hardware counters or perf. Zen 5's
-  costs differ (its `vpcompressd`, its clock), and code placement moves a build by about 2% on the 9700X
-  (Buster's `docs/profiling.md`); here differences under about 3% are not resolved.
+- The attribution, the profiles and the ablations are the Xeon's: an Intel Xeon @ 2.10 GHz in a cloud VM, without
+  the shared lock, hardware counters or perf, where differences under about 3% are not resolved. The A/B's 9700X
+  runs (above) have no profile or counters either: `benchmark-emit-ab` times stages, and code placement moves a
+  build by about 2% on the 9700X (Buster's `docs/profiling.md`), which is the size of the small units' residue.
 - The floor compares the trees in the host's fast state; the medians are in `logs/` too.
 - The container moved hosts during the work (the kernel changed, `manifests/host-second.txt`): each comparison is
   within one host's rounds.
@@ -184,7 +244,9 @@ failures, generated executables against this host's clang, are `head`'s too), wi
 
 ## Reproducing
 
-On the 9700X, from a Buster checkout and this repository's checkout:
+`9700x/*/queue442*.sh` are the scripts that made the 9700X runs above, in directories that held the trees, the
+c-testsuite checkout and the synthetic units. The same, by hand, from a Buster checkout and this repository's
+checkout:
 
 ```sh
 scripts/build-trees.sh ~/buster ~/buster-fast-bench/442-trees      # SHIM unset: the 9700X has mwaitx
