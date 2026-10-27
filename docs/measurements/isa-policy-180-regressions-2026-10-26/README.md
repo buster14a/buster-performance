@@ -61,7 +61,7 @@ It is also rejected: all12plain medians cost0.84–3.81% against main74. Five
 batches/240children were retained; round3/after30 was never launched.
 An isolated candidate strengthens five storage alignments from64 to4096 without
 changing array extents, entries or readiness. Native8/8, graph and dump pass;
-local sanitizer tests are queued. BSS grows105,088bytes versus the rejected
+local sanitizer tests pass8/8. BSS grows105,088bytes versus the rejected
 tail candidate, while file/text sizes match it. The first48-child diagnostic
 batch improves small calls about4%, but full-batch results remain mixed,
 including an unaccepted cost. Repeated controls are pending; addresses alone
