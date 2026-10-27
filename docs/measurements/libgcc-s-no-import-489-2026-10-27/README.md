@@ -98,6 +98,25 @@ The final traces show zero `libgcc_s.so.1` checks for a cached ordinary link and
 
 `harness/probe-check-handoff.sh` also compares the ordinary and unwinder outputs with the preceding `f4dd5962` implementation: both executables are byte-for-byte unchanged by omitting the unused writer catalog. Reproducing that check first requires building the `f4dd5962` tree in `codex-489-final` and running `harness/probe-check-final.sh` there to produce the two reference outputs; its scripts and manifest are included. Build and run each validation step through the shared lock as the harnesses do.
 
+## Review coverage and final test-build smoke
+
+Review of the implementation requested explicit coverage of the forced-retention route: a needed named library has an unversioned strong `_Unwind_Backtrace` reference, no covering `DT_NEEDED`, and no version need. Test-only commit `e65a6f3e3827e1125719451d62e60125d217c71a` adds that case for loaded stale PIE/shared snapshots and both binding paths. It verifies no deferred check at `bind_begin`, the GCC need and snapshot retry at `bind_end`, then successful retention after discard/re-import. It also compares `Bind.gcc_s_needed` in the common cross-path oracle.
+
+All four affected checks passed on the physical 9700X: `test-snapshot`, `test-bind --cross-check`, retained `test-snapshot --keep --functions 1`, and `build.sh check-call-graph`. Each snapshot run reports 130 deferred-probe checks per runtime kind, with no failures. With the build-identity capture, the runner reports five commands passed in 8.5 s. `review-validation/tests.log`, its build/run receipts and `harness/manifest-e65a6f3e.sha256` pin that validation. The executable SHA-256 is `57653a3d38e29952b9fb5847f3d265e04337e4968ff70354b6667a902d601fbc`.
+
+The production runtime, binding, snapshot and writer sources are unchanged from the three-round implementation pin `3760045a`. Because additional test code can change executable layout, `harness/review-link-smoke.sh` ran one isolated default complete-link invocation on the new test build, with all generated outputs validated:
+
+| Workload | Review test-build smoke |
+| --- | ---: |
+| 1-worker PIE | 21.4 us |
+| 1-worker shared | 57.8 us |
+| 2,000-worker PIE | 143.6 us |
+| 2,000-worker shared | 1,039.6 us |
+| 102,400-worker PIE | 11,236.1 us |
+| 102,400-worker shared | 26,919.3 us |
+
+The tiny PIE matches the historical median, with cached open 11.4 us, begin/end 0.8/0.6 us and writer count 1.0 us. This is one build-layout smoke sample, not three new independent acceptance rounds; it does not replace the primary comparison or support a general larger-link speedup. The whole-driver/RSS figures above refer to `3760045a` and were not remeasured for the test-only change. Full required hardware CI and maintainer review are separate from these targeted checks.
+
 ## Earlier trials and limits
 
 `initial/` preserves the first deferred-probe/range-classification trial (`7c269d8f`), which still validated the selected GCC begin object twice. Its complete-link samples did not establish the historical budget, so it was not accepted. The second trial, `f4dd5962/`, adds startup-path reuse and meets the loading/binding budget but still passes an unused GCC catalog to the writer. The qualified source additionally publishes binding's as-needed decision to exclude that catalog before allocating/copying writer inputs.
