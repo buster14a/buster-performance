@@ -48,9 +48,13 @@ Each job ran this once. `logs/*-benchmark-executable.log` holds each job's step
 in full.
 
 The dynamic section links programs that call libc, with 1, 64, 2,000 and
-180,000 workers, as dynamic PIEs on one lane. Each figure is the median of 21
-writes, in place over the previous write's file and as a new file. Besides the
-plain program, each worker gets one probe in one of these modes:
+180,000 workers, as dynamic PIEs on one lane. Each figure is the median of the
+timed writes after a first, untimed one, both in place over the previous
+write's file and as a new file. There are 41 timed writes for an output of up
+to 4 MB (`BUSTER_EXECUTABLE_BENCHMARK_LINK_RUNS`, the 1-, 64- and 2,000-worker
+rows), and 11 past it (`BUSTER_EXECUTABLE_BENCHMARK_LARGE_RUNS`, the
+180,000-worker rows' files of 44 to 50 MB). Besides the plain program, each
+worker gets one probe in one of these modes:
 
 - **control**: the general-dynamic probe's bytes, atoms and fixups without TLS.
   It has a `PC32` to a data object where the access has `TLSGD`, and a direct
