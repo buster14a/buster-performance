@@ -3,6 +3,11 @@
 Original qualification for [Buster #562](https://github.com/buster14a/buster/issues/562)
 and [implementation PR #588](https://github.com/buster14a/buster/pull/588).
 
+The later [VLA review follow-up](review-vla/README.md) records six additional
+fixtures and exact-head build/checker results for `d5d7f330`. It retains the
+Clang observations that contradict the reported range diagnostic; production
+behavior and the original cost evidence below are unchanged.
+
 ## Identities and scope
 
 - Baseline: `e61532592cab11718ade1f99b4e805794f95ad4a`, PR #561's deferred range resolver.
