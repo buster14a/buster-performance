@@ -13,7 +13,8 @@ stage's time and peak RSS added, and perf's counters and profile.
 
 ## Identity
 
-- **Date:** 2026-10-27, from 12:18 to 12:41 UTC.
+- **Date:** 2026-10-27, from 12:18 to 12:41 UTC (rounds 1 and 2) and from
+  12:49 to 13:17 UTC (round 3).
 - **Host:** `benchpress`, an AMD Ryzen 7 9700X (kernel 6.18.50-2-lts), every
   step under the host's lock (`exclusive.sh`) and pinned to CPU 2.
 - **Compilers:** each tree built on the host with `BUSTER_DEBUG_INFO=0 ./build.sh`
@@ -33,12 +34,17 @@ stage's time and peak RSS added, and perf's counters and profile.
     comments: `c_parser.c`'s two on the kernels' reservation, and the figure
     37 MB, which the branch's `c_check_program_emit.c` and
     `docs/function-lanes.md` give as round 2's 46 MB.
+  - `head3`: round 3's tree, buster's commit
+    `e6e71772ea4b5d2db35c61dd35b7a55af898fe33` exactly (`manifest-head3.sha256`):
+    the type table's and the parse's changes alone. The branch dropped lane 0's
+    writer's change there, which #570 makes for #531. Its executable's sha256
+    is `c4efb5dca9fa0afa76d1f14d25698a7a16100295508328b3a5d2a989e06cb87e`.
 - **Source:** `sqlite/sqlite3.c` of the frozen corpus
   `preprocessor-391e729af658`, sha256
   `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`.
 - **Reference for the ratio:** `/usr/bin/tcc`, sha256
   `49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082`.
-- **Objects:** base's and head2's objects are the same bytes, sha256
+- **Objects:** base's, head2's and head3's objects are the same bytes, sha256
   `0c48ff92978c3125b1822a1552eb48d2742ea09d80176488d8dc5320c4afe91f`, and so
   are base's and head's (round 1's `cmp`).
 
@@ -51,7 +57,7 @@ The options, for every compile, are #136's speedtest1 record's
 -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE -I"$sqlite" "$sqlite/sqlite3.c"
 ```
 
-`round1.sh` and `round2.sh` ran each step under the lock:
+`round1.sh`, `round2.sh` and `round3.sh` ran each step under the lock:
 - the build of each tree;
 - the objects of base and the head, compared with `cmp`;
 - `measure-compile --runs 21`, the head with base as its `--reference`, then
@@ -62,7 +68,7 @@ The options, for every compile, are #136's speedtest1 record's
 - `perf stat -r 11 -e task-clock,page-faults,cycles:u,instructions:u,cycles:k,instructions:k,branch-misses:u`
   of each, in round 2 twice, alternating;
 - in round 2, `perf record -q -F 20000` of 5 compiles of each, reported by DSO
-  and by symbol.
+  and by symbol, and in round 3 of the head.
 
 Round 2's first `measure-compile` steps failed: the host's `/tmp` was full
 for a moment ("can't make a directory under /tmp"), and the run was stopped.
@@ -71,15 +77,16 @@ with `--directory` in the run's own directory.
 
 ## Files
 
-- `round1.sh`, `round2.sh` and `round2-measurements.sh`: the scripts, as run.
-- `round1.log` and `round2.log`: their output. The lock's waiting messages,
+- `round1.sh`, `round2.sh`, `round2-measurements.sh` and `round3.sh`: the
+  scripts, as run.
+- `round1.log`, `round2.log` and `round3.log`: their output. The lock's waiting messages,
   which name other sessions' commands, are removed: by `strip_lock.py`, a later
   version of
   [`window-tables-lines-451-2026-10-26/review/strip_lock.py`](../window-tables-lines-451-2026-10-26/review/strip_lock.py)
   that drops a holder's command over several lines, then the owner lines that
   `perf stat`'s `tail` left without their first line.
-- `manifest-base.sha256`, `manifest-head.sha256` and `manifest-head2.sha256`:
-  each tree's files' hashes, as measured.
+- `manifest-base.sha256`, `manifest-head.sha256`, `manifest-head2.sha256` and
+  `manifest-head3.sha256`: each tree's files' hashes, as measured.
 - `strip_lock.py`: the filter.
 - `SHA256SUMS`: the files' hashes.
 
@@ -123,3 +130,43 @@ head2 keeps in the caller's scratch.
 
 Every run's `-c` and `--time-stages` objects were the same bytes
 (`measure-compile: 0 failures`).
+
+Round 3, head3 against base, the branch's two changes without lane 0's
+(`measure-compile`, medians of 21):
+
+| | base | head3 | change |
+| --- | ---: | ---: | ---: |
+| wall time | 190.138 ms (189.505 to 193.267) | 186.274 ms (184.842 to 187.867) | −3.9 ms (−2.0%) |
+| peak RSS | 674,216 KB | 558,936 KB | −115,280 KB (−17.1%) |
+| minor faults | 1,531 | 2,092 | +561 |
+
+Base against head3 gave 190.305 ms against 186.034 ms.
+
+`perf stat -r 11`, two pairs:
+
+| | base | head3 | change |
+| --- | ---: | ---: | ---: |
+| task-clock | 189.74 ms, 190.12 ms | 186.06 ms, 186.19 ms | −1.9%, −2.1% |
+| page faults | 1,356 | 1,901 | +545 |
+| cycles, user | 896.9 M, 898.2 M | 902.2 M, 902.9 M | +0.6%, +0.5% |
+| instructions, user | 2,227.30 M | 2,227.11 M | 0.0% |
+| cycles, kernel | 155.2 M, 155.7 M | 129.5 M, 129.2 M | −16.6%, −17.1% |
+
+head3's profile has the kernel at 14.9% of the samples, `clear_page_erms` at
+12.2%, and glibc at 5.1%, against base's 17.6%, 14.8% and 3.9% in round 2.
+
+head3's stages (`--time-stages`, from head3 against base) against base's
+(from base against head3): ms and peak KB added.
+
+| stage | base | head3 |
+| --- | ---: | ---: |
+| parse | 9.551 ms, 105,704 KB | 9.440 ms, 97,556 KB |
+| type-table | 1.669 ms, 38,916 KB | 0.036 ms, 128 KB |
+| check-input | 80.256 ms, 324,612 KB | 78.223 ms, 261,408 KB |
+| check-program | 15.789 ms, 14,336 KB | 15.843 ms, 10,240 KB |
+| lower | 25.415 ms, 56,044 KB | 25.141 ms, 56,172 KB |
+| code-atoms | 0.527 ms | 0.519 ms |
+
+`code-atoms`, the emission's atoms and fixups added to the link, took about
+0.3 ms more in rounds 1 and 2 (0.838 ms against 0.531 in round 2), and not in
+round 3: it came with lane 0's writer's change.
