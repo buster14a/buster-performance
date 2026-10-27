@@ -84,6 +84,38 @@ Two tries before this one lost head's build to the host's `/tmp`. Its tmpfs had 
 with "No space left on device". Their logs are in `after-merge/logs/first-try/` and `second-try/`; their base runs
 have no head runs to pair with. The third try ran once the tmpfs had inodes to spare again.
 
+## After the review's fix (`e1dc5d01`)
+
+The review found that a naked attribute on a later declaration than the function's first was missed. The fix,
+`e1dc5d01`, makes `check_program`'s pass over the declarations test each function declaration's attributes. That pass
+runs for every unit. `after-review/` measures it against main at `a66f8638` (#511, #568 and #517 after the last merge),
+by `after-review/scripts/queue-review.sh`, each command under the lock on its own, on CPU 2, with `TMPDIR` on `/home`.
+
+Both trees write the same object (`aa07c5e1c9468c495f50f704c2fb557d`, `after-review/logs/queue.log`).
+
+| | main | head | |
+|---|---:|---:|---:|
+| Wall (`ab`, 5 rounds of 11 runs: the median and range of the rounds' medians, `after-review/logs/ab-sqlite.log`) | 155.60 ms (155.40–155.75) | 155.82 ms (155.51–156.12) | +0.14% |
+| User instructions (`perf stat -r 11`, twice each, `after-review/logs/perf-sqlite-*.log`) | 1,724,011,571 and 1,724,011,570 | 1,724,634,978 and 1,724,634,982 | +0.036% |
+| User cycles | 720.5 M, 722.4 M | 722.7 M, 724.7 M | +0.31% |
+| Peak RSS (`ab`, the rounds' medians) | 618,804 KB | 618,896 KB | +0.015% |
+
+Main's own `-c` of this file had dropped by 21% in user instructions and 17% in wall time since `78ec3f8a`.
+
+A switch on one executable separates the fix's own work from the builds' placement. The switch,
+`after-review/scripts/switch.diff`, isn't committed: `BUSTER_NO_NAKED_SCAN` skips the attributes' test, and
+`queue-switch.sh` ran it. The two settings write the same object. Three `perf stat -r 11` runs of each, in turn (`after-review/logs/switch/`):
+
+| | scan (the PR) | no scan |
+|---|---:|---:|
+| User instructions | 1,724,637,386, 1,724,637,395, 1,724,637,398 | 1,724,528,182, 1,724,528,177, 1,724,528,180 |
+| User cycles | 722.3 M, 723.0 M, 722.2 M | 724.1 M, 721.9 M, 722.5 M |
+| Task clock | 155.59, 155.60, 155.51 ms | 155.90, 155.43, 155.56 ms |
+
+The test costs 109,213 user instructions (0.006%) and no time the runs can tell apart. The rest of head's 623,409
+more instructions against main, and its cycles, are how clang compiled and placed the two builds, which #536's
+record measured at up to 0.7% in cycles and about 2 M instructions for the same work.
+
 ## The assembler
 
 `benchmark-assembler`, twice each (`logs/assembler-*.log`). The matcher admits more forms on head, and its parser
