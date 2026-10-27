@@ -26,9 +26,9 @@ commit (`commit-*.sha256`).
 | `headb` | `head` with `patches/strict.patch`: the first branch's head as its pull request opened, `da1f3894`, but for one comment of `c_builtin_lower.c` rewrapped after the measurement (no code) | `6c057ea510c56e8b7f84ee2f740bab3609e3e08b9f5d4c417f6e09cd7f84998c` |
 | `bitint` | `headb` with `patches/bitint.patch`: the second branch's first version | `1da59a414caa5b443eab008318c516b02967cc651197c79e306805d6feb796f2` |
 | `bitint2` | `headb` with `patches/bitint2.patch`: the second branch's head as its pull request opened, `2eb6e6f9`, exactly (with `patch`'s `c_check_program_lower.c.orig` beside it, which nothing compiles) | `e4ff213e59371c30aed7f6f3ef42966cd80a4acc87e9ad1107f4902eb9953453` |
-
 | `headc` | `1338d2643f270f601039ad77d3a15919fee4599d`'s tree exactly, a `git archive`: the first branch after review | `409f1d852060105f905ed6530237002b53cbce756bff848ff4eafd8187f6d7b0` |
 | `bitint3` | `02cc348d73291bd1c6edbb9a832903b7e31ef023`'s tree exactly, a `git archive`: the second branch after review | `ddb609eb08e4ca237e7cd8dfec782886f16aa9694b58c05c6845c9fded0ee19e` |
+
 The heads the pull requests opened with: `da1f38940c37fa6f05ea0b46ee1d391f07d991bd` and
 `2eb6e6f93f60863f7de9b140cac0c6cbb969c6c4`; after review: `1338d2643f270f601039ad77d3a15919fee4599d` (`headc`) and
 `02cc348d73291bd1c6edbb9a832903b7e31ef023` (`bitint3`), measured in `logs/rounds4`.
