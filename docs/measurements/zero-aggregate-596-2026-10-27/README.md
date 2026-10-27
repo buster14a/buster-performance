@@ -16,7 +16,7 @@ when a nonzero byte or relocation survives. Const zero data keeps RODATA.
 
 The 256 MiB explicit-zero compile falls from **18.248 to 1.751 ms** (90.4% less
 wall time, 10.42x on this input), and peak RSS from **282,056 to 23,860 KiB**.
-All 1,848 timed compiles exit zero. Medians pool 21 fresh processes per variant:
+All 1,848 A/B timed compiles exit zero. Medians pool 21 fresh processes per variant:
 
 | Explicit-zero N | Base wall, ms | Candidate wall, ms | Base peak RSS, KiB | Candidate peak RSS, KiB |
 | --- | ---: | ---: | ---: | ---: |
@@ -88,6 +88,34 @@ including the inlined overlap fallback. `function-sizes.txt` and
 `check-data-emit.asm` retain that cost and the emitted bounded scan. Timing
 controls above expose the common-path costs. No instruction-count or generated
 program-speed claim is made.
+
+### Identical-compiler control
+
+After the A/B campaign, `control-aa.sh` repeats all three rounds with **the same
+baseline executable path in both roles**, using the unchanged `compare` binary,
+the same inputs, CPU 2 and a separate shared lock hold for each round. The
+`head` label in `aa/` therefore means the second baseline role, not the candidate.
+Baseline and controller hashes match before and after this control. All 1,848
+A/A timed rows exit zero, with 264 discarded warmups and no major faults. All
+44 final object pairs match, and their hashes match the original A/B objects.
+
+| Input | A/B pooled wall change | Identical-baseline A/A pooled role difference |
+| --- | ---: | ---: |
+| Explicit zero, 256 MiB | −90.40% | +0.50% |
+| TLS zero, 256 MiB | −89.81% | −0.12% |
+| Dense array | +1.49% | −0.08% |
+| Dense array ending in zero | +1.85% | +0.29% |
+| SQLite | +0.12% | −0.08% |
+
+The A/A dense round differences range from −0.38% to +0.41%, tail-zero from
++0.01% to +0.37%, and SQLite from −0.21% to +0.11%. The dense A/B slowdowns
+exceed the role differences observed in this control; SQLite's small A/B change
+is comparable to the observed variation. This later A/A campaign measures noise
+at one baseline layout and does not establish neutrality across different
+compiler layouts. No A/A adjustment is applied to the A/B results. Pooling
+recomputes each role's median from all 21 samples rather than averaging the
+three round ratios. `aa/summary.tsv`, its validated raw receipts, stage logs,
+identity records and the exact controller are retained.
 
 ## Method and scope
 
@@ -217,6 +245,7 @@ Recompute the retained summaries locally:
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror report.c -o /path/to/work/report
 /path/to/work/report round-0.tsv round-1.tsv round-2.tsv > summary.tsv
+/path/to/work/report aa/round-0.tsv aa/round-1.tsv aa/round-2.tsv > aa/summary.tsv
 ```
 
 For the focused local sanitizer check, from the candidate source root:
