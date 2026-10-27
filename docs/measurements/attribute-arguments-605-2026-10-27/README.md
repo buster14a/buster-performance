@@ -11,6 +11,11 @@ allocation for zero/single arguments, and reuses those bounds in validation,
 declaration ICEs and constant-reader preparation/evaluation. Boundary discovery
 uses two forward walks; lookup reads at most two retained positions.
 
+The initial complete scaling snapshot is commit
+`34f8e27ec8d8fdfc69d19bba7608999413b51bfe`; the isolated arity controls and
+explicit corpus result below supplement it without changing either compiler
+executable or the original campaign/tools.
+
 ## Results
 
 All three rounds completed: 1,056 successful processes including warm-ups, with
@@ -70,6 +75,27 @@ zero. The grouped case has the same boundary counts as a plain 2,048-argument
 list, independent of the skipped groups' sizes. These are logical boundary
 dispatch counts, not hardware instruction counts.
 
+### Isolated zero/one/two-argument controls
+
+The review's short-arity supplement uses `short-controls.c`: 128 functions per
+source with `nothrow` (zero arguments), `nonnull(1)`, or `alloc_size(1,2)`.
+It uses the same fork/exec/stage/RSS and object-comparison protocol as the
+original campaign, in one separately locked round with 21 measured repetitions
+and one warm-up per tree/source/mode. All 264 processes succeed, including the
+12 warm-ups, and all 66 object pairs are byte-identical.
+
+| Arity | Checker-input stage, syntax | Whole `-fsyntax-only` | Whole `-c` | Whole `-c` change |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 0.199 → 0.202 | 1.144 → 1.141 | 1.928 → 1.931 | +0.11% |
+| 1 | 0.236 → 0.238 | 1.187 → 1.186 | 1.968 → 1.969 | +0.04% |
+| 2 | 0.301 → 0.300 | 1.279 → 1.274 | 2.173 → 2.162 | -0.50% |
+
+All six whole-driver changes are within 0.6%; peak RSS medians change by less
+than 0.5%. These differences do not resolve a short-list regression. The raw
+values, stage logs and identities are in `short-controls.csv`, `short-cases/`,
+`short-summary.csv` and `short-identities.sha256`. The helper uses the same
+local generic Clang 23.1.4 build configuration as the original harness.
+
 ## Correctness
 
 On the locked 9700X, the candidate's full checker suite passes 274,912 checks
@@ -79,8 +105,12 @@ zero unapproved cycles and zero split static variables (three existing allowed
 cycles).
 All 28 scalar/vector, syntax/object diagnostic comparisons against the normal
 reference build pass, with byte-identical stderr and no object left by a rejected
-input. The local focused attribute suite passes 13,599 checks. The generated
-performance inputs also pass local Clang 23.1.4's GNU C17 syntax checking.
+input. The local focused attribute suite passes 13,599 checks. An explicit local
+Buster-vs-Clang 23.1.4 GNU C17 corpus run accepts all 14 generated performance
+sources, including the normal/raw constant-reader paths and the isolated short
+controls: 118,599 tokens, zero acceptance, first-line, diagnostic-path or
+scalar/vector differences, and zero resource/preprocessing failures
+(`corpus-local.log`).
 
 ## Protocol
 
@@ -167,6 +197,15 @@ EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/605 \
     "$PWD/base/build/compiler" "$PWD/head/build/compiler" "$PWD/evidence/diagnostic-cases"
 evidence/summarize evidence/round-{1,2,3}.csv > evidence/summary.csv
 ```
+
+Compile `short-controls.c` with the same standalone-tool flags, generate
+`evidence/short-cases`, and run its `measure` command once under `exclusive.sh`
+and `taskset -c 2`, passing the same normal base/head compiler paths, the new
+case directory and round `1`. This supplement deliberately uses 21 timed
+repetitions in one invocation. Summarize `short-controls.csv` with `summarize`.
+The corpus command is `head/build/compiler test-checker-corpus --clang
+/usr/bin/clang evidence/cases/*.c evidence/short-cases/*.c`, run on the recorded
+local machine for the retained report; do not interpret it as target timing.
 
 `focused.c`/`focused-tests.log` retain the local attribute-only regression run.
 Prepare its `focused-main.c` from the candidate's `main.c` with the same
