@@ -1,0 +1,225 @@
+diff --git a/docs/x86-target.md b/docs/x86-target.md
+index a32cc43..4da2ea2 100644
+--- a/docs/x86-target.md
++++ b/docs/x86-target.md
+@@ -89,8 +89,8 @@ admitted rows. ISA filtering and final record validation still apply per form.
+ The default 64-bit encoder initializer reuses FS templates for GS: their layouts,
+ checks and fallback choices are identical, with only the optional segment byte
+ changing. It checks that byte before patching both template halves and uses the
+-direct builder if the expected location changes. Existing storage and encoding
+-loops are unchanged.
++direct builder if the expected location changes. Existing storage and the
++instruction record format are unchanged.
+ 
+ Main units share the pure `x86_build_nonlegacy_templates` constructor in the X86
+ home. The caller supplies its immutable form descriptions and keeps its own
+@@ -109,6 +109,16 @@ descriptions. Default 64-bit and APX require the caller's table. The output cont
+ storage and leaves the intervening gap untouched. Unsupported modes and missing
+ required descriptions fail without writing; an invalid catalogue can leave partial output.
+ 
++The default 16-record encoding kernel also shares code in the X86 home through
++`x86_encode_templates_16`. Its caller passes its own initialized template table,
++aligned to 32 bytes and disjoint from the records and outputs. The kernel reads
++no mutable home state; readiness and storage remain local. Public encoding entry
++points retain their existing count/capacity checks. Standalone inclusions keep a
++static kernel, and other modes and experimental widths retain their local tables.
++The policy fixture checks 272 combinations of counts 0 through 33, optional
++offsets/fixups, and alternating private/ordinary tables against explicit opcode,
++offset and fixup-end expectations, including output guards.
++
+ The target test compares 250,560 complete entries, including unavailable rows,
+ fallbacks, segment variants and fixup copies, with private per-form construction.
+ It uses a separate descriptor copy, including an isolated opcode change that
+diff --git a/src/buster/compiler/x86_64_encoder.c b/src/buster/compiler/x86_64_encoder.c
+index 8e8b8bf..a934f6d 100644
+--- a/src/buster/compiler/x86_64_encoder.c
++++ b/src/buster/compiler/x86_64_encoder.c
+@@ -7437,13 +7437,8 @@ static int64_t x86_measure(const X86Instruction* instructions, uint64_t count, u
+ // from Phase III's shuffles and compressions.
+ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t quads, uint8_t* out, const uint8_t* output, uint32_t* offsets,
+                                     uint32_t offset_lanes, uint32_t** fixup_ends, X86Gather gather, X86Store store, X86FixupStore fixup_store,
+-                                    X86EncoderMode encoder)
++                                    X86EncoderMode encoder, const X86TemplateEntry* templates)
+ {
+-    const X86TemplateEntry* const templates = encoder == X86_ENCODER_MODE_ADDRESS32 ? x86_templates_address32
+-                                         : encoder == X86_ENCODER_MODE_APX     ? x86_templates_apx
+-                                         : encoder == X86_ENCODER_MODE_32      ? x86_templates_32
+-                                         : encoder == X86_ENCODER_MODE_16      ? x86_templates_16
+-                                                                               : x86_templates;
+     // I. Records and templates (zero for the quads past `quads`).
+     __m512i records[4];
+     __m512i bytes[4];
+@@ -7615,7 +7610,8 @@ BUSTER_INLINE uint8_t* encode_group(const X86Instruction* instructions, uint32_t
+ // before it, at most 15 for each of the first `count` (the zeroed copy's padding adds none), so it ends by
+ // 15 * count + 64.
+ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends,
+-                                     uint32_t quads, uint32_t groups, X86Gather gather, X86Store store, X86FixupStore fixup_store, X86EncoderMode encoder)
++                                     uint32_t quads, uint32_t groups, X86Gather gather, X86Store store, X86FixupStore fixup_store, X86EncoderMode encoder,
++                                     const X86TemplateEntry* templates)
+ {
+     const uint64_t group_instructions = BUSTER_X86_QUAD_INSTRUCTIONS * quads;
+     const uint64_t iteration_instructions = group_instructions * groups;
+@@ -7631,13 +7627,13 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
+         // spill (unrolled, it's 14% slower on Zen 5).
+         for (uint32_t g = 0; g < groups; g += 1)
+         {
+-            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
++            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder, templates);
+             i += group_instructions;
+         }
+     }
+     while (i + group_instructions <= count)
+     {
+-        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder);
++        out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, group_lanes, fixups, gather, store, fixup_store, encoder, templates);
+         i += group_instructions;
+     }
+     if (i < count)
+@@ -7645,7 +7641,7 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
+         X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
+         memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
+         out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
+-                           encoder);
++                           encoder, templates);
+     }
+     return (int64_t)(out - output);
+ }
+@@ -7662,19 +7658,44 @@ BUSTER_INLINE int64_t encode_batches(const X86Instruction* instructions, uint64_
+         int64_t result; \
+         if (fixup_ends == 0) \
+         { \
+-            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, 0, quads, groups, gather, store, fixup_store, encoder) \
+-                                  : encode_batches(instructions, count, output, 0, 0, quads, groups, gather, store, fixup_store, encoder); \
++            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, 0, quads, groups, gather, store, fixup_store, encoder, x86_mode_templates(encoder)) \
++                                  : encode_batches(instructions, count, output, 0, 0, quads, groups, gather, store, fixup_store, encoder, x86_mode_templates(encoder)); \
+         } \
+         else \
+         { \
+-            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, fixup_ends, quads, groups, gather, store, fixup_store, encoder) \
+-                                  : encode_batches(instructions, count, output, 0, fixup_ends, quads, groups, gather, store, fixup_store, encoder); \
++            result = offsets != 0 ? encode_batches(instructions, count, output, offsets, fixup_ends, quads, groups, gather, store, fixup_store, encoder, x86_mode_templates(encoder)) \
++                                  : encode_batches(instructions, count, output, 0, fixup_ends, quads, groups, gather, store, fixup_store, encoder, x86_mode_templates(encoder)); \
+         } \
+         return result; \
+     }
+ BUSTER_X86_ENCODE_VARIANT(x86_encode_4, 1, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64)
+ BUSTER_X86_ENCODE_VARIANT(x86_encode_8, 2, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64)
+-BUSTER_X86_ENCODE_VARIANT(x86_encode_16, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64)
++
++// Main units share this default kernel in the X86 home, with no mutable home state. The caller supplies its own
++// initialized, 32-byte-aligned templates, disjoint from the records and outputs. Other preconditions are those of
++// x86_encode after its count/capacity checks. Standalone inclusions keep a static kernel and the same table argument.
++BUSTER_X86_TEMPLATE_ENTRY __attribute__((noinline, unused)) int64_t x86_encode_templates_16(const X86Instruction* instructions, uint64_t count, uint8_t* output,
++                                                                                        uint32_t* offsets, uint32_t* fixup_ends, const X86TemplateEntry* templates)
++{
++    int64_t result;
++    if (fixup_ends == 0)
++    {
++        result = offsets != 0 ? encode_batches(instructions, count, output, offsets, 0, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64, templates)
++                              : encode_batches(instructions, count, output, 0, 0, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64, templates);
++    }
++    else
++    {
++        result = offsets != 0 ? encode_batches(instructions, count, output, offsets, fixup_ends, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64, templates)
++                              : encode_batches(instructions, count, output, 0, fixup_ends, 4, 1, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64, templates);
++    }
++    return result;
++}
++
++static __attribute__((unused)) int64_t x86_encode_16(const X86Instruction* instructions, uint64_t count, uint8_t* output, uint32_t* offsets, uint32_t* fixup_ends)
++{
++    return x86_encode_templates_16(instructions, count, output, offsets, fixup_ends, x86_templates);
++}
++
+ BUSTER_X86_ENCODE_VARIANT(x86_encode_32, 4, 2, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64)
+ BUSTER_X86_ENCODE_VARIANT(x86_encode_64, 4, 4, X86_GATHER_INSERTS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64)
+ BUSTER_X86_ENCODE_VARIANT(x86_encode_16_forms_from_records, 4, 1, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL, X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64)
+diff --git a/src/buster/compiler/x86_target_policy_test.c b/src/buster/compiler/x86_target_policy_test.c
+index 5523fb3..99293db 100644
+--- a/src/buster/compiler/x86_target_policy_test.c
++++ b/src/buster/compiler/x86_target_policy_test.c
+@@ -5,6 +5,72 @@
+ // every single-feature removal from each profile, and unknown rows even with every feature bit set. The independent
+ // named-form expectations and external compiler/assembler checks establish ISA facts; the matrix checks the kernels.
+ 
++static bool x86_target_test_encode_templates(X86FormDescription* descriptions, X86TemplateEntry* templates)
++{
++    descriptions[X86_FORM_NOP].opcode = 0x91;
++    bool passed = x86_build_nonlegacy_templates(X86_ENCODER_MODE_64, descriptions, templates);
++    descriptions[X86_FORM_NOP].opcode = x86_form_descriptions[X86_FORM_NOP].opcode;
++    X86Instruction instructions[33] = { 0 };
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(instructions); i += 1)
++    {
++        instructions[i].form = X86_FORM_NOP | (i % 2 != 0 ? BUSTER_X86_FORM_FIXUP : 0);
++    }
++    uint32_t checks = 0;
++    for (uint32_t count = 0; passed && count <= BUSTER_ARRAY_LENGTH(instructions); count += 1)
++    {
++        for (uint32_t options = 0; passed && options < 4; options += 1)
++        {
++            // Alternate private and ordinary tables to catch accidental home-table reads or retained caller state.
++            for (uint32_t table = 0; passed && table < 2; table += 1)
++            {
++                uint8_t output[64 + BUSTER_X86_ENCODER_CAPACITY(33) + 64];
++                uint32_t offsets[8 + 33 + 8];
++                uint32_t fixups[8 + BUSTER_X86_ENCODER_FIXUP_CAPACITY(33) + 8];
++                memset(output, 0xa5, sizeof(output));
++                memset(offsets, 0xa5, sizeof(offsets));
++                memset(fixups, 0xa5, sizeof(fixups));
++                uint32_t* positions = (options & 1) != 0 ? offsets + 8 : 0;
++                uint32_t* ends = (options & 2) != 0 ? fixups + 8 : 0;
++                const int64_t length = table == 0 ? x86_encode_templates_16(instructions, count, output + 64, positions, ends, templates)
++                                                  : x86_encode_16(instructions, count, output + 64, positions, ends);
++                passed &= length == count;
++                for (uint32_t i = 0; i < count; i += 1)
++                {
++                    passed &= output[64 + i] == (table == 0 ? 0x91 : 0x90);
++                }
++                for (size_t i = 0; i < sizeof(output); i += 1)
++                {
++                    if (i < 64 || i >= 64 + BUSTER_X86_ENCODER_CAPACITY(count))
++                    {
++                        passed &= output[i] == 0xa5;
++                    }
++                }
++                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(offsets); i += 1)
++                {
++                    const uint32_t expected = positions != 0 && i >= 8 && i < 8 + count ? i - 8 : UINT32_C(0xa5a5a5a5);
++                    passed &= offsets[i] == expected;
++                }
++                const uint32_t marked = count / 2;
++                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixups); i += 1)
++                {
++                    if (ends != 0 && i >= 8 && i < 8 + marked)
++                    {
++                        passed &= fixups[i] == 2 * (i - 8) + 2;
++                    }
++                    else if (ends == 0 || i < 8 || i >= 8 + BUSTER_X86_ENCODER_FIXUP_CAPACITY(marked))
++                    {
++                        passed &= fixups[i] == UINT32_C(0xa5a5a5a5);
++                    }
++                }
++                checks += 1;
++            }
++        }
++    }
++    passed &= checks == 272;
++    printf("target caller-private encoding templates: %s (%u count/offset/fixup/table cases, guarded outputs)\n", passed ? "pass" : "FAIL", checks);
++    return passed;
++}
++
+ static bool x86_target_test_templates(void)
+ {
+     const size_t span = BUSTER_X86_FORM_TEMPLATES * sizeof(X86TemplateEntry);
+@@ -76,6 +142,11 @@ static bool x86_target_test_templates(void)
+     passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_64, 0, &rejected);
+     passed &= !x86_build_nonlegacy_templates(X86_ENCODER_MODE_APX, 0, &rejected);
+     passed &= memcmp(&original, &rejected, sizeof(original)) == 0;
++    if (passed)
++    {
++        X86TemplateEntry* aligned = (X86TemplateEntry*)(((uintptr_t)storage + 63) & ~(uintptr_t)63);
++        passed &= x86_target_test_encode_templates(descriptions, aligned);
++    }
+     free(storage);
+     free(descriptions);
+     printf("target complete native-mode templates against direct builder: %s (%u entries, all byte/layout halves and fixups; caller descriptions, dirty unaligned destinations and refusal guards)\n", passed ? "pass" : "FAIL", checks);

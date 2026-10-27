@@ -169,3 +169,36 @@ Outer wall/resource/counter observations include env, directory changes and
 the extra exec; the same helper does not prove identical overhead. Backend
 inner windows remain separate and have no external PMU group. Preserve all
 earlier observations and analyze this new protocol separately.
+
+Read-only review of unpublished 3953bcc confirms that its only difference from
+597 is the aligned(64)/dedicated text-section annotation and comment. No source
+correctness defect was identified. The first matrix has five passes and three
+setup failures; it establishes no errno or filesystem cause. The reviewer
+requested precise external-check and metadata-attribution wording, now corrected
+in README. No candidate performance or functional acceptance was inferred.
+
+3953 artifact follow-up independently confirms four unchanged active instruction
+sequences after relocation normalization (encoder 1425, runner 1378, reader 72,
+tables 5222), native 64-byte-aligned 9417-byte entry, and reproduced object
+ordinary text alignment 16 / dedicated executable section alignment 64. Native
+and sanitizer 42-unit records, 481 hashes in each passing eight-suite matrix,
+graph and exact five-mode dump receipts verify. Input-section metadata is from
+a reproduced compile; disassembly is from the actual linked native binary.
+No source/provenance defect or performance acceptance was inferred.
+
+All30 section64 screen metrics independently reproduce across54 TSV rows and
+captured outputs. In addition to vector costs, RSS rises252/244KiB and faults4
+versus597, all three pairs. The reviewer recommends the smaller single-group
+remainder guard: the linked first loop consumes every full16-record group, then
+rechecks the same condition. Source proof leaves groups2/4 unchanged; no
+performance benefit is assumed. Hot linkage remains an unadopted prototype with
+ABI/register and specialization risks.
+
+cb56 native/local provenance independently verifies all units/hashes, eight
+suites each, graph, complete dump and linked size reductions. The eventual
+address-range capture is964 instructions. All30 historical guard metrics
+reproduce across54 rows/captures; scalar, encoding and whole-wall costs remain
+unaccepted. The current-main merge preserves all12 concrete #535 rows, exactly
+four newly classified in the canonical table. XSAVE is low bit16 and survives
+the compact projection unchanged. The reviewer's duplicate table-build call
+was removed in df02bc. New placement/copy qualification remains separate.

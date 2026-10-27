@@ -386,9 +386,11 @@ Collection notifications used an obsolete hardcoded files=28 even though their
 validation already required the actual 41 files. The original
 [collection status](raw/context-control-status-collected.json) is preserved;
 the corrected status records 41 and an explicit metadata erratum. Independent
-review confirms that no sample, raw archive or pass/fail condition changed.
+review confirms 41 files per archive, reproduces the raw arithmetic, and verifies
+that the collected-to-corrected status difference changes only metadata. The
+writer records that the original validator already required 41 files.
 
-## Rejected entry-alignment prototype and pending isolation test
+## Rejected entry-alignment prototypes
 
 Unpublished 6f5defc633100957d35738bd8fa636a00aae1ab4 (tree
 f626422a9f3ab346d4c688d93b63bb968d109155) differs from 597 by only the comment
@@ -424,14 +426,100 @@ tree 89b1064f804440b2d6897d9da91311b244fc4998, shown in
 production kernel its own .text.x86_encode_16 input section, separating its
 alignment requirement from ordinary unit code. The normal 42-source build
 passes. The first eight-suite matrix exits one: all five encoder modes pass,
-but external target checks, temporary-directory creation in the assembler
-cross-check, and disassembler CLI/oracles fail. The original log/status are
-preserved; diagnosis and further exact-byte, input/output layout, correctness
-and performance qualification are pending. This is an isolation experiment, not an established
-fix or acceptance claim. The real loop body and every experimental batch
+but the target command stops before its macro/GAS comparisons, temporary-directory
+creation fails in the assembler cross-check, and disassembler CLI/oracle setup
+fails before useful output checks. The original log/status are
+preserved. A separate repeat passes all eight suites, including every external
+comparison; the direct assembler probe also passes. The first failure's cause
+remains unknown. The complete 42-unit local ASan/UBSan build and all eight
+suites pass, with matching 481 source hashes and recorded build/test exits zero.
+The full dump remains exactly 16,035,840 identical bytes, the graph passes, and
+independent inspection verifies native instructions and both native/local
+artifact provenance. The input-section proof comes from a reproduced compile;
+linked hot-code inspection comes from the actual native image. The complete [three-round screen](raw/section64-triage-retry1-summary.json)
+retains 54 successful processes, no warmups, and all 41 files per archive.
+Vector selection is 14.49 to 14.57 ns/entry directly (+0.552%) and 14.46 to
+14.58 relatively (+0.830%), higher in all three pairs against both main and597.
+Encoding median ns is lower directly and equal relatively, with mixed paired
+directions; this does not offset the vector cost. Against597, RSS grows252KiB
+directly /244KiB relatively and minor faults grow4 in both contexts, each
+three paired increases. Independent review reproduces all30 metric series. The prototype is rejected
+without a performance waiver. The first screen launch failed duplicate-directory
+setup before any timed child; its error, empty archive and plan remain intact,
+and the successful retry has separate receipt paths. The real loop body and every experimental batch
 variant remain unchanged; generated-program ISA and data-storage alignment
 remain unchanged. #180 claims 6440428642 and 6441745311 record this narrow
 scope extension after refreshed encoder ownership checks.
+
+## Single-group remainder-loop candidate
+
+Unpublished cb56f1cb638c3cec2207048be268138e1083aab4, tree
+f52ed93ecd943c4afa1b2f8f1b0fb5b23c88a08e, starts from597 and skips the second
+full-group loop when groups equals one: the first loop has already exhausted
+the identical condition. Groups greater than one retain the remainder loop.
+No encoder API, table pointer, storage, record format or producer is changed.
+Independent source review supports the proof; no performance gain is assumed.
+
+The local Clang23.1.4 object diagnostic targets znver5 and reduces the backend
+kernel from9417 to6345 bytes. This is codegen diagnosis, not9700X performance.
+The [frozen native qualification](raw/group-guard-qualification-plan.json) also
+passes:42-source finalO3 build,481 source hashes, eight suites, graph
+42/23845/141528/zero unallowed cycles/three existing allowed/zero split
+variables, and exactly16035840 identical five-mode bytes. Original receipts
+are in raw/group-guard-qualification. Actual native SHA256 is
+ce9fc3067d74e39797da19872f6a2c930e9a3ae4f473a405d0de39ffab23c6cd.
+Its backend entry is6345 bytes; whole file31176348 and text18755386 bytes,
+both223520 below597. Rodata3137313, data.rel.ro8493088 and bss237749985
+bytes retain their previous sizes. Symbol/size evidence is from the linked
+native image. The initial name-selected dump misses the backend copy. The successful first
+screen round captures its exact linked address range after timing:964 decoded
+instructions, versus1425 in597; no empty snapshot is treated as code evidence.
+
+The full local Zen4 sanitizer build and all eight suites pass, with42 unique
+finalO1 ASan/UBSan/frame-pointer/no-recovery records and481 checked source
+hashes; original build/test exits are zero. This is functional diagnosis only.
+No changed-head CI is claimed for the unpublished candidate.
+
+The [three-round screen](raw/group-guard-triage-plan.json) is frozen and
+running through the sole measurement controller with the ordinary lock held
+separately per round. It compares main35,597 andcb56 directly and under the
+existing matched-relative protocol. The first round also captures the actual
+backend instruction range after timing (42 archive files); other rounds have41.
+All54 timed children succeed. The [historical screen](raw/group-guard-triage-summary.json)
+retains scalar costs +1.445% direct/+1.590% relative and encoding +1.149%
+in both contexts, all three pairs higher versus main35. Whole-process wall is
++1.015%/+0.955%, all three pairs higher. Vector selection is -0.207%/-0.277%,
+all three lower, and displayed encoding instructions fall17.78 to17.74. These
+point costs remain unaccepted. The unchanged main image now has peak RSS about
+415160KiB versus413649KiB in earlier controls; no source cause is established.
+
+A separate caller-template hot-linkage prototype is preserved in
+[its source patch](prototype-kernel-shared.patch) but not adopted. Its fast
+local C driver fails compilation because it omitted stdio.h; no execution or
+performance qualification is claimed. Independent review identifies ABI and
+caller-specialization risks and recommends the smaller loop guard first.
+
+## Current-main composition and final-method refresh
+
+Freeze current main a66f863878d28cd2c242b81a3544fc47d35f5996. The composed
+head is df02bc1065eb2da98e21eed723087b7d65c3eed2, tree
+8b6d18febae93beb1168499f46f8465ed846b230. Its merge1364610 resolves only
+x86_target_forms.c: retain the canonical generator and preserve #535
+(merged079af33) exactly. Eight of that PR's twelve concrete rows were already
+classified; three baseline PCMPEQD forms and XSAVE-gated XGETBV add four.
+Named profile positives and XSAVE-only positive/AVX-only negative record checks
+cover the handoff. The reviewer found one duplicate test-table rebuild, removed
+in df02; no incoming producer implementation is edited.
+
+Current [profiling guidance](https://github.com/buster14a/buster/blob/a66f863878d28cd2c242b81a3544fc47d35f5996/docs/profiling.md#comparing-two-versions)
+requires sampling code placements and fresh physical copies, with a repeated
+reference. The old unshifted campaigns remain historical and retain every cost;
+they are not relabeled or discarded. The new [frozen qualification plan](raw/current-qualification-plan.json)
+builds current main and composed head normally, with twelve backend placements
+spread over a page (0 through3696, step336) for subsequent copy controls. These
+are measurement images; production source gains no padding. Builds, tests,
+final-copy/placement timing and fresh CI for this source remain pending. The
+head's full local sanitizer build is queued through the shared core scheduler.
 
 ## Exploratory history and rejected costs
 
