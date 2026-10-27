@@ -30,7 +30,7 @@ The median of each build's 12 runs (six placements, two rounds), with their rang
 | `main.c`, instructions/input token | 278.23 | 276.59 | 278.23 |
 
 The branch's placements' medians for `sqlite3.c`'s main loop are 4.283 to 4.345 ms, against main's 4.425 to 4.470 ms
-and main again's 4.413 to 4.478 ms. A run's statistics (`per pass`) give its invocations' arguments expanded first.
+and main again's 4.413 to 4.478 ms.
 
 ## Whole processes
 
