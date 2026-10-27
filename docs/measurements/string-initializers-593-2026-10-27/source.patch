@@ -1,0 +1,483 @@
+diff --git a/docs/c-checker.md b/docs/c-checker.md
+index dbb49235..85d54dd4 100644
+--- a/docs/c-checker.md
++++ b/docs/c-checker.md
+@@ -623,6 +623,23 @@ data references. The direct initializer API retains its strict rejection
+ contract. Diagnostic-only scans borrow complete checked roots, restore both
+ arenas and never publish an initializer or a supposedly clean stream.
+ 
++String initializer lookup uses `CheckInput.string_ids`, the reader's token-to-literal
++index retained in the output arena. Every adjacent literal part names the same
++record. An array-valued expression also resolves its ordinary literal through
++its object identity (`token + 1`), preserving parenthesized string copies;
++predefined function-name arrays remain excluded from literal initialization.
++The planner checks the indexed record's bounds and identity instead of scanning
++all literals for every initializer, including nonstring elements of a record.
++Deferred bodies remap this existing column together with their merged literal
++pool, and corpus comparisons include the retained indices.
++
++Static-assert messages contribute no expression value. The reader's existing
++constant-context pass marks each message span once, after identifying its
++assertion's top-level comma. String operands in the condition remain checked.
++This removes a parser-ancestor walk per string, whose repeated traversal of a
++long initializer's separator chain was quadratic (#593). Both changes consume
++existing reader facts; they add no search pass or per-initializer allocation.
++
+ The source bridge owns symbols, names and Link tables in `output`; `bytes`
+ owns initialized contents and `scratch` is temporary. The three arenas must be
+ distinct. The lower-level emitter accepts an existing Link and object-to-symbol
+diff --git a/src/buster/compiler/c_check_corpus.c b/src/buster/compiler/c_check_corpus.c
+index 9e1ea435..06a9ae8b 100644
+--- a/src/buster/compiler/c_check_corpus.c
++++ b/src/buster/compiler/c_check_corpus.c
+@@ -1619,7 +1619,8 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
+                 left->linkage[token] == right->linkage[token] && left->defined[token] == right->defined[token] &&
+                 left->tentative[token] == right->tentative[token] && left->initializer_nodes[token] == right->initializer_nodes[token] &&
+                 left->initializer_begins[token] == right->initializer_begins[token] && left->initializer_ends[token] == right->initializer_ends[token] &&
+-                left->token_nodes[token] == right->token_nodes[token] && left->body_declarations[token] == right->body_declarations[token] &&
++                left->token_nodes[token] == right->token_nodes[token] && left->string_ids[token] == right->string_ids[token] &&
++                left->body_declarations[token] == right->body_declarations[token] &&
+                 left->declaration_bodies[token] == right->declaration_bodies[token] && left->parameters[token] == right->parameters[token] &&
+                 left->parameter_next[token] == right->parameter_next[token] && left->control_owners[token] == right->control_owners[token] &&
+                 left->label_targets[token] == right->label_targets[token] && left->case_ranges[token] == right->case_ranges[token] &&
+diff --git a/src/buster/compiler/c_check_deferred_test.c b/src/buster/compiler/c_check_deferred_test.c
+index bb89a9e4..e5e3cb05 100644
+--- a/src/buster/compiler/c_check_deferred_test.c
++++ b/src/buster/compiler/c_check_deferred_test.c
+@@ -94,6 +94,17 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
+     // What a body appends to the reader's tables: strings and __func__, statement expressions, VLAs, varargs, asm
+     // statements, cached constants, compound literals and statics.
+     { "strings-and-function-names", "const char* top = \"top\";\nconst char* f(void) { return __func__; }\nconst char* g(void) { const char* s = \"body\"; return s + sizeof __func__; }\n", true },
++    {
++        "string-initializer-indices",
++        "const char* before[]={\"first\",\"second\"};\n"
++        "const char* f(int i){static const char* t[]={\"body\" \" one\",\"body two\",__func__};"
++        "_Static_assert(sizeof \"condition\"==10,\"message\" \" tail\");return t[i];}\n"
++        "char between[][4]={\"ab\",(\"cd\")};\n"
++        "const char* g(int i){struct Row{char text[4];const char* p;};"
++        "static struct Row t[]={{\"xy\",\"body three\"},{\"za\",\"body four\"}};return t[i].p;}\n"
++        "const char* after[]={\"last\",\"final\"};\n",
++        true,
++    },
+     { "statement-expressions", "int f(int a) { int r = ({ int t = a + 1; t * 2; }); return r + ({ a; }); }\nint g(int b) { return ({ int u = b; u; }); }\n", true },
+     { "variable-length-arrays", "int f(int n, int a[n]) { int b[n]; b[0] = a[0]; return (int)sizeof b + b[0]; }\nint g(int m) { int c[m][2]; return (int)sizeof c; }\n", true },
+     { "varargs",
+diff --git a/src/buster/compiler/c_check_initializer.c b/src/buster/compiler/c_check_initializer.c
+index ae98c8f0..fa1e47a5 100644
+--- a/src/buster/compiler/c_check_initializer.c
++++ b/src/buster/compiler/c_check_initializer.c
+@@ -14,6 +14,7 @@
+ typedef struct CheckInitString CheckInitString;
+ struct CheckInitString
+ {
++    // An ordinary literal's object is token + 1; string_ids maps every adjacent part to this record's index.
+     uint32_t object;
+     uint32_t token;
+     TypeId type;
+@@ -72,7 +73,7 @@ struct CheckInitializer
+ };
+ 
+ static __attribute__((unused)) bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+-                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
++                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                   TypeId type, uint32_t begin, uint32_t end, bool static_storage,
+                                   Arena* output, Arena* scratch, CheckInitializer* result);
+ 
+@@ -176,6 +177,7 @@ struct CheckInitWalker
+     CheckInitWarningCollector* warnings;
+     const CheckInitString* strings;
+     uint32_t string_count;
++    const uint32_t* string_ids;
+     const uint64_t* indices;
+     const uint8_t* index_valid;
+     const TypeId* expression_types;
+@@ -941,6 +943,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
+     *position = token;
+ }
+ 
++// Both identities are already indexed by the reader. In particular, an ordinary nonstring initializer never
++// searches the unit's literal pool, and an array-valued parenthesized string resolves through its original object.
+ static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint32_t node)
+ {
+     const CheckInitString* result = 0;
+@@ -953,18 +957,26 @@ static const CheckInitString* check_init_string(CheckInitWalker* walker, uint32_
+             object = value->object;
+         }
+     }
+-    bool literal_only = begin < end;
+-    for (uint32_t token = begin; literal_only && token < end; token += 1)
++    if (object != 0 && object <= walker->parser->tokens.count && walker->string_ids != 0)
+     {
+-        literal_only = walker->parser->tokens.kinds[token] == PARSE_KIND_STRING;
++        const uint32_t index = walker->string_ids[object - 1];
++        if (index < walker->string_count && !walker->strings[index].predefined && walker->strings[index].object == object)
++        {
++            result = walker->strings + index;
++        }
+     }
+-    for (uint32_t i = 0; i < walker->string_count && result == 0; i += 1)
++    if (result == 0 && begin < end && walker->string_ids != 0)
+     {
+-        const CheckInitString* string = &walker->strings[i];
+-        if (!string->predefined && ((object != 0 && string->object == object) ||
+-                                    (string->token >= begin && string->token < end && literal_only)))
++        const uint32_t index = walker->string_ids[begin];
++        bool literal_only = index < walker->string_count && !walker->strings[index].predefined &&
++                            walker->strings[index].token >= begin && walker->strings[index].token < end;
++        for (uint32_t token = begin; literal_only && token < end; token += 1)
++        {
++            literal_only = walker->parser->tokens.kinds[token] == PARSE_KIND_STRING;
++        }
++        if (literal_only)
+         {
+-            result = string;
++            result = walker->strings + index;
+         }
+     }
+     return result;
+@@ -1860,7 +1872,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
+ // The diagnostic caller has proved this complete root's dependency closure despite unrelated stream reports.
+ // Only that caller permits reports; it discards all parts unconditionally and cannot supply emission plans.
+ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+-                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
++                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
+                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph,
+                                    CheckInitWarningCollector* warnings, const CheckInitObjects* objects)
+@@ -1874,7 +1886,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
+     const uint64_t scratch_start = scratch != 0 ? scratch->length : 0;
+     bool valid = types != 0 && parser != 0 && token_nodes != 0 && stream != 0 && output != 0 && scratch != 0 &&
+                  output != scratch && type_is_valid(types, type) && begin < end && end <= parser->tokens.count &&
+-                 (string_count == 0 || strings != 0) && (stream->count == 0 || (stream->values != 0 && stream->diagnostics != 0));
++                 (string_count == 0 || (strings != 0 && string_ids != 0)) && (stream->count == 0 || (stream->values != 0 && stream->diagnostics != 0));
+     valid = valid && (graph == NULL || (graph->count == stream->count && (graph->count == 0 ||
+             (graph->ops != NULL && graph->tokens != NULL && graph->operand0 != NULL && graph->operand1 != NULL && graph->operand2 != NULL))));
+     result->status = valid ? CHECK_INIT_OK : CHECK_INIT_INVALID;
+@@ -1895,6 +1907,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
+             .warnings = warnings,
+             .strings = strings,
+             .string_count = string_count,
++            .string_ids = string_ids,
+             .static_storage = static_storage,
+             .ignore_excess = ignore_excess,
+             .output = output,
+@@ -1920,31 +1933,31 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
+ }
+ 
+ static bool check_initializer_plan(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+-                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
++                                   const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                    TypeId type, uint32_t begin, uint32_t end, bool static_storage, bool diagnostic_only, bool ignore_excess,
+                                    Arena* output, Arena* scratch, CheckInitializer* result, const CheckGraph* graph)
+ {
+-    return check_initializer_plan_warnings(types, parser, token_nodes, stream, strings, string_count, type, begin, end,
++    return check_initializer_plan_warnings(types, parser, token_nodes, stream, strings, string_count, string_ids, type, begin, end,
+                                            static_storage, diagnostic_only, ignore_excess, output, scratch, result, graph, NULL, NULL);
+ }
+ 
+ static bool check_initializer_run(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+-                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
++                                  const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                   TypeId type, uint32_t begin, uint32_t end, bool static_storage,
+                                   Arena* output, Arena* scratch, CheckInitializer* result)
+ {
+-    return check_initializer_plan(types, parser, token_nodes, stream, strings, string_count, type, begin, end,
++    return check_initializer_plan(types, parser, token_nodes, stream, strings, string_count, string_ids, type, begin, end,
+                                   static_storage, false, false, output, scratch, result, NULL);
+ }
+ 
+ // Clang's ordinary C language modes diagnose excess elements as warnings. Their expressions remain in the
+ // checked graph, but source-compatible plans omit them. Direct consumers can request the strict API above.
+ static __attribute__((unused)) bool check_initializer_source(TypeTable* types, const Parser* parser, const uint32_t* token_nodes,
+-                                     const CheckStream* stream, const CheckInitString* strings, uint32_t string_count,
++                                     const CheckStream* stream, const CheckInitString* strings, uint32_t string_count, const uint32_t* string_ids,
+                                      TypeId type, uint32_t begin, uint32_t end, bool static_storage,
+                                      Arena* output, Arena* scratch, CheckInitializer* result)
+ {
+-    return check_initializer_plan(types, parser, token_nodes, stream, strings, string_count, type, begin, end,
++    return check_initializer_plan(types, parser, token_nodes, stream, strings, string_count, string_ids, type, begin, end,
+                                   static_storage, false, true, output, scratch, result, NULL);
+ }
+ 
+diff --git a/src/buster/compiler/c_check_initializer_input.c b/src/buster/compiler/c_check_initializer_input.c
+index 118e8fc3..7711ea2d 100644
+--- a/src/buster/compiler/c_check_initializer_input.c
++++ b/src/buster/compiler/c_check_initializer_input.c
+@@ -129,7 +129,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
+             // earlier retained bytes; an ordinary nonconstant result does not reject the automatic object.
+             const uint64_t output_mark = output->length;
+             CheckInitializer constant = { 0 };
+-            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
++            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
+                                        input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
+                                        true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects);
+             valid = accepted || constant.status != CHECK_INIT_RESOURCE;
+@@ -314,7 +314,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
+         if (eligible)
+         {
+             CheckInitializer plan = { 0 };
+-            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
++            const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
+                                                          input->declared_types[declaration], begin, end, input->static_objects[declaration] != 0,
+                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects);
+             const bool retained = !accepted || check_init_object_retain(&objects, input, stream, parser, types, declaration, &plan, true, output, scratch);
+@@ -435,7 +435,7 @@ static bool check_initializers_run(CheckInitializers* result, const CheckInput*
+         if (input->initializer_begins[token] != BUSTER_CHECK_NONE)
+         {
+             CheckInitializer* plan = result->plans + at;
+-            valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count,
++            valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
+                                           input->declared_types[token], input->initializer_begins[token], input->initializer_ends[token],
+                                           input->static_objects[token] != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects);
+             if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
+diff --git a/src/buster/compiler/c_check_initializer_test.c b/src/buster/compiler/c_check_initializer_test.c
+index a5843dbe..c544ffd6 100644
+--- a/src/buster/compiler/c_check_initializer_test.c
++++ b/src/buster/compiler/c_check_initializer_test.c
+@@ -289,6 +289,61 @@ static void check_init_test_objects(CheckTest* test, Link* link, const CheckInit
+ 
+ #include "c_check_initializer_overload_test.c"
+ 
++// Reverse the pool, as a body merge can reorder its literals, and remap the published token index. Check syntax
++// and object lookup independently, without assuming that pool order, token order and object identity coincide.
++static void check_init_test_string_index(CheckTest* test, const CheckInput* input, const Parser* parser, TypeTable* types, Arena* scratch)
++{
++    const uint64_t mark = scratch->length;
++    CheckInitString* strings = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitString, input->string_count);
++    uint32_t* ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)parser->tokens.count + 1);
++    bool valid = strings != NULL && ids != NULL;
++    for (uint32_t token = 0; valid && token < parser->tokens.count; token += 1)
++    {
++        const uint32_t id = input->string_ids[token];
++        valid = id == BUSTER_CHECK_NONE || id < input->string_count;
++        ids[token] = id != BUSTER_CHECK_NONE ? input->string_count - 1 - id : BUSTER_CHECK_NONE;
++    }
++    for (uint32_t i = 0; valid && i < input->string_count; i += 1)
++    {
++        strings[input->string_count - 1 - i] = input->strings[i];
++    }
++    CheckValue value = { 0 };
++    CheckStream stream = {
++        .values = &value,
++        .count = 1,
++    };
++    CheckInitWalker walker = {
++        .types = types,
++        .parser = parser,
++        .stream = &stream,
++        .strings = strings,
++        .string_count = input->string_count,
++        .string_ids = ids,
++    };
++    for (uint32_t i = 0; valid && i < input->string_count; i += 1)
++    {
++        const CheckInitString* string = strings + i;
++        value = (CheckValue){
++            .type = string->type,
++            .object = string->object,
++        };
++        const CheckInitString* expected = string->predefined ? NULL : string;
++        valid = check_init_string(&walker, 0, 0, 0) == expected;
++        if (!string->predefined)
++        {
++            valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == string;
++            value.offset = 1;
++            valid = valid && check_init_string(&walker, 0, 0, 0) == NULL;
++            const uint32_t id = ids[string->token];
++            ids[string->token] = input->string_count;
++            valid = valid && check_init_string(&walker, string->token, string->token + 1, BUSTER_CHECK_NONE) == NULL;
++            ids[string->token] = id;
++        }
++    }
++    check_test_expect(test, valid, "string initializer indices survive pool reordering, preserve object offsets and exclude predefined arrays");
++    arena_pop_to(scratch, mark);
++}
++
+ static void check_init_test_source_language(CheckTest* test, const char* source, const CheckInitExpected* expected, uint32_t count,
+                                             bool accept, bool emit, const char* clang, CLanguage language)
+ {
+@@ -328,6 +383,10 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
+         check_test_expect(test, checked == accept, description);
+         if (checked)
+         {
++            if (input.string_count != 0)
++            {
++                check_init_test_string_index(test, &input, &parser, &types.table, &scratch);
++            }
+             check_init_test_overload_parts(test, &input, &stream, &parser, &identifiers, &types.table, &initializers, source, clang);
+             for (uint32_t i = 0; i < initializers.count; i += 1)
+             {
+@@ -335,7 +394,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
+                 {
+                     const uint32_t declaration = initializers.declaration_tokens[i];
+                     CheckInitializer strict = { 0 };
+-                    const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
++                    const bool accepted = check_initializer_run(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
+                                                                  input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                  input.static_objects[declaration] != 0, &output, &scratch, &strict);
+                     check_test_expect(test, !accepted && strict.status == CHECK_INIT_INVALID && strict.parts == 0 && strict.count == 0 && output.length == 0 && scratch.length == 0,
+@@ -368,7 +427,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
+                     Arena tiny = output;
+                     tiny.capacity = sizeof(CheckInitPart);
+                     CheckInitializer rejected = { 0 };
+-                    const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count,
++                    const bool partial = check_initializer_plan(&types.table, &parser, input.token_nodes, &stream, input.strings, input.string_count, input.string_ids,
+                                                                 input.declared_types[declaration], input.initializer_begins[declaration], input.initializer_ends[declaration],
+                                                                 input.static_objects[declaration] != 0, false, false, &tiny, &scratch, &rejected, &input.graph);
+                     check_test_expect(test, !partial && rejected.status == CHECK_INIT_RESOURCE && rejected.parts == 0 && rejected.count == 0 && tiny.length == 0 && scratch.length == 0,
+@@ -797,6 +856,65 @@ static void check_init_test_flexible(CheckTest* test, const char* clang)
+         },
+     };
+     check_init_test_source(test, strings, string_expected, BUSTER_ARRAY_LENGTH(string_expected), true, true, clang);
++    static const char indexed[] =
++        "_Static_assert(sizeof \"condition\" == 10,\"message\" \" tail\");\n"
++        "_Static_assert(sizeof (char[][4]){\"abc\",\"def\"} == 8,\"nested strings\");\n"
++        "char joined[][4]={\"a\" \"b\",(\"cd\")};\n"
++        "int wide_joined[][3]={L\"a\" L\"b\",(L\"cd\")};\n"
++        "unsigned short short_joined[][3]={u\"a\" u\"b\",(u\"cd\")};\n"
++        "struct StringRow{char text[4];int wide[3];} string_rows[]={\n"
++        "{\"a\" \"b\",L\"cd\"},{(\"cd\"),L\"a\" L\"b\"}};\n";
++    static const CheckInitExpected indexed_expected[] = {
++        {
++            .name = "joined",
++            .bytes = {
++                [0] = 'a',
++                [1] = 'b',
++                [4] = 'c',
++                [5] = 'd',
++            },
++            .size = 8,
++            .class = BUSTER_LINK_CLASS_DATA,
++        },
++        {
++            .name = "wide_joined",
++            .bytes = {
++                [0] = 'a',
++                [4] = 'b',
++                [12] = 'c',
++                [16] = 'd',
++            },
++            .size = 24,
++            .class = BUSTER_LINK_CLASS_DATA,
++        },
++        {
++            .name = "short_joined",
++            .bytes = {
++                [0] = 'a',
++                [2] = 'b',
++                [6] = 'c',
++                [8] = 'd',
++            },
++            .size = 12,
++            .class = BUSTER_LINK_CLASS_DATA,
++        },
++        {
++            .name = "string_rows",
++            .bytes = {
++                [0] = 'a',
++                [1] = 'b',
++                [4] = 'c',
++                [8] = 'd',
++                [16] = 'c',
++                [17] = 'd',
++                [20] = 'a',
++                [24] = 'b',
++            },
++            .size = 32,
++            .class = BUSTER_LINK_CLASS_DATA,
++        },
++    };
++    check_init_test_source(test, indexed, indexed_expected, BUSTER_ARRAY_LENGTH(indexed_expected), true, true, clang);
+     check_init_test_source(test, "void f(void){struct F{int n;int v[];} empty={1,{}};}", 0, 0, true, false, clang);
+     static const char* invalid[] = {
+         "void f(void){struct F{int n;int v[];} local={1,{2,3}};}",
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index e4caac5a..a3998399 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -213,6 +213,9 @@ struct CheckInput
+     uint32_t asm_capacity;
+     uint32_t* asm_ids;
+     CheckInitString* strings;
++    // Literal index by token, including every part of an adjacent literal sequence; NONE for other tokens.
++    // Retained from the reader so initializer planning also resolves an array-valued literal by object - 1.
++    uint32_t* string_ids;
+     uint32_t string_count;
+     uint32_t token_count;
+     CBindingStatistics binding_statistics;
+@@ -3801,16 +3804,8 @@ static void check_input_expressions(CheckInputReader* reader)
+         }
+         else if ((reader->syntax[token] & BUSTER_CHECK_SYNTAX_STRING) != 0 && role == PARSE_ROLE_OPERAND)
+         {
+-            uint32_t ancestor = parser->tree.parents[token];
+-            while (ancestor < parser->tokens.count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_KEYWORD && parser->tree.roles[ancestor] != PARSE_ROLE_TERMINATOR)
+-            {
+-                ancestor = parser->tree.parents[ancestor];
+-            }
+-            const uint32_t keyword = ancestor < parser->tokens.count ? reader->first_child[ancestor] : BUSTER_CHECK_NONE;
+-            const uint32_t separator = keyword < ancestor ? check_constant_punctuation(parser, keyword + 2, ancestor, PARSE_KIND_COMMA) : ancestor;
+-            const bool message = keyword < parser->tokens.count && parser->tokens.kinds[keyword] == PARSE_KIND_STATIC_ASSERT && token > separator;
+             const CheckInitString* string = check_input_string(reader, token);
+-            if (!message && string != 0)
++            if (string != 0)
+             {
+                 node = check_input_add(reader, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+                 if (node != BUSTER_CHECK_NONE)
+@@ -4068,13 +4063,8 @@ static void check_input_expressions(CheckInputReader* reader)
+         }
+         else if (kind == PARSE_KIND_STRING)
+         {
+-            // Static assertions' messages do not contribute a value; other string objects need the string-pool adapter.
+-            uint32_t ancestor = parser->tree.parents[token];
+-            while (ancestor < parser->tokens.count && parser->tree.roles[ancestor] != PARSE_ROLE_CLOSE_KEYWORD && parser->tree.roles[ancestor] != PARSE_ROLE_TERMINATOR)
+-            {
+-                ancestor = parser->tree.parents[ancestor];
+-            }
+-            supported = ancestor < parser->tokens.count && parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_KEYWORD;
++            // Static-assert messages and concatenated tails are already ignored. Other literals need an operand.
++            supported = false;
+         }
+         else if (kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH ||
+                  kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+@@ -4457,6 +4447,12 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
+         {
+             const uint32_t separator = check_constant_punctuation(parser, token + 2, close, PARSE_KIND_COMMA);
+             memset(reader->constant_contexts + token + 2, 1, separator - token - 2);
++            if (separator < close)
++            {
++                // A message contributes no expression value. Mark its span once instead of walking the parser
++                // ancestors of every string, which is quadratic in a long initializer's separator chain (#593).
++                memset(reader->ignored + separator + 1, 1, close - separator - 1);
++            }
+         }
+     }
+     if (parser->tokens.kinds[token] == PARSE_KIND_CASE)
+@@ -4469,8 +4465,9 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
+     }
+ }
+ 
+-// The constant contexts of every token. Only static objects, static assertions and case labels open one, so the vector
+-// path visits those alone, the scalar path every token. Each writes constant_contexts alone, which no scan reads.
++// The constant contexts of every token, and the static-assert message spans that contribute no expression value.
++// Only static objects, static assertions and case labels open one, so the vector path visits those alone, the scalar
++// path every token. Neither the context writes nor the ignored message spans affect the selection scans.
+ static void check_input_constant_contexts(CheckInputReader* reader)
+ {
+     const Parser* parser = reader->parser;
+@@ -4792,6 +4789,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     BUSTER_CHECK_OUTPUT_ARRAY(expression_regions, uint32_t);
+     BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
+     BUSTER_CHECK_OUTPUT_ARRAY(strings, CheckInitString);
++    BUSTER_CHECK_OUTPUT_ARRAY(string_ids, uint32_t);
+ #undef BUSTER_CHECK_OUTPUT_ARRAY
+     if (valid && deferred_tokens != 0)
+     {
+@@ -4838,7 +4836,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     BUSTER_CHECK_INPUT_ARRAY(initializer_finish_heads, uint32_t);
+     BUSTER_CHECK_INPUT_ARRAY(initializer_finish_next, uint32_t);
+     BUSTER_CHECK_INPUT_ARRAY(incomplete_array_types, TypeId);
+-    BUSTER_CHECK_INPUT_ARRAY(string_ids, uint32_t);
++    reader.string_ids = input->string_ids;
+     BUSTER_CHECK_INPUT_ARRAY(designator_indices, uint64_t);
+     BUSTER_CHECK_INPUT_ARRAY(designator_valid, uint8_t);
+     BUSTER_CHECK_INPUT_ARRAY(designator_tokens, uint32_t);
