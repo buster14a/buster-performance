@@ -61,6 +61,37 @@ Local Clang 23.1.4 validation has these separate results:
   `fpclassify-known-category-effects`. There are no swizzle failures. This local
   full-suite run does not pass; its log is retained in `local-checker.log`.
 
+### Review follow-up: classify the four local mismatches
+
+The [review of PR #589](https://github.com/buster14a/buster/pull/589#pullrequestreview-5671114683)
+requested a baseline/regression classification. A fresh optimized build of the
+unmodified frozen base, and a repeated head run, use the same local Clang
+23.1.4 and `test-checker --seed 133`. Builds run through `cores -n 4` with
+`BUSTER_DEBUG_INFO=0`; each checker run uses `cores -n 1`.
+
+| Source | Checks | Failures | Exit status |
+| --- | ---: | ---: | ---: |
+| Original base `74dae999` (original fixtures) | 259,613 | 4 | 1 |
+| Head `0d4148e4` (includes new swizzle fixtures) | 259,887 | 4 | 1 |
+
+Both reproduce exactly the same failures on both checker schedules:
+
+- `fpclassify-conditional-selector-effects`, `n=2`, repeat 0:
+  Buster 512434 versus Clang 512344.
+- `fpclassify-known-category-effects`, `n=-3`, repeat 0:
+  Buster 1512430 versus Clang 1512340.
+
+The extracted failure signatures compare byte-for-byte equal. These are
+**pre-existing baseline failures under the local toolchain, not regressions
+introduced by #589**. This classification does not turn either local full-suite
+run into a pass and does not diagnose which compiler or fixture is responsible.
+The separate passing 9700X results above remain the target-host acceptance.
+
+`review/` retains the baseline build, both complete checker logs, source and
+local tool/CPU/binary identities, failure signatures, and commands. The compiler
+head is unchanged; no repeated hardware or timing campaign was needed for this
+evidence-only follow-up.
+
 ## Measurement method
 
 Both builds use the approved host's Clang 23.1.1, the existing `./build.sh`,
