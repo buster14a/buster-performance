@@ -106,6 +106,40 @@ process rounds. `time-runs` rotates inputs within each round and retains every
 process status, wall time, CPU time, peak RSS and page-fault count. It checks
 status stability, not source acceptance; both properties are inspected here.
 
+`9700x-final-ab.log` contains all six successful timing blocks. Every one of
+the **252 measured invocations exited 0**; all 36 per-input summaries contain
+seven samples, and no timing block reports a failed process. `summary.tsv`
+retains the wall-median ranges and measured RSS ranges as well as these values.
+
+Wall values below are the median of the three per-round seven-sample medians.
+RSS values are the median of the 21 measured process peaks. Positive
+differences mean more time or memory. These are descriptive results from
+three rotating rounds, not confidence intervals or improvement claims.
+
+| Input | Baseline ms | Candidate ms | Wall difference | Baseline peak KB | Candidate peak KB | RSS difference |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| plain | 6.200 | 6.046 | -2.5% | 66,640 | 67,620 | +1.5% |
+| packed-suppressed | 5.722 | 5.797 | +1.3% | 66,628 | 67,596 | +1.5% |
+| packed-warning | 5.691 | 5.765 | +1.3% | 66,644 | 67,632 | +1.5% |
+| packed-locals | 9.709 | 10.644 | +9.6% | 102,268 | 107,932 | +5.5% |
+| packed-unused | 5.533 | 5.481 | -0.9% | 62,564 | 63,520 | +1.5% |
+| SQLite | 145.859 | 145.775 | -0.1% | 596,512 | 597,256 | +0.1% |
+
+The adversarial zero-match case has no diagnostic arena allocation, but its
+whole-process peak RSS still rises by 956 KB (1.5%). Its measured ranges are
+62,488–62,604 KB on the reference and 63,352–63,544 KB on the candidate.
+The plain control has a similar 980 KB (1.5%) median increase. This screen
+does not separate code-page placement and other fixed process costs, and
+does not claim zero process overhead. The zero-capacity arena test directly
+checks the absence of record/context allocation for unrelated addresses.
+
+The anonymous-local case exposes a real feature cost: preparing 2,048
+anonymous diagnostic names, source history and conversion witnesses costs
+9.6% wall time and 5.5% peak RSS in this input, even with terminal output
+disabled. The small plain/SQLite timing differences cannot establish an
+improvement; executable placement remains a limitation. These measurements
+do not establish native-code performance or full compiler/corpus acceptance.
+
 The initial `pilot-ab-rejected-arguments.log` is incomplete and **not a valid
 SQLite measurement**: its fourth input used `--no-default-config`, which the
 production driver refuses before checking source. That pilot was stopped and
