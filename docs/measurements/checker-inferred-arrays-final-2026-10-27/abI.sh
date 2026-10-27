@@ -1,0 +1,41 @@
+#!/bin/bash
+# #555's walk at its final head (abi17: main 51bf882b, abi10's build, against be3e7ec1): test-checker against clang
+# 23.1.1; the frozen sqlite3.c's -fsyntax-only (clang's feature answers); and a generated file of inferred arrays of GNU
+# vectors, extension vectors and structs (walk/walk_arrays.c's, 2,000 functions, 48,000 elements) beside the same
+# arrays with their sizes written, whose difference is the inference's cost; perf stat -r 11 in three rounds, each
+# build and run under its own hold of the lock, pinned to CPU 2.
+set -u
+export EXCLUSIVE_OWNER=claude-126 EXCLUSIVE_TITLE="solve #126: an inferred array's walk, final head A/B" EXCLUSIVE_LINK=https://github.com/buster14a/buster/pull/555
+lock=~/buster-fast-bench/exclusive.sh
+unset CPATH C_INCLUDE_PATH
+export TMPDIR=~/buster-fast-bench/solve-126-claude/tmp
+export SOURCE_DATE_EPOCH=1792454400
+corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+system=(-nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+driver=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --target=x86_64-linux-gnu -march=znver5 -std=gnu17 "${system[@]}" "$corpus/sqlite/sqlite3.c")
+walk=(--target=x86_64-linux-gnu -march=znver5 -std=gnu17 "${system[@]}")
+cd ~/buster-fast-bench/solve-126-claude/abi17
+(cd head && $lock env BUSTER_DEBUG_INFO=0 LC_NUMERIC=C ./build.sh > ../build_head.log 2>&1) || { echo "build head failed"; exit 1; }
+echo "built head"
+$lock ./head/build/compiler test-checker > test_checker.log 2>&1
+echo "test-checker status $? $(grep -E 'checks, [0-9]+ failures' test_checker.log | tail -1)"
+for tree in base head; do
+    $lock taskset -c 2 $tree/build/compiler -fsyntax-only "${driver[@]}" > drive_$tree.log 2>&1
+    echo "drive $tree status $?"
+    for file in inferred sized; do
+        $lock taskset -c 2 $tree/build/compiler -fsyntax-only "${walk[@]}" walk/$file.c > walk_${file}_$tree.log 2>&1
+        echo "walk $file $tree status $? diagnostics $(grep -c 'warning\|error' walk_${file}_$tree.log)"
+    done
+done
+for round in 1 2 3; do
+    for tree in base head; do
+        echo "== round $round tree $tree driver" >> perf.log
+        $lock perf stat -x, -e instructions:u,cycles:u,task-clock -r 11 taskset -c 2 $tree/build/compiler -fsyntax-only "${driver[@]}" 2>&1 >/dev/null | grep -v "^exclusive.sh:\|^  title:\|^  link:\|^  pull request:" >> perf.log
+        for file in inferred sized; do
+            echo "== round $round tree $tree walk $file" >> perf.log
+            $lock perf stat -x, -e instructions:u,cycles:u,task-clock -r 11 taskset -c 2 $tree/build/compiler -fsyntax-only "${walk[@]}" walk/$file.c 2>&1 >/dev/null | grep -v "^exclusive.sh:\|^  title:\|^  link:\|^  pull request:\|warning\|error\|^ \|^[0-9]* warning" >> perf.log
+        done
+    done
+done
+echo "perf done"
+echo done
