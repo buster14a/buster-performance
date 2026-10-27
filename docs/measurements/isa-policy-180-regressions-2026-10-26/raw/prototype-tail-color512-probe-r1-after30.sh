@@ -1,8 +1,19 @@
 set -e
+set -o pipefail
 d='/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-probe-r1-after30'
 c='/tmp/buster421-prototype-tail-color512-probe-r1-after30'
 mkdir "$d" "$c"
 trap 'rm -rf -- "$c"' EXIT
+sha256sum -c - > "$d/qualified-image-check.log" <<'BUSTER421_QUALIFIED_IMAGES'
+0bf7f99eca610ea770a66debe3aa2b414a835479a2c6a65daf5895a4778a9653  /home/david/buster-fast-bench/codex-421-integrated-base-74da/build/compiler
+6adfd4d0bd608f07cf70c96acff10fa3a11e9472af474e6e3eacb91726f75fa8  /home/david/buster-fast-bench/codex-421-prototype-tail-color512/build/compiler
+4f4b5a30f1e3cd48dbd3892bfe7f465fcf4e9552e78237e3a4bb7558cfbfb457  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-336
+b97475e11fc3ca85df206a623e60a0217fed00b72a2904dd7935bc811926575b  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/integrated-base-checker-placements/compiler-336
+4b4c7a62a84601d843ebaed25e551293cb9a431cb9a5117cca8ea45c58733192  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/integrated-base-checker-placements/compiler-672
+f7e8e1648fdd74597e0e1e451ef571beb870f40db675e6b3191c41f1d87ab798  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-672
+3bd23c7d51a0dd55eb5857d0e80437005ed13689bd93b66d5b5d81c4552daf53  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/integrated-base-checker-placements/compiler-1008
+48dd9bbbcbf78162ce2e1999704d56f9a78077835157b8be2348d4bfbcca7d07  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1008
+BUSTER421_QUALIFIED_IMAGES
 printf '%s  %s\n' '94d7c1ff56e666a3065a3577bdda5c7fa2cf2535a3bd0de5254fddd5a12745aa' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/procbench-24f54c2' | sha256sum -c - > "$d/harness-check.log"
 cp --reflink=never '/home/david/buster-fast-bench/codex-421-integrated-base-74da/build/compiler' '/tmp/buster421-prototype-tail-color512-probe-r1-after30/bin-000'
 cmp '/home/david/buster-fast-bench/codex-421-integrated-base-74da/build/compiler' '/tmp/buster421-prototype-tail-color512-probe-r1-after30/bin-000'

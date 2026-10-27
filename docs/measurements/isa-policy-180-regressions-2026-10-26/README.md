@@ -147,19 +147,45 @@ The original PATH-resolved dump recipe is retained. Native imageSHA256 is
 6adfd4d0bd608f07cf70c96acff10fa3a11e9472af474e6e3eacb91726f75fa8.
 File/text/BSS are31,571,541/19,024,276/249,372,769bytes: versus publicac57,
 file-15,900,text-41,312,BSS+88,704bytes. These are correctness/static facts.
-No candidate performance measurements have run yet. Its frozen288-child screen
-will run only after the single active diagnostic controller finishes.
+Its frozen288-child direct screen is now the sole active measurement controller,
+with qualified-image checks per batch and all12candidate active-symbol census
+in the first. The first192status-zero children are retained, allqualified hashes/copies/headers
+verified and no major faults. Full-call plain flags0/3 medians cost0.54/0.16%
+versus main; conditioned flags0 improves0.53% while flags3 costs0.62%. All
+repeated references and placement bounds remain in the partial summary. These
+point estimates are unaccepted; round2/plain full flags0 improves1.25% while
+flags3 is-0.162%versus main/+0.163%versus main-again. Round2/conditioned
+full flags0 improves0.712%, while flags3 equals main/costs0.311%versus
+main-again. Repeats continue; the final third round has not completed. All12candidate
+images move each selected active kernel/runner by the exact requested shift,
+covering four mod64phases.
 
-The checked C table-phase diagnostic has8/12completed64-phase runs at this
-checkpoint: two complete permutation orders, both plain/30ms-conditioned
-flags0/3. Its controller is stopped while its own first third-order child
-drains; the last three runs will not launch. This bounds diagnostic cost
-before direct source comparison; all completed data is retained. It reuses benchmark allocations within one executable to vary
+The checked C table-phase diagnostic stopped at9/12completed64-phase runs:
+two complete permutation orders (plain/30ms,flags0/3), plus the normally drained
+third-order30ms/flags0child. All576observations remain retained. The last three
+runs never launched; controller143/child0 are recorded. This bounds diagnostic
+cost before direct source comparison. It reuses benchmark allocations within one executable to vary
 only the default template phase. Repeated plain results support placement
 sensitivity, but conditioned results vary and no cache mechanism, production
 fix or performance acceptance follows. The modified diagnostic also adds one
 operation to three full loops, so its values are not production timing.
 All raw outputs, rejected candidates and failed setup recipes remain retained.
+
+One further private source snapshot changes only the outlined candidate's
+default64 backing-array alignment64to4096 and adds a comment. Its original
+one-entry guards/array extent stay unchanged (logical start64mod4096), as do
+the other four mode declarations. It has no runtime phase API. SourceSHA256
+7a20d8e0ee84234e44d2c7068e04784763385434216983f26c2d9c58aab89eae;
+644-source native/local sanitizer matrices now each pass8/8, with41finalO3/
+O1instrumented units. The nonrecursive graph and exact16,035,840-byte dump
+pass under pinned absolute dump tools. All24default arrays retain3,700,864-byte
+extent and first64mod4096. Native imageSHA256is
+6eedca5ad9b46d767d772d2c03937e3c96d1539f126b3eeb68138d22cb7a266e.
+File/text equal the outlined candidate; BSS grows88,704bytes from linker
+alignment, matching fixed512despite the smaller declared array. Six native
+function counts and full-loop counts match outlined. It is not a performance
+result or promoted source. The fixed512 measured source stays
+frozen; no second performance controller has been launched.
 
 ## Historical campaigns and candidates
 

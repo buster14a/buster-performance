@@ -1,8 +1,65 @@
 set -e
+set -o pipefail
 d='/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-probe-r1-plain'
 c='/tmp/buster421-prototype-tail-color512-probe-r1-plain'
 mkdir "$d" "$c"
 trap 'rm -rf -- "$c"' EXIT
+sha256sum -c - > "$d/qualified-image-check.log" <<'BUSTER421_QUALIFIED_IMAGES'
+0bf7f99eca610ea770a66debe3aa2b414a835479a2c6a65daf5895a4778a9653  /home/david/buster-fast-bench/codex-421-integrated-base-74da/build/compiler
+6adfd4d0bd608f07cf70c96acff10fa3a11e9472af474e6e3eacb91726f75fa8  /home/david/buster-fast-bench/codex-421-prototype-tail-color512/build/compiler
+4f4b5a30f1e3cd48dbd3892bfe7f465fcf4e9552e78237e3a4bb7558cfbfb457  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-336
+b97475e11fc3ca85df206a623e60a0217fed00b72a2904dd7935bc811926575b  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/integrated-base-checker-placements/compiler-336
+4b4c7a62a84601d843ebaed25e551293cb9a431cb9a5117cca8ea45c58733192  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/integrated-base-checker-placements/compiler-672
+f7e8e1648fdd74597e0e1e451ef571beb870f40db675e6b3191c41f1d87ab798  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-672
+3bd23c7d51a0dd55eb5857d0e80437005ed13689bd93b66d5b5d81c4552daf53  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/integrated-base-checker-placements/compiler-1008
+48dd9bbbcbf78162ce2e1999704d56f9a78077835157b8be2348d4bfbcca7d07  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1008
+47db80e32a2411ac7a38c644537fe03c19fa4f941173d72575431f0f2d896f23  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1344
+a3f2ee4b90de305c0144ef32cd639614bc455ae7ee5ed1380d132a1aa14dfd82  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1680
+94372ff5866d47bb02e0bd3ebd8da0c22804252e7922d713252089f2342b4a91  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2016
+90c0eb70b8e53cf32e5e8373adce1b8321257df8cc7e39eca11bad5f3ce32943  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2352
+a55d42a7d8b45427226a647f566bfdd869d376084f33c266dda85f638b7ec8d6  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2688
+77a65fd2b6f6b3fc23c6ed30dd27beb49df11a3700912fa5f61b9952964b5208  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3024
+ac72f72773ac5383bc4f9ba3d31cfd0133290eb183932a3542f4bfe6909436bb  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3360
+a0c33b3cd3a943eaa32b8b03273c1713c197593d198db3821edaebab0cf700c8  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3696
+BUSTER421_QUALIFIED_IMAGES
+{
+printf 'image	%s	%s	%s
+' 'candidate' 0 '/home/david/buster-fast-bench/codex-421-prototype-tail-color512/build/compiler'
+readelf -sW '/home/david/buster-fast-bench/codex-421-prototype-tail-color512/build/compiler' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 336 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-336'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-336' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 672 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-672'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-672' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 1008 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1008'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1008' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 1344 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1344'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1344' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 1680 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1680'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-1680' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 2016 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2016'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2016' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 2352 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2352'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2352' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 2688 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2688'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-2688' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 3024 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3024'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3024' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 3360 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3360'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3360' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image	%s	%s	%s
+' 'candidate' 3696 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3696'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-tail-color512-checker-placements/compiler-3696' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+} > "$d/candidate-placement-census.log"
 printf '%s  %s\n' '94d7c1ff56e666a3065a3577bdda5c7fa2cf2535a3bd0de5254fddd5a12745aa' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/procbench-24f54c2' | sha256sum -c - > "$d/harness-check.log"
 cp --reflink=never '/home/david/buster-fast-bench/codex-421-integrated-base-74da/build/compiler' '/tmp/buster421-prototype-tail-color512-probe-r1-plain/bin-000'
 cmp '/home/david/buster-fast-bench/codex-421-integrated-base-74da/build/compiler' '/tmp/buster421-prototype-tail-color512-probe-r1-plain/bin-000'
