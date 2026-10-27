@@ -3,6 +3,11 @@
 Evidence for [Buster #487](https://github.com/buster14a/buster/issues/487) and
 [source PR #561](https://github.com/buster14a/buster/pull/561).
 
+The updated PR is qualified in the [latest-main record](review-latest/README.md),
+including the compound-literal review correction and subsequent main merge.
+The [first review-fix record](review-fe4daf9b/README.md) retains its complete
+five-input screen. The results below describe the initial `59a7aca5` source.
+
 Reachable out-of-range x86 builtin immediates become default-error warning
 events in the driver. A checked control/expression walk resolves dead and
 unevaluated calls before lowering. Prototype ICE, rounding, SAE and scale
