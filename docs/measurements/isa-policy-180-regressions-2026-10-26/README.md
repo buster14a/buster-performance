@@ -79,6 +79,14 @@ Production configured-target boundary adoption remains with #136/#133. This
 slice does not take over producer, preprocessor, builtin-lowering or tuning
 implementation. #180 remains open.
 
+A further private source snapshot outlines default64 final-group work and
+selects constant1/2/4quads for short tails. Independent source review found no
+correctness issue; localASan/UBSan passes8/8 with644exact source files and41
+instrumentedO1units. Its native qualification is queued, and its288-child
+diagnostic plan is prepared but not launched. The public compiler head remains
+ac57. The final cursor address crosses the new call, so linked full-loop
+allocation must be inspected before any timing interpretation.
+
 The receipt reader now supports separately configured plain/conditioned batch
 counts below64. Legacy12/36 modes pass25checks each, and their complete1728-row
 summary remains byte identical. Separate54/36 synthetic fixtures pass12ASan/UBSan
