@@ -87,8 +87,8 @@ correctness issue; localASan/UBSan passes8/8 with644exact source files and41
 instrumentedO1units. Its first native recipe selected the wrong archive and failed the input
 checksum guard before source extraction/build. The failed receipt is retained.
 A distinct corrected retry validates the selected archive locally before
-queueing and preserves the original failure. Its288-child diagnostic plan is
-prepared but not launched. The public compiler head remains
+queueing and preserves the original failure. Its original288-child diagnostic plan was stopped after96completed
+children, as recorded below. The public compiler head remains
 ac57. A matched localClang23.1.4/O3/znver5 object diagnostic measures6500B/1009
 parent instructions plus3897B/610helper instructions, versus13009B/1976
 for ac57. All four full-loop opcode/memory histograms match, with no cursor
@@ -135,6 +135,31 @@ tests pass. Review also hardened the shared numeric-line terminator against
 embeddedNUL suffixes: both legacy configurations pass26checks and the complete
 1728-observation/648-row summary remains byte identical. No phase measurements
 have been accepted yet.
+
+The current private fixed512 candidate keeps the outlined-tail logic and changes
+only the default64 table's leading padding/alignment. Native and local sanitizer
+matrices each pass8/8 (644source files,41units). All24 linked default table
+objects start on4096-byte boundaries and their first logical template is at512
+mod4096. The other four modes' source declarations are unchanged; linked
+addresses can move. A separate absolute-Clang/pinned-linker supplement checks
+all644source hashes and reproduces the entire16,035,840-byte template dump.
+The original PATH-resolved dump recipe is retained. Native imageSHA256 is
+6adfd4d0bd608f07cf70c96acff10fa3a11e9472af474e6e3eacb91726f75fa8.
+File/text/BSS are31,571,541/19,024,276/249,372,769bytes: versus publicac57,
+file-15,900,text-41,312,BSS+88,704bytes. These are correctness/static facts.
+No candidate performance measurements have run yet. Its frozen288-child screen
+will run only after the single active diagnostic controller finishes.
+
+The checked C table-phase diagnostic has8/12completed64-phase runs at this
+checkpoint: two complete permutation orders, both plain/30ms-conditioned
+flags0/3. Its controller is stopped while its own first third-order child
+drains; the last three runs will not launch. This bounds diagnostic cost
+before direct source comparison; all completed data is retained. It reuses benchmark allocations within one executable to vary
+only the default template phase. Repeated plain results support placement
+sensitivity, but conditioned results vary and no cache mechanism, production
+fix or performance acceptance follows. The modified diagnostic also adds one
+operation to three full loops, so its values are not production timing.
+All raw outputs, rejected candidates and failed setup recipes remain retained.
 
 ## Historical campaigns and candidates
 
