@@ -1,0 +1,1 @@
+for t in base head head base; do echo "== $t"; taskset -c 2 head/build/compiler time-runs --runs 3 --warmups 1 --executable $t/build/compiler --list test-assembler --cross-check | grep -E "^list|failed"; done
