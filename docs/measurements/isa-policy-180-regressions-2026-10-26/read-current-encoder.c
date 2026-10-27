@@ -39,7 +39,7 @@ typedef struct Sample
 
 static bool line_end(const char* text)
 {
-    return text[0] == 0 || (text[0] == '\n' && text[1] == 0);
+    return text[0] == '\n' && text[1] == 0;
 }
 
 static bool empty_file(const char* path)

@@ -121,6 +121,18 @@ static bool fixture_copy(const char* source, const char* destination, unsigned m
             cursor = mutation == 9 ? strchr(cursor + 1, '\n') : 0;
         }
     }
+    else if (okay && mutation == 10)
+    {
+        char* cursor = strstr(text, "x86_encode_16");
+        cursor = cursor != 0 ? strchr(cursor, '\n') : 0;
+        okay &= cursor != 0 && size + 8 < sizeof(text);
+        if (okay)
+        {
+            memmove(cursor + 8, cursor, strlen(cursor) + 1);
+            memcpy(cursor, "\0ignored", 8);
+            size += 8;
+        }
+    }
     FILE* output = okay ? fopen(destination, "wb") : 0;
     okay &= output != 0 && fwrite(text, 1, size, output) == size;
     if (output != 0)
@@ -182,6 +194,11 @@ int main(int argc, char** argv)
             checks += 1;
             okay &= fixture_copy(source, destination, 0);
         }
+        snprintf(source, sizeof(source), "%s/%s/1-main-p00-c0-0.out", argv[1], batch);
+        snprintf(destination, sizeof(destination), "%s/1-main-p00-c0-0.out", directory);
+        okay &= fixture_copy(source, destination, 10) && !read_sample(root, batch, 0, "main-p00-c0", &sample);
+        checks += 1;
+        okay &= fixture_copy(source, destination, 0);
         // --first 3 numbers both captures and TSV rows as round 3. These are
         // temporary parser fixtures, never measured campaign receipts.
         snprintf(source, sizeof(source), "%s/%s/1-main-p00-c0-0.out", argv[1], batch);

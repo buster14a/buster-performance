@@ -102,8 +102,11 @@ and checker parents shrink6345→3221bytes, but adding their3837-byte helper
 raises the combined backend footprint by713bytes/132static instructions. Full
 backend loops retain224/199instructions. Whole-image text falls46,864bytes,
 rodata rises20,128bytes and file falls21,452bytes versus ac57; BSS is unchanged.
-Its sole performance controller is running the prepared mixed screen. No
-candidate has been promoted and no timing acceptance follows.
+Its first96children are complete and independently audited. Short-call ns
+improves4.52–12.10% versus main, but full calls retain1.09–1.96% costs versus
+both references. Only2/6planned batches ran; the conditioned child drained0
+and the controller exited143. The image remains unaccepted and no source was
+promoted.
 
 The receipt reader now supports separately configured plain/conditioned batch
 counts below64. Legacy12/36 modes pass25checks each, and their complete1728-row
@@ -111,6 +114,27 @@ summary remains byte identical. Separate54/36 synthetic fixtures pass12ASan/UBSa
 checks, including the last valid command, extra out-of-range, duplicate and
 missing rows. No measured54-row campaign has run. Future larger batches keep
 the original observation counts/timers and require distinct provenance.
+
+A separate private C diagnostic now varies the default table through64cache-line
+phases in one executable, reusing46fixed allocation addresses and the unchanged
+benchmark. All64complete table extents match, and scalar/vector counts0..199,
+four output states, constructor/output sentinels and allocator negative cases
+pass local sanitizers and native verification. The output-checked native image
+is ded4c396d61d2e5cb5dfc89cf5af910acfa5dcd012bc263b4125725ff02835e1;
+645source checks and both output-failure exits pass. Earlier un-checked source
+was superseded before timing; a deprecated-linker-option failure/retry is also
+preserved. Tool paths now match their pinned hashes.
+
+The causal screen has12bounded runs (three phase permutations, flags0/3,
+plain/after30), with an ordinary lock per invocation. Its modified executable
+and fixed addresses can show phase sensitivity; they cannot independently
+prove a production fix, a specific cache-alias cause or counter multiplexing.
+The strict C consumer requires all64phases, exact259726-byte/3825-mark frozen
+workload, stable allocation identity and positive counters. Its48synthetic
+tests pass. Review also hardened the shared numeric-line terminator against
+embeddedNUL suffixes: both legacy configurations pass26checks and the complete
+1728-observation/648-row summary remains byte identical. No phase measurements
+have been accepted yet.
 
 ## Historical campaigns and candidates
 
