@@ -55,7 +55,9 @@ command. The options are the first record's:
   holds of the lock of 5 rounds each. The script meant to rotate the order
   over all 15 rounds, but passed the hold's number as `bash -c`'s `$0`, so each
   hold ran the same five orders: each build ran first in 3 or 6 rounds, second
-  in 3 or 6 and third in 3 or 6 (`stages.txt` keeps the order).
+  in 3 or 6 and third in 3 or 6 (`stages.txt` keeps the order). `balanced/`
+  repeats it with the order balanced, by `balanced/ab.sh`, the harness fixed:
+  use that one for future captures.
 - **Counters:** `perf stat -r 11 -e task-clock,cycles:u,instructions:u,branch-misses:u`
   of each build's default compile.
 - **Graph run:** `benchmark-checker-source --passes 11 --only vector` of each
@@ -80,6 +82,8 @@ command. The options are the first record's:
 - `build-*.log`: the builds' last lines.
 - `probe.patch`: the probe, against `d32d593f`'s `c_checker.c`.
 - `laptop/`: the laptop's per-function samples and its probe run (below).
+- `balanced/`: the A/B repeated with the order balanced and the harness fixed,
+  with a README of its own.
 - `SHA256SUMS`: the files' hashes.
 
 ## Results
