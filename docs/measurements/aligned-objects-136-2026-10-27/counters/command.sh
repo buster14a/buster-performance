@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# The command that took head's counters (run from the laptop, under one hold of the 9700X's lock), as the session ran
+# it: perf stat of benchmark-backend --only vector for main, head, main, head. Each run's files replaced the run before's,
+# so counters/*.out and *.perf hold each tree's second run; both-runs.txt is the command's output, which printed each run.
+timeout 1800 tailscale ssh david@benchpress 'cd ~/buster-fast-bench/aligned-136 && mkdir -p counters && EXCLUSIVE_OWNER=claude-aligned-136 EXCLUSIVE_TITLE="Objects aligned past 16 (#136): counters" EXCLUSIVE_LINK="https://github.com/buster14a/buster/issues/136" ~/buster-fast-bench/exclusive.sh bash -c "for t in main head main head; do taskset -c 2 perf stat -x, -e cycles:u,instructions:u,branch-misses:u,L1-icache-load-misses:u,ic_tag_hit_miss.instruction_cache_miss:u ./\$t/build/compiler benchmark-backend --only vector > counters/\$t.out 2> counters/\$t.perf; echo \$t; sed -n 3p counters/\$t.out; cut -d, -f1,3 counters/\$t.perf; done" 2>&1 | grep -v "^exclusive.sh: waiting\|^  title:\|^  link:\|^  pull request:"' 2>&1 | tail -30
