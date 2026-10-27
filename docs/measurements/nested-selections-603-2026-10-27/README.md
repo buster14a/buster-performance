@@ -13,6 +13,9 @@ updates and the compact interval index's logarithmic traversal.
 - Measured/qualified compiler head: `1014c2968ef0f3c02d9be4ba2130c8c78d5a6cc7`.
   Its implementation commit is `a4f0dfd5b82357bd779d78bb44e52483389e62c4`;
   the second commit bounds the Clang-facing regression fixture.
+- Publication head `2f659f26d9935837e18f448816b825e80dd2a7a5` only wraps
+  initializer formatting and documents the results. The reformatted C files'
+  non-whitespace bytes match the qualified versions (`logs/format-identity.txt`).
 - AMD Ryzen 7 9700X, Linux `6.18.50-2-lts`, Clang 23.1.1, native `-O3`
   `./build.sh` with `BUSTER_DEBUG_INFO=0`. Each build, test and measurement
   took the shared `exclusive.sh` lock separately. Measurements were pinned to
@@ -35,6 +38,44 @@ three recorded processes per case per round. Tables are medians of nine
 recorded processes; all 1,920 processes including warm-ups returned zero.
 These use the uninstrumented binaries. Process counters include startup and
 cleanup; `check_input_ms` comes from the existing driver stage clock.
+Empty captures are represented losslessly by their paths in
+`empty-captures.txt`; all nonempty captures are retained under `samples/`.
+The disassembly capture trims trailing whitespace while retaining instruction
+bytes and addresses.
+
+## Entry after lighter scalar work
+
+`logs/process-conditioned-r2.txt` is an additional whole-process comparison
+using the existing `time-runs` scalar integer spin for 100 ms immediately
+before each recorded compile. Seven rotated runs, one discarded warm-up and
+one executable copy per build compare base/head/base-again on all eight deep
+inputs and frozen SQLite. All 189 recorded processes and the 27 warm-ups
+succeed. Exact commands are in `logs/process-conditioned-command-r2.txt`.
+
+| Input, D=2048 | Base A ms | Head ms | Base B ms |
+|---|---:|---:|---:|
+| Runtime choose, selected | 9.381 | 2.596 | 8.665 |
+| Runtime choose, discarded | 13.051 | 2.260 | 12.980 |
+| Runtime generic, selected | 13.491 | 3.539 | 13.719 |
+| Runtime generic, discarded | 30.804 | 3.705 | 30.481 |
+| Constant choose, selected | 14.893 | 2.372 | 14.674 |
+| Constant choose, discarded | 13.318 | 2.301 | 12.992 |
+| Constant generic, selected | 22.855 | 3.691 | 23.052 |
+| Constant generic, discarded | 21.219 | 3.926 | 20.783 |
+| Frozen SQLite syntax | 116.197 | 115.925 | 116.297 |
+
+The deep cases retain about 3.5–8.3 times whole-process improvement against
+the mean base controls. SQLite is -0.28% in this additional run. The first
+small case's base controls differ by 7.6%, so retain the controls and ranges
+when interpreting small changes. This run omits `--time-stages` and collects
+user-only PMUs; it is an additional A/B comparison, not a direct subtraction
+of clock states from the earlier collector's results.
+
+The first invocation of this additional check exited during setup because
+the parent directory for executable copies had not been created. Its two-line
+failure is retained in `logs/process-conditioned-setup-failed.txt`; no failed
+setup data contributes to the measurements. The corrected command ran only
+after creating the parent directory.
 
 The two `*-check-input` campaigns separately use the existing
 `benchmark-checker-bindings --only direct --passes 7`: three independent
