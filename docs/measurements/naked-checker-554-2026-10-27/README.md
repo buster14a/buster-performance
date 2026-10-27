@@ -2,6 +2,10 @@
 
 Qualification and a bounded syntax-only cost screen on October 27, 2026.
 
+The [main-merge follow-up](merge/README.md) records qualification after
+integrating main's naked-function lowering, including updated lowering-boundary
+fixtures. Earlier review and initial-head results remain below.
+
 The [review follow-up](review/README.md) qualifies the later compiler head
 `1193571fd09b3a2c35a74b07371070e37068721b`, including the VLA/type-only and
 inline register-type review cases. The results below retain the initial head.
