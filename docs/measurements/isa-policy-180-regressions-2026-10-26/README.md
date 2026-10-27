@@ -62,10 +62,11 @@ batches/240children were retained; round3/after30 was never launched.
 An isolated candidate strengthens five storage alignments from64 to4096 without
 changing array extents, entries or readiness. Native8/8, graph and dump pass;
 local sanitizer tests pass8/8. BSS grows105,088bytes versus the rejected
-tail candidate, while file/text sizes match it. The first48-child diagnostic
-batch improves small calls about4%, but full-batch results remain mixed,
-including an unaccepted cost. Repeated controls are pending; addresses alone
-do not establish alias causality. Backend, policy, initialization and
+tail candidate, while file/text sizes match it. The first96children cover plain and conditioned diagnostics. Small calls
+improve2.64–4.66% versus main, but full flags0 still costs0.89445% plain and
+0.53381% conditioned (positive against both references). This candidate is
+rejected. Already queued round2/plain is draining; the last three batches are
+not launched. Addresses alone do not establish alias causality. Backend, policy, initialization and
 fresh generated-program timings remain pending the retained candidate decision. Current physical CI40546104621 passes82/82 commands on its actual integration
 revision10f2c5d9f2 (ac57 into8fcf19cee49cdc54e53602b67dc94ad70ec7eb6c).
 The full1,070,307-byte log and SHA256 receipt are retained. Historical receipts
