@@ -57,6 +57,33 @@ each, about 2,700 times for sqlite3.c. So the reduction comes from how clang com
 `check_lower_part`'s per-entry loops: about one instruction per entry would give it. This record doesn't attribute it
 further. IBS, or a far longer sampling run, could.
 
+## After merging main `78ec3f8a`
+
+The branch then merged main at `78ec3f8a`, with #552, #536's jump tables and #557, as `81cec58f`. The merge numbers
+the templates' own symbols after the jump tables' and adds no work to a unit without asm statements. `after-merge/`
+has the same comparison against that main: base `78ec3f8a`, head `81cec58f`, each command under the lock on its own,
+on CPU 2. `after-merge/scripts/queue-merge.sh` built base in the first try, and `queue-merge2.sh` built head and ran
+the comparison. `after-merge/identities.txt` and the trees' manifests are beside them.
+
+Both trees write the same object (`aa07c5e1c9468c495f50f704c2fb557d`, `after-merge/logs/queue.log`). #536's tables
+make it differ from the object above.
+
+| | main | head | |
+|---|---:|---:|---:|
+| Wall (`ab`, 5 rounds of 11 runs: the median and range of the rounds' medians, `after-merge/logs/ab-sqlite.log`) | 187.81 ms (187.15–188.23) | 186.69 ms (186.38–187.28) | −0.60% |
+| User instructions (`perf stat -r 11`, twice each, `after-merge/logs/perf-sqlite-*.log`) | 2,191,975,215 and 2,191,975,216 | 2,190,834,683 and 2,190,834,683 | −0.052% |
+| User cycles | 887.6 M, 887.5 M | 881.3 M, 883.3 M | −0.59% |
+| Peak RSS (`ab`, the rounds' medians) | 664,040 KB | 664,040 KB | 0 |
+
+Head again runs fewer user instructions: 1,140,532, the same count in both `perf stat` runs. #536's record
+(`6328c266`) measured how much the placement of the same code moves this compile: up to 0.7% in cycles and about
+2 M instructions between two builds of the same work. Both differences here are inside that, so this record doesn't
+claim them for the PR's code.
+
+Two tries before this one lost head's build to the host's `/tmp`. Its tmpfs had run out of inodes, so `mktemp` failed
+with "No space left on device". Their logs are in `after-merge/logs/first-try/` and `second-try/`; their base runs
+have no head runs to pair with. The third try ran once the tmpfs had inodes to spare again.
+
 ## The assembler
 
 `benchmark-assembler`, twice each (`logs/assembler-*.log`). The matcher admits more forms on head, and its parser
