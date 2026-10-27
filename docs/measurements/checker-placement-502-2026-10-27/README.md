@@ -64,3 +64,23 @@ User cycles against main, the median of 54 runs per build in each of the three r
 Every range over placements includes 0. Wall time is in `ab.txt` (main 143.68 to 143.92 ms; #473 −0.09%, −0.19%,
 +0.16%; #502 −0.20%, −0.20%, −0.07%; both −0.20%, −0.35%, −0.04%). Main's placements spread 0.71 to 1.14% in user
 cycles, and #502's 0.32 to 0.88%, which is what its copies alone spread (0.60 to 1.08%).
+
+## `benchmark-checker-source` (`logs/q6`), for #543's review
+
+`scripts/queue6.sh` runs `benchmark-checker-source` of the frozen `sqlite3.c`, the 9700X job's command line on
+`preprocessor-391e729af658`. The builds are main `cb5736ff`, #502's section, and main again as the floor. Each is
+run at the six placements of `queue5.sh`, from two fresh copies per round (paths of one length), in three rounds with
+the builds' order rotating: 36 processes per build. Each process takes the lock alone, on CPU 2. Address space
+randomization stays on, so each process's stack lands at an offset of its own (#445's effect). Each process reports
+its body graph's medians over 21 passes, for each path.
+
+Cycles per body node, the median of each build's 36 processes, and against main in each round:
+
+| Path | main | #502 | main again | #502 against main, per round | main again, per round |
+| --- | ---: | ---: | ---: | --- | --- |
+| scalar | 278.25 | 276.79 (−0.52%) | 279.12 (+0.32%) | −0.51%, −0.78%, −0.38% | +0.03%, +0.37%, +0.59% |
+| vector | 303.72 | 301.53 (−0.72%) | 304.28 (+0.18%) | −0.34%, −0.91%, −0.67% | −0.11%, +0.57%, +0.42% |
+
+In ns/node: scalar 50.40 (main), 50.21 (#502) and 50.65 (again); vector 54.90, 54.63 and 55.11. Each build has 4 to 6
+processes more than 2% slower than its median, #445's stack offsets. So the section costs the checker stage nothing.
+It reads 0.4 to 0.9% faster in each round, a little past the floor's +0.6%.
