@@ -155,3 +155,38 @@ project material under Apache-2.0 WITH LLVM-exception. Clang runs externally;
 LLVM's `SemaChecking.cpp`, `SemaExpr.cpp` and `AST/Expr.cpp` at `llvmorg-23.1.3` were behavior
 references. No LLVM implementation or external corpus source is imported.
 SQLite and frozen system headers remain external runtime inputs.
+
+## Current-main integration, 2026-10-27
+
+Compiler head `bdcfc89b95805dfbc049b2911837f41ab61c1d92` integrates main
+`2bc55bfd` and preserves both the packed-member warning and the newly landed
+loop-hint diagnostics. The two packed-warning implementation files are
+byte-identical to `4fa50ac2`; two additional original Clang probes check warning
+retention and conversion suppression inside a rejected annotated loop.
+The packed-specific differential set now has **104 cases**.
+
+The immutable integration source archive (`git archive HEAD build.sh src tests`)
+has SHA-256 `c67f5edcce378151444de0531f0f7148caec91a64fe6f42c47a3d68bb42eb94d`.
+Its source tree is `e925888d4740d9f96393e22a30fcbc32d3376e96`, its build-script
+blob is `9909122edfe1459305d8dc0efabd49805939f025`, and its tests tree is
+`3cd54ce65e008b233b57380837afb2e070e14c3f`. Binary/toolchain identity is in
+`integration-bdcfc89b-identities.txt`; no source directory was overlaid.
+
+`integration-bdcfc89b-9700x.log` records all five suites passing in 13.5 seconds:
+
+| Integration suite | Result |
+| --- | --- |
+| Types, packed layouts | Passed, no failed checks |
+| Checker, seed 507 | 254,584 checks, 0 failures |
+| Driver, real executable | 21,559 checks, 0 failures |
+| Deferred source readers | 61 fixtures, 960 checks, 0 failures |
+| Packed-local corpus, four lanes | 1 file, 3 bodies, zero differences |
+
+The corresponding local build/driver logs also pass. The local broad checker
+is 254,584 checks with the same four recorded Clang 23.1.4 fpclassify oracle
+failures and the same values, with no additional failures.
+
+The cost table above remains a measurement of **4fa50ac2**, before the
+independent changes newly landed on main. The whole integrated compiler's
+performance was not separately remeasured; those numbers are not an
+exact-head performance claim for this integration.
