@@ -1,0 +1,3 @@
+set -e
+./build.sh > '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/prototype-tail-mainloop-local-asan-build.log' 2>&1
+./build/compiler parallel --jobs 4 --timeout 120 '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/current-tests.list' > '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/prototype-tail-mainloop-local-asan-matrix.log' 2>&1

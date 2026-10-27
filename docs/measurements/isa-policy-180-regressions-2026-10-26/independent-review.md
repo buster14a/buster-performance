@@ -257,3 +257,31 @@ The reviewer confirms this final24-check test design; both configurations now
 pass24checks under local ASan/UBSan through the cores queue. The
 plain36-row fixture does not prove conditioned30ms parsing, which awaits the
 complete actual campaign.
+
+## Complete ac57 encoder and private tail-candidate audit
+
+Independent recomputation verifies all1728children,648summaryrows and432actual
+30ms-conditioned headers. All3456hashlines,3456inode rows and3792regularfiles
+in48archives match; all1776child/harness stderr files are empty. Wrapper stderr
+contains only normal lock-wait metadata. Every median/percentage/Cartesian bound
+matches. Plain ac57 medians are12/12higher than both main labels,0.6766–1.6971%;
+conditioned results are8higher/3lower/1tie. One major fault is retained at
+round1/plain/flags2 command32(main-p10-c0). No filtering or acceptance follows.
+The C gate completes, verifies all conditioned headers and fails on /dev/full.
+
+The private masked-tail source passes native8/8, localSan8/8, graph and dump.
+Full-loop opcode/memory histograms match ac57 without extra PDEP/masked loads
+or spills; whole-function instruction counts increase. Independent decoding
+confirms both disassembly captures and the stated footprint components. Both
+288-child screens match source-image hashes/inodes and status0, with zero majors.
+Partial-batch medians improve every comparison, but no-tail costs against main
+persist; reject this candidate.
+
+The second private source only restores main's original remainder loop. Native
+8/8 and graph/dump pass. Its initial localSan6/8 run inherited the sanitizer
+compiler wrapper into external Clang oracles; the clean-PATH retry passes8/8.
+The actual retry did not rebuild; a corrected full reproduction recipe is saved
+separately. The independent reviewer finds no semantic change in the loop
+restoration. Storage-address arithmetic is checked, including64bytes before
+the first template; addresses alone do not prove alias causality. Second-control
+timings and the third data-alignment candidate remain unaccepted/incomplete.

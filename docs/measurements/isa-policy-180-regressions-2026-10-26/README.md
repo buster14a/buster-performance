@@ -37,9 +37,30 @@ and exact matched summaries are both preserved; mixed tiny SQL directions
 establish no speedup or neutrality. Independent receipt review confirms all966 summary values and raw status/counter
 checks. The static address census verifies all24 images and72 selected addresses:
 both active encoder kernels and the backend runner move by every exact requested
-shift, covering all four mod64 phases available at16-byte alignment. The encoder campaign is running;
-backend, policy, initialization and fresh generated-program timings follow it
-sequentially. Current physical CI40546104621 passes82/82 commands on its actual integration
+shift, covering all four mod64 phases available at16-byte alignment. The frozen ac57 encoder campaign is complete:1,728 captures pass the C gate,
+including all432 actual30ms conditioned cases. The output-failure check returns
+nonzero for /dev/full. All12 plain round/state medians are slower by0.68–1.70%;
+conditioned states also retain costs. These regressions remain unaccepted. One
+major fault is retained in the raw data; no observation was removed.
+
+A private tail-copy-removal candidate based on ac57 is under investigation. Both
+native and local sanitizer matrices pass8/8, graph and five-mode dump match.
+Native code shows no extra full-loop PDEP/mask work or spills; tail memcpy calls
+disappear. All six corresponding full-loop opcode/memory histograms match, but
+allocation and placement differ, and whole-function instruction counts rise
+1976→2060 (standalone) and964→1018 (backend). File size rises2608bytes; section
+deltas include text-1488,rodata+128,eh_frame+1328,relro_padding+1488. No timing or
+retention claim follows from these static results.
+
+The candidate initial screen is complete: all24 medians improve2.77–5.18%
+against ac57. Its full-batch control is also complete: all12plain medians cost
+1.01–3.60% against main74, and all12conditioned cases exceed main-again. This
+candidate is rejected despite its partial-batch win. A second private control
+restores main's remainder loop; native8/8 and clean-oracle localSan8/8 pass,
+while its long-stream screen is running. An isolated page-alignment candidate
+is queued for native qualification; recorded addresses do not establish alias
+causality. Backend, policy, initialization and
+fresh generated-program timings remain pending the retained candidate decision. Current physical CI40546104621 passes82/82 commands on its actual integration
 revision10f2c5d9f2 (ac57 into8fcf19cee49cdc54e53602b67dc94ad70ec7eb6c).
 The full1,070,307-byte log and SHA256 receipt are retained. Historical receipts
 below retain their original revisions and do not qualify this final head.
