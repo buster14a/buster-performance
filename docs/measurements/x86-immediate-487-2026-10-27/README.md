@@ -7,6 +7,8 @@ The compound-literal correction and subsequent main merge are qualified in
 the [latest-main record](review-latest/README.md). The later tests-only
 [`-w` review follow-up](review-quiet/README.md) adds explicit command-line
 suppression coverage without changing the diagnostic implementation.
+The subsequent [hard-message assertions](review-hard/README.md) require the
+actual hard-constraint diagnostic and reject an injected unrelated error.
 The [first review-fix record](review-fe4daf9b/README.md) retains its complete
 five-input screen. The results below describe the initial `59a7aca5` source.
 
