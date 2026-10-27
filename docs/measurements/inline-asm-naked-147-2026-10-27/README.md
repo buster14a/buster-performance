@@ -1,0 +1,96 @@
+# Inline assembly: naked functions, labels and names (#147), 2026-10-27
+
+buster14a/buster's branch `claude/inline-asm-naked-147`, the second part of #147's inline assembly claim, against main
+at its merge-base, on the 9700X (Ryzen 7 9700X, Zen 5). The branch compiles naked functions, makes the labels that
+templates define into symbols, and resolves the other names templates use.
+
+## Sources and binaries
+
+- **Base:** main at `079af33a391de0d10740bc9768b6ece5f46b8740`, the branch's merge-base. That is #535's merge, the
+  first part of the claim.
+- **Head:** `c54b3cf33361d16ede07f852529f1e00769e9c06`. It merges that main into the branch's two commits:
+  `fbbd26cd` (the assembler) and `f5e25df5` (the lowering).
+- Each tree was sent with `git archive` into an empty directory. `manifest-079af33a.sha256` and
+  `manifest-c54b3cf3.sha256` list every file. The trees on the host matched them file for file (635 files each),
+  leaving out `build/` and `build.log`.
+- Each tree was built with `LC_NUMERIC=C BUSTER_DEBUG_INFO=0 ./build.sh` under the lock. The executables' hashes, the
+  toolchain and the inputs' hashes are in `identities.txt`.
+
+Every measurement held the shared lock (`~/buster-fast-bench/exclusive.sh`) for itself. Each ran on CPU 2 unless said
+otherwise, with base and head in alternating order. The logs leave out the lock's waiting lines, which name other
+sessions' private links.
+
+A first run measured #535's head `d9bd14be` against the branch's `f5e25df5`, before main moved on. It was stopped
+after its drive check, when the branch merged main (`logs/first-pair/`). In that run both trees wrote the same object
+as here.
+
+## The default path: `-c` of sqlite3.c
+
+The input is the frozen corpus's `sqlite3.c` (SQLite 3.53.2, `/var/lib/buster-9700x/corpora/preprocessor-391e729af658`).
+The options are `--predefines $corpus/provenance/gnu17-pinned-predefines.txt --target=x86_64-linux-gnu -march=znver5
+-std=gnu17 -nostdinc` with the corpus's three `-isystem` directories, and the output goes to `/dev/null`. The file has
+no asm statement and no naked function. The run leaves out `--clang-features`, as #535's record did.
+
+Both trees write the same object (`b4cc5868df7fafacd95cc01cef01066a`, `logs/queue.log`), which is #535's record's too.
+
+| | main | head | |
+|---|---:|---:|---:|
+| Wall (`ab`, 5 rounds of 11 runs: the median and range of the rounds' medians, `logs/ab-sqlite.log`) | 187.15 ms (186.70–188.01) | 186.62 ms (186.12–187.48) | −0.28% |
+| User instructions (`perf stat -r 11`, twice each, `logs/perf-sqlite-*.log`) | 2,189,610,811 and 2,189,610,815 | 2,187,800,096 and 2,187,800,097 | −0.083% |
+| User cycles | 891.4 M, 888.5 M | 884.5 M, 885.3 M | −0.6% |
+| Peak RSS (`ab`, the rounds' medians) | 662,960 KB | 662,024 KB | −0.14% |
+
+Head runs 1,810,716 fewer user instructions, the same count in both `perf stat` runs of each tree: a code difference,
+not noise. `scripts/step-profile.sh` sampled `instructions:u` every 200,003 instructions over 5 compiles of each tree
+(`logs/profile-*.txt`), but the attribution it gives can't be trusted at this rate. perf's sample-rate cap dropped
+samples: 48,214 and 48,516, where about 54,700 were due. The functions whose samples moved most between the trees are
+of unchanged code. `check_driver_reports`, `check_graph_action`, `check_input_resolve_range` and `check_data_prepare` are
+the same size in both executables (`logs/function-sizes.txt`), so their shifts are sampling noise. The functions this PR
+changes are:
+
+- `check_program_emit_lanes`, 7,373 bytes larger, with the names pass and the label definitions;
+- `check_program_asm_plan`, which clang no longer inlines into `check_lower_prepare`;
+- `check_lower_part`, 16 bytes smaller, whose loops run per entry.
+
+On a unit without asm statements, the code the PR adds runs once per body or per function. That is a few instructions
+each, about 2,700 times for sqlite3.c. So the reduction comes from how clang compiled the changed functions, likely
+`check_lower_part`'s per-entry loops: about one instruction per entry would give it. This record doesn't attribute it
+further. IBS, or a far longer sampling run, could.
+
+## The assembler
+
+`benchmark-assembler`, twice each (`logs/assembler-*.log`). The matcher admits more forms on head, and its parser
+joins string instructions with their prefixes and chooses `movq`'s family by its operands.
+
+| | main | head |
+|---|---:|---:|
+| Vector path, total | 1.485, 1.457 ms | 1.448, 1.453 ms |
+| Scalar path, total | 3.655, 3.688 ms | 3.601, 3.570 ms |
+| Match index | 419,496 bytes | 419,496 bytes |
+
+## musl's symbols
+
+CI's command (`--symbols-minimum 354`) ran on the frozen copy of musl's eight directories (`logs/musl-*.log`). Both
+trees compare 354 files' objects with clang -O0's, with 0 different and 0 failures. musl's remaining inline assembly
+refusals are x87 operand constraints, the matcher's SSE scalar instructions and explicit register variables. This PR
+doesn't take those.
+
+## main.c's three functions
+
+`main_three.c` holds the three functions of `main.c` that #535 still refused, extracted as they are:
+`interpreter_native_bridge`, `x86_semantics_test_enter` with its statics, and `x86_semantics_test_return_address`.
+`scripts/step-three.sh` ran on it once under the lock (`logs/step-three.log`):
+
+- head's `--verify -c` by the vector and the scalar paths: the same object;
+- `nm`: clang -O0's symbols, `x86_semantics_test_return` among them, the naked functions at clang's offsets (0 and
+  0xd0, the label at 0x1a4); ours adds `x86_semantics_test_return_address`'s helper, `.Lbuster_asm_2`;
+- `interpreter_native_bridge`'s 203 bytes and `x86_semantics_test_enter`'s 437 bytes are clang's (the padding between
+  functions differs: ours `int3`, clang's a multi-byte `nop`);
+- their FDEs have no CFA instructions, over clang's ranges;
+- with `-g`, their rows are at clang's lines (10 and 53), and `llvm-dwarfdump --verify` passes.
+
+## Scripts
+
+`scripts/queue.sh` built both trees and ran the drive check, the `ab`, the `perf stat` pairs, the assembler pairs and
+musl's comparison. `scripts/step-three.sh` and `scripts/step-profile.sh` ran after it. `scripts/timed.sh` is the
+wrapper `queue.sh` times musl's run with.
