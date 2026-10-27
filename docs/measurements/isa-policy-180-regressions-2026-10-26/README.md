@@ -1,22 +1,50 @@
 # PR421 remaining-performance fixes
 
-Current compiler head is df02bc1065eb2da98e21eed723087b7d65c3eed2, tree
-8b6d18febae93beb1168499f46f8465ed846b230, pushed to draft PR421. Leave it
-open/unmerged. The current frozen baseline is a66f863878d28cd2c242b81a3544fc47d35f5996.
-Both images pass the manual normal 9700X build and all eight focused suites.
-Current-head local ASan/UBSan is 7/8: an empty-shape overread also reproduces
-on pinned main; owner coordination is pending. Required current-head 9700X CI
-is queued, not green. No performance exception is requested or accepted.
+Current frozen source is ac574f988b3db78f6e01d793ad19e3eb7224141f (tree
+9b9e5ef941e17b77a1c9f35b875184cb817f4745), compared with main
+74dae999734fa0423efcc198af2ebd6251cc8108 (tree
+c18664632d9447e6114b4470b17a0f32dd6d7bdb). Conflicts are resolved and pushed;
+GitHub reports mergeable. Leave PR421 draft/open/unmerged. No performance
+exception is requested or accepted.
 
-Three current placement/fresh-copy whole-C rounds are complete: verified short-C
-user cycles fall 3.22–3.36%; SQLite checking user-cycle point costs are +0.03%,
-+0.08% and +0.15%. Those positive costs are retained and remain unaccepted.
-The independent encoder placement/copy campaign is queued/running under ordinary
-per-batch shared locks. Backend synthetic timing is deferred for the inherited
-ASan defect. Earlier sections retain each named historical source and campaign;
-older wins or CI results never qualify this head.
+Both frozen images pass all eight native suites, the nonrecursive graph check,
+and the exact 16,035,840-byte five-mode template comparison. The final head also
+passes all eight local ASan/UBSan suites. Full source manifests cover641 base
+and644 head Git files; each native image has41 final-O3 translation units.
+See [native provenance](raw/final-native-provenance.json) and
+[local sanitizer summary](raw/final-local-asan-summary.json).
 
-## Frozen sources and images
+The main74 merge preserves #565 and #584 owner changes. The canonical policy
+classifies1,667/8,352 forms and denies all6,685 unknowns. Matcher cache identity
+now includes reg/rm/syntax in addition to its previous four inputs. Independent
+source review found a segmented movq tie-break defect: using the raw form mask
+retained FS/GS offsets. Both candidates now use the existing x86_form_row
+normalization; eight positive/negative byte comparisons against GNU as cover
+high-base loads/stores. The two intermediate fixture mistakes and failed runs
+are retained; the final fixture has real newlines and a GNU object symbol label.
+
+The final baseline/v3/v4 object/program proof passes: all six emitted objects
+and all six programs are byte identical between the two sources, match fresh
+ClangO0 output, and pass the conservative pinned ISA audit. This proves no
+code-generation difference on this corpus, not a runtime speedup.
+
+The three final whole-compiler placement/copy rounds are complete. Independent
+receipt review and final summaries are pending. The encoder campaign is running;
+backend, policy, initialization and fresh generated-program timings follow it
+sequentially. Current physical CI40546104621 is in progress. Historical receipts
+below retain their original revisions and do not qualify this final head.
+
+Native image sizes fall34,093,877 to31,587,441 bytes; text falls19,286,020 to
+19,065,588 bytes. The actual backend benchmark encoder kernel falls9,417 to
+6,345 bytes. These static reductions do not waive timing or resource costs.
+
+Production configured-target boundary adoption remains with #136/#133. This
+slice does not take over producer, preprocessor, builtin-lowering or tuning
+implementation. #180 remains open.
+
+## Historical campaigns and candidates
+
+## Historical frozen sources and images
 
 | Role | Source commit | Tree |
 | --- | --- | --- |
@@ -42,15 +70,15 @@ cores FIFO grants (four physical cores for the build, one per test), nice19.
 The short single-threaded probe took under 30 seconds and used the documented queue
 exemption, nice19 and idle I/O. Local diagnostics establish no 9700X timing result.
 
-## Current implementation
+## Historical constructor implementation
 
 Main units share pure nonlegacy template construction in the X86 home.
 Default64/APX callers supply the immutable description table already used by
 their consumer. Address32 has an explicit canonical-home-table path for its
 forced writer adapter, avoiding retention of otherwise unused caller tables.
 The choice is outside the form loop. Caller template storage/readiness and
-legacy properties remain private. No storage, guard, gap, alignment, allocator,
-encoder-loop, instruction-format, producer, preprocessor or tuning change.
+legacy properties remain private. This constructor-only stage changed no storage, guard, gap, alignment, allocator,
+encoder loop, instruction format, producer, preprocessor or tuning behavior.
 
 The original row arithmetic is factored into an always-inlined value helper.
 The constructor requires descriptions/output to be disjoint. Unsupported modes
@@ -645,3 +673,17 @@ All1944 timed children exit0;648 warmup slots precede them. Percentages above ar
 The encoder campaign [frozen plan](raw/current-encoder-copies-plan.json) uses the pinned first-party C procbench24f54c2,12 placements, fresh copies, rotated main/head/main-again, all four offsets/fixup states and a65537-record stream in129-record sections. Three plain rounds use three copies per placement/role; three scalar-conditioned100ms rounds use one new copy per placement/role/round. Every process has21 internal measured passes and a warmup; no external PMU competes with internal counters. Lock separately per12-process batch. Pending/partial captures are not accepted results.
 
 At15:06UTC, current-head required physical qualification is queued (run40525040722; admission says P2 normal/not admitted); hosted changes/storage guards passed. Overall workflow success does not establish execution. Historical597 CI remains separate.
+
+## Refreshed source after checker isolation
+
+[Claim6446206714](https://github.com/buster14a/buster/issues/180#issuecomment-6446206714) freezes main530304f and merges it cleanly into4471676. Incoming checker page sections, vector metadata, CI retirement and compile-measure code are unchanged. The delta against this main remains the same10 ISA-policy files. [Source identities/qualification commands](raw/refresh-qualification-plan.json) freeze486 base/489 head input files and source archives. Existing native Clang/Wild identities and the full eight-suite/template/state-graph qualification are reused as a recipe, not as results. Twelve checker-unit shifts still vary the standalone encoder; the checker hot code now has its own page section. Native jobs8462 and local sanitizer build59654 are queued/running through their ordinary shared locks/core queue.
+
+The old encoder controller is deliberately incomplete. [Stop record](raw/current-encoder-stop-record.json) preserves17 complete batches/204successful children, all31 regular files per batch and every normal/placement image SHA matching its frozen build receipt. Parent2227152 was stopped while its own SSH2345300 completed (zombie exit_code0 verified); only that parent was terminated/resumed, exit143. Last archive was extracted and verified separately. No CI/other-owner process or reservation was changed. The prepared old policy/runtime/assembler followup controller was never launched. Old flag0 has a complete108-child round; flag1 has only96children. No conditioned/fixup/later-round samples exist and none is implied.
+
+[Physical df02 CI receipt](raw/current-head-ci-receipt.json) records82/82 commands in81.1s and actual integration8f4a75e787cbae82ea4e45be9931befec0ae8d25 into4244323ff4d40170128b5c9a4da14acf150cdb3e, distinct from manuala66f. The original1056709-byte job log is retained, SHA25616d4d800aee0b8038e53f12998d2b006965315935f72a05c579735de7914dec3. Call graph41/23748functions/142135calls/0unallowed/3allowed/0split. This is historicaldf02 CI, not447 qualification. The admission experiment was retired by its owner in main; this session changes no priorities or workflow configuration.
+
+The C-only [receipt reader](read-current-encoder.c) and [tests](test-current-encoder-reader.c) are provisional tooling for the frozen1728-observation schema. The final1728-row manifest exactly matches the plan. It checks31 regular files per batch, required nonempty metadata, all12 unique successful process rows with no external PMU columns, exact21-pass benchmark headers/count/section/flags/conditioning, positive finite internal metrics, every slot/group and strict upper medians. It preserves major-fault observations rather than filtering them. SHA/inode identity content is independently audited separately; the C reader does not claim to check those contents. The script can mask remote tar failure; complete-file/capture checks handle that limitation.
+
+Read-only review found and fixed header-prefix acceptance, signed/overflow unsigned fields, read-error-as-EOF and unreported stdout errors. [Final local test log](raw/current-encoder-reader-test-v2.log) passes21checks under Clang23.1.4 O1/ASan/UBSan/Werror through cores. Full-campaign successful-summary and /dev/full execution remain pending; a partial campaign must fail with no summary. Internal encoder PMU lacks enabled/running fields, so positive raw counters are not proof of no multiplexing. Conditioned sampling has one copy per placement/role/round, three across rounds, not a within-round copy spread.
+
+The #136/#552 owner [claims the empty-shape fix itself](https://github.com/buster14a/buster/issues/136#issuecomment-6446362420), reproduces the same sanitizer error on its currentmain16226e01 and will publish the landing SHA. This session does not edit tier0_generate.c or take over that producer. Affected synthetic backend measurements and final sanitizer acceptance remain pending that integration.
