@@ -65,8 +65,9 @@ local sanitizer tests pass8/8. BSS grows105,088bytes versus the rejected
 tail candidate, while file/text sizes match it. The first96children cover plain and conditioned diagnostics. Small calls
 improve2.64–4.66% versus main, but full flags0 still costs0.89445% plain and
 0.53381% conditioned (positive against both references). This candidate is
-rejected. Already queued round2/plain is draining; the last three batches are
-not launched. Addresses alone do not establish alias causality. Backend, policy, initialization and
+rejected. The queued round2/plain batch drained successfully:144children total
+across three batches, allstatus0 and no major faults. The stopped controller
+exited143; the last three batches were never launched. Addresses alone do not establish alias causality. Backend, policy, initialization and
 fresh generated-program timings remain pending the retained candidate decision. Current physical CI40546104621 passes82/82 commands on its actual integration
 revision10f2c5d9f2 (ac57 into8fcf19cee49cdc54e53602b67dc94ad70ec7eb6c).
 The full1,070,307-byte log and SHA256 receipt are retained. Historical receipts
@@ -83,10 +84,17 @@ implementation. #180 remains open.
 A further private source snapshot outlines default64 final-group work and
 selects constant1/2/4quads for short tails. Independent source review found no
 correctness issue; localASan/UBSan passes8/8 with644exact source files and41
-instrumentedO1units. Its native qualification is queued, and its288-child
-diagnostic plan is prepared but not launched. The public compiler head remains
-ac57. The final cursor address crosses the new call, so linked full-loop
-allocation must be inspected before any timing interpretation.
+instrumentedO1units. Its first native recipe selected the wrong archive and failed the input
+checksum guard before source extraction/build. The failed receipt is retained.
+A distinct corrected retry validates the selected archive locally before
+queueing and preserves the original failure. Its288-child diagnostic plan is
+prepared but not launched. The public compiler head remains
+ac57. A matched localClang23.1.4/O3/znver5 object diagnostic measures6500B/1009
+parent instructions plus3897B/610helper instructions, versus13009B/1976
+for ac57. All four full-loop opcode/memory histograms match, with no cursor
+spills; writeback is after loop exit. The baseline four memcpy relocations are
+counted with objdump-dr, since unresolved object calls cannot be counted by
+callee names alone. NativeClang23.1.1 allocation and timing remain unverified.
 
 The receipt reader now supports separately configured plain/conditioned batch
 counts below64. Legacy12/36 modes pass25checks each, and their complete1728-row
