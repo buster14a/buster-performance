@@ -90,10 +90,39 @@ All times are in µs, written in place on one lane.
 
 At 1 worker every mode takes 5.8 to 6.0 µs; at 64, 11.5 (control) to 13.2.
 
+### What each mode's program is
+
+These are `c1a615c`'s counts for each program, from the rows' headers. The other
+heads' programs are the same.
+
+| Program | Atoms | Fixups | Code bytes | Dynamic symbols | `.rela.dyn` | File bytes |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| plain, 180,000 | 185,457 | 2,342,793 | 31,650,098 | 10 | 11 | 44,712,744 |
+| control, 180,000 | 365,521 | 2,702,793 | 36,690,098 | 11 | 11 | 50,473,368 |
+| general, 180,000 | 365,521 | 2,702,793 | 36,690,098 | 11 | 11 | 50,473,368 |
+| local, 180,000 | 365,521 | 2,882,793 | 37,230,098 | 11 | 11 | 50,473,368 |
+| imported, 180,000 | 365,521 | 2,702,793 | 36,690,098 | 12 | 12 | 50,473,464 |
+| control, 2,000 | 4,181 | 30,108 | 408,079 | 11 | 11 | 579,488 |
+| general, 2,000 | 4,181 | 30,108 | 408,079 | 11 | 11 | 579,488 |
+| local, 2,000 | 4,181 | 32,108 | 414,079 | 11 | 11 | 579,488 |
+| imported, 2,000 | 4,181 | 30,108 | 408,079 | 12 | 12 | 579,600 |
+| control, 1 | 100 | 122 | 819 | 11 | 11 | 19,584 |
+| general, 1 | 100 | 122 | 819 | 11 | 11 | 19,592 |
+
+General and control are the same program but for each probe's two fixups'
+kinds: a `PC32` into `.data` and a call to a function, against a `TLSGD` into
+`.tdata` and a call to `__tls_get_addr`. Their data and TLS sections differ, so
+the one-worker files differ by 8 bytes. Local adds a `DTPOFF32` fixup and 3
+bytes of code per probe. Imported adds `errno`'s dynamic symbol and its
+`TPOFF64` relocation, and its probes target one symbol rather than one each.
+
 ### Per access
 
 Each access's cost is the mode's time minus the control's, divided by the
-number of probes. All figures are in ns.
+number of probes. All figures are in ns. These are whole-writer deltas between
+the programs above, not the latency of the relaxation's code alone: each one
+includes whatever else the two programs' differences cost the writer, and the
+local and imported rows include their extra fixup or relocation.
 
 | Head | Mode | 2,000 in place | 180,000 in place | 180,000 new file |
 | --- | --- | ---: | ---: | ---: |
@@ -104,10 +133,9 @@ number of probes. All figures are in ns.
 | `c1a615c` | local | 24.1 | 23.2 | 23.4 |
 | `c1a615c` | imported | 22.0 | 20.6 | 21.1 |
 
-So the relaxation costs about 19 ns per general-dynamic access to the program's
-own thread-local, and 21 ns to an import. A local-dynamic access costs about
-23 ns, but part of that is its probe's extra `DTPOFF32` fixup, which the control
-doesn't have.
+So a general-dynamic access to the program's own thread-local adds about
+19 ns to the write, and one to an import about 21 ns. A local-dynamic access
+adds about 23 ns, part of which is its probe's extra `DTPOFF32` fixup.
 
 These are the phases at 180,000 workers on `c1a615c`, as each mode's excess over
 the control in ns per access:
@@ -118,10 +146,10 @@ the control in ns per access:
 | local | 3.7 | −0.1 | 3.3 | 0.0 | 16.3 |
 | imported | 4.9 | 0.0 | 3.1 | 0.0 | 12.5 |
 
-- The count (finding the accesses) and the symbols' pass (their targets, and
-  for the import its GOT slot) take about 3 ns each.
-- Rewriting the sequences in the chunks takes about 12 ns per access, or 16 ns
-  with the local-dynamic probe's extra field.
+- The count phase, which finds the accesses, and the symbols' pass, which
+  resolves their targets and the import's GOT slot, each grow by about 3 ns.
+- The chunks, where the sequences are rewritten, grow by about 12 ns per
+  access, or 16 ns with the local-dynamic probe's extra field.
 
 The control itself costs about 34 ns per probe over the plain program, from the
 probe's atoms and fixups alone: (16,159.0 − 9,835.8) / 180,000 on `c1a615c`.
