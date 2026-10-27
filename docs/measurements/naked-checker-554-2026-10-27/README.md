@@ -2,6 +2,10 @@
 
 Qualification and a bounded syntax-only cost screen on October 27, 2026.
 
+The [review follow-up](review/README.md) qualifies the later compiler head
+`1193571fd09b3a2c35a74b07371070e37068721b`, including the VLA/type-only and
+inline register-type review cases. The results below retain the initial head.
+
 - Compiler baseline: `buster14a/buster` at `b7f444eb52bb53495da751f188b6bba883bbf891`.
 - Qualified compiler: `fa7cae05018ebd6281a6a7fbcfd64c138b3fd3e9`, branch `codex/554-naked-function-diagnostics`.
 - Host: benchpress, AMD Ryzen 7 9700X, Linux/x86-64, Clang 23.1.1. `host.txt` records its identity.
