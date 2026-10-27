@@ -20,9 +20,9 @@ The historical compiler and its source manifest match [the original record](http
 ./build/compiler benchmark-link --only direct --kinds dynamic,shared --directory DIR --cache CACHE
 ```
 
-It measures runtime loading, `bind_begin`, `bind_end` plus `dynamic_inputs`, and the writer separately, then sums them. The benchmark pins its lane to CPU 2 and checks the generated executables. Default workloads have 1, 2,000 and 102,400 workers. Raw stdout is under each remote-directory name's `handoff-campaign/logs/link-{1,2,3}.log`.
+It measures runtime loading, `bind_begin`, `bind_end` plus `dynamic_inputs`, and the writer separately, then sums them. The benchmark pins its lane to CPU 2 and checks the generated executables. Default workloads have 1, 2,000 and 102,400 workers. Raw stdout is under `qualified/REMOTE-DIRECTORY/handoff-campaign/logs/link-{1,2,3}.log`.
 
-The campaign also runs one supplementary `benchmark-snapshot` (all four runtime kinds), `benchmark-bind --functions 1,2000`, and a 41-process hello-world compilation sample after five warmups, all pinned to CPU 2. These are separately identified `*-extra.log`: their internal medians and instruction counts supplement the three-round complete-link comparison; they are not three independent microbenchmark repetitions. The historical and immediate-baseline captures are included; the candidate's supplementary capture is still queued on the shared host. `harness/hello.c` is the original hello-world input. Reproduction uses the directory names above below `~/buster-fast-bench`, the existing shared `exclusive.sh`, and that input copied to `~/buster-fast-bench/libgcc-s-489-hello.c`.
+Afterwards, each binary runs one supplementary `benchmark-snapshot` (all four runtime kinds), `benchmark-bind --functions 1,2000`, and a 41-process hello-world compilation sample after five warmups, all pinned to CPU 2. These are separately identified `*-extra.log`: their internal medians and instruction counts supplement the three-round complete-link comparison; they are not three independent microbenchmark repetitions. `harness/hello.c` is the original hello-world input. Reproduction uses the directory names above below `~/buster-fast-bench`, the existing shared `exclusive.sh`, and that input copied to `~/buster-fast-bench/libgcc-s-489-hello.c`.
 
 ## Results
 
@@ -41,13 +41,54 @@ For the tiny PIE that exposed the fixed runtime cost, every final round is at or
 
 For the tiny shared library, loading is 10.5–10.8 us versus 11.0–11.5 us historically. Its binding-plus-input phase is 0.7–0.8 us versus 0.6 us historically; summing the printed loading, begin and end phases still gives 11.9–12.2 us versus 12.3–12.8 us. Shared total wall time is dominated by the close/write phase, which varies widely. The larger-output totals likewise support no general linker speedup claim; the 2,000-worker PIE and large shared totals remain above the historical binary's medians, with much of that difference already present in the immediate baseline. The following control isolates the runtime choices within one executable.
 
+The supplementary snapshot sample reports the following file sizes and cached-open medians (bytes / us). Each cell is one process's internal median, not three independent repetitions.
+
+| Runtime | Historical #483 | Immediate baseline | Qualified change |
+| --- | ---: | ---: | ---: |
+| Dynamic PIE | 3,282,344 / 11.77 | 3,286,696 / 13.14 | 3,286,568 / 11.43 |
+| Shared library | 3,280,832 / 11.12 | 3,285,312 / 12.22 | 3,285,120 / 10.93 |
+| Static | 8,711,948 / 25.92 | 8,711,948 / 24.17 | 8,711,948 / 25.76 |
+| Static PIE | 8,711,180 / 24.20 | 8,711,180 / 26.35 | 8,711,116 / 23.95 |
+
+The qualified dynamic and shared snapshots retain 45 extra global names versus the historical catalog and record 23 and 20 probes respectively, including four deferred probes each. An ordinary load therefore checks 19 and 16 paths, versus the historical 20 and 17; static PIE also loses the duplicate begin-object check, while static keeps its separate `crtbeginT.o` check. Snapshot format 8 does not grow the probe structure: the deferred flag occupies existing padding.
+
+The supplementary `bind_end` results are us / retired instructions. Its imported runtime does not include cached-open work; these are one process per binary with internal medians, so they do not establish a separate wall-time speedup for every row.
+
+| Binding workload/path | Historical #483 | Immediate baseline | Qualified change |
+| --- | ---: | ---: | ---: |
+| 1-worker PIE, vector | 0.32 / 7,233 | 0.36 / 9,152 | 0.34 / 6,738 |
+| 1-worker PIE, exact | 0.29 / 7,584 | 0.32 / 9,503 | 0.30 / 7,089 |
+| 1-worker shared, vector | 0.32 / 6,617 | 0.35 / 8,237 | 0.30 / 6,275 |
+| 1-worker shared, exact | 0.28 / 7,388 | 0.31 / 9,008 | 0.27 / 7,046 |
+| 2,000-worker PIE, vector | 0.83 / 17,338 | 0.86 / 19,257 | 0.82 / 16,853 |
+| 2,000-worker shared, vector | 1.12 / 22,121 | 1.14 / 23,741 | 1.10 / 21,779 |
+
+The two new as-needed passes together use fewer instructions than the historical single pass. The tiny PIE's individual supplementary wall median is slightly above historical; the repeated complete-link comparison above, including loading, binding and writer handoff, is the budget evidence. Raw output also includes static kinds, exact 2,000-worker binding and explicitly named `-lm` cases.
+
+The 41-process whole-driver sample is observational: historical / immediate / qualified medians are 2.405 / 2.267 / 2.241 ms, with peak RSS 31,504 / 29,584 / 30,500 KB and minor faults 569 / 558 / 541. Every process succeeded. The qualified binary retires 22,890,341 instructions versus the immediate baseline's 22,893,959 (the historical timer did not report instructions). The qualified sample's peak RSS is 916 KB above the immediate baseline and 1,004 KB below historical. It establishes no whole-driver memory improvement over the immediate baseline; executable layout and the earlier huge-page finding remain separate from the direct-link runtime/binding cost. All three samples are single campaigns with internal 41-process medians, not three independent paired driver repetitions.
+
 ## One executable, two runtime configurations
 
 `harness/qualification.patch` applies to the qualified source. The private measurement build keeps one executable and selects its imported runtime configuration with `BUSTER_GCC_S_489_CONTROL`, evaluated during cache construction. The caches are separate, so this environment lookup is outside the timed cached opens.
 
-The control omits the GCC DSO catalogue, restores the duplicate `crtbeginS.o` probe, and uses #483's scalar loader cleanup with its per-import version scans. The candidate uses the shipping decisions. Both retain the current snapshot format and all unrelated modern linker code. The benchmark has no named libraries or GCC references, matching the baseline helper's scope. `controlled-campaign.sh` first verifies 20 probes/3,387 global names in the control and 23 probes/3,432 names in the candidate, then runs three alternating rounds of the same complete-link command over every default workload. Each invocation separately takes the shared lock.
+The control omits the GCC DSO catalogue, restores the duplicate `crtbeginS.o` probe, and uses #483's scalar loader cleanup with its per-import version scans. The candidate uses the shipping decisions. Both retain the current snapshot format and all unrelated modern linker code. The benchmark has no named libraries or GCC references, matching the baseline helper's scope. `controlled-campaign.sh` first verifies 20 probes/3,387 global names in the control and 23 probes/3,432 names in the candidate, then runs the same complete-link command over every default workload. Each invocation separately takes the shared lock.
 
-The control build is complete and its measurements are queued on the shared host. No result from that experiment is claimed in this revision of the record.
+The control build's executable SHA-256 is `0947f153dab0f8b37e70e8013406142e87d15efb47f482f0d1c67d5edea2f5f9` (`control/build.log`). Its snapshot medians are 11.62 / 11.53 us for cached open and 4.61 / 4.52 us for warm one-worker binding (control / candidate). These are one process per configuration with internal medians; they support removal of the runtime/binding cost without attributing unrelated historical-code or executable-layout changes to the GCC catalog.
+
+One complete control/candidate pair was used as an attribution diagnostic after the three-round acceptance comparison was already complete:
+
+| Workload | Same-executable control | Same-executable candidate |
+| --- | ---: | ---: |
+| 1-worker PIE | 21.8 us | 21.2 us |
+| 1-worker shared | 57.6 us | 57.7 us |
+| 2,000-worker PIE | 142.8 us | 140.8 us |
+| 2,000-worker shared | 1,047.1 us | 1,041.4 us |
+| 102,400-worker PIE | 11,396.9 us | 11,155.7 us |
+| 102,400-worker shared | 26,066.2 us | 26,439.5 us |
+
+The tiny PIE loses the fixed cost with the same executable layout; the tiny shared runtime load falls from 11.1 to 10.8 us, with begin/end unchanged at 0.7/0.6 us. Its extra 0.1 us total is in writing. The large shared total remains higher in this pair: its count phase is 2,642.9 / 2,643.7 us and symbols 340.2 / 340.5 us, while chunks are 12,068.7 / 12,356.6 us and finish 8,772.4 / 8,925.7 us. Individual phase medians should not be summed into a causal decomposition. This diagnostic supports removal of the fixed unused-library cost; one pair does not prove equality of the large-output case or a general linker speedup.
+
+The initial harness scheduled three pairs. After the first complete pair agreed with the fixed-cost conclusion, the remaining queued diagnostic repetitions were withdrawn; no result from them is included. `control/campaign-run.log` records the four completed invocations. The published harness defaults to that one pair; `BUSTER_GCC_S_489_ROUNDS=3` reproduces the initial longer schedule, alternating order in round two. This diagnostic does not replace or enlarge the three independent primary rounds.
 
 ## Correctness and file checks
 

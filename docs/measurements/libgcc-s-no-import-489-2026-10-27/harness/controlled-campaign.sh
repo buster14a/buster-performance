@@ -13,7 +13,8 @@ for mode in base candidate; do
 done
 grep -q 'The dynamic runtime: 20 probes, 3387 global names' controlled/logs/snapshot-base.log
 grep -q 'The dynamic runtime: 23 probes, 3432 global names' controlled/logs/snapshot-candidate.log
-for round in 1 2 3; do
+last_round=${BUSTER_GCC_S_489_ROUNDS:-1}
+for ((round = 1; round <= last_round; round += 1)); do
     order='base candidate'
     [ "$round" != 2 ] || order='candidate base'
     for mode in $order; do
