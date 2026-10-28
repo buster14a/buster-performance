@@ -86,7 +86,34 @@ The corresponding production-suite regression is independent of the generous wal
 old many-types case can pass.
 
 `cost_inputs.c` generates original no-member and 64-level anonymous-record inputs. `cost_review.c` runs those,
-the 40,000-member input and the 8,000-record input on four lanes, holding the host lock separately for every compile
-and retaining process RSS/stages. That additional footprint screen is in progress at this publication checkpoint;
-it is not needed to reinterpret the retained positive/negative observations above. Its results will be appended
-before this record and PR #648 are declared ready.
+the 40,000-member input and the 8,000-record input, holding the host lock separately for every compile and retaining
+process RSS/stages. The controller completed all 24 compiles: three alternating baseline/candidate rounds per shape.
+`cost-review/controller.log` and all stage outputs are retained. The table deliberately shows the first individual
+paired screen point, not a claimed stable median, neutrality result or new whole-workload speedup:
+
+| Process peak RSS, first individual pair | main | indexed lookup | change |
+| --- | ---: | ---: | ---: |
+| no member access | 21,816 KB | 23,872 KB | +2,056 KB |
+| 64 anonymous levels | 24,080 KB | 25,956 KB | +1,876 KB |
+| 40,000 members | 300,284 KB | 305,300 KB | +5,016 KB |
+| 8,000 records, four emission lanes | 805,716 KB | 811,584 KB | +5,868 KB |
+| actual deferred-reader benchmark, four copied lanes | 174,172 KB | 176,424 KB | +2,252 KB |
+
+The small-unit cost is visible and is not called neutral. Some first runs include cold executable faults; all three
+observations per compile shape remain available rather than filtering those runs. Single-lane compiles use CPU 2;
+the emission-lane case uses CPUs 0–7 with `--lanes 4`. These emission lanes are distinct from #113's deferred reader.
+
+For actual deferred-reader copies, the original `wait_peak.c` wrapper records the child's `wait4` peak RSS. Its
+statically linked binary was built with `clang -O2 -static -Wall -Werror wait_peak.c -o wait-peak`; its SHA-256 is in
+`cost-review/wait-peak.sha256`. Each compiler ran the command below in its own hold of the shared target lock:
+
+```sh
+./wait-peak TREE/build/compiler benchmark-checker-deferred \
+  --passes 6 --lanes 4 --cpus 2,3,4,5 --every-lane units/records-500.c
+```
+
+Both reports say `merged=yes`, with four active lanes and four copied readers (and a separate one-lane reading with
+one copy). The benchmark's six passes rotate source-order, one-lane and four-lane readings. First baseline/candidate
+process footprints are the last table row; the per-lane copy measurements are 900,379 and 922,661 ns. This is a
+bounded footprint/copy-cost screen, not a multi-process timing acceptance campaign. Correctness equality is supplied
+by the separate deferred-reader tests and source-corpus results, not inferred from this benchmark's successful merge.
