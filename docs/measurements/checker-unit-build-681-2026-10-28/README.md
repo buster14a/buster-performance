@@ -16,19 +16,23 @@ There are no exact-head d875 or merged-main timing claims here.
 ## Observed target results
 
 `original/measure-681.log` is the original author's unmodified record. Four
-build summaries, in fixed alternating main/head order, report:
+`sources compiled` summaries, in fixed alternating main/head order, report:
 
-| Round | Role | Build seconds | Checker unit seconds | Backend unit seconds |
+| Round | Role | Compile-phase seconds | Checker unit seconds | Backend unit seconds |
 | ---: | --- | ---: | ---: | ---: |
 | 1 | main | 33.8 | 33.8 | 25.9 |
 | 1 | head | 28.5 | 27.4 | 26.0 |
 | 2 | main | 33.6 | 33.6 | 26.1 |
 | 2 | head | 28.5 | 27.3 | 26.0 |
 
-The two-observation means are 33.7 → 28.5 seconds (−5.2 seconds, −15.43%);
-checker-unit means are 33.7 → 27.35 seconds. This is an observed build-time
-improvement under the recorded schedule, not a guarantee for every build,
-host, compiler version or checkout composition.
+The two-observation compilation-phase means are 33.7 → 28.5 seconds (−5.2
+seconds, −15.43%); checker-unit means are 33.7 → 27.35 seconds. `build.sh`
+measures these phase durations around `each_source`, prints the summary, then
+writes command metadata and invokes the final linker. Final link time and
+remaining script overhead are excluded. No end-to-end build duration was
+retained, so this does not establish a whole-build percentage gain. The
+observed compile-schedule improvement is not a guarantee for every host,
+compiler version or checkout composition.
 
 One locked CPU-2 `time-runs` hold measures the ordinary compile of the frozen
 SQLite input with #518's four defines, 21 runs per role, three requested warmups
@@ -53,7 +57,7 @@ persistent and is not rounded away as timing noise.
 The timings show a small ordinary-input difference within overlapping ranges;
 they do not establish universal neutrality or a general compile speedup.
 There is one input, one physical executable placement per role and one paired
-measurement hold, with no same-binary A/A or placement sweep. Build timing has
+measurement hold, with no same-binary A/A or placement sweep. Compilation timing has
 only two samples per role in one fixed alternation.
 
 ## Added startup work and unresolved attribution
