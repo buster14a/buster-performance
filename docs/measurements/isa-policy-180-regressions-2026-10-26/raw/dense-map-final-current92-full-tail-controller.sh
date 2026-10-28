@@ -1,0 +1,5 @@
+set -e
+scp -q '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/dense-map-final-current92-generated-proof.sh' '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/dense-map-final-current92-audit-elf.c' benchpress:'/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/'
+bash '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/dense-map-final-current92-generated-proof-command.sh'
+bash '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/dense-map-final-current92-full-controller.sh'
+bash '/home/david/Documents/Codex/2026-10-25/work-on-https-github-com-buster14a/work/buster-performance/docs/measurements/isa-policy-180-regressions-2026-10-26/raw/dense-map-final-current92-tail-controller.sh'
