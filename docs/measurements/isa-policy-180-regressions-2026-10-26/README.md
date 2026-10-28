@@ -1,4 +1,20 @@
-## Current4ba459a9: reviewed one-quad tail, final measurements in progress
+## Current qualification: 42dc2b7b against main 1c6443e0
+
+The PR remains draft and unmerged. No performance regression or exception has been approved.
+
+- Head: `42dc2b7b959d2f2e2c6ae230357646b502acaf1d`; tree: `ce70c5ae100ce14865b9eb115b38a83bed0fe45d`.
+- Frozen main: `1c6443e0370e53f4d35616cf1d194e5f777825e3`; tree: `10e0a5438f2e78646036b8de2ba9fc008a0a1b84`.
+- Source manifests: baseline650 files, `ba7ac6b1fbf1553705fb4d2c9a3844bfa913eb4b513825f8c108a57277ad6539`; head653 files, `25fe797559ed6c74da2695779e67561e5caab78c33305f7792e5e861e2800d3f`.
+
+This clean merge preserves all11 policy files from4ba and all642 other-owner files from main, as independently verified in the [source proof](raw/main1c6-integration-source-proof.json). The policy and encoder implementation did not change during this integration refresh.
+
+Fresh native qualification passes8/8 baseline and9/9 head suites, with41 O3 translation units each. Local head qualification passes9/9 under ASan/UBSan, with41 O1 units. Both native call graphs report0 cycles,3 allowed cases and0 split variables. Both complete five-mode template dumps match all16,035,840 original bytes (a7672bd6…). Independent review verifies these receipts; they are correctness results and do not establish performance acceptance.
+
+The fresh baseline/head native images are `25e0ae7158270c5725dd278bfec252452354e59d67a52b745b339952f58f6efa` / `c8e4ffd91f9e4cb8d2fc207db419c8916e0708ae0a7cce911f6cc16c1a88b3e4`. Fresh generated-code proof passes18 byte comparisons,9 bounded ISA audits and6 outputs agreeing with Clang O0. Object and program hashes were freshly derived, rather than assumed from the old campaign; they remain2056c6… andd1d372…, respectively. See the [proof manifest](raw/main1c6-final-generated-proof-binary-manifest.json). [Current-head CI](https://github.com/buster14a/buster/actions/runs/40660287649) is queued.
+
+The fresh matched performance campaign is running through one bounded shared-lock controller. The superseded92c0/4ba campaign completed1,728 full-stream and1,728 partial-batch captures, plus1,944 whole-compiler observations. It stopped after one36-command follow-up batch completed normally; the remaining549 follow-up and567 runtime observations were superseded and are not counted as passed. [The queue receipt](raw/small-doc-final-current92-superseded-queue.json) records the safe boundary. All completed and adverse observations are retained. Older results remain tied to their original source and images; none is relabelled as a result for42dc.
+
+## Previous4ba459a9: reviewed one-quad tail, frozen92 measurements
 
 Public head `4ba459a9f8fae4a9eb1225ac0f207244e130b201`, tree `8c019c2d25138ae8022f95068da857b9ffdbc1c1`, is draft/open/mergeable/unmerged against main `92c025e71856d13eb34247477c5294d2cead139e`. All649 source files match reviewed C36r2 manifest `b876e33d4d27024e361ba96586dd4a95266e742a9d225a81728bb617047073e1` ([binding](raw/small-tail-public-source-binding.json)). Native9/localASanUBSan9 pass; all41 units are O3 native/O1 sanitizer, callgraph0cycles/3allowed/0split and complete five-mode template dumps match the original16,035,840B payload. The independent source reviewer finds no correctness or coverage gap; the documentation wording finding is fixed. Existing count0..199 scalar/offset/fixup/page-edge checks cover the4/5 boundary and tails after full groups.
 
