@@ -43,6 +43,75 @@ nonzero for /dev/full. All12 plain round/state medians are slower by0.68–1.70%
 conditioned states also retain costs. These regressions remain unaccepted. One
 major fault is retained in the raw data; no observation was removed.
 
+Current private performance work remains unaccepted. The fixed512candidate
+(source d6ef4523, image6adfd4d0) completed its288-child screen and then a
+1,728-observation full-stream control:12actual placements,3fresh plain copies,
+three rounds,all4offset/fixup states,plain and30ms-conditioned. The C gate
+passes648summary rows, but conditioned fixup-only ns costs0.654%,0.490%,
+0.327%versus main (0.654%,0.326%,0.327%versus main-again). Its tail campaign
+was never launched. See [full provenance](raw/color512-full-provenance.json).
+
+The default64-only page-alignment variant (source7a20d8e0,image6eedca5a)
+passes native/local8/8, graph and five-mode bytes. Its288-child screen is
+complete with allstatus0/no majors; conditioned full flags3 costs0.618%,
+0.620%,0.932%versus main. It is unaccepted. Its larger full/tail plans were
+prepared but never launched. Twelve actual active placements and all raw
+positive/adverse observations are retained.
+
+The register-broadcast probe (6ba38fcb,imageb6a0c073) completed its full
+1,728-observation campaign and passes the C gate. It is rejected: plain
+fixup-only ns costs1.356%,0.675%,1.014%versus main. Native changes were exactly
+as intended, so scalar-conditioned gains do not waive this steady-state cost.
+Its stale memory-broadcast comment and affected9–15tail profitability were
+not production changes; the rejected source is preserved.
+
+The current private control (2f6f7139,imagec3001cc8) restores main74's exact
+vector region throughEOF, including the original stack-copy tail. It keeps
+publicac57ISA-policy, cold-constructor and matcher work. Native/local8/8,
+41units/644source checks, graph and fulla767dump pass. Standalone19250B/
+2917instructions andbackend/checker9417B/1425match main; every full/remainder
+loop has matching opcode/memory-width histogram and exact stack operands.
+The source-identity guard first caught an unavailable old source cache and
+a leftover comment, before any build/test began; exact Git74source fixed the
+comparison. This is different from the earlier masked-tail/restored-loop
+probe. Its36-batch/1,728-observation full control is complete and rejected:
+all12plain round/flag ns medians cost1.695–3.063%versus main and1.520–2.878%
+versus main-again. Allstatuses0/no majors; C gate passes648rows. All12actual
+placements and exact shifts/fourmod64phases are retained. See
+[control provenance](raw/main-vector-full-provenance.json).
+
+The next private control restores per-unit catalogue access and local production
+template construction (encoder d929a768), preserving the pure constructor API,
+ISA policy and baseline vector/tail code. Only the encoder in a private snapshot
+is changed; main.c and other owners remain untouched. Native and local sanitizer
+qualification is pending. No performance controller is active. Public compiler
+source remains ac57. New main92c025e71856d13eb34247477c5294d2cead139e was
+fetched on2026-10-28: these controls remain explicitly against frozen main74.
+Final acceptance must use a retained implementation and contemporaneous main.
+
+The C receipt gate now has statically bounded full/partial workload profiles,
+with exact byte/section/3,825-mark checks. Sanitized synthetic54plain/36
+conditioned tests pass48checks each; legacy12/36tests pass26each and the
+original1,728-capture summary remains byte identical. The new54-command actual
+full batch passes26additional checks. Output-failure statuses1and exact
+commands are retained. The single rejected JSanalysis binding trial is
+preserved separately: it returned C6IDs while preparing C7's unpublished
+summary, was caught before interpretation/publication, and was replaced by
+an explicit-plan analyzer. Raw measurements were unchanged.
+
+The nine-run576-phase diagnostic is closed (child0/controller143); last3
+runs never launched. Its ranking varies, so no cache mechanism or uniformly
+winning phase is claimed. Final policy/backend/startup/whole-C/generated
+program/runtime acceptance awaits a retained implementation. Publicac57
+physical CI40546104621 remains82/82on integration10f2c5d9, distinct from
+private validation. #136/#133 retain production configured-target adoption;
+preprocessor, builtin-lowering and per-function targets stay with their
+owners. PR421 remains draft/open/unmerged; no regression exception is accepted.
+
+## Historical campaigns and candidates
+
+## Previous private-progress checkpoints
+
 A private tail-copy-removal candidate based on ac57 is under investigation. Both
 native and local sanitizer matrices pass8/8, graph and five-mode dump match.
 Native code shows no extra full-loop PDEP/mask work or spills; tail memcpy calls
@@ -187,7 +256,6 @@ function counts and full-loop counts match outlined. It is not a performance
 result or promoted source. The fixed512 measured source stays
 frozen; no second performance controller has been launched.
 
-## Historical campaigns and candidates
 
 ## Historical frozen sources and images
 
@@ -832,3 +900,5 @@ The C-only [receipt reader](read-current-encoder.c) and [tests](test-current-enc
 Read-only review found and fixed header-prefix acceptance, signed/overflow unsigned fields, read-error-as-EOF and unreported stdout errors. [Final local test log](raw/current-encoder-reader-test-v2.log) passes21checks under Clang23.1.4 O1/ASan/UBSan/Werror through cores. Full-campaign successful-summary and /dev/full execution remain pending; a partial campaign must fail with no summary. Internal encoder PMU lacks enabled/running fields, so positive raw counters are not proof of no multiplexing. Conditioned sampling has one copy per placement/role/round, three across rounds, not a within-round copy spread.
 
 The #136/#552 owner [claims the empty-shape fix itself](https://github.com/buster14a/buster/issues/136#issuecomment-6446362420), reproduces the same sanitizer error on its currentmain16226e01 and will publish the landing SHA. This session does not edit tier0_generate.c or take over that producer. Affected synthetic backend measurements and final sanitizer acceptance remain pending that integration.
+
+Current control qualification note: the first private-catalogue native build stops under-Werror because the preserved pure constructor becomes unused in standalone benchmark inclusions. No test or timing ran for that build. Its full error log is retained. The checked retry adds only the existing-style unused attribute to the preserved API; a fresh immutable snapshot/identity is required.

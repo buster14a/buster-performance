@@ -10,6 +10,29 @@
 #undef main
 #include <unistd.h>
 
+static bool write_capture(const char* directory, unsigned index, bool conditioned, unsigned flags, unsigned mutation)
+{
+    char path[2048], fixups[96] = {0};
+    snprintf(path, sizeof(path), "%s/1-fixture-%u-0.out", directory, index);
+    FILE* file = fopen(path, "wb");
+    bool okay = file != 0;
+    const bool full = mutation == 1 ? !BUSTER_RECEIPT_FULL_GROUPS : BUSTER_RECEIPT_FULL_GROUPS;
+    const unsigned records = full ? 65536 : 65537;
+    const unsigned bytes = (full ? 259726 : 259736) + (mutation == 2);
+    const unsigned section = (full ? 65536 : 129) + (mutation == 4);
+    if ((flags & 2) != 0)
+    {
+        snprintf(fixups, sizeof(fixups), ", with fixup ends (%u marked)", mutation == 3 ? 3826 : 3825);
+    }
+    if (file != 0)
+    {
+        okay &= fprintf(file, "%u mixed instructions, %u bytes (3.96 per instruction), in calls of %u%s%s; 21 interleaved passes of 64 runs%s, medians (cycles also min-max):\n", records, bytes, section, (flags & 1) != 0 ? ", with offsets" : "", fixups, conditioned ? ", each after 30 ms of the scalar loop" : "") > 0;
+        okay &= fputs(" x86_encode_16 1 ns 1 M/s 1 GB/s 1 cycles [1-1] 1 instructions IPC 1 throttle 0\n  (per encoded instruction; GB/s of machine code; throttle: PMCx1A0 umask 0x08, read as the dispatch slots the power cap takes)\n", file) >= 0;
+        okay &= fclose(file) == 0;
+    }
+    return okay;
+}
+
 static bool write_processes(const char* directory, unsigned count, unsigned mutation)
 {
     char path[2048];
@@ -49,17 +72,9 @@ static bool write_fixture(const char* root, const char* batch, unsigned count, b
     }
     for (unsigned i = 0; okay && i < count; i += 1)
     {
-        snprintf(path, sizeof(path), "%s/1-fixture-%u-0.out", directory, i);
-        FILE* file = fopen(path, "wb");
-        okay &= file != 0;
-        if (file != 0)
-        {
-            okay &= fprintf(file, "65537 mixed instructions, 259736 bytes (3.96 per instruction), in calls of 129; 21 interleaved passes of 64 runs%s, medians (cycles also min-max):\n", conditioned ? ", each after 30 ms of the scalar loop" : "") > 0;
-            okay &= fputs(" x86_encode_16 1 ns 1 M/s 1 GB/s 1 cycles [1-1] 1 instructions IPC 1 throttle 0\n  (per encoded instruction; GB/s of machine code; throttle: PMCx1A0 umask 0x08, read as the dispatch slots the power cap takes)\n", file) >= 0;
-            okay &= fclose(file) == 0;
-        }
+        okay &= write_capture(directory, i, conditioned, 0, 0);
         snprintf(path, sizeof(path), "%s/1-fixture-%u-0.err", directory, i);
-        file = fopen(path, "wb");
+        FILE* file = fopen(path, "wb");
         okay &= file != 0 && fclose(file) == 0;
     }
     okay &= write_processes(directory, count, 0);
@@ -119,6 +134,21 @@ int main(void)
         sample.condition ^= 1;
         okay &= !read_sample(root, batch, count - 1, label, &sample);
         checks += 1;
+        sample.condition = condition;
+        for (unsigned flags = 0; okay && flags < 4; flags += 1)
+        {
+            sample.flags = flags;
+            okay &= write_capture(directory, count - 1, condition != 0, flags, 0) && read_sample(root, batch, count - 1, label, &sample);
+            checks += 1;
+            for (unsigned mutation = 1; okay && mutation <= 4; mutation += 1)
+            {
+                if (mutation != 3 || (flags & 2) != 0)
+                {
+                    okay &= write_capture(directory, count - 1, condition != 0, flags, mutation) && !read_sample(root, batch, count - 1, label, &sample);
+                    checks += 1;
+                }
+            }
+        }
     }
     if (root != 0)
     {
@@ -128,6 +158,6 @@ int main(void)
         }
         okay &= rmdir(root) == 0;
     }
-    printf("54-plain/36-conditioned synthetic reader fixtures: %s (%u checks)\n", okay ? "pass" : "FAIL", checks);
+    okay &= printf("54-plain/36-conditioned synthetic reader fixtures (%s): %s (%u checks)\n", BUSTER_RECEIPT_FULL_GROUPS ? "full groups" : "partial groups", okay ? "pass" : "FAIL", checks) > 0 && fflush(stdout) == 0 && !ferror(stdout);
     return okay ? 0 : 1;
 }

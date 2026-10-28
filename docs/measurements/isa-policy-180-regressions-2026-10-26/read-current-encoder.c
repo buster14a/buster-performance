@@ -23,8 +23,12 @@
 #ifndef BUSTER_RECEIPT_AFTER_MS
 #define BUSTER_RECEIPT_AFTER_MS 100
 #endif
+#ifndef BUSTER_RECEIPT_FULL_GROUPS
+#define BUSTER_RECEIPT_FULL_GROUPS 0
+#endif
 _Static_assert(BUSTER_RECEIPT_BATCH_SIZE > 0 && BUSTER_RECEIPT_BATCH_SIZE < 64, "receipt mask capacity");
 _Static_assert(BUSTER_RECEIPT_PLAIN_BATCH_SIZE > 0 && BUSTER_RECEIPT_PLAIN_BATCH_SIZE < 64, "plain receipt mask capacity");
+_Static_assert(BUSTER_RECEIPT_FULL_GROUPS == 0 || BUSTER_RECEIPT_FULL_GROUPS == 1, "frozen encoder workload profile");
 
 typedef struct Sample
 {
@@ -205,7 +209,11 @@ static bool read_sample(const char* root, const char* batch, unsigned command, c
     }
     snprintf(path, sizeof(path), "%s/%s/%u-%s-0.out", root, batch, sample->round, label);
     file = fopen(path, "r");
+#if BUSTER_RECEIPT_FULL_GROUPS
+    const char prefix[] = "65536 mixed instructions, 259726 bytes (3.96 per instruction), in calls of 65536";
+#else
     const char prefix[] = "65537 mixed instructions, 259736 bytes (3.96 per instruction), in calls of 129";
+#endif
     okay &= file != 0 && fgets(line, sizeof(line), file) != 0 && strncmp(line, prefix, sizeof(prefix) - 1) == 0;
     if (file != 0)
     {
@@ -222,7 +230,7 @@ static bool read_sample(const char* root, const char* batch, unsigned command, c
             {
                 memcpy(digits, number, (size_t)(end - number));
             }
-            okay &= bounded && unsigned_number(digits, &marked) && marked != 0 && marked <= 65537;
+            okay &= bounded && unsigned_number(digits, &marked) && marked == 3825;
             snprintf(fixups, sizeof(fixups), ", with fixup ends (%llu marked)", (unsigned long long)marked);
         }
         char expected[1024];

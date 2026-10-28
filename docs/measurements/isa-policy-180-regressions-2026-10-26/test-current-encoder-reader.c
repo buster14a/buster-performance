@@ -51,20 +51,23 @@ static bool fixture_copy(const char* source, const char* destination, unsigned m
     }
     else if (okay && mutation == 3)
     {
-        char* cursor = strstr(text, "65537");
+        char* cursor = strstr(text, BUSTER_RECEIPT_FULL_GROUPS ? "65536" : "65537");
         okay &= cursor != 0;
         if (cursor != 0)
         {
-            cursor[4] = '6';
+            cursor[4] = BUSTER_RECEIPT_FULL_GROUPS ? '5' : '6';
         }
     }
     else if (okay && mutation == 4)
     {
-        char* cursor = strstr(text, "in calls of 129;");
+        const char* section = BUSTER_RECEIPT_FULL_GROUPS ? "in calls of 65536" : "in calls of 129";
+        char expected[64];
+        snprintf(expected, sizeof(expected), "%s;", section);
+        char* cursor = strstr(text, expected);
         okay &= cursor != 0;
         if (cursor != 0)
         {
-            cursor[strlen("in calls of 129")] = '0';
+            cursor[strlen(section)] = '0';
         }
     }
     else if (okay && (mutation == 5 || mutation == 6))

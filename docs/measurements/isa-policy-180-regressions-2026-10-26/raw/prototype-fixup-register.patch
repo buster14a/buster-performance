@@ -1,0 +1,158 @@
+--- a/src/buster/compiler/x86_64_encoder.c
++++ b/src/buster/compiler/x86_64_encoder.c
+@@ -5566,15 +5566,19 @@
+ };
+ _Static_assert(sizeof(X86TemplateEntry) == 64, "a template entry is a cache line");
+ 
+-// The templates, with BUSTER_X86_TEMPLATE_PADDING unused entries on either side: the vectorized encoder loads 16 bytes
++// The templates, with at least BUSTER_X86_TEMPLATE_PADDING unused entries on either side: the vectorized encoder loads 16 bytes
+ // of a template into a lane of a ZMM register with a masked load that spans up to 48 bytes on either side of them. A
+ // marked form's are a copy at BUSTER_X86_FORM_FIXUP and up, so that the vectorized encoder looks the form up as the
+ // record has it: taking the flag off each form cost the loop 2.4% on Zen 5. Between the two, the pages nothing touches
+ // stay unmapped.
+ #define BUSTER_X86_TEMPLATE_PADDING 1
+-static X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+-    __attribute__((aligned(64)));
+-static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_PADDING;
++// Keep the default table start 512 bytes into a 4 KiB aligned buffer, independent
++// of surrounding storage. The suffix retains only the masked-load safety room.
++#define BUSTER_X86_TEMPLATE_DEFAULT_PADDING 8
++_Static_assert(BUSTER_X86_TEMPLATE_DEFAULT_PADDING >= BUSTER_X86_TEMPLATE_PADDING, "default table leading safety padding");
++static X86TemplateEntry x86_template_storage[BUSTER_X86_TEMPLATE_DEFAULT_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
++    __attribute__((aligned(4096)));
++static X86TemplateEntry* const x86_templates = x86_template_storage + BUSTER_X86_TEMPLATE_DEFAULT_PADDING;
+ static bool x86_encoder_initialized;
+ // The same for 32-bit addresses (x86_encode_address32): the templates of the forms with a memory operand have a 67.
+ static X86TemplateEntry x86_template_storage_address32[BUSTER_X86_TEMPLATE_PADDING + BUSTER_X86_FORM_FIXUP + BUSTER_X86_FORM_TEMPLATES + BUSTER_X86_TEMPLATE_PADDING]
+@@ -7444,13 +7448,18 @@
+                                          : encoder == X86_ENCODER_MODE_32      ? x86_templates_32
+                                          : encoder == X86_ENCODER_MODE_16      ? x86_templates_16
+                                                                                : x86_templates;
+-    // I. Records and templates (zero for the quads past `quads`).
++    // I. Records and templates (zero for the quads past `quads`). Full groups
++    // have constant all-one masks. A partial group zeroes inactive records at
++    // the load; inactive quads use the valid base pointer, never one past input.
++    const uint64_t record_dwords = _pdep_u64(offset_lanes, 0x1111111111111111ull) * 15;
+     __m512i records[4];
+     __m512i bytes[4];
+     __m512i layouts[4];
+     for (uint32_t q = 0; q < 4; q += 1)
+     {
+-        records[q] = q < quads ? _mm512_loadu_si512(instructions + BUSTER_X86_QUAD_INSTRUCTIONS * q) : _mm512_setzero_si512();
++        const uint32_t record = BUSTER_X86_QUAD_INSTRUCTIONS * q;
++        const uint32_t source = ((offset_lanes >> record) & 15) != 0 ? record : 0;
++        records[q] = q < quads ? _mm512_maskz_loadu_epi32((__mmask16)(record_dwords >> (16 * q)), instructions + source) : _mm512_setzero_si512();
+         bytes[q] = _mm512_setzero_si512();
+         layouts[q] = _mm512_setzero_si512();
+     }
+@@ -7483,11 +7492,11 @@
+ 
+     for (uint32_t q = 0; q < quads; q += 1)
+     {
+-        const X86Instruction* quad = instructions + BUSTER_X86_QUAD_INSTRUCTIONS * q;
+         const uint8_t* t[BUSTER_X86_QUAD_INSTRUCTIONS];
+         for (uint32_t j = 0; j < BUSTER_X86_QUAD_INSTRUCTIONS; j += 1)
+         {
+-            t[j] = (const uint8_t*)&templates[gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q)) : quad[j].form];
++            t[j] = (const uint8_t*)&templates[gather == X86_GATHER_INSERTS_FORMS_FROM_RECORDS ? (uint16_t)(slot_forms[j] >> (16 * q))
++                                                                                          : instructions[BUSTER_X86_QUAD_INSTRUCTIONS * q + j].form];
+         }
+         if (gather == X86_GATHER_MASKED_LOADS)
+         {
+@@ -7513,7 +7522,7 @@
+     const __m512i checks = _mm512_unpacklo_epi64(template_high01, template_high23);
+     const __m512i flags = _mm512_unpackhi_epi64(template_high01, template_high23);
+ 
+-    // II. The lanes of the quads past `quads` hold zeros, which are valid, as are a zeroed copy's padding.
++    // II. Inactive records and the lanes of the quads past `quads` hold valid zeros.
+     const X86Fields fields = compute_fields(operands, displacement, extension, flags, checks, encoder);
+ 
+     // Where the group's machine code starts, for its offsets and fixup ends.
+@@ -7577,8 +7586,18 @@
+         // The group's offset in the output, broadcast from memory: a load, where a broadcast from a general register
+         // takes FP1 or FP2 too.
+         uint32_t group_offset = (uint32_t)(group_out - output);
+-        __asm__("" : "+m"(group_offset));
+-        const __m512i group_start = BUSTER_X86_SPLAT(group_offset);
++        __m512i group_start;
++        if (offsets == 0 && quads == 4 && gather == X86_GATHER_INSERTS && store == X86_STORE_FULL &&
++            fixup_store == X86_FIXUP_STORE_FULL && encoder == X86_ENCODER_MODE_64)
++        {
++            __asm__("" : "+r"(group_offset));
++            group_start = _mm512_set1_epi32((int32_t)group_offset);
++        }
++        else
++        {
++            __asm__("" : "+m"(group_offset));
++            group_start = BUSTER_X86_SPLAT(group_offset);
++        }
+         if (offsets != 0)
+         {
+             const __m512i starts = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_sub_epi8(ends, lengths)));
+@@ -7587,7 +7606,7 @@
+         if (fixup_ends != 0)
+         {
+             // The marked instructions' ends, compressed, by the fixup flags of the forms, which the records had long
+-            // before the lengths. The zeroed copy's padding isn't marked.
++            // before the lengths. Inactive zeroed records aren't marked.
+             const __mmask16 marked = (__mmask16)_mm512_movepi8_mask(_mm512_permutexvar_epi8(_mm512_load_si512(x86_form_high_bytes), extension));
+             const __m512i marked_ends = _mm512_add_epi32(_mm512_cvtepu8_epi32(_mm512_castsi512_si128(ends)), group_start);
+             if (fixup_store == X86_FIXUP_STORE_COMPRESS)
+@@ -7606,8 +7625,34 @@
+ 
+ #undef BUSTER_X86_SPLAT
+ 
++// Default 64-bit tails contain 1..15 records. Keep their variable masks and shorter
++// quad kernels out of the full-group function's register allocation. Offsets
++// and fixup dispatch happen once for this final group, never in its hot loop.
++__attribute__((noinline)) static uint8_t* encode_tail64(const X86Instruction* instructions, uint32_t count, uint8_t* out, const uint8_t* output,
++                                                       uint32_t* offsets, uint32_t** fixup_ends)
++{
++    const uint32_t lanes = (1u << count) - 1;
++    uint8_t* result;
++    if (count <= 4)
++    {
++        result = encode_group(instructions, 1, out, output, offsets, lanes, fixup_ends, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL,
++                              X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
++    }
++    else if (count <= 8)
++    {
++        result = encode_group(instructions, 2, out, output, offsets, lanes, fixup_ends, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL,
++                              X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
++    }
++    else
++    {
++        result = encode_group(instructions, 4, out, output, offsets, lanes, fixup_ends, X86_GATHER_INSERTS_FORMS_FROM_RECORDS, X86_STORE_FULL,
++                              X86_FIXUP_STORE_FULL, X86_ENCODER_MODE_64);
++    }
++    return result;
++}
++
+ // The vectorized encoder's loop: `groups` groups of 4 * `quads` instructions per iteration (all constants), then the
+-// whole groups left, then the last partial group from a zeroed copy, so that no load reads past the instructions.
++// whole groups left, then the last partial group with masked record loads, so that no load reads past the instructions.
+ // Returns the number of bytes. The instructions must be valid (see x86_encode): then it writes nothing past
+ // output + BUSTER_X86_ENCODER_CAPACITY(count), but may write past the instructions' bytes.
+ //
+@@ -7646,10 +7691,17 @@
+     }
+     if (i < count)
+     {
+-        X86Instruction tail[BUSTER_X86_GROUP_INSTRUCTIONS] __attribute__((aligned(64))) = { 0 };
+-        memcpy(tail, instructions + i, (count - i) * sizeof(X86Instruction));
+-        out = encode_group(tail, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups, gather, store, fixup_store,
+-                           encoder);
++        if (quads == 4 && gather == X86_GATHER_INSERTS && store == X86_STORE_FULL && fixup_store == X86_FIXUP_STORE_FULL && encoder == X86_ENCODER_MODE_64)
++        {
++            out = encode_tail64(instructions + i, (uint32_t)(count - i), out, output, offsets != 0 ? offsets + i : 0, fixups);
++        }
++        else
++        {
++            // Forms come from the masked records too: scalar form loads would
++            // read inactive inputs. Full groups retain their gather strategy.
++            out = encode_group(instructions + i, quads, out, output, offsets != 0 ? offsets + i : 0, (uint32_t)((1ull << (count - i)) - 1), fixups,
++                               X86_GATHER_INSERTS_FORMS_FROM_RECORDS, store, fixup_store, encoder);
++        }
+     }
+     return (int64_t)(out - output);
+ }
