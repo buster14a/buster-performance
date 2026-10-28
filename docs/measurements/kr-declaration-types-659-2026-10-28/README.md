@@ -12,7 +12,8 @@ throughput, release-build, full-CI or whole-issue-completion claim.
 | Boundary-only | 58961ff0a90332945e7471b5377f53da8b89826c | baseline18,742 checks/46 failures |
 | Typed-query fix | addd421d60eead9019c64cefa86dd1d720199143 | baseline/native18,780/8 each; atomic/source/ABI controls pass; no sanitizer finding |
 | Normal parent integration | 8921da4adc90cb2d68de2518a141346970ce9c39 | baseline and native 18,780 checks / 0 failures each |
-| Permanent driver matrix targeting parent CLI | corrected driver with frozen9bb CLI | 529 checks/32 failures |
+| Driver negative, older runtime-call witness | addd421d matrix with frozen9bb CLI | 529 checks/32 failures |
+| Final driver negative | 8921da4a matrix with frozen9bb CLI | 529 checks/24 failures, all new atomic cases |
 
 At addd421d, all 8 failures are inherited policy case 23 (parent case 20). The
 runtime call in that witness is outside parent #701's admitted return-warning
