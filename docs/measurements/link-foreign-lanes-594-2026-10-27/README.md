@@ -14,6 +14,11 @@ This record holds the sweep the threshold comes from (complete) and a first
 confirmation of the head (one pass); a redesigned confirmation is written but
 not run (see "Not run yet").
 
+**October 28 continuation:** the redesigned confirmation is now complete in
+[confirmation2](confirmation2/README.md): 7,750 successful processes, all 28
+output families identical, and the final benchmark row qualified by exact-head
+hardware CI. The original handoff description below is retained as history.
+
 ## Executables and inputs
 
 - **v0**, main [`d8805cb7`](https://github.com/buster14a/buster/tree/d8805cb7436542f16e1015c29f66feb15dac7c81),
