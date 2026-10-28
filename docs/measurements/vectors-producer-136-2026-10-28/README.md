@@ -3,8 +3,9 @@
 Branch `claude/loving-carson-j9sz52-producer-vectors` (buster14a/buster#717) gives the lowering GNU C's and clang's
 vector types of 16, 32 and 64 bytes as Tier 0's VECTOR class, with their operators as X86 entries. This record measures
 its commit `c0b216d7`, the branch with main `241fcb3e` merged, against that main, on the frozen `sqlite3.c`. The unit
-has no vector type, so this measures what the producer's code costs a unit without vectors. The pull request's current
-head, `326cbf0` (main `12db4a0e` merged), isn't measured here.
+has no vector type, so this measures what the producer's code costs a unit without vectors. The pull request's publication
+head, `326cbf0` (main `12db4a0e` merged), isn't measured here. Neither is the later reviewed `c32dbf57` boundary fix;
+this remains evidence for the frozen `c0b216d7` source only.
 
 | Measure (`sqlite3.c`) | main (`241fcb3e`) | head (`c0b216d7`) | change |
 | --- | --- | --- | --- |
@@ -51,8 +52,10 @@ seven runs each, 21 per tree (`stages2.log`, `stages2-receipts.log`). The median
 | total | 124.219 | 124.580 | +0.361 (+0.29%) |
 
 Each run's spread is larger than these differences: the totals ran from 123.555 to 127.549 ms for main and from 123.688
-to 127.006 ms for the head. The two largest differences are in checking, whose sources the producer doesn't change.
-There, as `-fsyntax-only`'s instruction count says, the head runs about the same instructions in more cycles. That fits
+to 127.006 ms for the head. The two largest differences are in checking. The expression-checking algorithms are unchanged; the control-program
+phase additionally carries the new output-target feature metadata. The aggregate `-fsyntax-only` instruction count
+shows only a small instruction increase, while the stage rows show more time in these two passes; it does not isolate
+the cause of either pass's cycle change. That fits
 a change in clang's code for the same sources (inlining, or the placement of the checker unit's code, in which the
 lowering is compiled: #502 measured placement moving `sqlite3.c`'s compile by up to 2%), but this record doesn't
 establish which. The lowering's 0.074 ms is consistent with its 2.8 million instructions.
@@ -64,8 +67,9 @@ took the lock between two of its runs, made it slow. It was stopped after 7 runs
 ## The profile
 
 `profile.sh` recorded `perf record -e instructions:u -c 1000003` of 100 runs of `-c` by each tree. It resolved each
-sample's address against the tree's own symbol table (`nm_*.txt`, `ips_*.txt`, `functions_*_lower.txt`: 125,513 and
-125,943 samples). Its per-function differences aren't a reliable attribution here. Summed by component, they move by
+sample's address against the tree's own symbol table (`nm_*.txt`, `ips_*.txt`, `functions_*_lower.txt`). The raw files
+contain 125,600 and 126,000 samples; the archived tables name 125,513 and 125,943 of them, with the remaining 87 and
+57 in unnamed rows. Its per-function differences aren't a reliable attribution here. Summed by component, they move by
 millions of instructions a run in code that is the same in both trees and gets the same input: Tier 0's functions by
 +404 samples (about +4.0 million instructions a run), and the checker's graph and actions (`check_graph_*`,
 `check_action*`, `check_init*`, `check_literal*`, `check_constant*`, `check_builtin*`) by +602, while all of
@@ -129,4 +133,4 @@ min=605310 max=5582301 boost=1 driver=amd-pstate-epp` and status 0.
 - No A/A control.
 - The comparison's own holds have no receipts, and its logs are filtered (above).
 - The profile's attribution isn't reliable (above).
-- The pull request's current head `326cbf0`, with main `12db4a0e` merged, isn't measured.
+- The publication head `326cbf0`, with main `12db4a0e` merged, and the later reviewed `c32dbf57` boundary fix are not measured.
