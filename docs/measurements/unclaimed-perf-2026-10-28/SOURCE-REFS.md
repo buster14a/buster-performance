@@ -22,4 +22,3 @@ These public refs preserve exact measurement or qualification snapshots. They ar
 | combined | qualification | [d74d8736](https://github.com/buster14a/buster/tree/d74d87366e2f7458bc7997b2314d94b0f5cdf96b) | codex/qualification-20261028-compat |
 
 The combined snapshot records functional native/generic and qemu64 qualification against pinned main/#678 sources. Its workflow and fixture state is historical; later publication-only gate corrections and review adjustments have their own commits and CI. Rejected experiment refs preserve negative evidence, not accepted optimizations.
-
