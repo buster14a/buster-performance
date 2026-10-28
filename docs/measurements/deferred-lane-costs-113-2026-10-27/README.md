@@ -20,8 +20,8 @@ together so that the lane rule is fitted once:
 Three sessions made these runs: the hand-off of 2026-10-26 (campaign 1, the ways to take the parts), the hand-off of
 2026-10-27 (campaigns A, B and CT, on the branch's code on main `43030b89`), and the session that merged that code
 with main and opened the PR, on 2026-10-28 (campaigns A2, B2 and CT2, the same comparisons on the merged tree against
-main `cd9c5c9b`, with the merged tree's tests and mutants). Cited by Buster's `docs/c-deferred-bodies.md` ("How many
-lanes").
+main `cd9c5c9b`, with the merged tree's tests and mutants, and the tests of the PR's head, that tree merged with a
+later main). Cited by Buster's `docs/c-deferred-bodies.md` ("How many lanes").
 
 ## Sources and inputs
 
@@ -33,7 +33,8 @@ lanes").
 | `head` | `bbdbb4f1`: `main` with the costliest part first, the first lane's take, the state's memory kept and the parts cut before the lanes; #448's rule | 488 | `f755c11f92f514b1c3f277ca9b2ea861376a9a014e14c113dcc5def22b353b7a` |
 | `final` | `5238b4db`: `head` with the tests' commit and the rule | 488 | `c3ed806826a3e27c4a82dcd8967f9031810e3110eff4b1fe07d0891b474a9eae` |
 | `main` (2026-10-28) | `cd9c5c9b`: main when the branch was merged with it | 504 | `8b98f7e6f01cce975d2e41575bcf5040e0c7386f4a80dd5cd79b22096a7c0c38` |
-| `branch` | `54a3b6da`: `final` merged with `cd9c5c9b` (the PR's code; its later commits change documentation and a comment alone) | 504 | `0518a39a88d41dcddeac8afbb11e1651fb8cc56473fce888f76611bb4d35933c` |
+| `branch` | `54a3b6da`: `final` merged with `cd9c5c9b` (the code these campaigns measured; the PR's next commits change documentation and a comment alone) | 504 | `0518a39a88d41dcddeac8afbb11e1651fb8cc56473fce888f76611bb4d35933c` |
+| `merge2` | `06bda160`: `branch` merged with main `4165454e` for the PR, tested but not measured (the PR's later commits change documentation alone) | 509 | `7a293bb4d03e4eb947ba2dc47510c345392a1afce2db550f185de4c212b95f68` |
 
 Each manifest (`source-*.sha256`) lists the SHA-256 of `build.sh` and of every file under `src/` of the tree (what the
 build reads), in the order `sha256sum build.sh; find src -type f | LC_ALL=C sort | xargs sha256sum` writes them, and
@@ -237,6 +238,27 @@ On the host, each command in a lock hold of its own (`scripts/2-tests.sh`, `logs
 | `test-checker-corpus --clang /usr/bin/clang --deferred 8` on c-testsuite | 219 units read apart on 8 lanes, 1 left to source order (a body declares something with linkage), 0 differences; all 220 programs as clang has them |
 | the same on the frozen `sqlite3.c`, with `--symbols` | 2,608 bodies, 0 differences; its functions and objects clang's (0 unexplained) |
 | `test-checker --seed 133` | 387,962 checks, 0 failures |
+
+### The PR's head
+
+Main moved on while the PR was prepared, and the PR merges `branch` with main `4165454e` (`merge2`, `06bda160`): 95
+commits (40 merges) past `cd9c5c9b`, three of which change the deferred reader: #572's rare columns in pages of their
+own (PR #617), #591's member lookup through each record's index (PR #648) and #603's bound on nested selections'
+warning ranges (PR #654), whose private warning index for each lane named the lane's output arena `lane->output`,
+which this change moved into the lane's mapping (`arenas->output`); the merge corrects it. The campaigns weren't run
+again on it. Its build and tests, on the host, each in a lock hold of its own
+(`scripts/2-tests-head.sh`, the host's `tests2.sh`; `logs/tests-head.txt`):
+
+| Command | Result |
+| --- | --- |
+| `BUSTER_DEBUG_INFO=0 ./build.sh` | 41 sources compiled in 28.9 s |
+| `test-checker-deferred` | 74 fixtures (main's two more of the issue's cases: #593's string initializers' indices and #603's nested selections' warnings), 1,339 checks, 732 merged, 6,540 bodies read apart, 0 failures |
+| `test-lanes` | every check passes, the same counts as `branch`'s |
+| `test-call-graph`, `./build.sh check-call-graph` | 37 cases, 0 failed; 41 units, 25,339 functions, 0 cycles (3 allowed), 0 split variables |
+| `test-checker-corpus --clang /usr/bin/clang --deferred 8` on c-testsuite | 219 units read apart on 8 lanes, 1 left to source order (`00078.c`: a body declares something with linkage), 0 differences; all 220 programs as clang has them |
+| the same on the frozen `sqlite3.c`, with `--symbols` | 2,608 bodies, 0 differences; its functions and objects clang's (0 unexplained) |
+| `test-checker --seed 133` | 464,879 checks, 0 failures |
+| `test-types` | every section, 0 failed (main's member lookup's among them) |
 
 ### Before and after (campaigns B2 and CT2)
 
