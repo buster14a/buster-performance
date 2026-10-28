@@ -151,6 +151,9 @@ boost enabled. Full host and binary identities are in `identities/`. Builds and
 measurements use the shared `~/buster-fast-bench/exclusive.sh` lock; measured
 controllers use `taskset -c 2`. Local sanitizer experiments use Clang 23.1.4 on
 Ryzen 9 7940HS and the local core allocator. No local timing is target evidence.
+The [role and command receipt](identities/roles-and-commands.md) maps repeated
+binary basenames to exact revisions/paths/hashes and distinguishes reconstructed
+session invocations from the contemporaneous output logs.
 
 Create separate clean source directories at the pinned revisions and build each
 under the lock with `BUSTER_DEBUG_INFO=0 ./build.sh`. From a copy of this record:
