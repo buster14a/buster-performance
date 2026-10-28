@@ -1,0 +1,19 @@
+.PHONY: all
+all: budget_15
+budget_1: budget_0
+budget_2: budget_1
+budget_3: budget_2
+budget_4: budget_3
+budget_5: budget_4
+budget_6: budget_5
+budget_7: budget_6
+budget_8: budget_7
+budget_9: budget_8
+budget_10: budget_9
+budget_11: budget_10
+budget_12: budget_11
+budget_13: budget_12
+budget_14: budget_13
+budget_15: budget_14
+budget_%:
+	+$(PROBE) $(CASE)

@@ -1,0 +1,537 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 8737622e..ebf6fab5 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -4605,13 +4605,6 @@ the 9700X's numbers.
+ 
+ ## Per-file jobs tests
+ 
+-The preprocessor's lookup-accounting fixtures also check directory snapshots
+-(#653): skipped missing first components, existing symlinks/subdirectories,
+-dot/dot-dot and overlong-component fallback, repeated/shared cache use,
+-fresh-cache visibility of new names, exhausted optional storage, and casefold
+-where the temporary filesystem permits it. File-probe counters exclude the
+-separately recorded directory-listing opens.
+-
+ `./build/compiler test-files [--lanes LIST] [--seed N] [--id-order N] [--keep]
+ [--flat] [options] [path...]` (about 0.7 s without paths) checks `c_files.c`.
+ Every check fills a file cache on each lane count of `--lanes` (1, 2, 3 and 8),
+diff --git a/docs/c-files.md b/docs/c-files.md
+index 2a15d553..4f7e40b5 100644
+--- a/docs/c-files.md
++++ b/docs/c-files.md
+@@ -117,35 +117,7 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
+   units and lanes read it at once.
+ - **A path entry per path looked up:** the path's record, or none (no file, a
+   directory, a file too big or unreadable). A translation unit's include
+-  search then makes no file probe for a path the cache already looked up;
+-  optional directory metadata is recorded separately below.
+-- **Directory snapshots for negative include candidates (#653):** on the
+-  first missing candidate in an explicit or standard search directory, its entry-name hashes are retained in
+-  an optional arena of at most 16 MiB. An absent first path component needs
+-  no file open. A listed component always takes the existing probe, including
+-  symlinks and subdirectory names; a hash collision can only retain a probe.
+-  Dot, dot-dot, empty and overlong components retain the probe too. Complete,
+-  readable and searchable listings on btrfs, ext4 and tmpfs qualify; the
+-  directory flags must report that casefold is disabled. Unsupported filesystems,
+-  permission failures, partial reads and allocation exhaustion fall back to
+-  the existing search. Include order, `#include_next`, and each file's path
+-  and system-header level are still decided by `pp_include_candidate`.
+-  The preprocessor fills listings lazily, so a unit with no includes makes
+-  none. A run-ahead records a listing on lane 0 after a probe wave reports
+-  a missing candidate in that directory, inside the measured walk; the next
+-  wave's probes on lanes only read the snapshots. Flat walks, files with no
+-  literal includes and directories where every lookup succeeds need no
+-  listing. The scalar and vector paths
+-  share this syscall filter; the entry-name hash table is scalar, since its
+-  purpose is to eliminate OS calls rather than token-processing work.
+-  A first successful lookup does not enumerate its directory, including
+-  explicit `-I` searches. A quoted include's own source directory is probed
+-  directly unless it already has a snapshot from the search list.
+-  As with cached files and negative paths, the filesystem is a snapshot for
+-  the cache's lifetime: new directory entries require a fresh `FileCache`.
+-  Listing opens/entries are recorded in `FileCache.directory_opens` and
+-  `directory_entries`, separately from `FileCacheCounts`' file probes;
+-  `directory_skips` counts candidates omitted by the listing.
++  search then makes no system call for a path the cache already looked up.
+ - **A translation unit keeps its own state about each file:** `PPFile` (how a
+   path was found, its system level) and `PPFileData`, which copies the record's
+   prepared fields when the unit first enters the file and keeps `once` (`#pragma
+@@ -154,7 +126,7 @@ decision](c-parser-fragments.md)), and clang's headers for other targets
+   its own (`PPOptions.files` null) makes one, so every earlier command runs as
+   before: `-E`'s text is byte-identical, and `test-preprocessor --clang`
+   passes.
+-- **File probes in one place:** `file_cache_probe` opens a path, reads its
++- **System calls in one place:** `file_cache_probe` opens a path, reads its
+   identity, and unless a record has that identity, maps or reads its bytes.
+   `FileCacheCounts` counts its opens, mappings and reads for whoever called
+   it: a unit's `Preprocessor.probes`, or a run's lanes.
+diff --git a/src/buster/compiler/c_files.c b/src/buster/compiler/c_files.c
+index 217db63a..84c253c7 100644
+--- a/src/buster/compiler/c_files.c
++++ b/src/buster/compiler/c_files.c
+@@ -1301,17 +1301,6 @@ static void files_add_probes(FilesRun* run)
+         if (entry != 0)
+         {
+             file_cache_identify(cache, entry);
+-            // One lane adds snapshots between probe waves. A directory earns its listing after a real miss, so a
+-            // first successful include in a large user directory keeps its original cost. Other lanes only read it.
+-            for (uint32_t d = 0; run->found[p].error == ENOENT && d < run->search->directory_count; d += 1)
+-            {
+-                const uint32_t length = run->search->directory_lengths[d];
+-                const char* directory = run->search->directories[d];
+-                if (path->length > length + 1 && path->path[length] == '/' && memcmp(path->path, directory, length) == 0)
+-                {
+-                    file_cache_list_directory(cache, directory, length);
+-                }
+-            }
+         }
+         else if (run->found[p].mapped)
+         {
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 8ad8f81b..e72c7adb 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -89,11 +89,7 @@
+ #include <dirent.h>
+ #include <errno.h>
+ #include <sys/stat.h>
+-#include <sys/vfs.h>
+-#include <sys/ioctl.h>
+ #include <sys/wait.h>
+-#include <linux/fs.h>
+-#include <linux/magic.h>
+ #include <immintrin.h>
+ #include "c_builtin_catalog.c"
+ #include "buster/compiler/x86_target.c"
+@@ -568,20 +564,6 @@ struct FileCacheCounts
+     uint64_t fstats;
+     uint64_t maps;
+     uint64_t reads;
+-    uint64_t directory_skips;
+-};
+-
+-// A complete, searchable directory's entry-name hashes. Collisions only retain an unnecessary probe; no positive
+-// result supplies a file. Listings are immutable for the cache's lifetime, like its file/path records. One lane adds
+-// them; file_cache_probe only reads them, including when the per-file walk probes on several lanes.
+-typedef struct FileCacheDirectory FileCacheDirectory;
+-struct FileCacheDirectory
+-{
+-    FileCacheDirectory* next;
+-    const char* path;
+-    uint32_t length;
+-    uint32_t slot_mask;
+-    uint64_t* slots;
+ };
+ 
+ // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
+@@ -668,10 +650,6 @@ struct FileCache
+     uint32_t path_slot_mask;
+     Arena path_arena;
+     Arena arrays[4];
+-    Arena directory_arena;
+-    FileCacheDirectory* directories;
+-    uint64_t directory_opens;
+-    uint64_t directory_entries;
+     // Each lane's arenas, reserved when the lane first prepares a record.
+     FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
+     // The records prepared, and their tokens (for the tests and the benchmark).
+@@ -3630,7 +3608,6 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location,
+ #define BUSTER_FILE_CACHE_PATH_BYTES (1ull << 32)
+ #define BUSTER_FILE_CACHE_INITIAL_SLOTS 1024u
+ #define BUSTER_FILE_CACHE_ARENA_BYTES (64ull << 30)
+-#define BUSTER_FILE_CACHE_DIRECTORY_BYTES (16ull << 20)
+ // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
+ // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
+ // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
+@@ -3699,7 +3676,6 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
+         arena_release(&cache->arrays[i]);
+     }
+     arena_release(&cache->path_arena);
+-    arena_release(&cache->directory_arena);
+     *cache = (FileCache){ 0 };
+ }
+ 
+@@ -3824,145 +3800,6 @@ static FileCachePath* file_cache_find_path(FileCache* cache, const char* path, u
+     return result;
+ }
+ 
+-// Exact names are required for a negative result. Restrict the optimization to known local filesystems: a remote or
+-// userspace filesystem can resolve names case-insensitively, and ext4's casefold directories explicitly do. An
+-// unreadable or unsearchable directory retains the original open's errors, including ACL/effective-ID decisions.
+-static bool file_cache_directory_exact(int fd)
+-{
+-    struct statfs filesystem;
+-    const bool stated = fstatfs(fd, &filesystem) == 0;
+-    const bool supported = stated && (filesystem.f_type == BTRFS_SUPER_MAGIC || filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC);
+-    long flags = 0;
+-    bool result = supported && ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0 && (flags & FS_CASEFOLD_FL) == 0;
+-    result = result && faccessat(fd, ".", X_OK, AT_EACCESS) == 0;
+-    return result;
+-}
+-
+-// Snapshot a search directory on one lane after its first missing candidate; the run-ahead publishes between waves.
+-// A failed/incomplete listing, unsupported filesystem or exhausted optional arena retains the ordinary probe.
+-// Keep the failed directory record too, so an unreadable directory is not opened again for every name.
+-static void file_cache_list_directory(FileCache* cache, const char* path, uint32_t length)
+-{
+-    FileCacheDirectory* existing = cache->directories;
+-    while (existing != 0 && (existing->length != length || memcmp(existing->path, path, length) != 0))
+-    {
+-        existing = existing->next;
+-    }
+-    if (existing == 0 && length < PATH_MAX)
+-    {
+-        if (cache->directory_arena.base == 0)
+-        {
+-            cache->directory_arena = arena_reserve_small(BUSTER_FILE_CACHE_DIRECTORY_BYTES, BUSTER_FILE_CACHE_DIRECTORY_BYTES);
+-        }
+-        Arena* arena = &cache->directory_arena;
+-        const uint64_t mark = arena->length;
+-        FileCacheDirectory* directory = arena_push_array(arena, 1, sizeof(FileCacheDirectory), _Alignof(FileCacheDirectory));
+-        char* copy = directory != 0 ? arena_push(arena, (uint64_t)length + 1, 1) : 0;
+-        if (copy != 0)
+-        {
+-            memcpy(copy, path, length);
+-            copy[length] = 0;
+-            *directory = (FileCacheDirectory){ .next = cache->directories, .path = copy, .length = length };
+-            cache->directories = directory;
+-            const uint64_t names_mark = arena->length;
+-            DIR* stream = opendir(copy);
+-            cache->directory_opens += 1;
+-            bool complete = stream != 0 && file_cache_directory_exact(dirfd(stream));
+-            uint64_t* names = 0;
+-            uint32_t count = 0;
+-            struct dirent* entry = 0;
+-            while (complete)
+-            {
+-                errno = 0;
+-                entry = readdir(stream);
+-                if (entry == 0)
+-                {
+-                    complete = errno == 0;
+-                    break;
+-                }
+-                uint64_t* name = arena_push_array(arena, 1, sizeof(uint64_t), _Alignof(uint64_t));
+-                complete = name != 0;
+-                if (complete)
+-                {
+-                    names = count == 0 ? name : names;
+-                    *name = intern_hash_bytes((const uint8_t*)entry->d_name, (uint32_t)strlen(entry->d_name)) | 1;
+-                    count += 1;
+-                }
+-            }
+-            if (stream != 0)
+-            {
+-                closedir(stream);
+-            }
+-            uint32_t capacity = 2;
+-            while (capacity < 2ull * count)
+-            {
+-                capacity *= 2;
+-            }
+-            uint64_t* slots = complete ? arena_push_array(arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : 0;
+-            complete = slots != 0;
+-            if (complete)
+-            {
+-                memset(slots, 0, capacity * sizeof(uint64_t));
+-                for (uint32_t n = 0; n < count; n += 1)
+-                {
+-                    uint32_t slot = (uint32_t)names[n] & (capacity - 1);
+-                    while (slots[slot] != 0 && slots[slot] != names[n])
+-                    {
+-                        slot = (slot + 1) & (capacity - 1);
+-                    }
+-                    slots[slot] = names[n];
+-                }
+-                directory->slots = slots;
+-                directory->slot_mask = capacity - 1;
+-                cache->directory_entries += count;
+-            }
+-            else
+-            {
+-                arena_pop_to(arena, names_mark);
+-            }
+-        }
+-        else
+-        {
+-            arena_pop_to(arena, mark);
+-        }
+-    }
+-}
+-
+-// A missing first component proves the candidate absent without opening it. Dot, dot-dot, empty and overlong
+-// components retain the OS probe, preserving traversal and ENAMETOOLONG errors. Symlinks and every other entry kind
+-// stay in the hash set and are always probed. Hash collisions are harmless false positives.
+-static bool file_cache_directory_absent(const FileCache* cache, const char* path)
+-{
+-    const uint32_t length = (uint32_t)strlen(path);
+-    bool result = false;
+-    for (const FileCacheDirectory* directory = cache->directories; !result && directory != 0; directory = directory->next)
+-    {
+-        const uint32_t first = directory->length + 1;
+-        if (directory->slots != 0 && length > first && path[directory->length] == '/' && memcmp(directory->path, path, directory->length) == 0)
+-        {
+-            uint32_t end = first;
+-            while (end < length && path[end] != '/')
+-            {
+-                end += 1;
+-            }
+-            const uint32_t component = end - first;
+-            const bool dot = component == 1 && path[first] == '.';
+-            const bool parent = component == 2 && path[first] == '.' && path[first + 1] == '.';
+-            if (component != 0 && component <= NAME_MAX && !dot && !parent)
+-            {
+-                const uint64_t hash = intern_hash_bytes((const uint8_t*)path + first, component) | 1;
+-                uint32_t slot = (uint32_t)hash & directory->slot_mask;
+-                while (directory->slots[slot] != 0 && directory->slots[slot] != hash)
+-                {
+-                    slot = (slot + 1) & directory->slot_mask;
+-                }
+-                result = directory->slots[slot] == 0;
+-            }
+-        }
+-    }
+-    return result;
+-}
+-
+ // Probes the file system for a regular file at `path` (NUL-terminated): opens it and reads its identity, and unless a
+ // record already has that identity, gets its bytes as `how` says. A mapping is read-only: the page cache's pages, which
+ // costs neither a copy nor clearing new pages, but each mapping holds the process's memory map lock, on which lanes that
+@@ -3980,11 +3817,9 @@ static void file_cache_probe(const FileCache* cache, const char* path, FileCache
+     // Without blocking: opening a FIFO waits for a writer otherwise, also for the walk's speculative probes of includes
+     // no unit reaches. A FIFO, a device or a directory then isn't a regular file, and is none. O_NONBLOCK changes
+     // nothing for a regular file, and O_NOCTTY keeps a terminal from becoming the process's controlling one.
+-    const bool absent = file_cache_directory_absent(cache, path);
+-    const int fd = absent ? -1 : open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+-    int error = absent ? ENOENT : fd >= 0 ? 0 : errno;
+-    counts->opens += !absent;
+-    counts->directory_skips += absent;
++    const int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
++    int error = fd >= 0 ? 0 : errno;
++    counts->opens += 1;
+     struct stat stats;
+     const bool stated = fd >= 0 && fstat(fd, &stats) == 0;
+     error = fd >= 0 && !stated ? errno : error;
+@@ -4523,13 +4358,6 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t
+             result = file != BUSTER_PP_NONE && pp->files[file].data != BUSTER_PP_NONE ? file : BUSTER_PP_NONE;
+             *found_in = result != BUSTER_PP_NONE ? directory : BUSTER_PP_NONE;
+             error = file != BUSTER_PP_NONE ? pp->files[file].error : 0;
+-            // A directory earns a snapshot only after a real missing candidate. Enumerating a large -I directory
+-            // for a header found on its first probe would add work to a successful search. The first miss remains in
+-            // the path cache; the snapshot serves later names. Quoted includer directories retain ordinary probes.
+-            if (directory != BUSTER_PP_NONE && error == ENOENT)
+-            {
+-                file_cache_list_directory(pp->cache, prefix, prefix_length);
+-            }
+         }
+         failed = error != 0 && !pp_include_error_absent(error) && report != BUSTER_PP_NONE;
+         if (failed)
+diff --git a/src/buster/compiler/c_preprocessor_test.c b/src/buster/compiler/c_preprocessor_test.c
+index 3b1ee764..d9f3358f 100644
+--- a/src/buster/compiler/c_preprocessor_test.c
++++ b/src/buster/compiler/c_preprocessor_test.c
+@@ -2881,17 +2881,16 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
+         uint32_t opens;
+         uint32_t fstats;
+         uint32_t reads;
+-        uint32_t skips;
+     } cases[] = {
+-        { "absent.h", false, 2, 0, 0, 0 },
+-        { "absent.h", false, 0, 0, 0, 0 },
+-        { "value.h", true, 2, 1, 1, 1 },
+-        { "value.h", true, 0, 0, 0, 0 },
+-        { "alias.h", true, 2, 1, 0, 1 },
+-        { "folder.h", false, 2, 1, 0, 1 },
+-        { "folder.h", false, 0, 0, 0, 0 },
+-        { "loop.h", false, 2, 0, 0, 1 },
+-        { "loop.h", false, 0, 0, 0, 0 },
++        { "absent.h", false, 2, 0, 0 },
++        { "absent.h", false, 0, 0, 0 },
++        { "value.h", true, 2, 1, 1 },
++        { "value.h", true, 0, 0, 0 },
++        { "alias.h", true, 2, 1, 0 },
++        { "folder.h", false, 2, 1, 0 },
++        { "folder.h", false, 0, 0, 0 },
++        { "loop.h", false, 2, 0, 0 },
++        { "loop.h", false, 0, 0, 0 },
+     };
+     static InternTable table;
+     static Preprocessor units[2];
+@@ -2913,8 +2912,7 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
+             uint32_t found_in = BUSTER_PP_NONE;
+             const uint32_t file = pp_find_include(pp, (const uint8_t*)cases[c].name, (uint32_t)strlen(cases[c].name), true, false, BUSTER_PP_NONE,
+                                                    BUSTER_PP_NONE, &found_in, BUSTER_PP_NONE);
+-            const bool listed = pp->cache->directories != 0 && pp->cache->directories->slots != 0;
+-            expected_opens += u == 0 ? cases[c].opens - (listed ? cases[c].skips : 0) : 0;
++            expected_opens += u == 0 ? cases[c].opens : 0;
+             expected_fstats += u == 0 ? cases[c].fstats : 0;
+             expected_reads += u == 0 ? cases[c].reads : 0;
+             expected_found += cases[c].found;
+@@ -2960,137 +2958,6 @@ static bool pp_test_lookup_probes(const PPOptions* base, const char* missing_roo
+ // Real directive/query dispatch must produce the same tokens, locations, history and tables with vector/scalar
+ // kernels and with timing disabled. The independent fixture counts include failed and repeated cached searches,
+ // stat calls for every embed query (there is no embed path cache), and setup stats for duplicate/missing directories.
+-// Directory snapshots are optional negative information only: every known first component, traversal or failed
+-// listing falls back to the exact file probe. A shared cache keeps its snapshot; a fresh one sees newly created names.
+-static bool pp_test_directory_snapshot(const char* root)
+-{
+-    char directory[PATH_MAX];
+-    char present[PATH_MAX];
+-    char created[PATH_MAX];
+-    char alias[PATH_MAX];
+-    char nested[PATH_MAX];
+-    char query[PATH_MAX];
+-    snprintf(directory, sizeof(directory), "%s/directory-snapshot", root);
+-    snprintf(present, sizeof(present), "%s/value.h", directory);
+-    snprintf(created, sizeof(created), "%s/later.h", directory);
+-    snprintf(alias, sizeof(alias), "%s/alias.h", directory);
+-    snprintf(nested, sizeof(nested), "%s/nested", directory);
+-    bool result = mkdir(directory, 0700) == 0 && mkdir(nested, 0700) == 0 && pp_test_write_file(present, "value\n") && symlink("value.h", alias) == 0;
+-    FileCache cache = { 0 };
+-    FileCache fresh = { 0 };
+-    FileCache failed = { 0 };
+-    const uint32_t length = (uint32_t)strlen(directory);
+-    if (result)
+-    {
+-        // First hits both beside the source and in an explicit -I directory must not enumerate the directory.
+-        snprintf(query, sizeof(query), "%s/local.c", directory);
+-        static InternTable local_table;
+-        static Preprocessor local_unit;
+-        const char* const includes[] = { directory };
+-        for (uint32_t explicit = 0; result && explicit < 2; explicit += 1)
+-        {
+-            const PPOptions local_options = {
+-                .no_standard_includes = true,
+-                .quiet = true,
+-                .include_directories = includes,
+-                .include_directory_count = explicit,
+-            };
+-            result = pp_test_write_file(query, explicit == 0 ? "#include \"value.h\"\n" : "#include <value.h>\n") && intern_initialize(&local_table) &&
+-                     pp_initialize(&local_unit, &local_options, &local_table) && pp_run(&local_unit, query) && local_unit.cache->directory_opens == 0;
+-            pp_release(&local_unit);
+-            intern_release(&local_table);
+-        }
+-        unlink(query);
+-        file_cache_list_directory(&cache, directory, length);
+-        const bool supported = cache.directories != 0 && cache.directories->slots != 0;
+-        result = cache.directory_opens == 1 && !file_cache_directory_absent(&cache, present) && !file_cache_directory_absent(&cache, alias) &&
+-                 file_cache_directory_absent(&cache, created) == supported;
+-        snprintf(query, sizeof(query), "%s/missing/child.h", directory);
+-        result = result && file_cache_directory_absent(&cache, query) == supported;
+-        snprintf(query, sizeof(query), "%s/nested/child.h", directory);
+-        result = result && !file_cache_directory_absent(&cache, query);
+-        snprintf(query, sizeof(query), "%s/./later.h", directory);
+-        result = result && !file_cache_directory_absent(&cache, query);
+-        snprintf(query, sizeof(query), "%s/../later.h", directory);
+-        result = result && !file_cache_directory_absent(&cache, query);
+-        result = result && (uint64_t)length + NAME_MAX + 3 <= sizeof(query);
+-        if (result)
+-        {
+-            memcpy(query, directory, length);
+-            query[length] = '/';
+-            memset(query + length + 1, 'q', NAME_MAX + 1);
+-            query[length + NAME_MAX + 2] = 0;
+-            result = !file_cache_directory_absent(&cache, query);
+-        }
+-        result = result && pp_test_write_file(created, "later\n");
+-        file_cache_list_directory(&cache, directory, length);
+-        file_cache_list_directory(&fresh, directory, length);
+-        result = result && cache.directory_opens == 1 && file_cache_directory_absent(&cache, created) == supported &&
+-                 fresh.directory_opens == 1 && !file_cache_directory_absent(&fresh, created);
+-        // An optional listing that cannot fit cannot change an include's outcome; it is not a fatal cache failure.
+-        failed.directory_arena = arena_reserve_small(128, 128);
+-        file_cache_list_directory(&failed, directory, length);
+-        result = result && !file_cache_directory_absent(&failed, present) && !file_cache_directory_absent(&failed, created);
+-        snprintf(query, sizeof(query), "%s/missing.h", directory);
+-        result = result && !file_cache_directory_absent(&failed, query);
+-    }
+-    arena_release(&cache.directory_arena);
+-    cache = (FileCache){ 0 };
+-    arena_release(&fresh.directory_arena);
+-    arena_release(&failed.directory_arena);
+-    unlink(present);
+-    unlink(created);
+-    unlink(alias);
+-    rmdir(nested);
+-    failed = (FileCache){ 0 };
+-    if (result && geteuid() != 0)
+-    {
+-        result = chmod(directory, 0) == 0;
+-        file_cache_list_directory(&failed, directory, length);
+-        result = result && !file_cache_directory_absent(&failed, query) && failed.directories != 0 && failed.directories->slots == 0;
+-        result = chmod(directory, 0700) == 0 && result;
+-        arena_release(&failed.directory_arena);
+-    }
+-    FileCache unsupported = { 0 };
+-    file_cache_list_directory(&unsupported, "/proc", 5);
+-    result = result && !file_cache_directory_absent(&unsupported, "/proc/buster-absent-header.h") &&
+-             unsupported.directories != 0 && unsupported.directories->slots == 0;
+-    arena_release(&unsupported.directory_arena);
+-    // Where the temporary filesystem permits +F, a differently cased existing header must always reach the probe.
+-    const int fd = result ? open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+-    long flags = 0;
+-    bool casefold = false;
+-    if (fd >= 0 && ioctl(fd, FS_IOC_GETFLAGS, &flags) == 0)
+-    {
+-        long folded = flags | FS_CASEFOLD_FL;
+-        casefold = ioctl(fd, FS_IOC_SETFLAGS, &folded) == 0;
+-    }
+-    if (casefold)
+-    {
+-        snprintf(present, sizeof(present), "%s/MiXeD.h", directory);
+-        snprintf(query, sizeof(query), "%s/mixed.h", directory);
+-        result = pp_test_write_file(present, "casefold\n") && result;
+-        file_cache_list_directory(&cache, directory, length);
+-        const int header = open(query, O_RDONLY | O_CLOEXEC);
+-        result = result && header >= 0 && !file_cache_directory_absent(&cache, query) && cache.directories != 0 && cache.directories->slots == 0;
+-        if (header >= 0)
+-        {
+-            close(header);
+-        }
+-        unlink(present);
+-        ioctl(fd, FS_IOC_SETFLAGS, &flags);
+-        arena_release(&cache.directory_arena);
+-    }
+-    if (fd >= 0)
+-    {
+-        close(fd);
+-    }
+-    rmdir(directory);
+-    printf("directory snapshots: %s (first components, symlinks, traversal, cache lifetime, allocation fallback%s)\n", result ? "as expected" : "WRONG",
+-           casefold ? ", casefold" : "; casefold unavailable");
+-    return result;
+-}
+-
+ static bool pp_test_lookup_accounting(const char* directory)
+ {
+     char first[4200];
+@@ -3137,7 +3004,7 @@ static bool pp_test_lookup_accounting(const char* directory)
+     bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(folder, 0700) == 0 && symlink("loop.h", loop) == 0 &&
+                   pp_test_write_file(path, source) && pp_test_write_file(header, "#ifndef ACCOUNTED_H\n#define ACCOUNTED_H\n#define ACCOUNTED 7\nint accounted = ACCOUNTED;\n#endif\n") &&
+                   link(header, alias) == 0 && pp_test_write_file(bytes, "AB");
+-    result = result && pp_test_lookup_probes(&options, missing_root) && pp_test_directory_snapshot(directory);
++    result = result && pp_test_lookup_probes(&options, missing_root);
+     // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
+     // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
+     options.quiet = false;
+@@ -3150,15 +3017,12 @@ static bool pp_test_lookup_accounting(const char* directory)
+         Preprocessor* pp = &runs[k];
+         result = intern_initialize(&tables[k]) && pp_initialize(pp, &options, &tables[k]) && pp_run(pp, path);
+         const PPStatistics* stats = &pp->statistics;
+-        // The first missing name earns each snapshot; later names eliminate four candidates. Listing opens are separate from file
+-        // probes. On an unsupported filesystem the original ten probes remain. Every existing entry is still probed.
+-        const bool listed = pp->cache->directories != 0 && pp->cache->directories->slots != 0;
+-        const uint64_t include_opens = listed ? 4 : 8;
+-        result = result && pp->probes.opens == include_opens + 2 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0 &&
+-                 pp->probes.directory_skips == (listed ? 4u : 0u);
++        // Ten file open attempts: the unit, eight include candidates, and the embed's bytes. Four reach fstat: the
++        // unit, header, directory and resource. The three files' nonempty bytes are read once each.
++        result = result && pp->probes.opens == 10 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0;
+         if (options.timing)
+         {
+-            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == include_opens &&
++            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
+                      stats->include_fstats == 2 && stats->include_ticks != 0 && stats->embed_searches == 5 && stats->embed_found == 3 && stats->embed_stats == 10 &&
+                      stats->embed_ticks != 0;
+         }
