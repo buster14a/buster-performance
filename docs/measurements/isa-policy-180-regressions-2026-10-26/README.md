@@ -1,4 +1,14 @@
-## Current qualification: 42dc2b7b against main 1c6443e0
+## Merge outcome: PR421
+
+PR421 merged at2026-10-28 13:35:17 UTC as `321f5976d5af2b4c54fa45a639895739f2b8a8c9`, tree `a6838b69bad97003d7e9f26024aab074efe29a85`, with parents4165454e… and42dc2b7b…. Both the merge and qualified source head are verified on origin/main. Required checks passed and the normal guarded merge used no rule bypass. The [merge handoff](raw/main1c6-final-merge-handoff.json) records exact identities.
+
+The maintainer explicitly accepted the documented SQL/assembler/init/RSS/text/BSS tradeoffs and requested merge; [approval](https://github.com/buster14a/buster/pull/421#issuecomment-6470433346) and [independent review](https://github.com/buster14a/buster/pull/421#issuecomment-6470285710) are public. This changes acceptance status, not any observation or causal claim. The6,552 observations remain bound to frozen1c6/42dc; they are not relabelled as timings for the later merged tree. Issue180 remains open for the producer/builtin/attribute integrations and full C-source acceptance described below.
+
+[Postmerge CI40697811560](https://github.com/buster14a/buster/actions/runs/40697811560) also passes84/84 on the actual321f/a683 merge tree, completed2026-10-28 13:39:15 UTC. The seven policy/encoder/test files match qualified42dc exactly. The [original full log and provenance](raw/main1c6-postmerge-ci-provenance.json) record checkout, footer and exact hashes; this is functional CI, not new performance measurement.
+
+The following section preserves the qualification state before that explicit approval. Its previously open acceptance/draft statements describe that earlier point in time. All measurements, adverse results and corrections remain unchanged.
+
+## Qualification before maintainer acceptance: 42dc2b7b against main 1c6443e0
 
 The matched measurement campaign is complete. **Overall performance acceptance remains open.** PR421 remains draft, open, mergeable and unmerged at the last live check. No performance regression or exception has been approved.
 
