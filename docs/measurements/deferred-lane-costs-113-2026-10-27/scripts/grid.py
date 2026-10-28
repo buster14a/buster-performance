@@ -2,7 +2,8 @@
 # Reads benchmark-checker-deferred logs (runs.sh's headings "== round R RUN UNIT lanes L") into rows, one per process:
 # the unit's figures and, for the one-lane reading and the process's lanes, each reading's fields. Then summarizes by
 # run, unit and lanes over the rounds: the change of the lanes' reading against the same process's one lane (lowest,
-# median, highest), and the medians of the other fields.
+# median, highest), and the medians of the other fields. --full-precision keeps the percentage ratios unrounded for
+# rule thresholds and sums; the default is the original one-decimal display table.
 import re, sys, statistics, collections
 
 def fields(line):
@@ -65,11 +66,13 @@ def summarize(rows):
     return out
 
 if __name__ == '__main__':
-    rows = read(sys.argv[1:])
+    paths = sys.argv[1:]
+    full_precision = paths[:1] == ['--full-precision']
+    rows = read(paths[1:] if full_precision else paths)
     s = summarize(rows)
     cols = ['run', 'unit', 'lanes', 'rounds', 'tokens', 'bodies', 'body_tokens', 'largest', 'second', 'low', 'median', 'high', 'one', 'many', 'span',
             'active', 'copies', 'copy1', 'copy', 'dispatch', 'wake', 'arenas', 'first', 'passes']
     print('\t'.join(cols))
     for g in s:
-        print('\t'.join(('%+.1f' % g[c]) if c in ('low', 'median', 'high') else ('%.2f' % g[c]) if isinstance(g[c], float) and c in ('one', 'many', 'span') else
+        print('\t'.join((('%+.17g' if full_precision else '%+.1f') % g[c]) if c in ('low', 'median', 'high') else ('%.2f' % g[c]) if isinstance(g[c], float) and c in ('one', 'many', 'span') else
                         str(int(g[c])) if isinstance(g[c], float) else str(g[c]) for c in cols))

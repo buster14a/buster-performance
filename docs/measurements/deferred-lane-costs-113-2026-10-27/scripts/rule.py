@@ -3,6 +3,7 @@
 # its reading on each measured lane count against one lane (counts between measured ones interpolated), and for each rule
 # (the critical path's form, and N) the lanes it gives and its change there, beside the grid's best.
 #   rule.py RUN [N...] < summary.tsv
+# Feed grid.py --full-precision output so thresholds and sums precede display rounding.
 import sys, collections
 run = sys.argv[1]
 ns = [int(x) for x in sys.argv[2:]] or [8192, 10240, 12288, 14336, 16384]

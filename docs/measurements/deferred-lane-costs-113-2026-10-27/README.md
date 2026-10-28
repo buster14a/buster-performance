@@ -98,7 +98,18 @@ with linkage), for which the benchmark fails having said why.
 
 `scripts/grid.py` reads the logs into rows, a process each, and summarizes them by run, unit and lane count over the
 rounds (`tables/summary*.tsv`); `rule.py` and `rule2.py` evaluate rules on a grid's summary; `compare.py` and
-`compare2.py` make the before and after tables. The tables below come from them.
+`compare2.py` make the before and after tables. The original summary TSVs retain their one-decimal percentage display.
+Strict rule thresholds and sums below use `grid.py --full-precision` so each process's ratio and its median remain
+unrounded until the final display. A unit is within one point when its change against one lane is no more than one
+percentage point above the grid's best change; gains forgone sum those point differences. `rule2.py` truncates the
+top-level share to whole tokens, as the production rule does. For example, from this directory:
+
+```sh
+python3 scripts/grid.py --full-precision logs/A2.txt | python3 scripts/rule2.py branch-every 1024 0.25
+```
+
+The raw logs and original input/source manifests are unchanged by this reporting correction. The tables below come
+from these analyses; their displayed figures are rounded only after the thresholds and sums.
 
 ## The ways to take the parts (campaign 1)
 
@@ -188,23 +199,24 @@ change doesn't touch, vary as much between rounds as between the trees.
 
 ## The rule (campaign A's grid)
 
-`rule.py` and `rule2.py` on `head-every`'s grid (`tables/summaryA.tsv`), the median change of each unit's reading
+`rule.py` and `rule2.py` on `head-every`'s full-precision grid (`grid.py --full-precision logs/A.txt`; the original
+rounded display is `tables/summaryA.tsv`), the median change of each unit's reading
 against one lane, lane counts between 4 and 8 interpolated:
 
-| Rule: one lane, and one more per | Worst unit against one lane | Units within 1% of their best | Gains forgone, summed |
+| Rule: one lane, and one more per | Worst unit against one lane | Units within one point of their best | Gains forgone, summed |
 | --- | ---: | ---: | ---: |
 | 12,288 tokens beyond twice the largest body's (#448's) | +0.0% | 20 of 43 | 99.0 points |
 | 8,192 tokens beyond twice the largest body's | +0.0% | 24 | 78.8 |
-| 8,192 tokens beyond the largest body's | +5.5% | 25 | 59.0 |
-| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 29 | 48.4 |
-| the same, 6,144 tokens | +0.9% | 35 | 29.0 |
+| 8,192 tokens beyond the largest body's | +5.5% | 24 | 59.3 |
+| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 28 | 48.6 |
+| the same, 6,144 tokens | +0.9% | 35 | 29.3 |
 | 1,536 tokens and a fifth of the top level's, beyond the same | +0.0% | 41 | 13.0 |
-| 1,024 tokens and three tenths of the top level's, beyond the same | +0.0% | 40 | 13.1 |
+| 1,024 tokens and three tenths of the top level's, beyond the same | +0.0% | 40 | 13.2 |
 | 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 42 | 9.2 |
 
 `tables/fit-final.txt` has each unit's lanes and change by the rule against the grid's best. On `head-every-warm`'s
 grid (2 and 8 lanes alone), 256 tokens a lane beyond the same path, whatever the top level, reads every unit within
-+0.0% of one lane and forgoes 14.9 points, where the rule forgoes 45.0: a rule for a state's later readings could
++0.0% of one lane and forgoes 14.8 points, where the rule forgoes 44.8: a rule for a state's later readings could
 count far fewer tokens.
 
 ## Before and after on the hand-off's base (campaigns B and CT)
@@ -359,23 +371,24 @@ The arenas take 2.1 to 12.7 µs on two lanes and 4.2 to 18.8 µs on eight; the w
 and 15.3 on eight. `benchmark-lanes` gives the same balance as in campaign A on both trees: parts within 98 to 99% of
 the best, in 506 to 515 µs at full speed and 679 to 687 µs with half the lanes at half speed.
 
-`rule.py` and `rule2.py` on `branch-every`'s grid (`tables/summaryA2.tsv`, `tables/fitA2.txt`):
+`rule.py` and `rule2.py` on `branch-every`'s full-precision grid (`grid.py --full-precision logs/A2.txt`;
+`tables/summaryA2.tsv` retains its original rounded display, and `tables/fitA2.txt` has the corrected fit):
 
-| Rule: one lane, and one more per | Worst unit against one lane | Units within 1% of their best | Gains forgone, summed |
+| Rule: one lane, and one more per | Worst unit against one lane | Units within one point of their best | Gains forgone, summed |
 | --- | ---: | ---: | ---: |
-| 12,288 tokens beyond twice the largest body's (#448's) | +0.0% | 19 of 43 | 107.5 points |
+| 12,288 tokens beyond twice the largest body's (#448's) | +0.0% | 19 of 43 | 107.4 points |
 | 8,192 tokens beyond twice the largest body's | +0.0% | 23 | 89.0 |
-| 8,192 tokens beyond the largest body's | +4.8% | 23 | 68.6 |
-| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 27 | 57.2 |
-| the same, 6,144 tokens | +0.5% | 31 | 36.8 |
-| 1,536 tokens and a fifth of the top level's, beyond the same | +0.0% | 38 | 16.0 |
-| 1,024 tokens and three tenths of the top level's, beyond the same | +0.0% | 39 | 14.4 |
-| 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 39 | 10.8 |
+| 8,192 tokens beyond the largest body's | +4.8% | 23 | 68.3 |
+| 8,192 tokens beyond the larger of the largest's and twice the second's | +0.0% | 27 | 57.0 |
+| the same, 6,144 tokens | +0.5% | 31 | 36.6 |
+| 1,536 tokens and a fifth of the top level's, beyond the same | +0.0% | 37 | 15.9 |
+| 1,024 tokens and three tenths of the top level's, beyond the same | +0.0% | 38 | 14.2 |
+| 1,024 tokens and a quarter of the top level's, beyond the same (the rule) | +0.0% | 38 | 10.7 |
 
-The rule still forgoes the least and reads no unit slower than one lane; the four units it leaves more than a point
-from their best gain 3.0 to 13.4% where their best is 4.3 to 15.3% (`d16x19f384s288` on six lanes, `h64x3` on three,
-`b16x19` on eight, `x16x38` on four). On `branch-every-warm`'s grid, 256 tokens a lane beyond the same path reads every
-unit within +0.0% of one lane and forgoes 13.0 points, where the rule forgoes 46.9.
+The rule still forgoes the least and reads no unit slower than one lane; the five units it leaves more than a point
+from their best gain 3.0 to 13.4% where their best is 4.2 to 15.3% (`d16x19f384s288` on six lanes, `h64x3` on three,
+`b16x19` on eight, `x16x38` on four, and `d2x1f480s240` on four). On `branch-every-warm`'s grid, 256 tokens a lane beyond the same path reads every
+unit within +0.0% of one lane and forgoes 13.1 points, where the rule forgoes 47.1.
 
 ### Mutants (2026-10-28)
 
@@ -418,3 +431,13 @@ on this host (Buster's `docs/profiling.md`, "Comparing two versions"); the compa
 eight lanes against one lane in the same process. A2's first round ran in two parts (jobs 0 to 29, then 30 to 43 an
 hour later, after B2 and CT2); each of its rounds still has every job once. The laptop probe is the shape of a cold
 copy on a busy 7940HS, not a measurement of the 9700X.
+
+Cold readings here recreate the deferred state's mappings and first-touch their pages; each process preprocesses its
+input once and reads it repeatedly. They are not CPU-cache-cold, filesystem-cache-cold or full-process startup/full-
+compile measurements. Warm readings retain that state's memory. Touched pages remain until `check_deferred_release`,
+even when the arenas' logical lengths reset; this record has no RSS series across later readings or different units
+and makes no claim of lower peak or retained RSS. Mapping capacity is virtual address space, not resident memory.
+
+Timing claims remain attached to the listed frozen pairs, in particular `54a3b6da` against `cd9c5c9b` for A2/B2/CT2.
+The later `06bda160` merge and subsequent source revisions have no new timing campaign in this record; their tests or
+non-timing behavior checks do not turn the frozen timings into later-head measurements.

@@ -4,6 +4,7 @@
 # summary of one run (every lane) and prints, for each (A, B), the worst change at the rule's lanes, the gains forgone
 # against the grid's best, and the units within 1% of their best; then each unit's lanes and change for the chosen pair.
 #   rule2.py RUN [A B] < summary.tsv
+# Feed grid.py --full-precision output so thresholds and sums precede display rounding.
 import sys, collections
 run = sys.argv[1]
 chosen = (int(sys.argv[2]), float(sys.argv[3])) if len(sys.argv) > 3 else None
@@ -32,7 +33,7 @@ def lanes_for(u, a, b):
     path = max(u['b1'], 2 * u['b2'])
     beyond = max(0, u['tokens'] - path)
     top = u['all'] - u['tokens']
-    n = a + b * top
+    n = a + int(b * top)
     return max(1, min(8, u['bodies'], 1 + int(beyond // n)))
 def score(a, b):
     worst = -1e9; forgone = 0.0; within = 0
