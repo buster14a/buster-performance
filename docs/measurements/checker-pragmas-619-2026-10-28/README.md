@@ -67,12 +67,12 @@ attribute, and in `sqlite3.c` the system headers give most declarations attribut
 
 | Tree | Guard | `-fsyntax-only` instructions | `-c` instructions | Log |
 | --- | --- | --- | --- | --- |
-| head 1 (`8379300f`) | none: every declarator | +633,376 (+0.064%) | +662,684 (+0.053%) | `perf.log` |
+| head 1 (`83793002`) | none: every declarator | +633,376 (+0.064%) | +662,684 (+0.053%) | `perf.log` |
 | head 2 (`572471f4`) | declarators with attributes, or after the first setting or attribute | +528,393 (+0.053%) | +557,916 (+0.044%) | `perf2.log` |
 | head 2, again | the same | +528,606 | +558,109 | `perf3.log` |
-| head 3 (`45dd5034` with `head3.diff`) | as head 2, but attributes only once the reader has read a section attribute | +413,826 (+0.042%) | +443,161 (+0.035%) | `perf3.log` |
+| head 3 (`45dd503f` with `head3.diff`) | as head 2, but attributes only once the reader has read a section attribute | +413,826 (+0.042%) | +443,161 (+0.035%) | `perf3.log` |
 
-The pull request's head has a third guard (`c205abb8`): the attribute reader lowers the walk's start to each section
+The pull request's head has a third guard (`c205abb6`): the attribute reader lowers the walk's start to each section
 attribute's token as it reads one, so that the walk tests one compare per declarator. It was measured only after main's
 merge, in the table above, against another main. Head 3's guard saved 114,780 instructions of head 2's 528,606, a
 fifth. Each session's main runs a few hundred instructions apart from the others' (995,723,056 to 995,723,527 for
@@ -89,12 +89,12 @@ The time-runs rounds are in `history/ab.log` (head 1), `ab2.log` (head 2) and `a
 | `base` | [`241fcb3e`](https://github.com/buster14a/buster/tree/241fcb3e9a5a55d8ccc3dfffc7d9d0efd56bdda7) | main when measured, the branch's merge |
 | `head` | [`77c45e33`](https://github.com/buster14a/buster/tree/77c45e33427beece95816c69d7214b957467cce4) | the measured pull request head, with main `241fcb3e` merged |
 | `history/base` | [`4165454e`](https://github.com/buster14a/buster/tree/4165454e) | main before, the branch's first merge |
-| `history/head` | [`8379300f`](https://github.com/buster14a/buster/tree/8379300f) | the branch before the guards |
+| `history/head` | [`83793002`](https://github.com/buster14a/buster/tree/83793002821e597fd38b90a41946eb8a43e9534e) | the branch before the guards |
 | `history/head2` | [`572471f4`](https://github.com/buster14a/buster/tree/572471f4) | the first guard |
-| `history/head3` | `45dd5034` and `history/head3.diff` | the optimize pragma's fix, and the second guard, which no commit has |
+| `history/head3` | [`45dd503f`](https://github.com/buster14a/buster/tree/45dd503f832d0fc9542523119fce87e813dda327) and `history/head3.diff` | the optimize pragma's fix, and the second guard, which no commit has |
 
 `base` and `head` were `git archive` of their commits, sent by tar into empty directories. The history's trees' files
-are their commits' (`history/source-*.sha256` matches `git archive` of each), and head 3's are `45dd5034`'s with
+are their commits' (`history/source-*.sha256` matches `git archive` of each), and head 3's are `45dd503f`'s with
 `history/head3.diff` applied. Each `source-*.sha256` holds the SHA-256 of every file, and `inputs.sha256` those of
 the executables, the objects, the input and its predefines, and the host's kernel and clang. Each was built with
 `BUSTER_DEBUG_INFO=0 LC_NUMERIC=C ./build.sh` (`build_*.log`).
@@ -136,4 +136,6 @@ failures are not propagated by its loop, and only aggregate function counts are 
 attribution context. The history's trees predate the measured merge (`77c45e33`), whose deferred reader (#683) and
 ISA policy (#421) the measured head and main share. Later review changes and hosted-workflow integration have no new
 timing claim from this frozen record. A review compared all 669 base-manifest files and 671 head-manifest files with
-`git archive` of the full commits above; every path and hash matched. Original raw logs and manifests are unchanged.
+`git archive` of the full commits above; every path and hash matched. The historical base (666 files), head (668) and
+head 2 (668) match their archives, and all 668 head-3 hashes match `45dd503f` with the retained patch applied.
+Original raw logs and manifests are unchanged.
