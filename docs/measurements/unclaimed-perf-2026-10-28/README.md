@@ -1,8 +1,13 @@
 # Unclaimed performance work, 2026-10-28
 
-This is a local work record. No PR or remote branch push has been made by this
-session. Individual source branches and raw artifacts remain available in the
-same workspace. This record is still being completed.
+This archive preserves revision-scoped measurements, correctness receipts and
+rejected experiments published in [buster-performance PR #64](https://github.com/buster14a/buster-performance/pull/64).
+Individual reports remain byte-identical to their collected local records,
+including their original statements about publication status. Supporting frozen
+source revisions are exposed through the compiler repository's
+`codex/qualification-20261028-*` and `codex/experiment-20261028-*` refs.
+Full raw artifacts remain in the original local workspace; the collection
+manifests identify every copied and omitted file.
 
 ## Frozen individual qualification
 
@@ -30,8 +35,11 @@ Later scoped records use different revisions and must be read independently:
   experiments are excluded from this collection's accepted scope.
 - [647 streaming affinity](issue-647/target-README.md): correct physical-core
   configuration and honest skipped rows; not a compiler throughput gain.
-- [673 worker ownership](issue-673-spawn/REPORT.md): concrete GNU make token
-  ownership, with the measured uneven-tail latency tradeoff retained.
+- [673 worker ownership](issue-673-spawn/REPORT.md): frozen GNU make worker
+  ownership implementation and measurements, retaining the uneven-tail latency
+  cost. The return-capacity defect found during publication review is tracked
+  separately in [compiler PR #695](https://github.com/buster14a/buster/pull/695);
+  these historical measurements do not establish final protocol acceptance.
 - [653 negative result](issue-653/README.md): both admission policies failed
   ordinary-input process controls; all production changes are removed.
 - [Pristine 678 controls](pr-678-controls/README.md) and
@@ -45,7 +53,7 @@ Reports retain exact executable/input/source identities, affinities, commands,
 repetitions, statuses and resource metrics. Captured faults and adverse results
 are not trimmed.
 
-## Current-main and draft-PR compatibility
+## Frozen integration and compatibility records
 
 The independent current-main integration is frozen at
 `b8cd163ce33bb8042e42fd9fea7c675ae13fa487`, incorporating main
@@ -65,13 +73,35 @@ Tier 0 95,965/zero and all 220 native cross-checked corpus programs. All 672
 tracked source hashes match the staged source tree. These functional results
 do not transfer the individual speedups to the new main.
 
-A separate private #678 compatibility trial preserves the main-only branch.
-Six added scalar equivalents are needed by the retained performance fixes;
-their boundary tests pass, and native vector paths remain unchanged. The first
-trial against `8af0904b` exposes scalar failures and is retained as negative
-evidence. The PR advanced to `ed1e848e`; fresh native/scalar builds and exact
-clean-PR controls distinguish pre-existing failures from interactions. No
-compatibility acceptance is implied until that comparison is complete.
+The [early a11 compatibility stage](compat-678-a11/ARCHIVE-SCOPE.md) is frozen
+at `06150c52db27a31fe0106acbe00c1e34ae8249d0`. Its original location-limit
+fixture failure and focused test correction remain separate from later proof.
+The older [pristine PR controls](pr-678-controls/ARCHIVE-SCOPE.md) and
+[scalar-operation audit](pr-678-audit/ARCHIVE-SCOPE.md) retain their negative
+results at their own exact PR revisions.
+
+The authoritative later [full private union](compat-678-current/README.md) is
+`d74d87366e2f7458bc7997b2314d94b0f5cdf96b`: main `321f5976`, qualified next-main
+`d3c1d45d`, nullable ASM `dc15a18e` and pinned #678 `a11d8065`. Rejected #653 is
+absent. Both 41-unit builds and all 26 corrected native/generic suite commands
+pass. Native/generic byte comparisons and true qemu64 compilation, linking and
+runtime controls also pass. Initial incorrect invocations and removed-table
+syntax attempts are retained and excluded from those passing counts. The
+[scope record](compat-678-current/ARCHIVE-SCOPE.md) separates the older unchanged
+worker-budget lifecycle proof from actual new-head execution.
+
+These are bounded correctness results for that frozen private union. Later
+source PR heads, hosted CI and merges require their own qualification; no individual
+historical speedup or combined throughput gain is transferred to them.
+
+Publication review also reproduced a GNU make token-return defect in the
+frozen clean-launch implementation and the original #695 publication head:
+a full pipe can reject return writes even after credits have been borrowed,
+and the old guardian can exit without restoring the exact held bytes. At this
+archive's final review, a lossless correction and fresh source qualification
+are pending in [#695](https://github.com/buster14a/buster/pull/695). The archived
+673 reports and timings remain unchanged observations of their named source;
+their passing fixtures and frozen-union results do not override this finding.
 
 ## Archival method and provenance
 
@@ -86,7 +116,9 @@ Each issue's `COLLECTION.tsv` records every original file's path, byte count,
 SHA-256 and disposition. Binaries, objects, large generated inputs and complete
 compressed raw archives remain in the local workspace; reports name their
 archive identities. Generators and exact commands reproduce omitted payloads.
-The local delivery bundle will retain the full raw artifacts separately.
+The full raw artifacts remain in the original local workspace separately.
+Publication review independently verified every retained raw file against its
+collection digest; this is local retention, not a remote binary archive.
 
 The original `cohort.c` and `samples.c` in `method/` record each process and
 real output. Balanced placement/copy controllers and independent schedule
