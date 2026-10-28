@@ -23,6 +23,21 @@ combined effect of the fixes. Separate speedups must not be multiplied.
 | 664 | [Record](issue-664/target/README.md) | Bounded stable home selection; scalar twin cost is retained explicitly. |
 | 674 | [Record](issue-674/target/README.md) | Eight-worker throughput survives placement/copy/order controls; one-worker gain unresolved. |
 
+Later scoped records use different revisions and must be read independently:
+
+- [628 parser storage](issue-628/ARCHIVE-SCOPE.md): current-main-based parser
+  memory reduction; timing remains within controls. Unqualified output-column
+  experiments are excluded from this collection's accepted scope.
+- [647 streaming affinity](issue-647/target-README.md): correct physical-core
+  configuration and honest skipped rows; not a compiler throughput gain.
+- [673 worker ownership](issue-673-spawn/REPORT.md): concrete GNU make token
+  ownership, with the measured uneven-tail latency tradeoff retained.
+- [653 negative result](issue-653/README.md): both admission policies failed
+  ordinary-input process controls; all production changes are removed.
+- [Pristine 678 controls](pr-678-controls/README.md) and
+  [scalar operation audit](pr-678-audit/ARCHIVE-SCOPE.md) separate clean-PR
+  failures from interactions with the retained performance changes.
+
 The host is Ryzen 7 9700X / Linux 6.18.50-2-lts, ordinary Clang 23.1.1 native
 release builds with `BUSTER_DEBUG_INFO=0`. Every target build, test and timed
 run uses the shared `exclusive.sh` lock; no machine settings were changed.
@@ -38,6 +53,11 @@ The independent current-main integration is frozen at
 The source contract adaptations preserve #640's optional parser traversal,
 compact graph leaves, new warning interval producers, string IDs, symbolic
 zero data and automatic initializer pools.
+
+This is an intermediate branch that still contains the subsequently rejected
+653 experiment. Its [screen and metadata](current-main-b8/README.md) are
+retained, not transferred to the next batch. The latter removes 653 and adds
+the qualified 628 parser and 647 configuration changes.
 
 On the target, all 41 units build in 28.9 seconds; nine correctness groups
 pass in 45.0 seconds, including checker 488,765/zero, deferred 1,147/zero,
