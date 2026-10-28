@@ -77,6 +77,33 @@ Round 2, base against `head2`:
 - **The checker's source benchmark** (round 2): the graph run's vector path took 36.42 ns a body node against
   39.98 ns (201.8 against 221.4 cycles), its scalar twin 46.96 ns against 47.18 ns.
 
+## Integrated base, round 3
+
+The previously queued campaign completed on October 27 at 21:52 UTC. `round3.sh`, `round3.log` and the two
+`manifest-*-3.sha256` files (named `manifest-base3.sha256` and `manifest-head3.sha256`) retain the comparison of
+main `92c025e71856d13eb34247477c5294d2cead139e` against integration head
+`da352e29a9f1206d935b50cc3372cbb839bc2631`. Later `fc103cfe` changes documentation only.
+The same host, build flags, locked CPU 2, SQLite source and compile options apply. The objects are identical, with
+the same `0c48ff92978c3125...` hash as rounds 1 and 2. Binary hashes are printed at the log's object-comparison step.
+
+| Measure | main `92c025e7` | integrated `da352e29` |
+| --- | ---: | ---: |
+| 21-run wall median, head-first comparison | 147.074 ms | 140.812 ms |
+| 21-run wall median, reverse comparison | 146.980 ms | 141.056 ms |
+| peak RSS, first comparison | 512,868 KB | 392,000 KB |
+| peak RSS, reverse comparison | 512,864 KB | 392,024 KB |
+| user cycles, first perf pair | 692,359,477 | 671,525,183 |
+| kernel cycles, first perf pair | 120,166,982 | 108,780,991 |
+| user instructions, first perf pair | 1,552,457,457 | 1,554,177,472 |
+| user cycles, second perf pair | 692,577,153 | 669,351,747 |
+| kernel cycles, second perf pair | 120,004,554 | 108,578,811 |
+| vector graph benchmark | 39.748 ns/body node | 36.509 ns/body node |
+
+This integrated comparison lowers wall time by 4.26% and peak RSS by 23.57% in the first comparison; reverse order
+confirms the direction. Instructions increase 0.11%, while user and kernel cycles fall. These are measurements of
+the named snapshots and workload; they are not additive speedups for other concurrently developed checker PRs.
+The original rounds above remain unchanged.
+
 ## Probes, on the laptop
 
 `probes/` holds what throwaway builds on the laptop (an AMD Ryzen 9 7940HS, Zen 4) printed while finding where the
