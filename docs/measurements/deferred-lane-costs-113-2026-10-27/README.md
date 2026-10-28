@@ -308,9 +308,18 @@ lowest and highest in parentheses), and the passes in which the first lane read 
 | 4 | −1.3% (−2.1 to −0.9) | −0.3% (−1.4 to +1.0) | 0 | 120 |
 | 8 | +0.1% (−0.9 to +0.7) | −0.9% (−2.3 to +0.5) | 0 | 120 |
 
-The first lane reads the largest body in every pass, where it read it in none, and each configuration's change
-against one lane stays within the rounds' spread of the other build's: a body of 161 tokens is a part's worth of
-work, whichever lane reads it.
+The first lane reads the largest body in every pass, where it read it in none. The within-process ratio ranges
+overlap, but this alone does not establish zero cost: the raw cross-build paired median on forced two lanes is
++2.17% (four of five pairs positive, −0.98 to +7.07%). A separate predeclared balanced confirmation uses the same
+verified owner binaries and input, with 21 AB/BA pairs and 21 same-baseline A/A pairs, all 84 trials retained
+([complete raw data, controllers, identities and analysis](priority-confirmation-2026-10-28/README.md)).
+
+That confirmation's raw whole-reader paired median is +0.6228% (−1.8067 to +2.0901%, 12 of 21 pairs positive), with
+A/A +0.1241% (−1.1882 to +1.3579%, 11 of 21 positive). The initial >2% median does not reproduce; the residual
++0.6228% cost is retained explicitly and accepted as a bounded observed cost for the primary-lane placement contract.
+It is not rounded or normalized away, nor is it a claim of universal neutrality, a whole-compile gain or a new timing
+campaign on the other 42 units. The confirmation's single fresh lock hold lasts about eight seconds, with all
+statuses and before/after binary/input/CPU identities preserved; no rebuild, SQLite run or grid repeat is added.
 
 ### Before and after (campaigns B2 and CT2)
 
