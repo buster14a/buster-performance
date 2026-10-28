@@ -9,8 +9,8 @@ It covers two inputs:
 - the frozen `sqlite3.c`, which names no section and has no file-scope `asm`;
 - a generated unit with and without named sections.
 
-The pull request's later heads aren't measured here. From `4fcf8f60` on, they carry the review's three corrections and
-main `20f6cdc5`.
+The pull request's later heads aren't measured here. They include additional review corrections and newer main
+code; none of those later compositions is qualified by these timings.
 
 | Measure (`sqlite3.c`) | base (`93d232b8`) | A/A control | head (`0cf1abd4`) | head against base | control against base |
 | --- | --- | --- | --- | --- | --- |
@@ -34,19 +34,27 @@ The A/A control bounds what the comparison can resolve:
 
 - **`-fsyntax-only`:** the head's instructions are the base's within 1,836 (0.0002%). Its cycle and wall differences
   are smaller than the control's own.
-- **`-c` instructions:** the head runs 99,726 more (+0.008%). With `-fsyntax-only`'s the same, they come from what
-  `-c` runs past checking: the emission, whose section pass returns at once for a unit without placements or
-  file-scope `asm`, and the object writer, whose sections' count and layout the branch restructured (below).
-- **`-c` cycles and wall:** the head is lower in all five paired `ab` rounds, by 0.03% to 0.31%. But the identical
+- **`-c` instructions:** the head runs 99,726 more (+0.008%). The nearly unchanged checking-only count is consistent
+  with a cost in the later compile stages: the emission, whose section pass returns at once for a unit without
+  placements or file-scope `asm`, and the restructured object writer (below). This is a stage-level inference;
+  no profile separates those contributors.
+- **`-c` cycles:** the -0.25% point estimate is larger in magnitude than the control's +0.14%, and the three paired
+  cycle differences are not contained in the A/A range. These values remain descriptive results from one placement
+  per executable, without a causal attribution or robust speedup claim.
+- **`-c` wall:** the head is lower in all five paired `ab` rounds, by 0.03% to 0.31%. But the identical
   executable's rounds range from -0.26% to +0.13% against the base, so this record claims no speedup, and no cost
-  either.
+  resolved by that wall comparison. The ranges overlap; this does not mean every head result is inside the A/A range.
 
-`main.c` with `build.sh`'s flags:
+`main.c` with the source-option subset recorded in `ab619s2.sh`:
 
 - The base's `-c` stops at `main.c:341:1: error: unsupported: file-scope assembly` (`main_c_lower_base.log`).
 - The head's `-c` gets past it and the checker's section pragma. It stops at `xmmintrin.h:1496:24: error: unsupported:
   vector types` (`main_c_lower_head.log`), which #136's vector producer (buster14a/buster#717) takes next.
 - The head's `-fsyntax-only -Wall -Werror` of `main.c` succeeds (`main_c_check_head.log`, status 0).
+
+The probe uses `-march=native -Isrc -fwrapv -funsigned-char -fno-strict-aliasing`, with `-Wall -Werror` for checking.
+It omits the build's `-O3` and explicit default-target definition, so it is not the expanded-argument own-unit
+correctness check that the reviewed source PR adds to CI.
 
 ## Named sections in a compile
 
@@ -77,8 +85,10 @@ cost (the reader's placements, the emission's descriptors, the object writer's g
 costs. A control with the same attributes naming `.text` and `.data`, the classes' own sections, which make no new
 section, would separate them. This record doesn't have one.
 
-Both objects have the sections clang's object has (`sections_*.readelf`): `.text.hot` and `.text.unlikely` (`AX`,
-aligned to 16) and `.data.tables` (`WA`, aligned to 4), beside the remaining `.text` and `.data`.
+The generated Buster objects have the expected sections (`sections_*.readelf`): `.text.hot` and `.text.unlikely`
+(`AX`, aligned to 16) and `.data.tables` (`WA`, aligned to 4), beside the remaining `.text` and `.data`. These files
+record Buster's listings; this controller does not compile or archive a Clang object for the generated units.
+The separate driver fixtures compare section properties against Clang.
 
 ## The object writer
 
@@ -100,7 +110,7 @@ had no A/A control in the run, so its cycle and time differences aren't attribut
 
 ## Tests
 
-On the 9700X, against the system clang 23.1.1 with the oracle cache off, the head passes (`test_*.log`):
+On the 9700X, against the system clang 23.1.1 with the oracle cache off, these head suites pass (`test_*.log`):
 
 - `test-object-writer --cross-check`;
 - `test-assembler --cross-check` (1,891,352 checks);
@@ -128,6 +138,9 @@ subnormal first. #678 also moved the 9700X's CI job to a staged official 23.1.4,
 - the 9700X's clang 23.1.1, under the lock: 511, 55, 5122, **512434**, 512433;
 - clang 23.1.5 (Ubuntu's, on the cloud VM that wrote this record): 511, 55, 5122, **512344**, 512343.
 
+Those two output rows are the author's reported fixture results. The archived checker log retains the system
+Clang mismatches, but the standalone commands and the cloud compiler's output are not separately captured here.
+
 Ours gives 512344. No line of the diff from the base to the head names fpclassify, so the base would fail the same
 tests against this clang. That is inferred: the base's `test-checker` didn't run. #717's record
 (`../vectors-producer-136-2026-10-28/`) shows the other side: its head predates #678, and it passes these tests against
@@ -143,8 +156,8 @@ the same clang 23.1.1.
 
 Each tree was `git archive` of its commit, sent by tar into an empty directory. Each `source-*.sha256` holds the
 SHA-256 of every file of its tree but `build/`, 681 files each, all of which match `git archive` of the full commit
-above. `inputs.sha256` holds those of the executables, the objects, the generated units, the input and its
-predefines, and the host's kernel and clang. Each tree was built with `BUSTER_DEBUG_INFO=0 LC_NUMERIC=C ./build.sh`
+above. `inputs.sha256` records hashes of the executables, objects, generated units, input and predefines, plus
+kernel and Clang version strings; it does not hash the kernel or toolchain. Each tree was built with `BUSTER_DEBUG_INFO=0 LC_NUMERIC=C ./build.sh`
 (`build_*.log`), in 29.1 and 29.2 s.
 
 Host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1.
@@ -165,6 +178,13 @@ status: 0, but for the three runs that fail as reported above, each tree's `-c` 
 Nothing is filtered from the logs: the lock's waiting messages, which name the other sessions' and CI's runs it
 waited for, are in them. The timed runs ran pinned to CPU 2, and the suites on CPUs 0 to 7, as the job runs them.
 
+A review recomputation matches every headline median above and verifies all 681 source-file hashes per tree
+against archives of the full compiler commits. All 330 `time-runs` trial rows report status 0; the 76 receipt pairs
+have matching commands and policy fields, with the three nonzero outcomes described above. The longest hold is
+29.395 seconds. The controller uses `set -u`, so its final completion alone is not a success gate for every earlier
+command; the individual statuses and receipts are the evidence. `perf stat -r 11` retains aggregate command status
+and counters, not a separate status row for each repetition.
+
 ## Limits
 
 - One input for the cost, `sqlite3.c`, with one placement per tree. The A/A control covers `sqlite3.c`'s rows only.
@@ -173,5 +193,7 @@ waited for, are in them. The timed runs ran pinned to CPU 2, and the suites on C
 - The suites ran against the system clang 23.1.1, not the official 23.1.4 that the CI job now stages, which accounts
   for the 4 fpclassify failures.
 - No profile was taken.
-- The pull request's later heads, with the review's corrections (descriptors validated before grouping, the first
-  section attribute within a declaration, the lanes benchmark's warm-ups) and main `20f6cdc5`, are not measured here.
+- Hash manifests record binary, input and object identities, but those bytes and a raw CPU-model report are not
+  bundled in this directory. Their hash values and the reported host model cannot be independently recomputed
+  from these files alone. Source manifests are post-build; there are no per-hold before/after identity checks.
+- The pull request's later heads, including the review corrections and newer main code, are not measured here.
