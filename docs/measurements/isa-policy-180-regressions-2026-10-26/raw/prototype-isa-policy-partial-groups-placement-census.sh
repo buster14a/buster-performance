@@ -1,0 +1,40 @@
+set -e
+set -o pipefail
+sha256sum -c - >&2 <<'BUSTER421_CURRENT92_IMAGES'
+89dfd85dfd29a5dbacf9cee0e3945334363f01ff605deb8b3e309d1706ba5ca3  /home/david/buster-fast-bench/codex-421-prototype-isa-policy-partial-groups/build/compiler
+3cc1b976cf0db419ee1cfac67b6237edec11c88c2bad47976b98da7e7bbc8370  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-336
+5dcec164359cf616709fc8412175dad297ff572bd67cefe18ac39e0d9dbb46f3  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-672
+5760a0f2029fe9e7327fee2c689945dde068fba08d02721edd03ff34bdec37c0  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1008
+0d5d05f45846573238d90e036c9ce7b6c66a5a68431b375d8dc8b49a7e164c4b  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1344
+8ef3360cd981a6e03c89bbdaefa313789dad607e656350db5c65bb6ed9d5e03b  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1680
+09d3ef670d632de548783a28668a7afa244d20a497f36f2d9d9cd9870b1161cc  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2016
+afe3311103ff55271bdcb1c7657b691b0717c22477d66df72ec3b4e2ed8441c6  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2352
+73db3a1ac3a90369c775fa1efa79bf17bc849305c887f64f94aacc75a14c7e9d  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2688
+55423a39e684bdf42931ec426342fe08f54918209e9af629ad1117f7f398d00f  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3024
+a2e75e6d0841a3b1755818a7429393dcf00bd15e52f030143272252b2cb8f758  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3360
+b879e59a564c14372770c5b547d787f203c6f28f0d8d37ddb06ef1d01cc6784c  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3696
+BUSTER421_CURRENT92_IMAGES
+printf 'image\t%s\t%s\t%s\n' candidate 0 '/home/david/buster-fast-bench/codex-421-prototype-isa-policy-partial-groups/build/compiler'
+readelf -sW '/home/david/buster-fast-bench/codex-421-prototype-isa-policy-partial-groups/build/compiler' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 336 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-336'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-336' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 672 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-672'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-672' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 1008 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1008'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1008' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 1344 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1344'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1344' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 1680 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1680'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-1680' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 2016 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2016'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2016' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 2352 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2352'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2352' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 2688 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2688'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-2688' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 3024 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3024'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3024' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 3360 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3360'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3360' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 3696 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3696'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-partial-groups-checker-placements/compiler-3696' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
