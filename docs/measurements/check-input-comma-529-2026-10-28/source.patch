@@ -1,0 +1,383 @@
+commit b8ee29009260785aadc2659472daac30d44c081a
+Author:     David Gonzalez Martin <davidgmbb@gmail.com>
+AuthorDate: Wed Oct 28 20:14:01 2026 +0100
+Commit:     David Gonzalez Martin <davidgmbb@gmail.com>
+CommitDate: Wed Oct 28 20:14:01 2026 +0100
+
+    Batch source-reader comma contexts with dependency-order fallback
+    
+    Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+
+diff --git a/docs/c-checker.md b/docs/c-checker.md
+index 1428d31b..67861f2b 100644
+--- a/docs/c-checker.md
++++ b/docs/c-checker.md
+@@ -1815,6 +1815,25 @@ they do per token where little of it was per declaration or expression:
+   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
+   instructions fewer, about 70 a token. The scalar path computes each bit with
+   the walk's own tests (`check_input_syntax_of`).
++- **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
++  roles at a time, then visits only separators and statement terminators.
++  Non-separators' contexts depend directly on their roles; separators inherit
++  a parent's context. Reverse source order completes later parents first. An
++  earlier parent with a fixed context is computed directly; an earlier
++  separator parent asks the unchanged reverse-postorder scalar pass to replay
++  the whole view. This keeps dependency order for nonidentity traversals
++  without another retained column, allocation or ancestor walk. Loads and
++  stores are masked at the logical token count. The count is the parser
++  view's complete token count: a prefix has its own complete postorder, and
++  a repair includes its synthetic closers even beyond `original_end`, which
++  limits later publication. The scalar host and `--scalar` use the original
++  pass. Guard-page tests cover every tail through 257 tokens, shuffled
++  dependency orders, deep chains and unknown role bytes; real prefix and
++  repair views compare every output byte with the scalar oracle. This is a
++  bounded residual of #529; general literal preparation and graph
++  construction remain separate work. It does not repeat #646's sparse walks,
++  #640's traversal derivation, #628's retained parser buffers, #658's compact
++  integer tables or #641's post-check work.
+ - **Scans for few tokens.** The passes that act on few tokens test 64 of them
+   at once (16 or 8, by the column's width) and visit only those
+   (`check_input_scan_*`): the constant contexts (static objects, static
+diff --git a/src/buster/compiler/c_check_comma_input.c b/src/buster/compiler/c_check_comma_input.c
+new file mode 100644
+index 00000000..61b57dbd
+--- /dev/null
++++ b/src/buster/compiler/c_check_comma_input.c
+@@ -0,0 +1,97 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// Comma contexts for the source reader. Non-separators have a context fixed by their role; only separators inherit
++// a parent's byte. Reverse source blocks write contiguous bytes and visit only separators and for terminators.
++// A separator whose separator parent is earlier in source order falls back to the unchanged reverse-postorder
++// oracle. This also covers prefix/repair traversals without retaining another column or allocation. Input columns
++// have count logical elements; output is disjoint reader scratch. No sentinel or vector padding is accessed.
++// count is parser->tokens.count, exactly check_input_run's original loop bound. A diagnostic view's postorder is a
++// permutation of its own complete token view, including repair closers; original_end limits publication, not this pass.
++
++static bool check_input_expression_comma_seed(const Parser* parser, uint32_t token)
++{
++    const uint8_t role = parser->tree.roles[token];
++    const uint32_t parent = parser->tree.parents[token];
++    return role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CONDITION ||
++           role == PARSE_ROLE_CLOSE_SUBSCRIPT || role == PARSE_ROLE_CLOSE_TERNARY || role == PARSE_ROLE_CLOSE_FOR ||
++           (role == PARSE_ROLE_TERMINATOR && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR);
++}
++
++// The original pass, kept as an independent scalar oracle and the dependency-order fallback.
++static void check_input_expression_commas_scalar(CheckInputReader* reader)
++{
++    const Parser* parser = reader->parser;
++    const uint32_t count = parser->tokens.count;
++    for (uint32_t k = count; k-- > 0;)
++    {
++        const uint32_t token = reader->postorder[k];
++        const uint32_t parent = parser->tree.parents[token];
++        const uint8_t role = parser->tree.roles[token];
++        reader->expression_commas[token] = role == PARSE_ROLE_SEPARATOR && parent < count ? reader->expression_commas[parent] :
++                                          role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_SUBSCRIPT || role == PARSE_ROLE_CLOSE_TERNARY ||
++                                          role == PARSE_ROLE_CLOSE_FOR || (role == PARSE_ROLE_TERMINATOR && parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR);
++    }
++}
++
++// False asks the caller to replay the scalar oracle: earlier separator parents require its dependency order.
++static bool check_input_expression_commas_vector(CheckInputReader* reader)
++{
++    const Parser* parser = reader->parser;
++    const uint32_t count = parser->tokens.count;
++    bool complete = true;
++    for (uint32_t end = count; complete && end != 0;)
++    {
++        const uint32_t first = end > 64 ? end - 64 : 0;
++        const uint32_t length = end - first;
++        const __mmask64 active = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
++        const __m512i roles = _mm512_maskz_loadu_epi8(active, parser->tree.roles + first);
++        const __mmask64 seeds = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_GROUP)) |
++                                _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_SIZEOF)) |
++                                _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_CONDITION)) |
++                                _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_SUBSCRIPT)) |
++                                _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_TERNARY)) |
++                                _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_FOR));
++        _mm512_mask_storeu_epi8(reader->expression_commas + first, active, _mm512_maskz_set1_epi8(seeds, 1));
++        uint64_t terminators = active & _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_TERMINATOR));
++        for (; terminators != 0; terminators &= terminators - 1)
++        {
++            const uint32_t token = first + (uint32_t)__builtin_ctzll(terminators);
++            const uint32_t parent = parser->tree.parents[token];
++            reader->expression_commas[token] = parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR;
++        }
++        uint64_t separators = active & _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_SEPARATOR));
++        while (complete && separators != 0)
++        {
++            const uint32_t lane = 63u - (uint32_t)__builtin_clzll(separators);
++            const uint32_t token = first + lane;
++            const uint32_t parent = parser->tree.parents[token];
++            separators ^= UINT64_C(1) << lane;
++            if (parent < count)
++            {
++                if (parent > token)
++                {
++                    reader->expression_commas[token] = reader->expression_commas[parent];
++                }
++                else if (parser->tree.roles[parent] == PARSE_ROLE_SEPARATOR)
++                {
++                    complete = false;
++                }
++                else
++                {
++                    reader->expression_commas[token] = check_input_expression_comma_seed(parser, parent);
++                }
++            }
++        }
++        end = first;
++    }
++    return complete;
++}
++
++static void check_input_expression_commas(CheckInputReader* reader)
++{
++    if (BUSTER_SCALAR_PATH(reader->parser->options.scalar) || !check_input_expression_commas_vector(reader))
++    {
++        check_input_expression_commas_scalar(reader);
++    }
++}
+diff --git a/src/buster/compiler/c_check_comma_input_test.c b/src/buster/compiler/c_check_comma_input_test.c
+new file mode 100644
+index 00000000..8ddcc8db
+--- /dev/null
++++ b/src/buster/compiler/c_check_comma_input_test.c
+@@ -0,0 +1,158 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++// Original guarded oracle for comma contexts, including legal non-source-order traversals used by reader views.
++
++// Actual prefix/repair views are partial original inputs but complete permutations of their private token counts.
++// Compare every context, including synthetic closers past a repair's original publication limit.
++static void check_test_expression_comma_view(CheckTest* test, const Parser* view, uint32_t original_end)
++{
++    const uint32_t count = view->tokens.count;
++    uint8_t* expected = malloc((uint64_t)count + 1);
++    uint8_t* actual = malloc((uint64_t)count + 1);
++    uint8_t* seen = calloc((uint64_t)count + 1, 1);
++    bool same = expected != NULL && actual != NULL && seen != NULL && view->postorder != NULL && original_end <= count;
++    for (uint32_t position = 0; same && position < count; position += 1)
++    {
++        const uint32_t token = view->postorder[position];
++        same = token < count && seen[token] == 0;
++        if (same)
++        {
++            seen[token] = 1;
++        }
++    }
++    if (same)
++    {
++        memset(expected, 0xa5, (uint64_t)count + 1);
++        memset(actual, 0x5a, (uint64_t)count + 1);
++        CheckInputReader reader = { .parser = view, .postorder = view->postorder, .expression_commas = expected };
++        check_input_expression_commas_scalar(&reader);
++        reader.expression_commas = actual;
++        if (!check_input_expression_commas_vector(&reader))
++        {
++            check_input_expression_commas_scalar(&reader);
++        }
++        same = memcmp(expected, actual, count) == 0 && expected[count] == 0xa5 && actual[count] == 0x5a;
++    }
++    check_test_expect(test, same, "actual prefix/repair comma contexts equal the original full-view postorder pass, including tokens past original_end");
++    free(seen);
++    free(actual);
++    free(expected);
++}
++
++static void check_test_expression_commas(CheckTest* test)
++{
++    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
++    uint8_t* mappings[5];
++    bool ready = page >= 258 * sizeof(uint32_t);
++    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
++    {
++        mappings[column] = mmap(NULL, page * 2, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++        ready &= mappings[column] != MAP_FAILED && mprotect(mappings[column] + page, page, PROT_NONE) == 0;
++    }
++    check_test_expect(test, ready, "comma-context guarded columns are available");
++    CheckTest random = { .random = 0x529c0a };
++    for (uint32_t count = 0; ready && count <= 257; count += 1)
++    {
++        uint8_t* roles = mappings[0] + page - count;
++        uint32_t* parents = (uint32_t*)(mappings[1] + page) - count;
++        uint32_t* postorder = (uint32_t*)(mappings[2] + page) - count;
++        uint8_t* expected = mappings[3] + page - count;
++        uint8_t* actual = mappings[4] + page - count;
++        Parser parser = { .tokens = { .count = count }, .tree = { .roles = roles, .parents = parents } };
++        CheckInputReader reader = { .parser = &parser, .postorder = postorder, .expression_commas = expected };
++        for (uint32_t shape = 0; shape < 6; shape += 1)
++        {
++            for (uint32_t position = 0; position < count; position += 1)
++            {
++                postorder[position] = shape == 2 ? count - position - 1 : position;
++            }
++            if (shape >= 3)
++            {
++                for (uint32_t position = count; position > 1; position -= 1)
++                {
++                    const uint32_t other = (uint32_t)(check_test_random(&random) % position);
++                    const uint32_t token = postorder[position - 1];
++                    postorder[position - 1] = postorder[other];
++                    postorder[other] = token;
++                }
++            }
++            for (uint32_t position = 0; position < count; position += 1)
++            {
++                const uint32_t token = postorder[position];
++                const uint32_t left = count - position - 1;
++                const uint32_t next = position + 1 + (left != 0 && shape >= 3 ? (uint32_t)(check_test_random(&random) % left) : 0);
++                parents[token] = next < count ? postorder[next] : shape == 4 ? UINT32_MAX : count;
++                roles[token] = shape < 3 ? PARSE_ROLE_SEPARATOR : shape == 3 ? (uint8_t)check_test_random(&random) :
++                               shape == 4 ? (uint8_t)(token % PARSE_ROLE_COUNT) :
++                               token % 3 == 0 ? PARSE_ROLE_TERMINATOR : token % 3 == 1 ? PARSE_ROLE_CLOSE_FOR : PARSE_ROLE_SEPARATOR;
++            }
++            if (count != 0 && shape < 3)
++            {
++                roles[postorder[count - 1]] = shape == 1 ? PARSE_ROLE_CLOSE_CALL : PARSE_ROLE_CLOSE_GROUP;
++            }
++            bool fallback = false;
++            for (uint32_t token = 0; token < count; token += 1)
++            {
++                const uint32_t parent = parents[token];
++                fallback |= roles[token] == PARSE_ROLE_SEPARATOR && parent < count && parent <= token && roles[parent] == PARSE_ROLE_SEPARATOR;
++            }
++            memset(expected, 0xa5, count);
++            expected[-1] = 0x6d;
++            reader.expression_commas = expected;
++            check_input_expression_commas_scalar(&reader);
++            memset(actual, 0x5a, count);
++            actual[-1] = 0x3b;
++            reader.expression_commas = actual;
++            const bool fast = check_input_expression_commas_vector(&reader);
++            if (!fast)
++            {
++                check_input_expression_commas_scalar(&reader);
++            }
++            bool same = fast == !fallback && memcmp(expected, actual, count) == 0 && expected[-1] == 0x6d && actual[-1] == 0x3b;
++            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
++            {
++                parser.options.scalar = scalar != 0;
++                memset(actual, 0x5a, count);
++                check_input_expression_commas(&reader);
++                same &= memcmp(expected, actual, count) == 0 && actual[-1] == 0x3b;
++            }
++            check_test_expect(test, same, "comma contexts match the original postorder oracle at guarded tails, including backward dependencies and unknown roles");
++        }
++    }
++    for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
++    {
++        if (mappings[column] != MAP_FAILED)
++        {
++            munmap(mappings[column], page * 2);
++        }
++    }
++    enum { COUNT = 65536 };
++    uint8_t* roles = malloc(COUNT);
++    uint32_t* parents = malloc(COUNT * sizeof(uint32_t));
++    uint32_t* postorder = malloc(COUNT * sizeof(uint32_t));
++    uint8_t* actual = malloc(COUNT);
++    ready = roles != NULL && parents != NULL && postorder != NULL && actual != NULL;
++    bool same = ready;
++    for (uint32_t backward = 0; ready && backward < 2; backward += 1)
++    {
++        for (uint32_t token = 0; token < COUNT; token += 1)
++        {
++            roles[token] = PARSE_ROLE_SEPARATOR;
++            parents[token] = backward != 0 ? token != 0 ? token - 1 : COUNT : token + 1;
++            postorder[token] = backward != 0 ? COUNT - token - 1 : token;
++        }
++        roles[backward != 0 ? 0 : COUNT - 1] = PARSE_ROLE_CLOSE_GROUP;
++        Parser parser = { .tokens = { .count = COUNT }, .tree = { .roles = roles, .parents = parents } };
++        CheckInputReader reader = { .parser = &parser, .postorder = postorder, .expression_commas = actual };
++        check_input_expression_commas(&reader);
++        for (uint32_t token = 0; token < COUNT; token += 1)
++        {
++            same &= actual[token] == 1;
++        }
++    }
++    check_test_expect(test, same, "deep forward separator inheritance and backward postorder fallback retain every context without a recursive walk");
++    free(actual);
++    free(postorder);
++    free(parents);
++    free(roles);
++}
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 4c3e8d5d..23351211 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -5508,6 +5508,8 @@ static void check_input_output_none(CheckInput* input, uint32_t count)
+     memset(input->parameters, 0xff, bytes);
+ }
+ 
++#include "c_check_comma_input.c"
++
+ // `environment` publishes #113's environment of the unit (CheckInput.environment, check_environment_publish), which the
+ // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
+ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+@@ -5974,16 +5976,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+         }
+         arena_pop_to(scratch, traversal_mark);
+         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
+-        // expression commas from call/declaration separators; reverse postorder passes that fact down once.
+-        for (uint32_t k = count; k-- > 0;)
+-        {
+-            const uint32_t token = reader.postorder[k];
+-            const uint32_t parent = parser->tree.parents[token];
+-            const uint8_t role = parser->tree.roles[token];
+-            reader.expression_commas[token] = role == PARSE_ROLE_SEPARATOR && parent < count ? reader.expression_commas[parent] :
+-                                              role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_SUBSCRIPT || role == PARSE_ROLE_CLOSE_TERNARY ||
+-                                              role == PARSE_ROLE_CLOSE_FOR || (role == PARSE_ROLE_TERMINATOR && parent < count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR);
+-        }
++        // expression commas from call/declaration separators; only separators inherit that fact from a parent.
++        check_input_expression_commas(&reader);
+         if (parser->tokens.pragma_count != 0)
+         {
+             uint8_t* handled = arena_push_array(scratch, parser->tokens.pragma_count, sizeof(uint8_t), 1);
+diff --git a/src/buster/compiler/c_check_prefix_test.c b/src/buster/compiler/c_check_prefix_test.c
+index f22a66de..4a7ea0a8 100644
+--- a/src/buster/compiler/c_check_prefix_test.c
++++ b/src/buster/compiler/c_check_prefix_test.c
+@@ -213,6 +213,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
+             {
+                 const Parser* view = &prefix.parser;
+                 const uint32_t count = view->tokens.count;
++                check_test_expression_comma_view(test, view, prefix.end);
+                 bool nonowning = view->scratch.base == 0;
+                 for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(view->columns); column += 1)
+                 {
+diff --git a/src/buster/compiler/c_check_repair_test.c b/src/buster/compiler/c_check_repair_test.c
+index fe3e8f9f..a0274da6 100644
+--- a/src/buster/compiler/c_check_repair_test.c
++++ b/src/buster/compiler/c_check_repair_test.c
+@@ -196,6 +196,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
+                 const Parser* view = &repair.parser;
+                 const uint32_t cut = repair.original_end;
+                 const uint32_t count = view->tokens.count;
++                check_test_expression_comma_view(test, view, repair.original_end);
+                 bool original_tokens = cut != 0 && cut < count && cut <= original.diagnostics[repair.diagnostic].token &&
+                                        memcmp(view->tokens.kinds, original.tokens.kinds, cut) == 0 &&
+                                        memcmp(view->tokens.names, original.tokens.names, (uint64_t)cut * sizeof(uint32_t)) == 0 &&
+diff --git a/src/buster/compiler/c_checker_test.c b/src/buster/compiler/c_checker_test.c
+index 45768804..4428ca04 100644
+--- a/src/buster/compiler/c_checker_test.c
++++ b/src/buster/compiler/c_checker_test.c
+@@ -4535,6 +4535,7 @@ static __attribute__((noinline)) void check_test_target_options(CheckTest* test)
+ #include "c_check_data_source_test.c"
+ #include "c_check_attribute_test.c"
+ #include "c_check_program_test.c"
++#include "c_check_comma_input_test.c"
+ #include "c_check_prefix_test.c"
+ #include "c_check_repair_test.c"
+ #include "c_check_input_scan_test.c"
+@@ -4694,6 +4695,7 @@ static int run_checker_tests(int argc, char** argv)
+             check_test_builtin_graph(&test, &types.table, clang);
+             check_test_builtin_capacity(&test);
+             check_test_input_scans(&test);
++            check_test_expression_commas(&test);
+             check_test_warning_ranges(&test);
+             check_test_selection_roots(&test);
+             check_test_varargs_graph(&test, &types.table);
