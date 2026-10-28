@@ -1,28 +1,52 @@
 # PR421 remaining-performance fixes
 
-Current public head is68cb305eee2928653000d12325d14270027b726b (tree
-fa5c6b76f9ba116933a7f13901cb141f905abec6), merged with frozenmain
+The current public head is 68cb305eee2928653000d12325d14270027b726b (tree
+fa5c6b76f9ba116933a7f13901cb141f905abec6), merged with frozen main
 92c025e71856d13eb34247477c5294d2cead139e (tree
-0871c7ac7dd3047225d63ef67353f22e9dbe4eaa). Ninefiles differ fromthismain;
-theencoder isbyte-identical main. Separateencoderloop/constructor/catalogue
-optimizations andtheirownconstructor-onlytestwere removed. AllISApolicy,
-selection,negative,macro andsegmentedmovqtestsremain; thematcher usesexisting
-descriptor normalization. Independentreviewverifiesallotherownerfilespreserved.
+0871c7ac7dd3047225d63ef67353f22e9dbe4eaa). Nine files differ from this main.
+The encoder is byte-identical to main; separate encoder loop, constructor and
+catalogue-sharing optimizations and their own API-specific test were removed.
+All ISA, selector, macro, negative and segmented-movq tests remain. Independent
+review verifies every other owner's file and all 649 qualified source files.
 
-Both newnativeimages pass8/8,41finalO3units,646base/649headsourcechecks,
-graph0unallowed/3allowed/0split andthecomplete16,035,840-bytefive-mode
-a767dumpcomparison. HeadlocalASan/UBSan passes8/8with41finalO1instrumented
-units. Approvedhostmetadata confirmsRyzen7 9700X/CPU2performancegovernor.
-Baseimagecde1420d71e3099dea0682350c4eab1b015873bef2ba2a1bf79a60e8c64e9da8;
-headimagee25339660c40dfd4912a636307e001e660acd5e0be68056d3af39a40f3f6ca8f.
-Source/nativequalificationsareindependentofCI. Exactsubmitted-headCI
-40611028806/job122562368381isinprogress; previous82/82CIis historical.
+Both new native images pass eight suites, 41 final-O3 translation units,
+646 base / 649 head source checks, zero unallowed cycles, three allowed cycles,
+zero split variables and the complete 16,035,840-byte five-mode template dump
+(SHA a7672bd6...). The head passes eight local ASan/UBSan suites with 41 final-O1
+instrumented units. The approved host receipt identifies Ryzen 7 9700X and CPU2's
+performance governor. Base image: cde1420d71e3099dea0682350c4eab1b015873bef2ba2a1bf79a60e8c64e9da8.
+Head image: e25339660c40dfd4912a636307e001e660acd5e0be68056d3af39a40f3f6ca8f.
 
-Both twelve-imageactual-placementcensuses are queued under the ordinary shared
-lock. Newcurrent-main36batch/1728full-streamplan isfrozen butunlaunched.
-No performancecontrollerisactive. Tail/whole-C/backend/policy/startup/
-generated-program-runtimeacceptanceremainpending. PublicPR421staysdraft/open/
-unmerged. No performanceexceptionisrequested oraccepted.
+[Physical CI40611028806](https://github.com/buster14a/buster/actions/runs/40611028806)
+passes all 82 compiler test commands. Actual integration
+9ca5d00bc8254f4ed28af36acf5343cb31bf0b86 has parents main92c0/head68cb and
+the same tree as the submitted head. The complete 692,038-byte log, exact hash,
+step metadata and Git parent/tree proof are preserved. CI correctness and local
+sanitizers do not replace controlled performance acceptance.
+
+The current-head full-stream comparison is complete: 36 bounded batches,
+1,728 observations, twelve actual placements, three fresh plain copies and one
+conditioned copy, three rotated main/head/main-again rounds, all four flags,
+plain and 30ms-conditioned. The C gate passes 648 summary rows. All twelve plain
+ns medians cost 1.259–2.365% versus main and 1.178–2.538% versus main-again.
+These costs remain unaccepted. Final independent receipt review is pending.
+Both twelve-image censuses and all sixteen loop comparisons are independently
+verified; matching static instruction structure does not establish linked-byte
+identity or explain the timing difference.
+
+The private test-home candidate changes four owned paths: restore policy tests
+to FRONTEND, expose selector/native tests as a separate BACKEND command, document
+the boundary and add its unconditional CI entry. All tests and the exact main
+encoder remain. Both native and local sanitizer matrices pass nine suites,
+with zero split variables and the same five-mode bytes. Image 603b34f2..., full
+source manifest and actual twelve-image census are retained. Its controlled
+full-stream campaign is the sole active performance controller. Early repeated
+plain points still have costs; it is not accepted or published as the PR head.
+
+Final tail, whole-compiler, backend, policy, initialization and generated-program
+runtime gates remain pending for a retained candidate. PR421 stays draft, open
+and unmerged. No performance exception is requested or accepted. Earlier results
+below keep their original sources, failures and qualification boundaries.
 
 ## Earlier frozen-main74 validation and controls
 
