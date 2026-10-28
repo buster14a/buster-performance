@@ -160,7 +160,7 @@ Final laptop validation at this source:
 | Joint ASan/UBSan, packed tasks + volatile copies + pools | 35,886 / 0 |
 | Release checker seed598 | 336,554 checks; four known fpclassify oracle failures |
 | Driver | 21,632 / 0 |
-| Function workers/fallback | 2,695 / 0 |
+| Function workers/fallback | 2,687 / 0 |
 | Deferred checker | 1,113 / 0 |
 | Pinned c-testsuite with Clang | 220 / 220 |
 | Call graph | 41 units; 24,913 functions; 147,214 calls; 0 bad cycles, 3 allowed, 0 split |
