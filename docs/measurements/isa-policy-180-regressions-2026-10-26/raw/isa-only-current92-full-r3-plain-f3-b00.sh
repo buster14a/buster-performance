@@ -1,0 +1,260 @@
+set -e
+set -o pipefail
+d='/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/isa-only-current92-full-r3-plain-f3-b00'
+c='/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00'
+mkdir "$d" "$c"
+trap 'rm -rf -- "$c"' EXIT
+printf '%s  %s
+' '94d7c1ff56e666a3065a3577bdda5c7fa2cf2535a3bd0de5254fddd5a12745aa' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/procbench-24f54c2' | sha256sum -c - > "$d/harness-check.log"
+sha256sum -c - >> "$d/harness-check.log" <<'BUSTER421_QUALIFIED_IMAGES'
+cde1420d71e3099dea0682350c4eab1b015873bef2ba2a1bf79a60e8c64e9da8  /home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler
+e25339660c40dfd4912a636307e001e660acd5e0be68056d3af39a40f3f6ca8f  /home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler
+d1119d64005d599e8216a245468ce2bf5788c7c2480bfd5a171091d429d53bf6  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336
+da05a9f6a640326ee9459b3edc343acebfb831a59fef462a86dd2d1984272c1d  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336
+38e92fc8d2d74f95af4b8fe05e1812757af01e163196343b229034d0c46b5a94  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672
+58ab74498644cbd779441d1f00a95b331561c29c17daf66c5a9852f9365ecd33  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672
+308821fe7ed78b9e4eccf83a0ed6ec622b7ddd3397b8b52cf30c6c44d46bab00  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008
+1b13393324c2ac666ff93a37e58c3ff882af59e4c94410df9daf1487185b46e6  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008
+205422e8b62f5cf0b10208e56678da7704edd26b50bb1a4ae34ddf93e62f4721  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344
+07a3bf3862a32d2631975ffb6027c1d1ea975e9da9aa5a11032b58617491910f  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344
+8257e369deeb8385e6943cd021a7a5876ff9f4815715a0b65a550d020d7ce736  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680
+f612be43148a87d931324998aadb1bdbe1202b236dd8c4310afd1d790ca598dc  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680
+ce4884607bd870280d6750242cd021502cc4ed93194c5588fdcf38a7bd3f6b26  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016
+8fd465e1e31bcde2833c91f52dd319874c89598f4b5747fc9757ba3fdf190680  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2016
+bea4e4b7aa699cf386c9f75acced12589258bb2103c784bb659629c5ae767980  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352
+23ea8fab8910a0237b71a35ba7ef55f79233629215d80191621653b8a1a11052  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2352
+86c04ecfe7e35bfb1e5413fa7690d0e65fcc4182bf5dd8fa1860af8125169dc6  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2688
+e289aa8190d93446f36848b04f2ffb449754b0d6921c0e5ba6f52a4ca27172b7  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688
+9f87302e27cec3aafcded7486ce6c665f14886ddda68eaea888729b0cb01fa67  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024
+4df3bc6a91b1fad00e714ecafee5dd76d1e88334ce743a827feacb245e082ee0  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3024
+8f9f1ddb0712f644ac9d6b46e2136219c2f56d38de8ad34d06ffaf6e6a8f7c95  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360
+d99917bb0b400a3fcb72d64329213c5e81973a740ccd00bf7a61b172a0228194  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3360
+e78b71a3a55b144f2bf03d71ec65ad7a6a45829c849577ffac7559e314ad0e56  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3696
+73f225b1d6ac28513496f3a3cb41b98e8612fce2332ab908537b81923fce2ac1  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696
+BUSTER421_QUALIFIED_IMAGES
+cp --reflink=never '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-000'
+cmp '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-000'
+sha256sum '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-000' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-000' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-001'
+cmp '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-001'
+sha256sum '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-001' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-001' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-002'
+cmp '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-002'
+sha256sum '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-002' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-002' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-003'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-003'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-003' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-003' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-004'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-004'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-004' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-004' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-005'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-005'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-005' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-005' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-006'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-006'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-006' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-006' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-007'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-007'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-007' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-007' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-008'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-008'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-008' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-008' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-009'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-009'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-009' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-009' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-010'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-010'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-010' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-010' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-011'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-011'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-011' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-011' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-012'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-012'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-012' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-012' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-013'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-013'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-013' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-013' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-014'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-014'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-014' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-014' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-015'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-015'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-015' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-015' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-016'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-016'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-016' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-016' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-017'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-017'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-017' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-017' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-018'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-018'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-018' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-018' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-019'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-019'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-019' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-019' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-020'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-020'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-020' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2016' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-020' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-021'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-021'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-021' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-021' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-022'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-022'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-022' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-022' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-023'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-023'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-023' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2352' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-023' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-024'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-024'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-024' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-024' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-025'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-025'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-025' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-025' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-026'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-026'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-026' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-2688' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-026' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-027'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-027'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-027' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-027' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-028'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-028'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-028' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-028' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-029'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-029'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-029' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3024' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-029' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-030'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-030'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-030' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-030' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-031'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-031'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-031' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-031' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-032'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-032'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-032' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3360' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-032' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-033'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-033'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-033' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-033' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-034'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-034'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-034' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-034' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-035'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-035'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-035' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-3696' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-035' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-036'
+cmp '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-036'
+sha256sum '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-036' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-036' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-037'
+cmp '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-037'
+sha256sum '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-037' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-421-prototype-isa-only-current/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-037' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-038'
+cmp '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-038'
+sha256sum '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-038' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-421-prototype-base-current92/build/compiler' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-038' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-039'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-039'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-039' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-039' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-040'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-040'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-040' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-040' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-041'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-041'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-041' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-336' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-041' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-042'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-042'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-042' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-042' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-043'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-043'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-043' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-043' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-044'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-044'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-044' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-672' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-044' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-045'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-045'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-045' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-045' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-046'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-046'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-046' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-046' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-047'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-047'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-047' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1008' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-047' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-048'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-048'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-048' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-048' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-049'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-049'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-049' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-049' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-050'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-050'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-050' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1344' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-050' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-051'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-051'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-051' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-051' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-052'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-052'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-052' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-base-current92-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-052' >> "$d/image-inodes.txt"
+cp --reflink=never '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-053'
+cmp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-053'
+sha256sum '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-053' >> "$d/image-identities.sha256"
+stat -c '%d %i %s %n' '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-only-current-checker-placements/compiler-1680' '/tmp/buster421-isa-only-current92-full-r3-plain-f3-b00/bin-053' >> "$d/image-inodes.txt"
+cp '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/isa-only-current92-full-r3-plain-f3-b00.list' "$d/commands.list"
+cd '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence'
+set +e
+'/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/procbench-24f54c2' --rounds 1 --first 3 --out "$d" "$d/commands.list" > "$d/processes.tsv" 2> "$d/harness.err"
+status=$?
+printf '%s
+' "$status" > "$d/exit.txt"
+tar -cf - -C "$d" .
+archive_status=$?
+if [ "$status" -ne 0 ]; then exit "$status"; else exit "$archive_status"; fi

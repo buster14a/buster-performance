@@ -1,0 +1,1 @@
+nice -n 19 /home/david/.cache/buster421-c051/read-modern-full raw raw/private-catalogue-checked-full-manifest.tsv > raw/private-catalogue-checked-full-summary.tsv 2> raw/private-catalogue-checked-full-summary.err

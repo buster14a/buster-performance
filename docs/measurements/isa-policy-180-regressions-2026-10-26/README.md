@@ -1,5 +1,31 @@
 # PR421 remaining-performance fixes
 
+Current public head is68cb305eee2928653000d12325d14270027b726b (tree
+fa5c6b76f9ba116933a7f13901cb141f905abec6), merged with frozenmain
+92c025e71856d13eb34247477c5294d2cead139e (tree
+0871c7ac7dd3047225d63ef67353f22e9dbe4eaa). Ninefiles differ fromthismain;
+theencoder isbyte-identical main. Separateencoderloop/constructor/catalogue
+optimizations andtheirownconstructor-onlytestwere removed. AllISApolicy,
+selection,negative,macro andsegmentedmovqtestsremain; thematcher usesexisting
+descriptor normalization. Independentreviewverifiesallotherownerfilespreserved.
+
+Both newnativeimages pass8/8,41finalO3units,646base/649headsourcechecks,
+graph0unallowed/3allowed/0split andthecomplete16,035,840-bytefive-mode
+a767dumpcomparison. HeadlocalASan/UBSan passes8/8with41finalO1instrumented
+units. Approvedhostmetadata confirmsRyzen7 9700X/CPU2performancegovernor.
+Baseimagecde1420d71e3099dea0682350c4eab1b015873bef2ba2a1bf79a60e8c64e9da8;
+headimagee25339660c40dfd4912a636307e001e660acd5e0be68056d3af39a40f3f6ca8f.
+Source/nativequalificationsareindependentofCI. Exactsubmitted-headCI
+40611028806/job122562368381isinprogress; previous82/82CIis historical.
+
+Both twelve-imageactual-placementcensuses are queued under the ordinary shared
+lock. Newcurrent-main36batch/1728full-streamplan isfrozen butunlaunched.
+No performancecontrollerisactive. Tail/whole-C/backend/policy/startup/
+generated-program-runtimeacceptanceremainpending. PublicPR421staysdraft/open/
+unmerged. No performanceexceptionisrequested oraccepted.
+
+## Earlier frozen-main74 validation and controls
+
 Current frozen source is ac574f988b3db78f6e01d793ad19e3eb7224141f (tree
 9b9e5ef941e17b77a1c9f35b875184cb817f4745), compared with main
 74dae999734fa0423efcc198af2ebd6251cc8108 (tree
@@ -80,14 +106,25 @@ versus main-again. Allstatuses0/no majors; C gate passes648rows. All12actual
 placements and exact shifts/fourmod64phases are retained. See
 [control provenance](raw/main-vector-full-provenance.json).
 
-The next private control restores per-unit catalogue access and local production
-template construction (encoder d929a768), preserving the pure constructor API,
-ISA policy and baseline vector/tail code. Only the encoder in a private snapshot
-is changed; main.c and other owners remain untouched. Native and local sanitizer
-qualification is pending. No performance controller is active. Public compiler
-source remains ac57. New main92c025e71856d13eb34247477c5294d2cead139e was
-fetched on2026-10-28: these controls remain explicitly against frozen main74.
-Final acceptance must use a retained implementation and contemporaneous main.
+The per-unit catalogue/local production-constructor control (source3fc2aba9,
+image728d79e7) passesnative/localSan8/8,41units/644sourcechecks,graph and
+fullfive-modebytes. Its1728-observation fullcontrol is complete and rejected:
+all12plainns medians cost2.872–4.399%versus main and2.872–4.882%versus
+main-again. Cgatepasses648rows; finalindependentreceiptauditispending.
+All16full/remainder histograms/stackoperands and12actualplacements verify.
+Theinitialunused-function buildfailure andpremature1656-row gate refusal
+are preserved; correctedfreshsnapshotandcompletegatepass. No sourcepromoted.
+
+The new private ISA-only control targets newly fetched currentmain
+92c025e71856d13eb34247477c5294d2cead139e:9files differ,encoderverbatimmain
+(SHAd876f0d9),allseparateconstructor/catalogue/loopoptimizationsremoved
+withtheirownAPI-specifictest. AllISA/selection/negative/segmentedmovqtests
+andcompacttablesremain. Thematcherusesexistingdescriptornormalization,
+andBACKENDtestroutingispreserved. Head649/base646sourcefilesarefrozen;
+newbase/headnativequalificationandheadlocalsanitizersarepending. No
+performancecontrollerisactive. Publicsource remainsac57; oldmain74
+measurements remain explicitly historicalcontrols. Finalacceptancerequires
+thiscurrentmaincomparisonandallremainingwhole-C/backend/policy/runtimegates.
 
 The C receipt gate now has statically bounded full/partial workload profiles,
 with exact byte/section/3,825-mark checks. Sanitized synthetic54plain/36
