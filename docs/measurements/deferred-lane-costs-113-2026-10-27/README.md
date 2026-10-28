@@ -20,8 +20,9 @@ together so that the lane rule is fitted once:
 Three sessions made these runs: the hand-off of 2026-10-26 (campaign 1, the ways to take the parts), the hand-off of
 2026-10-27 (campaigns A, B and CT, on the branch's code on main `43030b89`), and the session that merged that code
 with main and opened the PR, on 2026-10-28 (campaigns A2, B2 and CT2, the same comparisons on the merged tree against
-main `cd9c5c9b`, with the merged tree's tests and mutants, and the tests of the PR's head, that tree merged with a
-later main). Cited by Buster's `docs/c-deferred-bodies.md` ("How many lanes").
+main `cd9c5c9b`, with the merged tree's tests and mutants, the tests of the PR's head, that tree merged with a later
+main, and those of the review's fix for grouped parts, with a screen of the one input whose parts' order it changes).
+Cited by Buster's `docs/c-deferred-bodies.md` ("How many lanes").
 
 ## Sources and inputs
 
@@ -34,7 +35,8 @@ later main). Cited by Buster's `docs/c-deferred-bodies.md` ("How many lanes").
 | `final` | `5238b4db`: `head` with the tests' commit and the rule | 488 | `c3ed806826a3e27c4a82dcd8967f9031810e3110eff4b1fe07d0891b474a9eae` |
 | `main` (2026-10-28) | `cd9c5c9b`: main when the branch was merged with it | 504 | `8b98f7e6f01cce975d2e41575bcf5040e0c7386f4a80dd5cd79b22096a7c0c38` |
 | `branch` | `54a3b6da`: `final` merged with `cd9c5c9b` (the code these campaigns measured; the PR's next commits change documentation and a comment alone) | 504 | `0518a39a88d41dcddeac8afbb11e1651fb8cc56473fce888f76611bb4d35933c` |
-| `merge2` | `06bda160`: `branch` merged with main `4165454e` for the PR, tested but not measured (the PR's later commits change documentation alone) | 509 | `7a293bb4d03e4eb947ba2dc47510c345392a1afce2db550f185de4c212b95f68` |
+| `merge2` | `06bda160`: `branch` merged with main `4165454e` for the PR, tested, and timed only in the `h64x3.c` screen (the code before the review's fix for grouped parts) | 509 | `7a293bb4d03e4eb947ba2dc47510c345392a1afce2db550f185de4c212b95f68` |
+| `merge3` | `a36179a9`: `merge2`'s code with the review's fix for grouped parts (Buster `629d91af`, the largest body's part first), the PR's head for its tests and the `h64x3.c` screen | 509 | `01ffbc11e86b5094ea1a69be15bd7187d2abc4c4dc4fb79acb9ad1ae0219fa3f` |
 
 Each manifest (`source-*.sha256`) lists the SHA-256 of `build.sh` and of every file under `src/` of the tree (what the
 build reads), in the order `sha256sum build.sh; find src -type f | LC_ALL=C sort | xargs sha256sum` writes them, and
@@ -272,6 +274,44 @@ again on it. Its build and tests, on the host, each in a lock hold of its own
 | `test-checker --seed 133` | 464,879 checks, 0 failures |
 | `test-types` | every section, 0 failed (main's member lookup's among them) |
 
+### The fix for grouped parts
+
+Review found that with more bodies than 64 a lane a part can hold two, and the costliest part then need not hold the
+largest body, which a woken lane would read. The fix (Buster `629d91af`, merged into the PR as `a36179a9`, `merge3`)
+promotes the largest body's part to the first place. Its build and tests on the host, each in a lock hold of its own
+(`scripts/2-tests-fix.sh`, the host's `tests3.sh`; `logs/tests-fix.txt`):
+
+| Command | Result |
+| --- | --- |
+| `BUSTER_DEBUG_INFO=0 ./build.sh` | 41 sources compiled in 28.9 s |
+| `test-checker-deferred` | 80 fixtures (the fix's six of grouped parts more), 1,423 checks, 804 merged, 29,580 bodies read apart, 0 failures |
+| `test-lanes` | every check passes |
+| `test-call-graph`, `./build.sh check-call-graph` | 37 cases, 0 failed; 41 units, 25,340 functions, 0 cycles (3 allowed), 0 split variables |
+| `test-checker-corpus --clang /usr/bin/clang --deferred 8` on c-testsuite | 219 units read apart on 8 lanes, 1 left to source order (`00078.c`), 0 differences; all 220 programs as clang has them |
+| the same on the frozen `sqlite3.c`, with `--symbols` | 2,608 bodies, 0 differences; its functions and objects clang's (0 unexplained) |
+| `test-checker --seed 133` | 464,879 checks, 0 failures |
+
+Of the 43 inputs, the fix changes the parts' order of `h64x3.c` alone (the review's identity check, on 1, 2, 3, 4 and 8
+lanes, by the rule and with every lane): its 64 largest bodies tie, and its costliest part grouped the headers'
+helpers. The screen times `merge2` against `merge3` on it (`scripts/2-chain-fix.sh`, `2-screen-h64x3.sh` and
+`2-jobs-h64x3.txt` through `2-batch.sh` and `2-runs.sh`; `logs/h64x3-screen.txt`; `tables/summary-h64x3.tsv`, from
+`grid.py --full-precision`): by the rule on 8 lanes, which takes 3, and with every lane on 2, 3, 4 and 8, five rounds
+of 24 passes, each run a process of its own and each round one lock hold, the runs' order rotating by round. Each
+build's reading on its lanes against its reading on one lane in the same process (the median of the rounds, their
+lowest and highest in parentheses), and the passes in which the first lane read the largest body:
+
+| Lanes | `merge2` against one lane | `merge3` | The first lane's, `merge2` | `merge3` |
+| --- | --- | --- | ---: | ---: |
+| the rule's 3 | −0.5% (−2.5 to −0.1) | −1.6% (−1.8 to −0.3) | 0 of 120 | 120 of 120 |
+| 2 | −0.1% (−2.0 to +0.2) | +0.0% (−4.0 to +0.9) | 0 | 120 |
+| 3 | −1.1% (−2.1 to −0.2) | −0.9% (−1.7 to +0.2) | 0 | 120 |
+| 4 | −1.3% (−2.1 to −0.9) | −0.3% (−1.4 to +1.0) | 0 | 120 |
+| 8 | +0.1% (−0.9 to +0.7) | −0.9% (−2.3 to +0.5) | 0 | 120 |
+
+The first lane reads the largest body in every pass, where it read it in none, and each configuration's change
+against one lane stays within the rounds' spread of the other build's: a body of 161 tokens is a part's worth of
+work, whichever lane reads it.
+
 ### Before and after (campaigns B2 and CT2)
 
 `compare2.py main branch logs/B2.txt logs/CT2.txt` (`tables/compareB2.txt`), five rounds of each unit by each tree's
@@ -440,4 +480,5 @@ and makes no claim of lower peak or retained RSS. Mapping capacity is virtual ad
 
 Timing claims remain attached to the listed frozen pairs, in particular `54a3b6da` against `cd9c5c9b` for A2/B2/CT2.
 The later `06bda160` merge and subsequent source revisions have no new timing campaign in this record; their tests or
-non-timing behavior checks do not turn the frozen timings into later-head measurements.
+non-timing behavior checks do not turn the frozen timings into later-head measurements. The one exception is the
+screen of the fix for grouped parts, which times `merge2` against `merge3` on `h64x3.c` alone.
