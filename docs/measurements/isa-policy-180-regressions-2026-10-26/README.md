@@ -12,11 +12,32 @@ Both encoder campaigns completed 1,728 observations, all four flags/plain/condit
 
 The fresh [generated-code proof recipe](raw/policy-current92-generated-proof.sh), [fixture](current-runtime-fixture.c), [auditor](current-audit-elf.c) and retained text receipts verify baseline/v3/v4: six objects, six programs,18 byte comparisons, nine independent ISA audits and output14213000051299467171 matching fresh ClangO0. The auditor covers linear file-backed executable sections, not external libraries or reachability. Its positive/negative/address32 fixtures and /dev/full handling pass native/local sanitizers. [Runtime summary](raw/policy-current92-runtime-summary.json) has567 timed/81 warmup children, strict counters/status0/no majors. The three profile/path labels contain identical code and are not distinct code placements; recomputed wall ratios use printed0.001ms rows and do not gain precision from arithmetic.
 
-Private C14 removes redundant default64 GS template construction by copying the FS span and changing only the guarded segment-prefix byte, with unchanged direct-builder fallback. [Source proof](raw/prototype-isa-init-gs-source-proof.json), [native qualification](raw/prototype-isa-init-gs-native-summary.json), [census](raw/prototype-isa-init-gs-census-summary.json), and [static inventory](raw/prototype-isa-init-gs-native-static-summary.json) retain hashes and commands. Nine native and nine local sanitizer suites pass;50,112 complete template/fixup entries match the direct builder and all five mode dumps match16,035,840B SHA a7672bd6…. Independent source/qualification review is clear. Its performance qualification remains open; it is not in public0c53. A cloned comparison-reference path caused the first whole-C recipe to fail after timing; [failure receipt](raw/init-current92-whole-failure.json) preserves that run as unaccepted, and a separately named corrected campaign adds a reference preflight.
+Private follow-up experiments have not been promoted. All timings below are actual locked9700X results against the same frozen main92, with rotated main/head/repeated-main roles. Diagnostic216 screens cover flags0/2,12 actual image placements and one fresh copy per role/placement/round; they do not replace the full acceptance campaign or measure within-placement copy spread. Positive costs remain unapproved.
+
+| Candidate | Closed result | Disposition |
+| --- | --- | --- |
+| C14 FS→GS initialization reuse | Whole-C1,944: short-C cycles -6.67..-6.72%; SQL retains small positive costs and RSS/fault increases | Not retained; no waiver ([whole summary](raw/init-v-current92-whole-summary.json)) |
+| C15 fixed8-lane compiler vectorization | Scalar after-predefines +8.07..9.92% | Rejected ([decision](raw/oracle8-current92-decision.json)) |
+| C16 indexed known rows | Scalar policy about+40..44% | Rejected ([decision](raw/known-current92-decision.json)) |
+| C17 dense known rows with compiler vectorization | Plain scalar cycles +4.01..5.54% | Unaccepted ([decision](raw/dense-current92-decision.json)) |
+| C18 dense scalar reference | Scalar policy about27..30% faster; full1728 encoder has all24ns points slower than both references,15/48 placement/copy bounds entirely above zero | Rejected ([full gate](raw/scalar-final-current92-full-summary.tsv), [tail gate](raw/scalar-final-current92-tail-summary.tsv)) |
+| C19 shared dense reference arrays | Encoder216 screen +2.15..3.60%main/+2.51..3.56%repeated-main | Rejected ([screen](raw/shared-screen-current92-full-summary.json)) |
+| C20 single-group remainder guard | Text -223,520B vsC19; encoder216 screen still +1.07..3.54%main | Rejected ([screen](raw/single-screen-current92-full-summary.json)) |
+| C21 BACKEND template-oracle home | Native/local sanitizer9/9; encoder216 retains +1.25..3.54% vs repeated-main | Rejected ([screen](raw/fixture-screen-current92-full-summary.json)) |
+| C22 compact32-byte template entry | Native correctness failure: sizing still used64-byte stride; no timing | Rejected; complete failed output retained ([failure](raw/prototype-isa-policy-compact-template-failure.json)) |
+| C23 corrected compact sizing stride | Native/local sanitizer9/9; canonical template payloads match; BSS about105MB smaller; encoder216 +3.39..7.95%main | Rejected ([decision](raw/stride-screen-current92-decision.json)) |
+| C24 dense scalar policy alone, original encoder/init | Native/local sanitizer9/9; encoder216 +1.61..2.37%main | Rejected ([decision](raw/policy-only-screen-current92-decision.json)) |
+| C25 unsigned KNOWN-bit scalar predicate | Scalar plain -17..19%, conditioned +12..13%main; encoder216 mixed | Rejected ([policy](raw/known-bit-current92-policy-summary.json), [screen](raw/bit-screen-current92-full-summary.json), [decision](raw/bit-screen-current92-decision.json)) |
+| C26 zero8-row-block skipping | Native/local sanitizer9/9; scalar conditioned +9.21..10.38%main/+6.92..11.31%repeated-main | Rejected; no encoder campaign ([decision](raw/zero-blocks-current92-decision.json)) |
+| C27 dense scalar four-row unroll | Native/local sanitizer9/9; scalar -17..19%; encoder216 +2.31..3.79%main/+2.86..3.60%repeated-main | Rejected ([policy](raw/unroll4-current92-policy-summary.json), [screen](raw/unroll4-screen-current92-full-summary.json), [decision](raw/unroll4-screen-current92-decision.json)) |
+
+C28 compiler-local full64 reference is frozen and under qualification; its source manifest is cf5cb6c1a193e92f1aeaf4beadf564d4e16f6605569951ab8909b3b4360a04a5. It restores the original scalar C loop and compiler-visible local constant initializer while retaining the shared compact32 production table and qualified C14 initialization reuse. No C28 correctness or performance pass is claimed here. Public0c53 is unchanged.
+
+The original and corrected C22/C23 recipes and the independent C canonical serializer are preserved. The serializer proves semantic64-byte payload equality across layouts, not physical32/64-byte format identity. Memory sentinel -1 in the timing harness means unavailable; reduced BSS does not establish RSS or huge-page behavior. The C27 qualification owner title inherited C26's text; actual source/archive/manifest bindings identify C27 and were verified before tests.
 
 No performance regression is accepted or approved. #136/#133 retain configured-target producer integration; no producer or preprocessor ownership is taken, and this PR does not close#180.
 
-# PR421 remaining-performance fixes
+# Historical public68cb qualification and earlier controls
 
 The current public head is 68cb305eee2928653000d12325d14270027b726b (tree
 fa5c6b76f9ba116933a7f13901cb141f905abec6), merged with frozen main
