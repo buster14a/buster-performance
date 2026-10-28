@@ -23,3 +23,13 @@ terms in [`LICENSES/LLVM.txt`](LICENSES/LLVM.txt). Other existing embedded notic
 and the full source portion inventory continue to apply. Imported patches and
 harnesses that include source components use those components under their
 retained terms; this archive does not relabel them as wholly original material.
+
+The new `docs/measurements/window-residual-451-2026-10-28/` record retains
+its frozen source/evidence identities and component notices. Its original
+curator and work-count/readers use the project default terms; OpenSSL is an
+external digest library. Generated main/preprocessor copies retain Buster
+e7f89091's terms, and Clang 23.1.4 macro snapshots retain the LLVM terms.
+The directory's `PROVENANCE.md` identifies exact source/generator/tool inputs
+and distinguishes those snapshots from original helper code. External SQL,
+system headers and toolchain packages remain runtime dependencies; omitted
+large binaries/outputs retain their digests and explicit private dispositions.
