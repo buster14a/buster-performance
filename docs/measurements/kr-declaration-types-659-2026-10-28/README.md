@@ -62,7 +62,7 @@ also requires its documented per-run lock. Baseline uses `x86-64`/`0`; native us
 Run each correctness command separately and retain its real exit status:
 
 ```sh
-env ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+env BUSTER_PARALLEL_CPUS=1 ASAN_OPTIONS=detect_leaks=1:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
   ./atomic-baseline --qualify-atomic "$clang"
 ```
 
@@ -80,3 +80,9 @@ linkage lines above. Large binaries are omitted. No benchmark, external corpus,
 LLVM implementation or third-party fixture is incorporated. The original
 harness/probes use Apache-2.0 WITH LLVM-exception; included Buster modules retain
 their own terms. Clang is an external behavioral/ABI oracle.
+
+The explicit single-oracle repeats set `BUSTER_PARALLEL_CPUS=1`; both final
+native and baseline entries again complete 18,780 checks / 0 failures within
+25 seconds. Earlier direct runs omitted that cap, allowing the test adapter's
+CPU-derived oracle concurrency. Their results are retained as separate runs;
+the explicit-cap receipts support the reproducible short-command resource claim.
