@@ -1,0 +1,40 @@
+set -e
+set -o pipefail
+sha256sum -c - >&2 <<'BUSTER421_CURRENT92_IMAGES'
+01aaaf43637e6811f91daf7013ae26c3afea37dec3326d5fdcf0c41a300ca842  /home/david/buster-fast-bench/codex-421-prototype-isa-policy-dense-scalar/build/compiler
+e1ba9e1d02df4e1e1ab56d83a7f9f1927cc81cc9b9600e069f42ab25fda6ea12  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-336
+e2b49968a9d7be9559c08486cdd10ca5c0076af5f386b2c2648c85689c6a3bd7  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-672
+78791d5b56cef636f32916bebbbe061559db5b20d6a483eeecf2d890c573b1fb  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1008
+a2b7b5a518e4cb46f40ddd217729799be7a422f58901acd4c71e6d31921a64d6  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1344
+9a4e7d14c3351b34d5043e3da9302d6ddd7cb368ef045b90376f919b14e5b6ed  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1680
+1453d680306589c82030660a6c11fdedc58567cc58d3c2b429ce21c70fc1420d  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2016
+62e4cd782b3042300ae18363a1d988b8f14110ad8df3075ce1e24ff75e75cc4e  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2352
+6ba0b72ca3a8efabed409f686cdb667c293a9f44fb228b643a3ff2242e8fe785  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2688
+ee83e01fc3820c7361edae82cb46e2fe5c9c0b4b47fab338ffedddd95a94b2eb  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3024
+bee2ceff3b08f071f9a278ba308ee5f4a9e2c3c0748c63c0050ba3adaf798ead  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3360
+d639e040b8ec58676b228886e322d3dd6f76bd2456b3eda91e27c830569c46d5  /home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3696
+BUSTER421_CURRENT92_IMAGES
+printf 'image\t%s\t%s\t%s\n' candidate 0 '/home/david/buster-fast-bench/codex-421-prototype-isa-policy-dense-scalar/build/compiler'
+readelf -sW '/home/david/buster-fast-bench/codex-421-prototype-isa-policy-dense-scalar/build/compiler' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 336 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-336'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-336' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 672 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-672'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-672' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 1008 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1008'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1008' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 1344 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1344'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1344' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 1680 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1680'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-1680' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 2016 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2016'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2016' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 2352 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2352'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2352' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 2688 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2688'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-2688' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 3024 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3024'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3024' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 3360 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3360'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3360' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
+printf 'image\t%s\t%s\t%s\n' candidate 3696 '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3696'
+readelf -sW '/home/david/buster-fast-bench/codex-180-fix-20261026-evidence/prototype-isa-policy-dense-scalar-checker-placements/compiler-3696' | awk '$4 == "FILE" { file=$8 } $4 == "FUNC" && ($8 == "x86_encode_16" || $8 == "tier0_benchmark_run" || $8 == "c_check_program") { print file, $2, $3, $8 }'
