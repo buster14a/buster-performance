@@ -49,20 +49,29 @@ provenance archive remains local raw with its digest/disposition recorded;
 the full experiment history and remnants outside this lean package remain
 local and were not modified or imported. No new target work was performed.
 ''',
-    '628': '''# Archive scope: issue 628 qualified parser memory slice
+    '628': '''# Archive scope: issue 628 qualified parser and ASM-column memory slices
 
 [Qualified report](PARSER-RESULTS.md), [local method](LOCAL-METHOD.md),
 [native identities](target/evidence628/native-identities.sha256),
 [186 exact timing-object comparisons](target/evidence628/parser-timing-objects.log).
+[Qualified ASM-column report](ASM-COLUMN-RESULTS.md),
+[ASM native identities](target-asm/evidence628-asm/native-identities.sha256),
+[248 exact ASM timing-object comparisons](target-asm/evidence628-asm/timing-objects.log).
 Patch `050dbfcde5687c339a7a2ea33237e5667162d01e` is based on pure a62;
 native head `1b98b195139a114c9b5da6cf7f82c083ce14c165` merges it with pure main
 `4165454ebadf9b96c2b40ab99c55f4c0b28ba975`. The accepted scope is four
 parser/benchmark/test/docs files, with about 6 MiB lower native RSS in both orders.
+Additional ASM slice `dc15a18ed3ad273888ae1cb87e903969e876acfa` is qualified on
+that immutable parser+416 parent. It saves about 2 MiB incremental native RSS;
+the directly measured parser+ASM total versus pure416 is about 8 MiB. Native
+checker, ASM/Clang and deferred checks pass; all 248 timing objects match.
 Wall and system-time improvement are unestablished. This does not complete #628.
 Older bc1/3864 and a62 local screens do not establish current native acceptance;
-local a62 proof is retained only with that label. Every uncommitted asm-ID slice,
-its asm-column records and column_counts proposal accounting remain local raw,
-with source identities in COLLECTION.tsv; none is accepted or copied here.
+local a62 proof is retained only with that label. The ASM local negative timing
+and mistaken CLI invocation remain explicitly fenced. The parser-only target
+tree is unchanged. Column-count proposal accounting stays local raw. The bulk
+NONE/output-fill experiment is unqualified and excluded entirely, along with
+the private issue-628-fill branch. No latest-main timing is inferred.
 ''',
     '647': '''# Archive scope: issue 647
 
@@ -137,6 +146,12 @@ negative results separately.
 }
 
 
+def inventoried(collection, relative):
+    return collection != '628' or not any(
+        part.startswith('output-fill-') or part in {'issue-628-fill', 'target-fill'}
+        for part in relative.parts)
+
+
 def admitted(collection, relative):
     """Scope filtering never deletes source data; excluded files stay in COLLECTION."""
     parts = relative.parts
@@ -152,6 +167,10 @@ def admitted(collection, relative):
             return len(parts) == 2 and parts[1] in {'SUMMARY.tsv', 'CACHE.tsv'}
         return len(parts) == 1
     if collection == '628':
+        if parts[0] == 'target-asm':
+            return len(parts) >= 3 and parts[1] == 'evidence628-asm' or (
+                len(parts) == 3 and parts[1] == 'issue628-asm416' and parts[2] in {
+                    'native-build.log', 'SOURCE_COMMIT'})
         if parts[0] == 'target':
             if len(parts) >= 3 and parts[1] == 'evidence628':
                 return True
@@ -160,11 +179,12 @@ def admitted(collection, relative):
                     'native-build.log', 'SOURCE_COMMIT'}
         if len(parts) == 1:
             return parts[0] in {
-                'PARSER-RESULTS.md', 'LOCAL-METHOD.md', 'current_parser_checks.c',
+                'PARSER-RESULTS.md', 'ASM-COLUMN-RESULTS.md', 'LOCAL-METHOD.md',
+                'asm_column_checks.c', 'current_parser_checks.c',
                 'current-main-standalone.c', 'current-checker.log',
                 'current-benchmark-stages.log', 'parser-a62-binaries.sha256',
                 'current-clang-version.txt', 'current-local-uname.txt'} or parts[0].startswith((
-                    'current-parser-', 'current-asan', 'current-base-', 'main416-base-'))
+                    'current-parser-', 'current-asan', 'current-base-', 'main416-base-', 'asm-column-'))
         return False
     return True
 
@@ -181,6 +201,8 @@ def collect(collection):
         if not file.is_file() or file.is_symlink():
             continue
         relative = file.relative_to(source)
+        if not inventoried(collection, relative):
+            continue
         size = file.stat().st_size
         digest = hashlib.sha256()
         with file.open('rb') as stream:
@@ -252,7 +274,8 @@ def verify(collection):
         else:
             assert row['disposition'] == 'retained-local-raw' and not output.exists(), output
     actual_sources = {file.relative_to(source).as_posix() for file in source.rglob('*')
-                      if file.is_file() and not file.is_symlink()}
+                      if file.is_file() and not file.is_symlink()
+                      and inventoried(collection, file.relative_to(source))}
     assert source_paths == actual_sources, (collection, 'source inventory changed')
     actual_outputs = {file.relative_to(target).as_posix() for file in target.rglob('*') if file.is_file()}
     assert expected == actual_outputs, (collection, 'unexpected or missing output')
