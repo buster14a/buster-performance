@@ -93,7 +93,13 @@ it was cut to three: `chainB3.sh` ran the rest of round 2 and round 3, a hold ea
 `chainB.sh`'s batches of 15 jobs stopped (`chainB2.sh`, written to run round 3 in two holds, ran none). The sweep of
 c-testsuite by both rules (`queueCT.sh`, `batchCT.sh`), which `chainB.sh` and `chainB2.sh` would have run last,
 isn't in the log: `chainB3.sh` started it afresh with the branch's rule alone. The campaigns' lock-waiting messages
-went to files of their own, which aren't published; the builds' and the 2026-10-28 tests' logs have them inline. The
+went to files of their own. The 2026-10-26 and 2026-10-27 campaigns' aren't published. The 2026-10-28 campaigns' are,
+under the names their scripts gave them: `logs/queue.lock.txt` for A2, B2 and CT2 (from `2-queue.sh`,
+`2-queue-resume.sh`, `2-chain.sh` and `2-master2.sh`), and `logs/mutants2/lock.txt` for the mutants
+(`2-mutants-chain.sh`). Each has a message for every acquisition that had to wait, naming the lock's holder when the
+wait began, as `exclusive.sh` printed it: when the holder took the lock, its owner and command, and its title and
+links. The mutants' file also has bash's line for `m2b-parts-unbounded`'s abort, since `2-run_mutant.sh`'s own errors
+went there too. The builds' and the 2026-10-28 tests' logs have the messages inline. The
 logs are as the runs wrote them, each run's heading, its output and its exit status. The one run that exits with status 1,
 c-testsuite's `00078.c` in each sweep, is a unit the deferred reader leaves to source order (a body declares something
 with linkage), for which the benchmark fails having said why.
