@@ -108,8 +108,7 @@ with `EXCLUSIVE_OWNER`, `EXCLUSIVE_TITLE` and `EXCLUSIVE_LINK` set, per run.
 The repaired source builds all 41 optimized units in 31.8 s on the locked
 9700X. `test-tier0 --seed 569 --count 128 --cross-check` passes 152,942 checks,
 including the unchanged scalar/vector code and native/Clang comparisons.
-Additional size controls and the resulting dispatch choice are recorded below
-before submission.
+Additional size controls and the resulting dispatch choice are recorded below.
 
 `review/buckets.c` times complete production validators on 0,1,2,4,8,16,
 24,32,48,64,128,256,1024 entries. Shapes are table-free CONST/DISCARD pairs
@@ -151,3 +150,54 @@ unchecked backend consumers. Sharing a validated plan would need a new
 producer/consumer contract and its own measured comparison; no fused-analysis
 speedup or eliminated correctness gate is claimed by this PR. The measured
 issue's requested reduction in `lower` is established with identical objects.
+
+## Final production code qualification
+
+Final code is Buster `006b872a`; source PR head `265a4aabe428d14e4200be88cf6f5ce0257cd1c8`
+adds documentation only. The final optimized target build compiles all 41
+units in 32.0 s. Final `test-tier0 --seed 569 --count 128 --cross-check`
+again passes 152,942 assertions. Final focused ASan/UBSan passes all 3,224
+assertions over the 559,200-stream matrix, including exact selected-wrapper
+diagnostics. The earlier repaired-code call graph has zero unexpected cycles
+and zero split variables; the dispatch adds no call edge. Final source and
+binary manifests and generated validator assembly are in `review/`.
+
+Twenty-one interleaved reference rounds on the locked 9700X, CPU 2:
+
+| Comparison | Final code | Reference | Difference |
+| --- | ---: | ---: | ---: |
+| Original baseline `8ab9a208` | 144.815 ms | 147.641 ms | -2.826 ms (-1.91%) |
+| Correctness fixes `949a2a7f`, before tiny dispatch | 144.626 ms | 144.516 ms | +0.111 ms (+0.077%) |
+
+Both commands report zero failures. Final `lower` medians are 13.243 and
+13.222 ms in these two runs. The tiny dispatch is not claimed to improve
+whole-SQLite timing: its +0.077% point is retained, with overlapping process
+ranges (143.675–145.468 ms final, 143.967–145.840 ms pre-dispatch).
+Overlap alone does not prove neutrality. The original validation change's
+end-to-end improvement remains measurable in the fresh baseline comparison.
+Final peak RSS is 515,108 KiB versus baseline 513,136 KiB (+1,972 KiB), and
+515,092 KiB versus pre-dispatch 515,232 KiB (-140 KiB). These are process RSS
+observations, not an attribution of all residency differences to validation.
+The logical vector scratch remains about `10*N` bytes plus bitsets, table words
+past 128 and alignment; tiny scalar dispatch avoids that vector preparation.
+
+`review/buckets-selected.c` times the actual final wrapper beside its two
+paths in the same executable. At 16 plain entries, means are scalar 57.246 ns,
+selected 57.659 ns and vector 71.208 ns; at 16 metadata entries, 98.794/99.939/
+118.558 ns. Empty plain selected/vector are 12.250/12.302 ns. At 1024 plain
+entries selected/vector are 1050.862/1037.508 ns, 5755.965/5753.071 cycles and
+11814.110/11807.109 instructions. This larger-case timing point is retained;
+no universal synthetic non-regression claim is made. Selected and vector
+metadata 1024 times are 1095.14/1095.17 ns. All seven samples per row are kept.
+
+The assembly retains bounded masked input loads, byte prefix additions,
+nearest-producer permutes and mask comparisons. Basic validity branches gate
+the scalar producer lookups; no new gather/scatter scheme or production
+validation-disable option is introduced. The standalone validation boundary
+is preserved; a fused validated analysis is not asserted to exist.
+
+The final locked SQLite object again has SHA-256
+`0c48ff92978c3125b1822a1552eb48d2742ea09d80176488d8dc5320c4afe91f`,
+matching the original baseline, original vector build and all switch modes.
+See `review/final-object.sha256`. All commands above returned status 0;
+mutant runs deliberately returned failure with their stated diagnostics.
