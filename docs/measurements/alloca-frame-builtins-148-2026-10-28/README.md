@@ -6,8 +6,9 @@ Compiler branch: `claude/happy-dhawan-eafb58` of buster14a/buster, for
 The branch lowers `__builtin_alloca` to Tier 0's `ALLOCA`, and level 0's
 `__builtin_frame_address` and `__builtin_return_address` through a new Tier 0
 kind, `FRAME_ADDRESS`. Neither appears in SQLite: this record checks that the
-default path, `-c` of the frozen `sqlite3.c`, writes the same object and costs
-the same. It also keeps the corpus survey behind the claim.
+default path, `-c` of the frozen `sqlite3.c`, writes the same object and shows
+no material cost in this bounded comparison. It also keeps the corpus survey
+behind the claim.
 
 ## Sources and host
 
@@ -21,14 +22,17 @@ the 9700X:
 - **head2:** `16a72e356176851241ece309d1318d9c83ab7b50`, the final head, with `FRAME_ADDRESS`
   numbered 45 and `JUMP_INDIRECT` 46.
 
-Host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1, perf 7.2.9. Every
-run is pinned to CPU 2, whose governor is `performance`. Each build and each
-measurement ran in a hold of its own on the host's lock (`exclusive.sh`). The
-lock's waiting messages are left out of the logs: they name other jobs. Only the
-lines the scripts and the compiler print are kept.
+Author-reported host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1,
+perf 7.2.9, with CPU 2's governor set to `performance`. The scripts pin each
+measurement to CPU 2 and request a separate hold of the host's lock
+(`exclusive.sh`) for each build and measurement. The lock's waiting messages
+are left out of the logs: they name other jobs. Only the lines the scripts and
+the compiler print are kept. This folder does not retain a host/tool/governor
+transcript or an independent lock-acquisition record.
 
 Builds: `BUSTER_DEBUG_INFO=0 ./build.sh`, as the 9700X job builds
-(`scripts/build-tree.sh`, `builds/`). The executables' SHA-256:
+(`scripts/build-tree.sh`, `builds/`). The author-recorded executables' SHA-256
+(the binaries and a checksum-command transcript are not included here):
 
 - base: `ac01998ef81588ffc023a62d2d6789a67cddcdd4a0257629ebd2959daed20f8a`;
 - head: `edd5c55244b049a21ab3b9d885f5883298d1ee2f068a98f659fe0a0e0ce814a1`;
@@ -58,6 +62,13 @@ Run 1 compared base with head, run 2 base with head2. Run 1 used the same
 script before its tree names became arguments, with `base` and `head` fixed.
 `scripts/analyze.py` gives the medians and the per-round ratios.
 
+The logs retain successful drive checks, their object comparison, all 48 perf
+event rows per run, and each backend-source invocation's status. They do not
+retain individual timed compile/perf exit statuses: the script filters perf's
+standard error and does not record that pipeline's status. The numeric rows
+therefore support the statistics below without establishing that every timed
+invocation succeeded. No replacement timing campaign is implied.
+
 ## Results
 
 `-c` of `sqlite3.c`, medians of the rounds' means. The ratios are per round,
@@ -70,9 +81,10 @@ and their median:
 
 Each tree's instructions vary by at most 18 within a run. Run 1's +9.37% is
 round 7's head sample, whose three runs varied by 4.6% (a disturbance). The
-other seven of its rounds favour head by up to 1.08%, inside the 0.7% placement
-swings that two builds of the same work show on this file (#536's record). Run
-2's cycles straddle zero.
+other seven rounds range from -1.08% to +0.02%; the largest change exceeds the
+0.7% placement reference from two builds of the same work on this file (#536's
+record). With one build of each tree, this comparison cannot separate code
+placement from the feature's effect. Run 2's cycles straddle zero.
 
 Tier 0 on the same file's 2,602 functions (396,872 typed entries,
 `benchmark-backend-source`): instructions per typed entry, with each round's
@@ -103,7 +115,8 @@ clang 23.1.4) with main `ba379033`'s build and head `c2dc7646`'s build:
   implementation macros.
 
 `results-main.txt` and `results-head.txt` give each unit's first error. Clang
-compiles all 24 units. On main 9 fail, and on head 7. stb_vorbis.c and QuickJS's
+compiles all 24 units. The retained summaries show 12 failures on main and 10
+on head (12 and 14 compile, respectively). stb_vorbis.c and QuickJS's
 libregexp.c, which stopped at `alloca`, compile.
 
 ## Limits
@@ -113,3 +126,10 @@ libregexp.c, which stopped at `alloca`, compile.
   counts are the precise comparison.
 - The survey's master branches are as fetched that day, without a pinned
   revision.
+- Host/lock and executable identities above are the author's declarations;
+  the retained transcripts cannot independently verify them. The survey's
+  first-error summaries are historical observations, not a frozen-source
+  reproduction or a claim that the remaining unsupported units pass.
+- These measurements apply only to the named original source revisions.
+  Later source-review corrections and current-main integration require their
+  own correctness qualification and receive no timing result from this record.
