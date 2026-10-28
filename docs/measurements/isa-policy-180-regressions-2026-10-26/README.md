@@ -1,4 +1,16 @@
-## Current9db36ecf: measured draft, performance acceptance open
+## Current4ba459a9: reviewed one-quad tail, final measurements in progress
+
+Public head `4ba459a9f8fae4a9eb1225ac0f207244e130b201`, tree `8c019c2d25138ae8022f95068da857b9ffdbc1c1`, is draft/open/mergeable/unmerged against main `92c025e71856d13eb34247477c5294d2cead139e`. All649 source files match reviewed C36r2 manifest `b876e33d4d27024e361ba96586dd4a95266e742a9d225a81728bb617047073e1` ([binding](raw/small-tail-public-source-binding.json)). Native9/localASanUBSan9 pass; all41 units are O3 native/O1 sanitizer, callgraph0cycles/3allowed/0split and complete five-mode template dumps match the original16,035,840B payload. The independent source reviewer finds no correctness or coverage gap; the documentation wording finding is fixed. Existing count0..199 scalar/offset/fixup/page-edge checks cover the4/5 boundary and tails after full groups.
+
+All13 actual C36r2 native images are byte-identical to C36 ([identity](raw/small-tail-doc-binary-identity.json)), permitting explicit reuse of324 focused and1944 whole-compiler observations below. This is timing reuse with fresh source qualification, not a new set of observations. The final C36r2 full/tail1728each,585followup and567generated-runtime campaign is currently running under one bounded shared-lock controller; no pass is claimed before closure. Hosted [CI40656263007](https://github.com/buster14a/buster/actions/runs/40656263007) is pending. Previous9db CI83/83 is historical for this head.
+
+Focused conditioned-backend time points tie both references in all3 rounds; displayed instructions17.82→17.70(-0.6734%). Cycles versus main are-.42735/+.21322/-.84746%, versus A2-.63966/-.42373/0%; the positive point is retained. The216 full-stream diagnostic has mixed small points, including+.36101%time main and+.17953%A2; no neutrality inference. Whole-compiler1944 observations improve short-C cycles6.72374/6.65434/6.59959%main and7.11007/7.03616/7.00085%A2, with about15.64%fewer instructions. Short-C RSS is+8/0/+16KiBmain and+12/+20/+28KiBA2. The C34~2MiB increase does not recur; smaller residual costs remain unaccepted.
+
+SQL retains **unaccepted** cycles+.01632/+.09762/+.05215%main and+.06497/+.24750/+.01132%A2, RSS+60/+60/+52KiBmain and6220 extra instructions eachround (about0.000527%); minorfaults are1lower. No causal attribution or waiver follows from placement/copy overlap. C36r2 image34,057,643B is187,533B smaller than main, while text grows121,760B, rodata falls317,764B, data.rel.ro grows3472B and BSS grows12,480B; these separate costs are explicit. Fresh C36 baseline/v3/v4 proof passes18byte comparisons,9bounded ISAaudits and6ClangO0-agreeing outputs; its identical-image reuse is explicit. Final runtime results are pending.
+
+No performance regression or exception is approved. Producer adoption stays with #133/#136 and builtin lowering with #148; issue180 remains open.
+
+## Previous9db36ecf: fully measured draft, performance acceptance open
 
 Head `9db36ecfbee629dbf5ee903c8231fff67cadfefc`, tree `551cadc94429f69db566e2a23a78bce2014b2871`, remains draft and unmerged against current main `92c025e71856d13eb34247477c5294d2cead139e`. All649 source blobs match frozen manifest `24bdac76d544a02484ccf40df6e9afd0b9f175827bfbaee74078db0935dd637f` ([binding](raw/dense-map-public-source-binding.json)). No performance regression or exception has been approved.
 
