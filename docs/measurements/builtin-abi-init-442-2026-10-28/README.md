@@ -14,6 +14,8 @@ The frozen candidate copies all seven canonical builtin ABI columns and the merg
 
 Start with [the target report](frozen/TARGET_REPORT.md), [local methods and rejected evidence](frozen/REPORT.md), and [the review handoff](frozen/REVIEW_HANDOFF.md). Top-level frozen logs, command receipts, summaries and original C helpers are also browseable under `frozen/`.
 
+The separate [publication-composition checks](publication/README.md) record the later main integration and focused local gates. They add no timing claim and do not change any frozen measurement's attribution.
+
 ## Complete raw records and reproduction
 
 `archives/frozen-receipts-and-methods.tar.zst` expands to the original relative evidence tree's text records and methods, including raw child rows, perf CSV, diagnostics, local rejected screens, helper sources and the exact source patch. There is no trimming of unfavorable timing samples. Root-level publication-composition logs are kept separate when added; they are not frozen timing evidence.
