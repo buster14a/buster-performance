@@ -72,9 +72,14 @@ include `sqlite3VdbeExec`, 763,840 cells, 6.53 ms against 3.91.) The vector path
 each pass over every cell, where the scalar constructor's work follows the
 instructions. Taking the vector path up to a bound of cells and the scalar one
 past it gave 35.96 ms at 16,384 cells; every bound from 8,192 to 32,768 came
-within 0.2% of that. `local/functions-sqlite-zen4.txt` is the same run on the
-laptop, where the totals were 71.99, 65.01 and 61.67 ms and the bound of 16,384
-gave 62.70. `q787b.sh`'s musl run refused, since `benchmark-ir-source` refuses a
+within −0.28% to +0.26% of that, from 35.86 ms at 9,159 cells to 36.05 at 18,500
+(each function's cells, its blocks times its slots, against each bound in turn:
+the totals change only at the 16 functions' cells in that range). The powers of
+two came within 0.14%: 8,192 −0.05% and 32,768 −0.13%.
+`local/functions-sqlite-zen4.txt` is the same run on the laptop, where the
+totals were 71.99, 65.01 and 61.67 ms, the bound of 16,384 gave 62.70, and every
+bound from 8,192 to 32,768 came within −0.28% (12,672 cells) to +0.24% (18,500)
+of that. `q787b.sh`'s musl run refused, since `benchmark-ir-source` refuses a
 corpus with files left out.
 
 ## Main against head
