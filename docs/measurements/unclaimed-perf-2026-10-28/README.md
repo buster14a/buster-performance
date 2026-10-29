@@ -9,6 +9,13 @@ source revisions are exposed through the compiler repository's
 Full raw artifacts remain in the original local workspace; the collection
 manifests identify every copied and omitted file.
 
+The [frozen source registry](SOURCE-REFS.md) maps the reports to public source
+refs. The later [publication records](publication-method/ARCHIVE-SCOPE.md)
+preserve refreshed source checks separately from the original measurements.
+Their PR and CI statuses are collection-time snapshots. In particular, the
+worker-return review below supersedes acceptance implied by earlier passing
+fixtures; these publication records do not qualify its proposed correction.
+
 ## Frozen individual qualification
 
 The following records compare baseline
