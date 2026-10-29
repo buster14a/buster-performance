@@ -101,7 +101,8 @@ executable after another, it took 0.08 to 0.10 ms after the first.
 
 Peak resident sets: synth by 8 lanes 537,508 and 539,160 KB, Lua by 8 lanes 212,692 to 214,544 KB plain and 224,612
 to 225,192 KB with `-g`. musl's first 7-run comparison (`logs/ev778.log`: 239.71 against 245.19 ms, ranges 224.78–270.09
-and 228.67–293.86) couldn't tell them apart; its 21 runs did.
+and 228.67–293.86) did not establish a throughput difference. The 21-run follow-up reports nearly equal medians,
+231.48 and 231.80 ms; these retained summaries do not establish a musl throughput change.
 
 ### One file (`ab/`, `logs/ev778.log`)
 
@@ -127,5 +128,5 @@ differences of this size.
 - Three `--time-stages` runs per configuration; whole processes 7, 15 or 21 runs. The governors were not all
   `performance`.
 - The stages' A/B alternated two executables, which made each one's runtime snapshot stale for the other (above).
-- Lua's ranges overlap between the heads; synth's 8-lane ranges and musl's 21-run medians are the comparisons that
-  separate (synth) or match (musl).
+- Lua's ranges overlap between the heads; synth's 8-lane ranges do not overlap, and musl's 21-run medians are
+  nearly equal. The retained musl summaries do not establish a throughput difference or statistical equivalence.
