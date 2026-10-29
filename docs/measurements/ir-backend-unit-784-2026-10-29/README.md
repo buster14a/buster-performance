@@ -56,9 +56,10 @@ turning each round:
 - **`-c` of `sqlite3.c`**, `perf stat -r 11` per tree per round
   (`logs/pair-compile-*.csv`, exit statuses in `logs/pair-compile.log`): the
   objects are byte-identical (`cmp`'s status 0 in `logs/progress`); user
-  instructions 1,314.119, 1,314.125 and 1,314.119 million (main) against
-  1,314.119, 1,314.125 and 1,314.125 million (head); user cycles 608.3, 603.1
-  and 602.1 million against 604.4, 604.7 and 604.3 million.
+  instructions 1,314,119,121, 1,314,118,921 and 1,314,118,923 (main, rounds 1
+  to 3) against 1,314,125,478, 1,314,125,479 and 1,314,125,474 (head): 1,314.119
+  million against 1,314.125 million, about 6,500 more (0.0005%); user cycles
+  608.3, 603.1 and 602.1 million against 604.4, 604.7 and 604.3 million.
 - **`-c` over placements** (#509's method; `logs/shifts-*.log`,
   `logs/placements.log`): each tree linked six times with the checker's unit
   shifted by 0, 640, 1,344, 2,048, 2,752 and 3,456 bytes, each link run from
