@@ -15,6 +15,8 @@ mutation receipts. The method is the one of `../cleanup-147-2026-10-28/`.
 | base | `9bb5060ebe347de5c7a0a92ba325a7b14a567788` | main when the branch was cut |
 | first head | `2d8e96d4a682338ee0605c6c22ce2ff147d65081` | the branch's first commit, measured and then amended |
 | head | `73c572d339378baa860a1c7450e2c46ae5861a62` | the branch's commit |
+| fix's base | `2ae4fa8274af0b5d257b8529fa37dc768eaa6616` | main, the review fix's merge parent |
+| fix | `86467e46ffc66b94aa6f6b4786c42c595f7d961c` | the review's fix, on the branch's merges of main (`a1dd0b26`, and `0e944d66` with that main) |
 
 The trees on the 9700X are `git archive` of their commits. `sources/*.sha256` list each commit's files and their
 SHA-256, and the trees there matched them file for file outside `build/` when this record was assembled (compared as
@@ -129,3 +131,67 @@ does, so it checks the conversion's acceptance, which the program fixtures check
 
 Limitations: the mutants ran on Zen 4 at `-O1`, in those sections alone, not the whole suite; each is one replacement
 chosen by the author.
+
+## The review's fix
+
+`86467e46`, from the pull request's review, refuses a union made transparent after an initializer that names a
+function, as well as after a function definition: clang classifies a function's type where its code first meets it,
+and an object's initializer that names the function does. `check_lower_first_classification` finds the earliest such
+place in the unit, the first time a lane asks, which only a transparent union whose first member passes otherwise
+makes it do; `-c` of `sqlite3.c` passes no transparent union, so it never runs there.
+
+### The default path's cost
+
+The method of "The default path's cost", for `86467e46` against its main parent `2ae4fa82`
+(`placements-fix/`, `scripts/shifts3c.sh`), with these differences:
+
+- **Trees:** `git archive` of the two commits (`sources/base-2ae4fa82.sha256`, `sources/head-86467e46.sha256`), each
+  matching it file for file outside `build/` and the `COMMIT` file the author added, when this record was assembled.
+- **Placements:** `0 704 1408 2112 2816 3520`. The checker unit's `.text` is aligned to 64 bytes at these commits, and
+  `build.sh shifts` refused the earlier campaigns' `688` as not a multiple of it: the first attempt stopped at the
+  base's build (`placements-fix/run-first-attempt.log`; the build log it wrote was replaced by the second attempt's).
+- **Instructions:** each tree's placement-0 executable counted by `perf stat -e instructions:u` for `-c` and
+  `-fsyntax-only`, three runs each, pinned to CPU 2, before the rounds (`placements-fix/perf-*.txt`). Their exit
+  statuses weren't logged; the script's raw log holds no lines but its own and the lock's messages.
+- **Host:** `placements-fix/host.txt`, the same 9700X, kernel, clang and perf as above, CPU 2's governor
+  `performance`.
+
+The drive check's objects are the same bytes (`objects identical`). Medians of each round's 54 runs per build
+(`placements-fix/ab.log`); every run exits with status 0:
+
+| Round | User cycles (M), head | head against base | base-again against base | Wall, head against base | base-again against base |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 592.149 | +0.12% (placements -0.35% to +0.76%) | -0.06% | +0.21% | -0.06% |
+| 2 | 592.533 | -0.01% (placements -0.35% to +0.71%) | -0.23% | +0.04% | -0.30% |
+| 3 | 592.408 | +0.12% (placements -0.35% to +0.60%) | -0.04% | +0.15% | -0.03% |
+
+Each range over placements crosses zero, and over placements and copies the ranges are wider (cycles: -1.19% to
++1.12%, -0.82% to +1.39%, -2.05% to +1.36%). Comparing each round's unrounded head and A/A medians directly, the
+head's user cycles are above the A/A control's by 0.19%, 0.21% and 0.16%, more than its instructions (below) would
+cost at an unchanged IPC. The fix's new code doesn't run on this input,
+and the placements vary only the checker unit's `.text` offset: as in the cleanup record, this comparison can't tell a
+layout effect from the change's work.
+
+Instructions per run, from `time-runs`' 162 runs per build: the base's median 1,296,388,092 (1,296,388,078 to
+1,296,388,176), base-again's 1,296,388,093, the head's 1,297,233,519 (1,297,233,509 to 1,297,233,660): 845,427 more
+(+0.065%). `perf stat`, medians of three: `-c` 1,296,388,789 and 1,297,234,151 (845,362 more), `-fsyntax-only`
+998,966,594 and 998,966,517 (77 fewer). The difference is the lowering's, and it is the whole pull request's against
+this main; the head before the main merges and the fix measured 1,032,016 more against main `9bb5060e` (above).
+
+### Mutation receipts of the fix
+
+`scripts/mutate6.py` and `scripts/run6.sh`, as `scripts/mutate4.py` and `run4.sh`, on `86467e46`'s tree, which matches
+`git archive` of the commit file for file: one replacement in `c_check_program_lower.c` each, built at `-O1`, then
+`test-checker`'s transparent unions' programs, vector programs and call boundary fixture alone, and
+`test-checker-driver`'s socket test alone. The unchanged copy passes (`C00-unchanged`: 2,063 and 55 checks).
+`mutants/results6.txt` is the run's record, `mutants/<mutant>.log` both commands' output.
+
+| Mutant | Change | Outcome |
+|---|---|---|
+| T18 | an initializer never names a function (`check_lower_initializer_names_function`) | killed: 144 failures |
+| T19 | the first definition's body isn't a place | killed: 4 |
+| T20 | the vector scan reads the lane after each hit | killed: 72 |
+| T21 | an initializer naming an object counts, one naming a function doesn't | killed: 220 |
+| T22 | a union counts as late when made transparent before the place | killed: 236 |
+
+Every failure is `test-checker`'s; the socket test kills none, as before. Limitations as above.
