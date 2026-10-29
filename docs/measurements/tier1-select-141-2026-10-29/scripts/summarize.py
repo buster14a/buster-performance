@@ -2,8 +2,11 @@
 # Medians of #141's 9700X benchmark-tier1-select logs, in ns per IR node. The main run (bench/): each shape, phase and
 # path's median over the five rounds by main and the head, with the rounds' range. The placements (shifts/): each
 # build's median over its placements' medians (each over the rounds), the placements' spread, and the head's and main
-# again's change against main, with its range over the placements. The rows' structure (records, bytes, costs, spills,
-# peaks) must be the same for every run of a row. Usage: summarize.py M_DIRECTORY MAIN HEAD.
+# again's change against main, with its range over the placements as docs/profiling.md's method takes it: each of the
+# build's placements' medians against each of main's, which pairs nothing, since a shift of one tree isn't the same
+# placement as that shift of another; and whether the change is outside the floor (beyond main again's change, and its
+# range excluding 0). The rows' structure (records, bytes, costs, spills, peaks) must be the same for every run of a
+# row. Usage: summarize.py M_DIRECTORY MAIN HEAD.
 import collections, glob, os, re, statistics, sys
 
 m, main, head = sys.argv[1:4]
@@ -53,8 +56,14 @@ if placements:
             spread = (max(p.values()) / min(p.values()) - 1) * 100
             line += "  %s %.3f (spread %.2f%%)" % (b, median, spread)
             if b != "main":
-                changes = [(p[s] - reference[s]) / reference[s] * 100 for s in p if s in reference]
-                line += " %+.2f%% (%+.2f to %+.2f)" % ((median - statistics.median(reference.values())) / statistics.median(reference.values()) * 100, min(changes), max(changes))
-        print(line)
+                changes = [(p[s] - reference[t]) / reference[t] * 100 for s in p for t in reference]
+                change = (median - statistics.median(reference.values())) / statistics.median(reference.values()) * 100
+                line += " %+.2f%% (%+.2f to %+.2f)" % (change, min(changes), max(changes))
+                if b == "head":
+                    head_change, head_range = change, (min(changes), max(changes))
+                else:
+                    floor = abs(change)
+        outside = abs(head_change) > floor and (head_range[0] > 0 or head_range[1] < 0)
+        print(line + ("  outside the floor" if outside else "  within the floor"))
 different = [key for key, shapes in structure.items() if len(shapes) != 1]
 print("== structure: %s" % ("the same for every run of each row" if not different else "differs: %s" % different))

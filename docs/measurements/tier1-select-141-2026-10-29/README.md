@@ -40,7 +40,10 @@ and peaks must be the same in every run, which `scripts/summarize.py` checks ("s
   3,520 bytes, multiples of its 64-byte alignment), then three rounds, each one hold, of the full run by every
   placement of main, the head and main again (the comparison's floor), the placements in an order rotating by round.
   `summarize.py` takes each placement's median of the rounds, each build's median of its placements, the placements'
-  spread, and each build's change against main with its range over the placements.
+  spread, and each build's change against main with its range over the placements as `docs/profiling.md`'s method
+  takes it: each of the build's placements' medians against each of main's, 36 pairs, which pair nothing, since a
+  shift of one tree isn't the same placement as that shift of another. A change is outside the comparison's floor
+  when it is beyond main again's against main and its range excludes 0.
 - **Diagnosis** (`logs/laptop-instructions.txt`): on the laptop's Zen 4, the benchmark's unit with
   `scripts/fixed_patch.py`, which runs one row a fixed number of times, under `perf stat`: instructions per node (exact,
   the difference of 140 and 40 runs) and cycles (the least of five runs) of the trees and of variants built to find the
@@ -54,50 +57,55 @@ command's first line, and the scripts' outputs (`all.out`, `shifts.out`) keep on
 
 ## Results
 
-**The first head** (`da2de4d9`) was slower in the plan, at every placement and beyond main again's floor
-(`logs/placements-da2de4d9/summary.txt`): `chain` +10.0% by the scalar twin and +3.3% by the vector path, `pressure`
-+5.2% and +2.8%, `wide` +1.2% and +1.5%; and `wide`'s whole pipeline +4.2% by the vector path. The laptop's counts
+Each row's change below is the head's median against main's, with its range over all 36 placement pairs, and "outside
+the floor" by the method's criterion (`summarize.py` prints it per row).
+
+**The first head** (`da2de4d9`) was slower outside the floor on nine of the twelve rows
+(`logs/placements-da2de4d9/summary.txt`): the plan by the scalar twin `chain` +10.0% (+8.8% to +11.0%), `pressure`
++5.2% (+4.4% to +7.3%) and `wide` +1.2% (+0.6% to +2.1%), by the vector path +3.3%, +2.8% and +1.5%; and the whole
+pipeline `chain`'s scalar twin +2.9%, `wide`'s +3.6% and its vector path +4.2% (+3.5% to +5.5%). The laptop's counts
 put it in the plan's pass over the nodes: 37 to 42 instructions more per node on every shape and path, on the lines of
 the pass's depth, level and operand walk. The barriers' store in that pass made the operands' walk after it reload the
 function's columns (the build's `-fno-strict-aliasing`); as a loop of their own, the same barriers cost 5 to 8
 instructions per node.
 
 **`589d8641`**, the barriers a pass of their own (a running maximum 16 nodes at a time, with the loop as its scalar
-twin), made the vector path faster than main at every placement (`logs/placements-589d8641/summary.txt`): the plan
--1.2% to -1.8%, the whole pipeline -0.3% to -1.6%. The scalar twin's plan stayed +0.5% to +5.9% slower, though it ran
+twin), made the vector path faster outside the floor for `chain` and `pressure` (`logs/placements-589d8641/summary.txt`):
+the plan -1.25% (-7.36% to -0.16%) and -1.79% (-5.43% to -0.61%), the whole pipeline -1.60% (-3.74% to -0.03%) and
+-1.09% (-2.56% to -0.55%); `wide`'s were within it. The scalar twin's plan was +5.9% and +3.8% in the median for
+`chain` and `pressure`, within the floor (its ranges, -0.96% to +6.90% and -0.66% to +4.70%, include 0), though it ran
 only 2 to 5 instructions per node more. On the laptop, removing the barrier pass didn't recover its cycles, and
 restoring the load test's old shape (the right operand's load, or a commutative operation's left where the right isn't
 a load, rather than also the left after a right load that can't fold) did: that test changed the registers and frame of
 the plan, which the benchmark inlines, by more than its 2.75 instructions per node account for.
 
 **The final head** (`ba283ca7`, with that test and main `0dd6fbc3` merged) against main `0dd6fbc3`
-(`logs/placements-ba283ca7/summary.txt`), ns per IR node, each build's median over its six placements, the change's
-range over the placements in parentheses:
+(`logs/placements-ba283ca7/summary.txt`), ns per IR node, each build's median over its six placements:
 
-| Shape | Phase | Path | main | head | Change | main again |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
-| chain | plan | scalar | 25.992 | 25.596 | -1.52% (-6.22 to +0.20) | -0.68% |
-| chain | plan | vector | 27.758 | 27.063 | -2.50% (-7.80 to -1.83) | -0.23% |
-| pressure | plan | scalar | 26.992 | 26.455 | -1.99% (-3.54 to -0.60) | -0.64% |
-| pressure | plan | vector | 26.547 | 25.886 | -2.49% (-5.75 to -1.02) | -0.80% |
-| wide | plan | scalar | 27.434 | 26.886 | -1.99% (-2.59 to -1.34) | -0.01% |
-| wide | plan | vector | 24.274 | 23.668 | -2.50% (-3.50 to -1.59) | +0.13% |
-| chain | pipeline | scalar | 100.267 | 98.422 | -1.84% (-2.24 to +11.40) | +0.45% |
-| chain | pipeline | vector | 89.196 | 87.341 | -2.08% (-4.07 to +5.42) | +2.17% |
-| pressure | pipeline | scalar | 186.964 | 185.565 | -0.75% (-1.78 to +33.67) | +0.24% |
-| pressure | pipeline | vector | 149.493 | 146.792 | -1.81% (-2.42 to +20.45) | +0.15% |
-| wide | pipeline | scalar | 108.466 | 108.183 | -0.26% (-1.01 to +18.98) | +0.05% |
-| wide | pipeline | vector | 79.058 | 78.639 | -0.53% (-1.11 to +1.40) | -0.02% |
+| Shape | Phase | Path | main | head | Change (all pairs) | main again | Floor |
+| --- | --- | --- | ---: | ---: | ---: | ---: | --- |
+| chain | plan | scalar | 25.992 | 25.596 | -1.52% (-6.71 to +0.32) | -0.68% | within |
+| chain | plan | vector | 27.758 | 27.063 | -2.50% (-7.85 to -1.63) | -0.23% | outside |
+| pressure | plan | scalar | 26.992 | 26.455 | -1.99% (-4.33 to +0.48) | -0.64% | within |
+| pressure | plan | vector | 26.547 | 25.886 | -2.49% (-6.32 to -0.29) | -0.80% | outside |
+| wide | plan | scalar | 27.434 | 26.886 | -1.99% (-3.39 to -1.32) | -0.01% | outside |
+| wide | plan | vector | 24.274 | 23.668 | -2.50% (-3.70 to -1.59) | +0.13% | outside |
+| chain | pipeline | scalar | 100.267 | 98.422 | -1.84% (-2.95 to +11.40) | +0.45% | within |
+| chain | pipeline | vector | 89.196 | 87.341 | -2.08% (-4.28 to +5.42) | +2.17% | within |
+| pressure | pipeline | scalar | 186.964 | 185.565 | -0.75% (-1.84 to +33.87) | +0.24% | within |
+| pressure | pipeline | vector | 149.493 | 146.792 | -1.81% (-2.59 to +20.72) | +0.15% | within |
+| wide | pipeline | scalar | 108.466 | 108.183 | -0.26% (-1.33 to +19.07) | +0.05% | within |
+| wide | pipeline | vector | 79.058 | 78.639 | -0.53% (-1.41 to +1.68) | -0.02% | within |
 
-The plan is faster at every placement by the vector path, and at all but one by the scalar twin (`chain` +0.20% at
-one). The whole pipeline's changes at five of the six placements run -4.07% to +0.43%, faster everywhere but at the
-first placement for `chain`'s and `wide`'s scalar twin (+0.21%, +0.43%) and `wide`'s vector path (+0.01%). At the
-sixth, the head's code 704 bytes later, its runs were slower in all three rounds (`pressure`'s scalar twin 248.7 ns
-against 184.9 to 186.6 at the other placements, its vector path 178.9 against 146.5 to 147.9), where main's at the same
-shift weren't. The 9700X's counters of that executable (`logs/counters-704.txt`; its runs are timed, so it completes
-fewer instructions in about the same cycles) show 1.37% of its dispatched operations coming from the legacy decoders,
-the rest from the op cache, against 0.94% at shift 0 and main's 0.99% at 704: the op cache missing on that layout's hot
-code, a placement of that executable rather than work the change adds.
+The plan is faster outside the floor on four rows: the vector path's three shapes and `wide`'s scalar twin. Every other
+row's median is lower than main's (-0.26% to -2.08%), within the floor: no row is slower. The pipeline's ranges reach
++5.4% to +33.9% through one of the head's placements, its code 704 bytes later, whose runs were slower in all three
+rounds (`pressure`'s scalar twin 248.7 ns against 184.9 to 186.6 at its other placements, its vector path 178.9 against
+146.5 to 147.9), where main's at the same shift weren't. The 9700X's counters of that executable
+(`logs/counters-704.txt`; its runs are timed, so it completes fewer instructions in about the same cycles) show 1.37% of
+its dispatched operations coming from the legacy decoders, the rest from the op cache, against 0.94% at shift 0 and
+main's 0.99% at 704: the op cache missing on that layout's hot code, a placement of that executable rather than work
+the change adds.
 
 The records are the same: every row's structure is main's in every run, and `test-tier1-select --manifest` lists the
 same records.
