@@ -19,7 +19,7 @@ Each tree built with `BUSTER_DEBUG_INFO=0` under its own hold of the lock, and i
 (`aa`) is a copy of the base's executable, the same bytes, run as a tree of its own. Instruction counts are
 deterministic here: the A/A copy is within 152 instructions of its base in `sqlite3.c`'s runs and within 7,422 in
 `main.c`'s, whose own rounds span 13,264. Cycles move more: the A/A copy differs from its base by up to 0.29%, and one
-tree's three rounds by up to 0.64% (the A/A copy's of `drive`).
+tree's three rounds by up to 0.77% (`v2`'s of `main`); the A/A copy's of `drive` span 0.64%.
 
 ## abW: the head and two variants against main
 
@@ -55,12 +55,14 @@ rotates; the medians of the rounds (`abW/perf.log`):
   v2's helpers out of line take 2,856, 2,938 and 18,770 more off, under 0.0003% of each, so the head takes v1, the
   smaller change.
 - **What v1 leaves against main:** `sqlite3.c -fsyntax-only` runs 467,187 more instructions (0.046%), and `-c`
-  612,826 fewer, so the lowering past checking runs about 1.08 M fewer than main's. `main.c -fsyntax-only` runs
-  5.83 M more (0.030%); its headers' half-precision constants are folded and rounded at the head, where main left
-  them unfolded (an unsupported constant), so some of that is work main didn't do. This record attributes none of
+  612,826 fewer. These whole-command deltas differ by about 1.08 M instructions. The syntax command uses
+  `--clang-features`, while the object command does not; this subtraction does not isolate lowering after checking.
+  `main.c -fsyntax-only` runs 5.83 M more (0.030%); its headers' half-precision constants are folded and rounded at
+  the head, where main left them unfolded (an unsupported constant), so some of that is work main didn't do. This record attributes none of
   these differences further.
 - **Cycles:** every tree's median is within 0.37% of base's (the head's of `main.c`, 0.37% fewer), inside the spread
-  of one tree's own three rounds (up to 0.64%, `abW/perf.log`); this record claims no speed difference.
+  of one tree's own three rounds (up to 0.77%, `v2/main`; A/A `drive` spans 0.64%, `abW/perf.log`); this record
+  claims no speed difference.
 
 ## Files
 
