@@ -26,15 +26,15 @@ for name in cycles-all ibs-op ibs-fetch branches; do
         perf record -q "${args[@]}" -o "$out/$name.data" -- bash -c "$repeat" repeat "${common[@]}" \
         > "$out/$name.stdout" 2> "$scratch/$name.stderr"; then
         echo 0 > "$out/$name.status"
-        perf report --stdio --no-children --percent-limit 0.25 -i "$out/$name.data" > "$out/$name.report.txt" 2>&1 || true
-        perf script -d -i "$out/$name.data" -F event > /dev/null 2> "$out/$name.integrity.txt" || true
+        "$HOME/buster-fast-bench/exclusive.sh" timeout 90 bash -c 'perf report --stdio --no-children --percent-limit 0.25 -i "$1" > "$2" 2>&1' run "$out/$name.data" "$out/$name.report.txt" || true
+        "$HOME/buster-fast-bench/exclusive.sh" timeout 90 bash -c 'perf script -d -i "$1" -F event > /dev/null 2> "$2"' run "$out/$name.data" "$out/$name.integrity.txt" || true
         if [[ $name == ibs-op ]]; then
-            perf mem report --stdio --dsos compiler --sort mem --percent-limit 0 -i "$out/$name.data" > "$out/$name.compiler-memory.txt" 2>&1 || true
+            "$HOME/buster-fast-bench/exclusive.sh" timeout 90 bash -c 'perf mem report --stdio --dsos compiler --sort mem --percent-limit 0 -i "$1" > "$2" 2>&1' run "$out/$name.data" "$out/$name.compiler-memory.txt" || true
         fi
-        zstd -q -f --rm "$out/$name.data"
+        "$HOME/buster-fast-bench/exclusive.sh" timeout 90 zstd -q -f --rm "$out/$name.data"
     else
         echo "$?" > "$out/$name.status"
     fi
-    sed -e '/^exclusive.sh: /d' -e '/^  title: /d' -e '/^  link: /d' "$scratch/$name.stderr" > "$out/$name.stderr"
+    sed -e '/^exclusive.sh: /d' -e '/^  title: /d' -e '/^  link: /d' -e '/^  pull request: /d' "$scratch/$name.stderr" > "$out/$name.stderr"
     printf '%s complete\n' "$name"
 done

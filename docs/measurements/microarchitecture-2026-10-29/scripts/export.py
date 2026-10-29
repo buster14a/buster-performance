@@ -12,7 +12,7 @@ p=argparse.ArgumentParser()
 p.add_argument('directory')
 a=p.parse_args()
 root=Path(a.directory)
-records=[json.loads(x) for x in (root/'measurements.jsonl').read_text().splitlines()]
+records=[json.loads(x) for x in (root/'measurements.jsonl').read_text().splitlines()] if (root/'measurements.jsonl').exists() else []
 recovered=[]
 if (root/'recovery.jsonl').exists():
     recovered=[json.loads(x) for x in (root/'recovery.jsonl').read_text().splitlines()]
@@ -42,7 +42,7 @@ for x in recovered:
     ls=lines(x['perf_stat'])
     if x['status']==0 and len(ls)==3 and min(z[2] for z in ls)>=99 and ls[0][1]>0 and ls[1][1]>0:
         event_line=ls[2]
-        samples[(x['workload'],x['event'])].append((event_line[1],event_line[1]/ls[0][1],event_line[1]/ls[1][1]*1000,min(z[2] for z in ls),'isolated'))
+        samples[(x['workload'],x['event'])].append((event_line[1],event_line[1]/ls[0][1],event_line[1]/ls[1][1]*1000,min(z[2] for z in ls),x.get('collection_method','isolated')))
 with (root/'counters-summary.csv').open('w',newline='') as f:
     w=csv.writer(f, lineterminator="\n");w.writerow(['workload','event','valid_samples','median_count','events_per_cycle','events_per_1000_instructions','minimum_duty_percent','method'])
     for (workload,event),ss in sorted(samples.items()):

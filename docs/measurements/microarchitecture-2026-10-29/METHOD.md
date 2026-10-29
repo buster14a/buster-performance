@@ -15,6 +15,7 @@ scripts/scalar-control.sh "$compiler" "$corpus" "$out"
 scripts/ir-passes.sh "$compiler" "$out"
 scripts/validate-sqlite.sh "$compiler" "$corpus" "$out"
 python3 scripts/rss-parent-repro.py --compiler "$compiler" --corpus "$corpus" --out "$out"
+python3 scripts/object-path-probe.py --compiler "$compiler" --corpus "$corpus" --out "$out"
 clang -O3 -march=native -pthread -Wall -Wextra -Werror scripts/memory-floor.c -o /tmp/buster-memory-floor
 scripts/memory-floor.sh /tmp/buster-memory-floor "$out"
 ```
@@ -27,4 +28,19 @@ The original sampling captures cover 30 fresh object compilations each. `perf re
 
 `scripts/sqlite-smoke.c` is adapted from the earlier `microarchitecture-9700x-2026-10-27/method/sqlite-smoke.c`; its RTree statements are omitted for this campaign's default SQLite configuration. `scripts/memory-floor.c` is adapted from that record's `method/memory-floor.c` to run one requested core count and store mode per process. They retain the performance repository's original contribution terms. The SQLite and header corpus is not redistributed in this record; its upstream notices remain in the verified corpus bundle. The release supplies Buster's source license and notices with the executable; dynamically linked system libraries are not redistributed.
 
-The 9700X CI run and its separate workflow-only diagnostic are identified in the report. Runner job hooks hold the shared host lock for each job; do not nest `exclusive.sh` inside such a job. A manual target command outside CI must acquire `~/buster-fast-bench/exclusive.sh` for each run, set its owner/title/link and use CPU 2 for single-core measurements. See the source revision's `AGENTS.md` and `docs/profiling.md` for placement and after-scalar controls. Historical 9700X full-system data belong to their recorded source, flags and corpus, not this source revision.
+The 9700X CI run and its separate workflow-only diagnostic are identified in the report. Runner job hooks hold the shared host lock for each job; do not nest `exclusive.sh` inside such a job. The CI binary is identified by its recorded hash, but was not retained. Its raw perf samples and symbolized text are saved; exact resymbolization requires that executable or a byte-identical rebuild.
+
+The manual 9700X follow-up used the same source archive and corpus, but a different compiler executable: its `environment.txt` records Clang 23.1.1, build settings and SHA-256. That measured executable is in the 9700X release archive. The native source build used `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh` under `exclusive.sh`. For a separate follow-up output directory, these commands reproduce the manual collection structure:
+
+```sh
+python3 scripts/zen5-grouped-counters.py --compiler "$compiler" --corpus "$corpus" \
+  --event-probes zen5/current/event-probes.json --out "$out" --repetitions 2
+scripts/zen5-scaling.sh "$compiler" "$corpus" "$out" scripts/scaling.py
+scripts/zen5-profiles.sh "$compiler" "$corpus" "$out"
+scripts/zen5-validate.sh "$compiler" "$corpus" "$out" scripts/sqlite-smoke.c
+python3 scripts/zen5-uncore-metrics.py --compiler "$compiler" --corpus "$corpus" \
+  --scaling scripts/scaling.py --names scripts/zen5-uncore-metric-names.json --out "$out"
+python3 scripts/export-system-metrics.py "$out"
+```
+
+The original `zen5-isolated-counters.py` sweep was interrupted while waiting for the shared lock and continued with `zen5-grouped-counters.py`: groups of three named events plus cycles and instructions. The continuation resumes only records with a successful status and at least 99% duty for every recorded counter, records the entire grouped output separately, and retries any under-scheduled group one event at a time. It can also run from a fresh output directory, as shown above. The scripts do not claim that named aliases are necessarily distinct or correctly documented. Every build, workload, sample or counter run outside CI acquired `~/buster-fast-bench/exclusive.sh` separately; no lock covers a series of independent measurements. The scripts set the owner, title and link and pin single-core work to CPU 2. Published evidence omits lock-owner coordination messages, including two residual lines removed from the isolated sweep's stderr after collection; the perf counter fields are unchanged. See the source revision's `AGENTS.md` and `docs/profiling.md` for placement and after-scalar controls. Historical 9700X full-system data belong to their recorded source, flags and corpus, not this source revision.
