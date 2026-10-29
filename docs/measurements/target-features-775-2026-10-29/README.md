@@ -10,8 +10,10 @@ check those calls after selection, as clang does. This record keeps:
 1. the cost on the 9700X: `-c` of the frozen `sqlite3.c`, a unit without a target attribute, and of stb_image at
    `-march=native`, whose `<emmintrin.h>` intrinsics have target attributes, main against three heads: the first
    (`first/`), the one after this record's attribution (`second/`), and the final one (`last/`);
-2. the attribution of the first head's extra instructions, by exact counts of builds on a 7940HS (`attribution/`);
-3. the calibration of the check against clang 23 on 18 small units (`calibration/`);
+2. the reported attribution of the first head's extra instructions, by local counts on a 7940HS (`attribution/`;
+   raw local session receipts are absent, as distinguished below);
+3. historical filtered diagnostic comparisons with clang 23 on 18 small units (`calibration/`; compiler statuses
+   and full output were not retained, so these are not acceptance or crash-freedom receipts);
 4. the mutation check of the check's tests (`mutants/`).
 
 ## Sources
@@ -25,7 +27,7 @@ Each measured tree is a `git archive` of its commit, extracted on the 9700X with
 - **last:** `5cf49b030ae9850b6f57c63cd1119a0b558ff455`, final with the errors in clang's emission order (a for loop's
   increment after its body).
 
-The pull request's head, `b0d76846f235db5123d2baace55b7de200ebbc1a`, is last with a fix to `test-checker-driver`'s
+The source pull request's head when this record was made, `b0d76846f235db5123d2baace55b7de200ebbc1a`, is last with a fix to `test-checker-driver`'s
 every-error check, which the mutation check found (below): test code alone, which `-c` doesn't run.
 
 `manifests/` has each commit's file manifest (the SHA-256 of every file of its `git archive`, sorted by path), and
@@ -82,8 +84,13 @@ The instructions are the precise comparison; one executable per tree is one plac
 ## The first head's instructions
 
 The first head ran 557,735 more instructions than main on `sqlite3.c`, where the check returns at once, and 416,509
-more on stb_image (`first/analysis.txt`). `attribution/counts.md` finds where, by exact counts of builds on a 7940HS
-(Zen 4, clang 23.1.4), each tree's sources a step from the one before (`attribution/*.diff`):
+more on stb_image (`first/analysis.txt`). `attribution/counts.md` reports local counts of builds on a 7940HS
+(Zen 4, clang 23.1.4), each tree's sources a step from the one before (`attribution/*.diff`). These are manual
+reported attribution data, without raw local perf/session or executable receipts, unlike the primary 9700X data.
+Their table is preserved and the inconsistent prose baseline range is corrected by showing each row's implied
+denominator. The session count, repeatability and measured extrema cannot be independently recovered from it.
+The original account associates the following changes with the reported local counts; it does not uniquely isolate
+placement from work:
 
 - a third pass over each attributed declaration's records, beside #772's target pass and the naked one, was 214,000
   of `sqlite3.c`'s; one pass now gives all three;
@@ -96,14 +103,18 @@ more on stb_image (`first/analysis.txt`). `attribution/counts.md` finds where, b
   callers without an attribute of their own, and reusing the host's features #772's pass read took it from +407,557 to
   +220,192.
 
-Per-symbol samples (`scripts/sample-symbols.sh`, `perf record -e instructions:u -c N`) moved by millions of
+Per-symbol samples (`scripts/sample-symbols.sh`, `perf record -e instructions:u -c N`) reportedly moved by millions of
 instructions between functions whose code didn't change when N went from 10,007 to 9,973, so they attribute nothing at
-this size; the builds are the attribution.
+this size; the local build-count table is the retained attribution account.
 
 ## Calibration
 
-`calibration/compare.sh` compiles each of 18 small units at `-march=x86-64` by this compiler (both paths) and clang
-23.1.4, and compares their errors line for line (`calibration/results.txt`, from `5cf49b03`'s build). 16 are the same.
+The original script, preserved byte for byte as `calibration/compare-legacy.sh`, compiled each of 18 small units at
+`-march=x86-64` by this compiler (both paths) and clang 23.1.4, then compared only filtered `: error:` lines
+(`calibration/results.txt`, from `5cf49b03`'s build). Sixteen retained filtered texts are the same. That script did
+not retain the compiler exit statuses or full output and did not check their acceptance classes. In particular, the
+five apparent no-error matches (c2/c3/c6/c7/c8) do not establish successful compilation, and empty filtered text
+cannot exclude a silent failure or signal. No actual compiler failure is alleged; no missing status is reconstructed.
 `c16.c` to `c19.c` are loops, a conditional and a statement expression, whose errors' order `1a036026` had wrong for
 a for loop's increment (`calibration/results-1a036026.txt`: `c16.c` and `c19.c`), which clang emits after the body.
 Two differ, as expected:
@@ -113,6 +124,16 @@ Two differ, as expected:
 - `c4.c` (`always_inline` with `target("default")`): clang's semantic analysis refuses the attributes together, at
   `-fsyntax-only` too, which this compiler's checker doesn't; that is
   [buster#839](https://github.com/buster14a/buster/issues/839), outside the code-generation check.
+
+For future capture only, the corrected `calibration/compare.sh COMPILER NEW_RECEIPT_DIRECTORY` requires a new,
+nonexistent receipt directory and the complete 18-source set. It retains each exact command, full combined output,
+exit status, filtered errors and acceptance check, with hashes of the compilers, script, sources and reference errors.
+Expected-success commands must exit 0 without error lines; expected rejections must exit 1 with an error. Signals,
+setup failures and silent failures are invalid regardless of text equality. Both Buster paths must match each other.
+The two known differences must match the exact historical filtered diagnostic references in `calibration/expected/`,
+which are expectations copied from `results.txt`, not new receipts. Any other process/class/text mismatch makes the
+script exit nonzero. This corrected harness has not been executed here; it does not retrospectively validate the
+unchanged historical results or request another campaign.
 
 ## Mutation check
 
@@ -135,8 +156,10 @@ and each result). 16 fail it:
 
 `node-order` passes: it orders a body's calls by node rather than by end before the statements' pass
 (`scripts/mutant-node-order.sh`, with the sort's `varying` from the same keys). Within a statement the graph is in
-postorder, which is the calls' order of ends, so the two are the same order; its build gives clang's errors on
-`calibration/c16.c` and `c19.c` too.
+postorder, which is the calls' order of ends, so the two are the same order. Its extra c16/c19 comparisons retained
+matching filtered diagnostic text only: `scripts/mutant-node-order.sh` has the same status-blind filtering pattern,
+so that textual comparison does not independently establish those compilations' statuses. The retained
+`test-checker-driver` exit 0 and the static equivalence argument remain separately scoped evidence.
 
 The check found a gap in the test before this run: `test-checker-driver`'s every-error comparison joined each side's
 lines into 1,024 bytes and dropped the rest unread, so `region-statement-own`, whose errors differ from clang's in the
