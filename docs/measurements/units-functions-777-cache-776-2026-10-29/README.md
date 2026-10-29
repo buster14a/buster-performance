@@ -23,7 +23,7 @@ The executables' SHA-256 (in full in `receipts/receipts.log` and `logs/sl777.log
 `36524332…eed31121`, t777s `4c17a056…d3e79a90`, t776 `7adb1596…3f364f89`. Each was built
 with `BUSTER_DEBUG_INFO=0 ./build.sh`, as the 9700X job builds.
 
-Host and tools as in [#778's and #779's record](../units-tail-778-779-2026-10-29/README.md) (the same
+Host and tools as in [#778's and #779's record](https://github.com/buster14a/buster-performance/blob/d3ed81314e41efdf56e776e8c0ba1bee2efb0fec/docs/measurements/units-tail-778-779-2026-10-29/README.md) (the same
 `receipts/receipts.log`, the same day): AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1, GCC 16.2.1, perf 7.2.9;
 CPU 2's governor `performance`, CPUs 0, 1 and 3 to 7's `powersave`. Inputs as there, and SQLite 3.53.4's amalgamation:
 `sqlite3.c` (9,515,341 bytes, the same file as the frozen `sqlite3.c`) and `shell.c` (1,185,915 bytes, SHA-256
@@ -61,9 +61,24 @@ variables. At t777s: `test-check-units` 552 and `test-lanes`, 0 failures.
 
 ### A few large units (`logs/ev777.log`, `logs/aa777.log`, `logs/sl777.log`)
 
+**Historical two-process controls are unverified.** The two-child commands in
+`ev777.sh` (lists 3 and 8), `aa777.sh` (lists 2 and 4), and `sl777.sh` (lists 3 and 6)
+use operand-free `wait`, which does not propagate each compiler's failure. The
+reported `0 failed processes` counts outer wrappers; no retained per-child exit
+statuses or fresh-output receipts establish that every timed child succeeded.
+The linked control can reuse old `a.o` or `b.o` after a failed attempt. This does
+not establish that a compiler actually failed. The scripts and logs remain as
+run; the last column's times, peaks and user times are historical wrapper
+observations, not validated successful-compilation controls. The derived 0.9%
+compile gap and 8.6% linked speedup against those controls are unverified and
+cannot serve as performance acceptance claims. The synchronous one-command
+parent/head comparisons, tests, stage measurements and separate #776 experiment
+have their own recorded scope; this limitation does not assert a failure in them.
+No measurement or rebuilt identity is added by this documentation correction.
+
 `sqlite3.c` and `shell.c`, medians (ranges):
 
-| ms | t778m | t777 | t777s | two processes at once |
+| ms | t778m | t777 | t777s | two processes at once (unverified) |
 | --- | ---: | ---: | ---: | ---: |
 | `-c` (ev777, 15 runs) | 133.86 (132.25–135.17) | 122.25 (121.59–124.39) | | 121.09 (120.05–121.92) |
 | `-c`, A/A (aa777, 21 runs) | | 122.66, 122.13 | | 121.28, 121.14 |
@@ -126,5 +141,5 @@ entered, 8.5% of the tokens), musl's 3.79 and 3.27 (none unused), synth's 30.03 
 - t778m and t777 carry main's commits up to `7a1f7373`, which #778's own record (t778) didn't: their synth and musl
   times by one lane are 4% to 6% above t778's there (the same corpora), for main's changes, which this record doesn't
   attribute.
-- The one command's 0.9% against the two processes is inside one address space; this record doesn't break it down
-  further than the stages above.
+- The historical two-process controls lack per-child success and fresh-output proof, as detailed above. Their
+  derived comparisons do not establish the cost of using one address space or a validated speedup/slowdown.
