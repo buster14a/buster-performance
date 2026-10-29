@@ -166,8 +166,9 @@ The drive check's objects are the same bytes (`objects identical`). Medians of e
 | 3 | 592.408 | +0.12% (placements -0.35% to +0.60%) | -0.04% | +0.15% | -0.03% |
 
 Each range over placements crosses zero, and over placements and copies the ranges are wider (cycles: -1.19% to
-+1.12%, -0.82% to +1.39%, -2.05% to +1.36%). The head's user cycles are above the A/A control's by 0.18%, 0.22% and
-0.16%, more than its instructions (below) would cost at an unchanged IPC. The fix's new code doesn't run on this input,
++1.12%, -0.82% to +1.39%, -2.05% to +1.36%). Comparing each round's unrounded head and A/A medians directly, the
+head's user cycles are above the A/A control's by 0.19%, 0.21% and 0.16%, more than its instructions (below) would
+cost at an unchanged IPC. The fix's new code doesn't run on this input,
 and the placements vary only the checker unit's `.text` offset: as in the cleanup record, this comparison can't tell a
 layout effect from the change's work.
 
