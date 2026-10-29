@@ -121,6 +121,14 @@ base pages' less huge pages'.
 
 ## The first write into a region (`tools/thp_probe.c`)
 
+**Historical executable identity limit:** The helper source is retained in
+[`tools/thp_probe.c`](tools/thp_probe.c), and its build/run commands and text output
+are in [`logs/thp_probe.txt`](logs/thp_probe.txt). The executed helper binary and
+its hash were not retained in this record. The compiler source manifests and
+`binaries.sha256` identify Buster builds only; they do not identify the helper
+executable behind these historical timings. That exact executable cannot be
+verified from the archive.
+
 `thp_probe` maps 64 MB with `MADV_HUGEPAGE` and touches each 2 MB region first in one of four ways, then stores into
 another 4 KB page of each: a store, a load and then a store (`*byte = *byte` through a volatile pointer, the claim's), a
 locked `or` of 0 (a read-modify-write, which faults as a write), and a load alone (`logs/thp_probe.txt`, two runs on CPU
