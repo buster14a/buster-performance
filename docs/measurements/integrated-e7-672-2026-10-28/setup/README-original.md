@@ -1,0 +1,13 @@
+# Integrated current-main baseline: in progress
+
+Compiler source is frozen at e7f89091648f68940b595aadd648841c1ffc3ec5. No throughput result is qualified yet. See PLAN.md for the measurement scope and unchanged historical C method.
+
+## Retained setup failures and limits
+
+1. The initial native staging command incorrectly quoted remote shell arguments. Its failed env command did not stop subsequent statements. A build ran outside the shared lock on28October2026 at18:39:38–18:40:26UTC in target directory `integrated-e7-672`. Its binary76ef91da is quarantined and is not a qualified baseline. Its overlap with CI714run40742354477 is recorded in PR714comment6477648307. Root requested a clean ordinary rerun of Benchpress job123014348734 at18:56UTC; the request succeeded. This does not invalidate older independent frozen665 evidence or establish a correctness failure.
+2. A properly quoted attempt refused to overwrite that existing directory and exited1. The source archive and original files remain preserved.
+3. A new build under the lock in `integrated-e7-672-locked` succeeded. Native binary SHA25693e2e068118a4925450091c3d852884a80d2a49f65394697cffdba5d87333c0f. Its bootstrap and test oracle were the host's older Clang23.1.1. ABI cross-check, deferred80fixtures/1423checks and frozen SQLite smoke pass. Full checker497025checks has four fpclassify oracle mismatches, matching the campaign's previously recorded old-oracle behavior. The raw values/logs are retained; this build is not labeled a fully qualified baseline. No throughput campaign has run with it.
+4. A guessed path for official Clang23.1.4 in David's cache was absent; a queued validation failed before staging a new compiler. CI's separate runner account has a private home, so its cache is not accessible. No permissions were changed and no privileged access was attempted. A separate campaign cache is being staged with the repository's exact setup-benchpress.sh under the shared lock, preserving release/archive/license verification. The next build and oracle run will use that same official toolchain, in a new directory.
+5. Local e7 baseline had two invocation failures: the first build was launched from the wrong working directory; the first parallel test invocation passed command names instead of a command-list file. Corrected build and ABI/deferred checks pass without source changes. Their original logs remain retained.
+
+These are setup and qualification observations, not performance improvements. Measurements, if collected, will name the final exact source, toolchain, binary, input and affinity identities. Physical DRAM-traffic acceptance remains conditional on performance#49's unresolved event/unit validation.
