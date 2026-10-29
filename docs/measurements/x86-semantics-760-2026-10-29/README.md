@@ -73,16 +73,20 @@ every record pays for the role; the twin walks three roles and checks the opmask
 and the merges for every record. Neither runs on `-c`'s default path: the loop's consumers are the Tier 1 scheduler
 and the unwind analyzer, both opt-in (the C driver reads the frame Tier 0 publishes).
 
-`-c` (each round's `perf stat` mean, the median of the five):
+`-c`: each tree's median of the five rounds' `perf stat` means, the change the head's median against main's, and in
+parentheses the range of the five rounds' paired differences (each round's head against the same round's main):
 
 | Unit | Measurement | main | head | Change |
 | --- | --- | ---: | ---: | ---: |
-| `sqlite3.c` | instructions:u | 1,314,232,138 | 1,314,514,107 | +281,969 (+0.021%), every round |
+| `sqlite3.c` | instructions:u | 1,314,232,138 | 1,314,514,107 | +281,969, +0.021% (rounds +281,968 to +281,975) |
 | | cycles:u | 599.84 M | 603.30 M | +0.58% (rounds +0.23% to +0.70%) |
 | | task-clock | 126.76 ms | 127.19 ms | +0.34% (rounds +0.13% to +0.59%) |
-| `tiny.c` | instructions:u | 12,145,079 | 12,460,007 | +314,928 (+2.59%), every round |
+| `tiny.c` | instructions:u | 12,145,078 | 12,460,007 | +314,929, +2.59% (rounds +314,927 to +314,929) |
 | | cycles:u | 3.539 M | 3.652 M | +3.2% (rounds +2.8% to +3.8%) |
 | | task-clock | 1.06 ms | 1.07 ms | +0.01 ms |
+
+buster#838's docs give `tiny.c`'s +314,928 instructions, the median of the rounds' paired differences: the same cost,
+by the other statistic.
 
 Both trees write the same objects: `sqlite3.c`'s SHA-256 `9048dda48896c43fd071e610d050c465d05d141a23689669bf272f1b35bbdcd0`
 and `tiny.c`'s `d1f4836f77987565a1cb163e002a1f7c63bbaf050b8ebb4fa17d77f4c314f746`. The instructions are a fixed cost per
