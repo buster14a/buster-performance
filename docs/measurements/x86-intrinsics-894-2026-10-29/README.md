@@ -24,9 +24,9 @@ Base: main `3beda954562cfb15b47a8de75da4705f8c59cdfb`, which has merged the bran
 `h9c`: the branch's head `d2f495babfe09b60cdac713cda7cfb76aa9f7592`, its batch's commit and its merges of #890's heads
 and of that main.
 
-abY.sh built the two trees, ran each tree's `-c` of `sqlite3.c` and `main.c`, then three rounds of `perf stat -r 11`
-(`-r 5` for `main.c`) of user instructions, cycles and task-clock, whose order rotates; the medians of the rounds
-(`abY/perf.log`):
+abY.sh built the two trees, ran each tree's `-c` of `sqlite3.c` and `-fsyntax-only` of `main.c`, then three rounds
+of `perf stat -r 11` (`-r 5` for `main.c`) of user instructions, cycles and task-clock, whose order rotates; the
+medians of the rounds (`abY/perf.log`):
 
 | Measure | base | A/A copy | h9c |
 | --- | ---: | ---: | ---: |
