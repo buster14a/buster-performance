@@ -141,3 +141,11 @@ programs' runs against clang, on both paths (`mutants/results.txt`).
 - The survey's #741 build applies that PR's diff as fetched with `gh pr diff`,
   not a merge: its result is a preview of the two together, not of a merged
   main.
+
+## After merging main
+
+[`after-merge-2026-10-29/`](after-merge-2026-10-29/README.md) measures the branch's head after it merged main
+(`d9a474cf`, against the merge-base `39732990`) the same way: byte-identical objects, +7,802 instructions
+(+0.0006%), and cycles' and task clock's per-round ratios that straddle zero. It also keeps the mutation check of the
+test that the PR's review asked for, `cvtps2dq` under each of MXCSR's rounding modes: a mutant whose `ldmxcsr`
+stores MXCSR fails that test on both paths, and passes the test before it.
