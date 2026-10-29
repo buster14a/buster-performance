@@ -5,9 +5,11 @@ buster14a/buster#843, for [this claim on #732](https://github.com/buster14a/bust
 
 The branch gives the shared IR first-class integer vectors (`v4i32`, `v8i32`, `v16i32`) and opmasks (`m8` to `m64`),
 with `vconst`, `vcmp` and `vselect`, the verifiers' rules for them, and the consumers' refusal of any function that has
-one: #748's work, merged with main and continued there. This record holds the 9700X's comparison of its final head
-with main, on the code every compile runs whether or not it has vectors: the verifier and the derived arrays, the
-typed stream's lowering, `benchmark-ir-source`'s verification and promotion on SQLite, and `-c` of SQLite.
+one: #748's work, merged with main and continued there. This record compares its final head with main on the 9700X.
+The existing scalar-input shared-IR benchmarks cover the verifier and derived arrays, typed-stream lowering, and
+`benchmark-ir-source`'s verification and promotion on SQLite. IR tools and the Tier1 pipeline use these paths.
+The separate `-c` SQLite measurement covers default C compilation, which sends normal emitted functions directly
+through Tier0 at the measured head.
 
 ## Sources and host
 
