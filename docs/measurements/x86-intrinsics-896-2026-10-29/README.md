@@ -108,15 +108,16 @@ head's, three rounds whose order rotates; the medians against base's (`abZ/event
 
 ## abZ5: base's code where the head's is
 
-The head's `.rodata` is 31,308 bytes larger than base's: its effects rows' table, `x86_effects_rows`, by 26,136 bytes
-(to 448,184, `nm`'s sizes of the executables), and strings without symbols the rest. `.text` follows `.rodata` and
-the sections after it (the unwind tables, `.init` and `.fini`), aligned to a page, so the head's whole `.text` starts
-32 KB later, at 0x8ec000 against 0x8e4000 (`abZ/abZ5.log`), an offset that keeps each address the same modulo 32 KB,
-which abZ2's to abZ4's shifts within a page don't vary. abZ5.sh built `pad`, base's tree with an unused array of
-31,308 bytes in `main_unit_x86.c`'s `.rodata` (`abZ/pad_main_unit_x86.c`, `__attribute__((used, retain))`), whose
-`.text` starts at 0x8ec000 with base's code (the same 0x1570b2c bytes of `.text`) and whose `-c` object of
-`sqlite3.c` is base's; then `perf stat -r 11` of base's, `pad`'s and the head's executables, three rounds whose order
-rotates; the medians against base's (`abZ/padded.log`):
+The head's `.rodata` is 31,308 bytes larger than base's: 26,136 bytes of it are its effects rows' table,
+`x86_effects_rows`, of which each executable has 11 copies, one in each translation unit that compiles the effects'
+initialization (`nm`'s sizes: 38,368 bytes each in base's, 40,744 in the head's, 108 more rows of 22 bytes), and strings
+without symbols the rest. `.text` follows `.rodata` and the sections after it (the unwind tables, `.init` and `.fini`),
+aligned to a page, so the head's whole `.text` starts 32 KB later, at 0x8ec000 against 0x8e4000 (`abZ/abZ5.log`), an
+offset that keeps each address the same modulo 32 KB, which abZ2's to abZ4's shifts within a page don't vary. abZ5.sh
+built `pad`, base's tree with an unused array of 31,308 bytes in `main_unit_x86.c`'s `.rodata`
+(`abZ/pad_main_unit_x86.c`, `__attribute__((used, retain))`), whose `.text` starts at 0x8ec000 with base's code (the
+same 0x1570b2c bytes of `.text`) and whose `-c` object of `sqlite3.c` is base's; then `perf stat -r 11` of base's,
+`pad`'s and the head's executables, three rounds whose order rotates; the medians against base's (`abZ/padded.log`):
 
 | Event | `-c`: pad | `-c`: h9d | `-fsyntax-only`: pad | `-fsyntax-only`: h9d |
 | --- | ---: | ---: | ---: | ---: |
@@ -136,7 +137,8 @@ rotates; the medians against base's (`abZ/padded.log`):
   than that; and the rest of the head's mispredictions in `-c`, 30,660 more than `pad`'s (0.9% of base's), it doesn't
   attribute.
 - **The table:** `x86_effects_rows` is read only by `x86_semantics_initialize`, which builds the effects' records
-  from it, and it lies in `.rodata` ahead of `.text`, so that rows a batch adds move all of the code after it.
+  from it, and its copies lie in `.rodata` ahead of `.text`, so that each row a batch adds, 242 bytes in all, moves all
+  of the code after it.
 - **Not measured:** `main.c`'s `-fsyntax-only` over placements or with `pad`, and the branch's later heads.
 
 ## Files
