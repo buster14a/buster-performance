@@ -1,0 +1,3 @@
+static inline __attribute__((always_inline, target("avx2"))) int h(int x) { return x + 1; }
+static int s(int x) { return h(x); }
+int e(int x) { return s(x); }

@@ -1,0 +1,405 @@
+--- effd18f6/src/buster/compiler/c_check_program.c
++++ head7/src/buster/compiler/c_check_program.c
+@@ -190,6 +190,10 @@
+     // check_program_target_features); null in a unit without a target attribute, where that check finds nothing.
+     uint64_t* attribute_keys;
+     uint32_t attribute_key_count;
++    // The host's features (predefines_host_of), where check_program_targets read them: they are the CPU's, which
++    // -march=native reads, and code generation's check of target features takes them from here.
++    PredefinesHost host;
++    bool host_read;
+ };
+ 
+ #define BUSTER_CHECK_PROGRAM_TARGET_VERSIONS UINT32_MAX
+@@ -278,15 +282,27 @@
+     }
+ }
+ 
+-// Whether a declaration's `attributes` hold GNU's naked attribute (CheckProgram.object_naked).
+-static bool check_program_attribute_naked(const CheckInputAttributes* attributes)
++// The attributes of a declaration that the static objects' pass reads (check_program_static_object), as bits.
++#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED 1u
++#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET 2u
++#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE 4u
++
++// Which of them a declaration's `attributes` hold, by one pass over its records that aren't ignored: GNU's naked
++// attribute (CheckProgram.object_naked), a target or target_clones attribute (CheckProgramTargetEvents), and an
++// always_inline or flatten one (#775, CheckProgram.attribute_keys).
++static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
+ {
+-    bool naked = false;
++    uint32_t bits = 0;
+     for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+     {
+-        naked |= attributes->records[i].kind == CHECK_ATTRIBUTE_NAKED && !attributes->records[i].ignored;
++        const CheckInputAttribute* attribute = &attributes->records[i];
++        const CheckInputAttributeKind kind = attribute->kind;
++        const uint32_t bit = kind == CHECK_ATTRIBUTE_NAKED ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED :
++                             kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET :
++                             kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || kind == CHECK_ATTRIBUTE_FLATTEN ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE : 0;
++        bits |= attribute->ignored ? 0 : bit;
+     }
+-    return naked;
++    return bits;
+ }
+ 
+ // The static functions' declarations with a target or target_clones attribute (#180), which check_program_targets
+@@ -308,32 +324,11 @@
+     bool room;
+ };
+ 
+-// Whether a declaration's `attributes` hold a target or target_clones attribute (CheckProgramTargetEvents).
+-static bool check_program_attribute_target(const CheckInputAttributes* attributes)
+-{
+-    bool target = false;
+-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+-    {
+-        const CheckInputAttribute* attribute = &attributes->records[i];
+-        target |= (attribute->kind == CHECK_ATTRIBUTE_TARGET || attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES) && !attribute->ignored;
+-    }
+-    return target;
+-}
+-
+-// Whether a declaration's `attributes` hold an always_inline or flatten attribute (CheckProgramTargetEvents).
+-static bool check_program_attribute_inline(const CheckInputAttributes* attributes)
+-{
+-    bool inline_attribute = false;
+-    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
+-    {
+-        const CheckInputAttribute* attribute = &attributes->records[i];
+-        inline_attribute |= (attribute->kind == CHECK_ATTRIBUTE_ALWAYS_INLINE || attribute->kind == CHECK_ATTRIBUTE_FLATTEN) && !attribute->ignored;
+-    }
+-    return inline_attribute;
+-}
+-
+-// Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling.
+-static void check_program_event_push(CheckProgramTargetEvents* events, uint64_t** keys, uint32_t* count, uint32_t* capacity, uint32_t object, uint32_t token)
++// Appends the key of `object`'s declaration at `token` to one of the events' arrays, which grows by doubling. It and
++// check_program_attribute_keys stay out of line: few declarations reach them, and inlined, they changed how clang
++// compiled the passes around them, so that -c of sqlite3.c, which has no target attribute, ran about 400,000 more
++// instructions, 0.03% (#775).
++__attribute__((noinline)) static void check_program_event_push(CheckProgramTargetEvents* events, uint64_t** keys, uint32_t* count, uint32_t* capacity, uint32_t object, uint32_t token)
+ {
+     if (events->room && *count == *capacity)
+     {
+@@ -2077,8 +2072,8 @@
+ 
+ // A static object's declaration at `token`: its object's declaration, whether the object is needed, the first of its
+ // declarations with GNU's naked attribute (CheckProgram.object_naked, made in `output` with the unit's first one), and a
+-// function's declaration with a target or target_clones attribute (`events`). Returns whether the column had room, `room`
+-// again unless making it failed.
++// function's declaration with a target or target_clones attribute, or an always_inline or flatten one (`events`), all
++// found by one pass over its attributes. Returns whether the column had room, `room` again unless making it failed.
+ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, uint32_t token, Arena* output, bool room, CheckProgramTargetEvents* events)
+ {
+     const CheckInput* input = program->input;
+@@ -2088,15 +2083,17 @@
+     {
+         program->object_declarations[object] = token;
+         needed[object] |= input->defined[token] || input->tentative[token];
+-        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_target(input->attributes[token]))
++        const uint32_t attributes = input->attributes[token] != 0 ? check_program_attribute_bits(input->attributes[token]) : 0;
++        const uint32_t function_attributes = attributes != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION ? attributes : 0;
++        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0)
+         {
+             check_program_target_event(events, object, token);
+         }
+-        if (input->attributes[token] != 0 && input->declaration_kinds[token] == C_BINDING_FUNCTION && check_program_attribute_inline(input->attributes[token]))
++        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_INLINE) != 0)
+         {
+             check_program_event_push(events, &events->inline_keys, &events->inline_count, &events->inline_capacity, object, token);
+         }
+-        if (input->attributes[token] != 0 && check_program_attribute_naked(input->attributes[token]))
++        if ((attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED) != 0)
+         {
+             if (program->object_naked == 0 && room)
+             {
+@@ -2196,8 +2193,6 @@
+     // The strings of the targets made so far, in their order.
+     String8* texts = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
+     valid = valid && (count == 0 || texts != 0);
+-    PredefinesHost host = { 0 };
+-    bool host_read = false;
+     uint32_t last_target = UINT32_MAX;
+     // The last string read and how predefines_target_attribute takes it: a header's functions share theirs, so most
+     // attributes are the one before.
+@@ -2267,14 +2262,14 @@
+             {
+                 program->targets = program->targets == 0 ? BUSTER_ARENA_PUSH_ARRAY(output, X86Target, count) : program->targets;
+                 valid = program->targets != 0;
+-                if (valid && !host_read)
++                if (valid && !program->host_read)
+                 {
+-                    host = predefines_host_of(options->predefines);
+-                    host_read = true;
++                    program->host = predefines_host_of(options->predefines);
++                    program->host_read = true;
+                 }
+                 if (valid)
+                 {
+-                    program->targets[found] = predefines_function_target(options->predefines, &host, program->target, applied->text.pointer,
++                    program->targets[found] = predefines_function_target(options->predefines, &program->host, program->target, applied->text.pointer,
+                                                                          (uint32_t)applied->text.length, cpu);
+                     texts[found] = applied->text;
+                     program->target_count += 1;
+@@ -2305,7 +2300,7 @@
+ // so each object's are still in token order) and then the always_inline and flatten ones, sorted stably by object with
+ // the radix kernel's twins (c_bindings_sort). A unit without a target attribute keeps none: no call of it can lack a
+ // feature by clang's rule. Returns false if there was no room.
+-static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
++__attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
+ {
+     const uint64_t total = (uint64_t)events->count + events->inline_count;
+     bool valid = events->room && total <= UINT32_MAX;
+--- effd18f6/src/buster/compiler/c_check_target_feature.c
++++ head7/src/buster/compiler/c_check_target_feature.c
+@@ -18,9 +18,10 @@
+ // not `(*f)` or `(&f)` (CodeGenFunction::EmitCallee). Clang's errors are unrecoverable: it emits no top-level function
+ // after the first that has one, nor the static and inline functions it defers to the unit's end; where no top-level
+ // function has one, it emits every deferred function, past their errors. So this reports the first externally visible
+-// function's errors alone, or else every deferred function's, each function's in the order of its calls' ends (an
+-// argument's call before its own, as clang emits them; but where clang evaluates out of source order, an assignment's
+-// right side first). Clang emits the externally visible functions in source order, and the deferred ones depth first
++// function's errors alone, or else every deferred function's, each function's in clang's emission order: by statement,
++// in the lowering's order of them (a for loop's increment after its body), and in a statement by the calls' ends (an
++// argument's call before its own; but where clang evaluates out of source order, an assignment's right side first).
++// Clang emits the externally visible functions in source order, and the deferred ones depth first
+ // from where its emission first referred to them; this takes those in source order too. Where the feature an error
+ // names is the first of the rest of a function's map (an attribute's arch= CPU's, or a caller's attribute that turns
+ // several off), clang's order is its StringMap's and this one predefines_features', so the two may name another feature
+@@ -73,7 +74,19 @@
+     bool valid;
+ };
+ 
+-// The functions' feature maps: the unit's, and those of the attribute strings resolved so far.
++// The walk's filter's answers for callees of a function without a target or flatten attribute of its own, the usual
++// caller, whose answer depends on the callee alone: by object, as a body calls few functions, an intrinsic many times.
++#define BUSTER_CHECK_TARGET_FEATURE_CALLEES 64
++
++typedef struct CheckTargetFeatureCallee CheckTargetFeatureCallee;
++struct CheckTargetFeatureCallee
++{
++    // The callee's object, or 0 for none.
++    uint32_t object;
++    bool fails;
++};
++
++// The functions' feature maps: the unit's, and those of the attribute strings resolved so far; and the filter's answers.
+ typedef struct CheckTargetFeatureMaps CheckTargetFeatureMaps;
+ struct CheckTargetFeatureMaps
+ {
+@@ -81,6 +94,7 @@
+     PredefinesHost host;
+     PredefinesFeatures unit;
+     CheckTargetFeatureCached cache[BUSTER_CHECK_TARGET_FEATURE_CACHE];
++    CheckTargetFeatureCallee callees[BUSTER_CHECK_TARGET_FEATURE_CALLEES];
+ };
+ 
+ // `object`'s attributes from its declarations before token `limit` (CheckProgram.attribute_keys: each object's target
+@@ -249,8 +263,8 @@
+     return object < program->object_count ? object : 0;
+ }
+ 
+-// Checks body `b`'s calls, which its walk reached (`calls`, `count` keys of a call's node in the low half, sorted by the
+-// calls' ends): appends each error. Returns false without room.
++// Checks body `b`'s calls, which its walk reached (`calls`, `count` keys of a call's node in the low half, in clang's
++// emission order): appends each error. Returns false without room.
+ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeatureMaps* maps, uint32_t b, bool deferred,
+                                        const CheckTargetFeatureAttributes* caller, PredefinesFeatures caller_map, const uint64_t* calls,
+                                        uint32_t count, Arena* output, CheckTargetFeatureError** errors, uint32_t* error_count)
+@@ -305,7 +319,7 @@
+     {
+         const CheckInput* input = program->input;
+         const uint64_t mark = scratch->length;
+-        CheckTargetFeatureMaps maps = { .options = options, .host = predefines_host_of(options) };
++        CheckTargetFeatureMaps maps = { .options = options, .host = program->host_read ? program->host : predefines_host_of(options) };
+         maps.unit = predefines_apply(options, &maps.host, maps.host.cpu, 0, 0);
+         // The objects with a key: a callee without one has no attribute, which only a flatten caller checks.
+         const uint64_t words = ((uint64_t)program->object_count + 63) / 64;
+@@ -313,11 +327,15 @@
+         valid = attributed != 0;
+         if (valid)
+         {
++            // The keys and their counts in locals: the stores into the bitset could otherwise be the program's fields.
++            const uint64_t* keys = program->attribute_keys;
++            const uint32_t key_count = program->attribute_key_count;
++            const uint32_t object_count = program->object_count;
+             memset(attributed, 0, words * sizeof(uint64_t));
+-            for (uint32_t k = 0; k < program->attribute_key_count; k += 1)
++            for (uint32_t k = 0; k < key_count; k += 1)
+             {
+-                const uint32_t object = (uint32_t)(program->attribute_keys[k] >> 32);
+-                attributed[object / 64] |= object < program->object_count ? 1ull << (object % 64) : 0;
++                const uint32_t object = (uint32_t)(keys[k] >> 32);
++                attributed[object / 64] |= object < object_count ? 1ull << (object % 64) : 0;
+             }
+         }
+         const uint64_t items = (uint64_t)input->graph.count + program->control_count;
+@@ -337,17 +355,29 @@
+                 PredefinesFeatures caller_map = maps.unit;
+                 if (external == (deferred == 0))
+                 {
+-                    caller = check_target_feature_attributes(program, body->object, body->declaration + 1);
++                    const bool keyed_caller = body->object < program->object_count && ((attributed[body->object / 64] >> (body->object % 64)) & 1) != 0;
++                    caller = keyed_caller ? check_target_feature_attributes(program, body->object, body->declaration + 1) : (CheckTargetFeatureAttributes){ 0 };
+                     caller_map = check_target_feature_map(&maps, &caller);
+                     // A callee without an attribute of its own fails a flatten caller whose attribute lacks a unit's feature.
+                     candidate = caller.flatten && caller.targeted && !caller.versions && check_target_feature_lacked(maps.unit, caller_map, 0) >= 0;
++                    const bool plain = !caller.targeted && !caller.flatten;
+                     for (uint32_t r = 0; !candidate && r < body->reference_count; r += 1)
+                     {
+                         const uint32_t object = program->references[body->reference_first + r];
+                         const bool keyed = object < program->object_count && ((attributed[object / 64] >> (object % 64)) & 1) != 0;
+-                        const CheckTargetFeatureAttributes callee = keyed ? check_target_feature_attributes(program, object, UINT32_MAX) :
+-                                                                            (CheckTargetFeatureAttributes){ 0 };
+-                        candidate = check_target_feature_fails(&maps, &caller, caller_map, &callee);
++                        CheckTargetFeatureCallee* answer = maps.callees + object % BUSTER_CHECK_TARGET_FEATURE_CALLEES;
++                        if (keyed && plain && answer->object == object)
++                        {
++                            candidate = answer->fails;
++                        }
++                        else
++                        {
++                            const CheckTargetFeatureAttributes callee = keyed ? check_target_feature_attributes(program, object, UINT32_MAX) :
++                                                                                (CheckTargetFeatureAttributes){ 0 };
++                            candidate = check_target_feature_fails(&maps, &caller, caller_map, &callee);
++                            answer->object = keyed && plain ? object : answer->object;
++                            answer->fails = keyed && plain ? candidate : answer->fails;
++                        }
+                     }
+                 }
+                 if (candidate && walk.seen == 0)
+@@ -362,46 +392,70 @@
+                 }
+                 if (valid && candidate)
+                 {
+-                    // The body's calls, as the walk reaches them, into a run of scratch.
++                    // The body's calls, as the walk reaches them, into a run of scratch, each with its statement: the control,
++                    // one more than its index, whose expression holds it, which a statement expression's own controls take
++                    // from the expression that reaches them (they follow the body's, but clang emits them where they are).
+                     const uint64_t calls_mark = scratch->length;
+-                    const uint32_t* calls = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 0);
++                    const uint64_t* calls = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, 0);
+                     walk.body = body;
+                     walk.call_count = 0;
+                     walk.call_room = calls != 0;
++                    walk.tag = 0;
+                     check_x86_diagnostic_push(&walk, 0, true);
+                     while (walk.depth != 0 && program->status == CHECK_PROGRAM_OK)
+                     {
+-                        const uint64_t item = walk.stack[--walk.depth];
++                        const uint64_t entry = walk.stack[--walk.depth];
++                        const uint64_t item = entry & UINT32_MAX;
++                        const uint32_t control = item >= input->graph.count ? (uint32_t)(item - input->graph.count) - body->first : UINT32_MAX;
++                        walk.tag = control < body->entry_count ? control + 1 : (uint32_t)(entry >> 32);
+                         if (item < input->graph.count)
+                         {
+                             check_x86_diagnostic_expression(&walk, (uint32_t)item);
+                         }
+                         else
+                         {
+-                            check_x86_diagnostic_control(&walk, (uint32_t)(item - input->graph.count) - body->first);
++                            check_x86_diagnostic_control(&walk, control);
+                         }
+                     }
+                     walk.depth = 0;
++                    walk.tag = 0;
+                     valid = walk.call_room && program->status == CHECK_PROGRAM_OK;
+-                    // The calls by their ends (a call's node is its closing parenthesis), so that arguments' calls come before
+-                    // their call's, as clang emits them: keys of the token in the high half and the node in the low.
+-                    uint64_t* keys = valid && walk.call_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, walk.call_count) : 0;
+-                    uint64_t* temporary = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, walk.call_count) : 0;
+-                    valid = valid && (walk.call_count == 0 || temporary != 0);
+-                    const uint64_t* sorted = 0;
+-                    if (valid && walk.call_count != 0)
++                    // The calls in clang's emission order: by their statements, whose controls are in the lowering's order,
++                    // as clang emits them (a for loop's increment after its body), and in one statement by their ends (a
++                    // call's node is its closing parenthesis), so that arguments' calls come before their call's. Two stable
++                    // passes of the radix kernel, by end then by statement, of keys of the sort's key in the high half and
++                    // the call's place in `calls` in the low; then the calls' nodes in the low half, in that order.
++                    const uint32_t call_count = walk.call_count;
++                    uint64_t* keys = valid && call_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, call_count) : 0;
++                    uint64_t* temporary = keys != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, call_count) : 0;
++                    valid = valid && (call_count == 0 || temporary != 0);
++                    uint64_t* sorted = 0;
++                    if (valid && call_count != 0)
+                     {
+                         uint32_t varying = 0;
+-                        for (uint32_t c = 0; c < walk.call_count; c += 1)
++                        for (uint32_t c = 0; c < call_count; c += 1)
++                        {
++                            const uint32_t end = input->graph.tokens[(uint32_t)calls[c]];
++                            keys[c] = ((uint64_t)end << 32) | c;
++                            varying |= end ^ input->graph.tokens[(uint32_t)calls[0]];
++                        }
++                        uint64_t* by_end = c_bindings_sort(keys, temporary, call_count, !scalar, varying);
++                        uint64_t* other = by_end == keys ? temporary : keys;
++                        varying = 0;
++                        for (uint32_t j = 0; j < call_count; j += 1)
++                        {
++                            const uint32_t statement = (uint32_t)(calls[(uint32_t)by_end[j]] >> 32);
++                            other[j] = ((uint64_t)statement << 32) | (uint32_t)by_end[j];
++                            varying |= statement ^ (uint32_t)(calls[(uint32_t)by_end[0]] >> 32);
++                        }
++                        sorted = c_bindings_sort(other, by_end, call_count, !scalar, varying);
++                        for (uint32_t j = 0; j < call_count; j += 1)
+                         {
+-                            const uint32_t end = input->graph.tokens[calls[c]];
+-                            keys[c] = ((uint64_t)end << 32) | calls[c];
+-                            varying |= end ^ input->graph.tokens[calls[0]];
++                            sorted[j] = (uint32_t)calls[(uint32_t)sorted[j]];
+                         }
+-                        sorted = c_bindings_sort(keys, temporary, walk.call_count, !scalar, varying);
+                     }
+                     valid = valid &&
+-                            check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, walk.call_count, output, errors, count);
++                            check_target_feature_calls(program, &maps, b, deferred != 0, &caller, caller_map, sorted, call_count, output, errors, count);
+                     arena_pop_to(scratch, calls_mark);
+                 }
+             }
+--- effd18f6/src/buster/compiler/c_check_x86_diagnostic.c
++++ head7/src/buster/compiler/c_check_x86_diagnostic.c
+@@ -6,8 +6,10 @@
+ // reparsing or dependence on target features. Unknown conditions retain both edges. Scratch has exactly one byte
+ // and one u64 slot per control/node; no padding is read. Failure publishes no partially resolved events.
+ // Code generation's check of target features walks the same way (#775, c_check_target_feature.c): with `calls`, the
+-// walk also appends each call it reaches to that arena, a uint32_t node each, `call_count` of them, in a run nothing else
+-// pushes into while it walks; `call_room` turns false if one had no room.
++// walk also appends each call it reaches to that arena, a uint64_t each of its node in the low half and the walk's `tag`
++// in the high, `call_count` of them, in a run nothing else pushes into while it walks; `call_room` turns false if one had
++// no room. Each item pushed carries `tag` in its high half too, for the check's loop to set it from (the statement whose
++// control reached an expression); this walk's is 0, so that its items are the bare indices.
+ 
+ typedef struct CheckX86DiagnosticWalk CheckX86DiagnosticWalk;
+ struct CheckX86DiagnosticWalk
+@@ -20,6 +22,7 @@
+     Arena* calls;
+     uint32_t call_count;
+     bool call_room;
++    uint32_t tag;
+ };
+ 
+ static void check_x86_diagnostic_push(CheckX86DiagnosticWalk* walk, uint32_t index, bool control)
+@@ -30,7 +33,7 @@
+     if (valid && walk->seen[item] == 0)
+     {
+         walk->seen[item] = 1;
+-        walk->stack[walk->depth++] = item;
++        walk->stack[walk->depth++] = item | (uint64_t)walk->tag << 32;
+     }
+ }
+ 
+@@ -178,11 +181,11 @@
+     {
+         if (op == CHECK_OP_CALL && walk->calls != NULL)
+         {
+-            uint32_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint32_t, 1) : NULL;
++            uint64_t* call = walk->call_room ? BUSTER_ARENA_PUSH_ARRAY(walk->calls, uint64_t, 1) : NULL;
+             walk->call_room = call != NULL;
+             if (call != NULL)
+             {
+-                *call = node;
++                *call = (uint64_t)walk->tag << 32 | node;
+                 walk->call_count += 1;
+             }
+         }
