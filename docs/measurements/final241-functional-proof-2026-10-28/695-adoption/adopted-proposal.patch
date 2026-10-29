@@ -1,0 +1,284 @@
+diff --git a/docs/function-lanes.md b/docs/function-lanes.md
+index be591c4f..fdce4d16 100644
+--- a/docs/function-lanes.md
++++ b/docs/function-lanes.md
+@@ -58,6 +58,16 @@ and masks are preserved. The implicit slot is never returned. Failed guardian
+ setup, descriptor or process limits leave the
+ compiler on one lane; failure to return owned slots refuses output.
+ 
++A full Linux pipe can lack append space even after a partial read frees logical
++bytes. The guardian reserves recovery storage before borrowing. If a return
++hits that page-buffer limit, it drains available opaque bytes into this storage
++and restores every pending byte, retaining any unwritten suffix. This compacts
++the pipe without requiring another recipe to read it; an I/O error never
++discards held slots. GNU make fills the initial pipe before starting jobs, so
++its capacity bounds the total available and borrowed explicit tokens. The
++recovery storage is private to the clean guardian and is released before its
++acknowledgement completes.
++
+ The lease and team size stay fixed for the emission phase. Tokens which another
+ file returns after dispatch cannot enlarge an already running team. In an uneven
+ build, two large files can receive seven lanes and one lane; when the first team
+diff --git a/src/buster/compiler/worker_budget.c b/src/buster/compiler/worker_budget.c
+index e9ce32f9..ce55cf04 100644
+--- a/src/buster/compiler/worker_budget.c
++++ b/src/buster/compiler/worker_budget.c
+@@ -14,6 +14,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <poll.h>
+ #include <signal.h>
+ #include <spawn.h>
+ #include <stdbool.h>
+@@ -21,6 +22,7 @@
+ #include <stdio.h>
+ #include <string.h>
+ #include <sys/ioctl.h>
++#include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
+ #include <sys/wait.h>
+@@ -29,6 +31,8 @@
+ #define BUSTER_WORKER_BUDGET_MAX 64u
+ // Linux's O_DIRECT flag on a pipe selects packet mode (asm-generic/fcntl.h). The protocol requires byte-stream IO.
+ #define BUSTER_WORKER_BUDGET_PACKET_FLAG 040000
++// Linux F_GETPIPE_SZ, also available when the caller does not enable GNU libc extensions.
++#define BUSTER_WORKER_BUDGET_GETPIPE_SIZE 1032
+ 
+ extern char** environ;
+ 
+@@ -268,13 +272,68 @@ static bool worker_budget_child_fds(int read_fd, int write_fd, int control, int
+     return result;
+ }
+ 
++// A partial read from a full Linux pipe may leave its first page occupied and its last page without append space.
++// Merely waiting for POLLOUT would deadlock a build with no other recipe to drain it. Compact the available bytes
++// through storage reserved before borrowing: GNU make initializes at most the pipe capacity before starting jobs.
++// Additional bytes taken here do no work and are returned with the original lease; every partial write keeps its
++// unwritten suffix. A temporary IO failure must retain ownership, never turn an error acknowledgement into lost slots.
++static void worker_budget_return(int read_fd, int write_fd, uint8_t* tokens, uint32_t count, uint32_t capacity)
++{
++    while (count != 0)
++    {
++        const ssize_t returned = write(write_fd, tokens, count);
++        if (returned > 0)
++        {
++            count -= (uint32_t)returned;
++            memmove(tokens, tokens + returned, count);
++        }
++        else if (returned < 0 && errno == EINTR)
++        {
++            continue;
++        }
++        else if (returned < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
++        {
++            bool reading = true;
++            bool progress = false;
++            while (reading && count < capacity)
++            {
++                const ssize_t taken = read(read_fd, tokens + count, capacity - count);
++                count += taken > 0 ? (uint32_t)taken : 0;
++                progress |= taken > 0;
++                reading = taken > 0 || (taken < 0 && errno == EINTR);
++            }
++            if (!progress)
++            {
++                struct pollfd descriptors[] = {
++                    { .fd = read_fd, .events = count < capacity ? POLLIN : 0 },
++                    { .fd = write_fd, .events = POLLOUT },
++                };
++                poll(descriptors, 2, 100);
++            }
++        }
++        else
++        {
++            // The private validated endpoints remain open. Retain their bytes through a transient resource failure.
++            poll(NULL, 0, 100);
++        }
++    }
++}
++
+ static void worker_budget_guardian(int read_fd, int write_fd, int control, int reply, uint32_t maximum)
+ {
+-    uint8_t tokens[BUSTER_WORKER_BUDGET_MAX - 1];
+     uint32_t count = 0;
+     // A runner may kill the compiler's whole process group, even with SIGKILL. Leave it before taking a token;
+     // before this succeeds a dead child owns nothing, and afterward parent exit closes the control pipe.
+-    const bool prepared = syscall(SYS_setsid) >= 0 && worker_budget_child_fds(read_fd, write_fd, control, reply);
++    const bool isolated = syscall(SYS_setsid) >= 0 && worker_budget_child_fds(read_fd, write_fd, control, reply);
++    const int pipe_capacity = isolated ? fcntl(read_fd, BUSTER_WORKER_BUDGET_GETPIPE_SIZE) : -1;
++    const uint32_t token_capacity = pipe_capacity > 0 ? (uint32_t)pipe_capacity : 0;
++    uint8_t* tokens = token_capacity != 0 ? mmap(NULL, token_capacity, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
++    if (tokens != MAP_FAILED)
++    {
++        // Fault the recovery pages while no byte is owned, rather than first demanding physical memory on return.
++        memset(tokens, 0, token_capacity);
++    }
++    const bool prepared = tokens != MAP_FAILED;
+     bool valid = true;
+     bool reading = prepared;
+     while (reading && count < maximum)
+@@ -301,16 +360,15 @@ static void worker_budget_guardian(int read_fd, int write_fd, int control, int r
+         while (finished < 0 && errno == EINTR);
+         valid = valid && finished == 0;
+     }
+-    ssize_t returned = 0;
+     if (count != 0)
+     {
+-        do
+-        {
+-            returned = write(write_fd, tokens, count);
+-        }
+-        while (returned < 0 && errno == EINTR);
++        worker_budget_return(read_fd, write_fd, tokens, count, token_capacity);
++    }
++    if (tokens != MAP_FAILED)
++    {
++        munmap(tokens, token_capacity);
+     }
+-    const uint8_t acknowledged = valid && returned == count;
++    const uint8_t acknowledged = valid;
+     do
+     {
+         sent = write(reply, &acknowledged, 1);
+diff --git a/src/buster/compiler/worker_budget_test.c b/src/buster/compiler/worker_budget_test.c
+index fe0cd38b..807f2190 100644
+--- a/src/buster/compiler/worker_budget_test.c
++++ b/src/buster/compiler/worker_budget_test.c
+@@ -26,6 +26,8 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
++#define BUSTER_WORKER_BUDGET_TEST_SETPIPE_SIZE 1031 // Linux F_SETPIPE_SZ, including callers without _GNU_SOURCE.
++
+ typedef struct WorkerBudgetTest WorkerBudgetTest;
+ struct WorkerBudgetTest
+ {
+@@ -90,7 +92,7 @@ static int worker_budget_test_available(int fd)
+ 
+ static bool worker_budget_test_tokens(int fd, const uint8_t* expected, uint32_t count)
+ {
+-    uint8_t received[64];
++    uint8_t received[4096];
+     uint32_t wanted[256] = { 0 };
+     uint32_t actual[256] = { 0 };
+     bool valid = count <= sizeof(received) && worker_budget_test_read(fd, received, count);
+@@ -399,12 +401,66 @@ static void worker_budget_test_limits(WorkerBudgetTest* test)
+     }
+ }
+ 
+-static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termination)
++// Linux can have every page buffer occupied despite a partial read freeing logical bytes. Returning a lease then
++// needs compaction, even when there is no other client to make further progress. Keep a full multiset oracle.
++static void worker_budget_test_full_pipe(WorkerBudgetTest* test)
+ {
+-    const uint8_t tokens[] = { 's', 0, 'g' };
++    uint8_t tokens[4096];
++    for (uint32_t i = 0; i < sizeof(tokens); i += 1)
++    {
++        tokens[i] = (uint8_t)(i * 71);
++    }
++    int fds[2] = { -1, -1 };
++    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 &&
++                       fcntl(fds[0], BUSTER_WORKER_BUDGET_TEST_SETPIPE_SIZE, sizeof(tokens)) == sizeof(tokens);
++    worker_budget_test_expect(test, ready, "a one-page full-pipe recovery fixture is available");
++    if (ready)
++    {
++        char flags[128];
++        snprintf(flags, sizeof(flags), " --jobserver-auth=%d,%d", fds[0], fds[1]);
++        WorkerBudget budget;
++        worker_budget_initialize(&budget, flags, 64);
++        for (uint32_t mode = 0; mode < 3; mode += 1)
++        {
++            WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
++            const uint32_t requested = mode == 0 ? 2 : 64;
++            const bool supplied = write(fds[1], tokens, sizeof(tokens)) == sizeof(tokens);
++            const uint32_t granted = supplied ? worker_budget_acquire(&budget, requested, &lease) : 0;
++            worker_budget_test_expect(test, granted == requested &&
++                                           worker_budget_test_available(fds[0]) == (int)(sizeof(tokens) - requested + 1),
++                                      "a full pipe grants only the requested extra credits");
++            const uint8_t unexpected = 1;
++            const bool corrupted = mode != 2 || (granted > 1 && write(lease.control, &unexpected, 1) == 1);
++            const bool released = worker_budget_release(&lease);
++            worker_budget_test_expect(test, corrupted && released == (mode != 2) && budget.return_failed == (mode == 2),
++                                      "full-pipe completion preserves the positive or negative guardian acknowledgement");
++            worker_budget_test_expect(test, worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)),
++                                      "compaction returns every full-pipe opaque byte exactly once");
++        }
++        worker_budget_close(&budget);
++    }
++    for (uint32_t end = 0; end < 2; end += 1)
++    {
++        if (fds[end] >= 0)
++        {
++            close(fds[end]);
++        }
++    }
++}
++
++static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termination, bool full)
++{
++    uint8_t tokens[4096] = { 's', 0, 'g' };
++    const uint32_t count = full ? sizeof(tokens) : 3;
++    for (uint32_t i = 3; i < count; i += 1)
++    {
++        tokens[i] = (uint8_t)(i * 71);
++    }
+     int fds[2] = { -1, -1 };
+     int ready_pipe[2] = { -1, -1 };
+-    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 && worker_budget_test_pipe_open(ready_pipe, O_CLOEXEC) == 0 && write(fds[1], tokens, sizeof(tokens)) == sizeof(tokens);
++    const bool ready = worker_budget_test_pipe_open(fds, O_CLOEXEC) == 0 &&
++                       (!full || fcntl(fds[0], BUSTER_WORKER_BUDGET_TEST_SETPIPE_SIZE, sizeof(tokens)) == sizeof(tokens)) &&
++                       worker_budget_test_pipe_open(ready_pipe, O_CLOEXEC) == 0 && write(fds[1], tokens, count) == count;
+     worker_budget_test_expect(test, ready, "termination test pipes are available");
+     const pid_t child = ready ? fork() : -1;
+     if (child == 0)
+@@ -419,12 +475,12 @@ static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termi
+         char flags[128];
+         snprintf(flags, sizeof(flags), " --jobserver-auth=%d,%d", fds[0], fds[1]);
+         WorkerBudget budget;
+-        worker_budget_initialize(&budget, flags, 8);
++        worker_budget_initialize(&budget, flags, 64);
+         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+-        const uint8_t granted = isolated ? (uint8_t)worker_budget_acquire(&budget, 8, &lease) : 0;
++        const uint8_t granted = isolated ? (uint8_t)worker_budget_acquire(&budget, 64, &lease) : 0;
+         const bool reported = write(ready_pipe[1], &granted, 1) == 1;
+         close(ready_pipe[1]);
+-        while (reported && granted == 4)
++        while (reported && granted == (full ? 64 : 4))
+         {
+             pause();
+         }
+@@ -437,7 +493,7 @@ static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termi
+         close(ready_pipe[1]);
+     }
+     uint8_t granted = 0;
+-    const bool acquired = child > 0 && worker_budget_test_read(ready_pipe[0], &granted, 1) && granted == 4;
++    const bool acquired = child > 0 && worker_budget_test_read(ready_pipe[0], &granted, 1) && granted == (full ? 64 : 4);
+     worker_budget_test_expect(test, acquired, "isolated compiler acquired credits before termination");
+     if (child > 0)
+     {
+@@ -447,7 +503,7 @@ static void worker_budget_test_termination_one(WorkerBudgetTest* test, int termi
+         const bool waited = worker_budget_test_wait(child, acquired ? termination : SIGKILL);
+         worker_budget_test_expect(test, signalled == 0 && waited, "termination keeps the compiler's ordinary signal behavior");
+     }
+-    worker_budget_test_expect(test, ready && worker_budget_test_tokens(fds[0], tokens, sizeof(tokens)),
++    worker_budget_test_expect(test, ready && worker_budget_test_tokens(fds[0], tokens, count),
+                               "a process-group termination returns every extra credit through guardian EOF");
+     if (ready_pipe[0] >= 0)
+     {
+@@ -684,8 +740,11 @@ static bool worker_budget_test(void)
+     worker_budget_test_flags(&test);
+     worker_budget_test_fifo(&test);
+     worker_budget_test_limits(&test);
+-    worker_budget_test_termination_one(&test, SIGTERM);
+-    worker_budget_test_termination_one(&test, SIGKILL);
++    worker_budget_test_full_pipe(&test);
++    worker_budget_test_termination_one(&test, SIGTERM, false);
++    worker_budget_test_termination_one(&test, SIGKILL, false);
++    worker_budget_test_termination_one(&test, SIGTERM, true);
++    worker_budget_test_termination_one(&test, SIGKILL, true);
+     worker_budget_test_child_modes(&test);
+     worker_budget_test_reused_descriptors(&test);
+     worker_budget_test_dry_run(&test);
