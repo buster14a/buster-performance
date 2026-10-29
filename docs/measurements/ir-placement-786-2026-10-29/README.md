@@ -77,18 +77,31 @@ instructions per run as old (+0.4% for `--only scalar`), in 9.1% to 10.6% more c
 slots that the front end leaves empty grow 67% to 74% per instruction. Back-end stalls fall 2% to 4%. Mispredictions,
 op-cache misses, I-cache misses and pipeline restarts stay under 0.05 per 1,000 instructions.
 
-`local/variants/` (`scripts/variants-*`): five versions of `ir.c` built on the laptop, every other object the same
-(`variants-build.sh`), each counted at fixed work (`benchmark-ir --only PATH --passes 1`, the same repetitions in
-every variant: `variants-report.py`):
+`local/variants/` retains historical exploratory trials labeled `v0` through `v4` on the laptop. The original
+notes describe five versions of `ir.c`, linked with the same other objects by `variants-build.sh`. The source
+construction or patches for `v1`, `v2` and `v3`, and the local executable hashes and build/toolchain receipts for
+all five variants, are not retained in this record. That script assumes already prepared source directories; it does not
+reconstruct them. The labels below therefore do not establish identified-source causal comparisons or prove
+that the local `v4` executable matches the separately identified 9700X head.
 
-| Variant | Instructions | Cycles |
+`scripts/variants-report.py` recomputes the counter table from the retained receipts, using a matched-work subset
+of `benchmark-ir --only PATH --passes 1`. It excludes `v0-scalar-3` and `v1-scalar-1`: those logged 4,096 small-function
+repetitions instead of the selected 8,192 (all large-function scalar samples have one repetition). This keeps
+**58 of 60 counter samples**. Scalar counts for `v0/v1/v2/v3/v4` are **2/2/3/3/3**; each other path keeps three
+samples per variant. The selected repetition tuples for vector, scalar, uses and CFG are `(8192, 1)`, `(8192, 1)`,
+`(4096, 1)` and `(32768, 4)` respectively. No raw receipt is changed. Run the report with Python from any directory;
+its default input is this record's `local/variants/` (an optional argument selects another receipt directory).
+
+| Historical trial label and reported description | Instructions | Cycles |
 | --- | ---: | ---: |
-| `v3`, the pins alone | −0.5% to −2.9% | −0.8% to −2.9% |
-| `v4`, the pins and the table (the fix) | −1.7% to +1.5% | −2.4% to −4.7% |
+| `v3`, the pins alone | −0.5% to −2.9% | −0.8% to −2.8% |
+| `v4`, the pins and the table | −1.7% to +1.5% | −2.4% to −4.7% |
 | `v2`, those and the dominance loop reading a local copy of the function | +1.9% to +6.2% | −2.3% to −4.6% |
 | `v1`, a rewrite of the dominance loop | +4.9% to +14.4% | +0.2% to +30.4% |
 
-Each change is against `v0`, main `da842410`, over the four paths (vector, scalar, uses, CFG).
+Each difference is against the trial labeled `v0` (reported as main `da842410`), over the four paths (vector,
+scalar, uses, CFG). These local observations are not qualifying evidence for the source changes. The primary
+9700X campaign below has separate complete source manifests, executable identities and build/run receipts.
 
 ## Old, base and head over placements
 
@@ -125,10 +138,14 @@ against at most 1.839, and 1.737 and 1.726 against at most 1.402).
 
 - Head is faster than old on the verifier (2.7% to 8.4%), on the use lists (5.8% to 5.9%), and on six of the
   optimizer's ten rows.
-- The CFG builder (+1.6% and +4.1%) and the optimizer's scalar phi-diamond (+1.9%), loop (+1.9% scalar, +1.0% vector)
-  and jump-chain (+3.3%) stay slower than old, about as base is, at every placement. That is work, not placement: #774's
-  new checks run once per function (the shape check's labels, ABI records and a variadic frame's anchors) or once per
-  block (`br_indirect`'s arms in the successors), which small functions don't amortize.
+- The CFG builder (+1.6% and +4.1%) and the optimizer's scalar phi-diamond (+1.9%), loop (+1.9%) and jump-chain
+  (+3.3%) stay slower than old, about as base is, at every placement's two-round median. Source inspection identifies
+  #774's added per-function checks (the shape check's labels, ABI records and a variadic frame's anchors) and
+  per-block checks (`br_indirect`'s arms in the successors), which small functions don't amortize; this work
+  explanation is separate from the placement observations.
+- The vector loop's pooled median is +1.0% over old, but head is faster at shifts 0 and 2,048: respectively
+  2,236.25 versus 2,242.35 and 2,241.65 versus 2,265.25 ns/function in the two-round medians. Its regression is
+  not present at every placement.
 - Pinning to lines doesn't make the verifier alike over these placements: head's spreads (8.5% to 11.1%) are as wide
   as old's and base's. Moving the code by whole lines changes which op-cache sets its lines take, and the op cache
   misses 10% to 15% of the time here. Pinning fixes only where the loops fall within their lines, which no longer
@@ -137,4 +154,6 @@ against at most 1.839, and 1.737 and 1.726 against at most 1.402).
 ## Limitations
 
 Two rounds per placement, six placements, all moving the code by whole lines; one host. The Zen 4 study is on another
-microarchitecture, at fixed work, and isn't the target's measurement. The host receipts were captured after the runs.
+microarchitecture and isn't the target's measurement. Its local variant comparison uses the matched-work subset
+above and has incomplete source/binary/build identities, so it cannot reproduce or establish attribution to the
+reported edits. The host receipts were captured after the runs.
