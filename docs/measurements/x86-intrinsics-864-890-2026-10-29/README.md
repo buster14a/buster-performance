@@ -49,7 +49,7 @@ of the rounds (`abX/perf.log`):
 - **Instructions:** one tree's three rounds span at most 50 instructions in `sqlite3.c`'s runs and 19,188 in
   `main.c`'s (the A/A copy's), and the A/A copy is within 2 and 1,491 of its base. Against base, `h864` runs 6,974,
   7,142 and 276,431 more; `h890` 3,074 fewer, 14,547 more and 22,301 fewer, which against `h864` is 10,048 fewer,
-  7,405 more and 298,732 fewer. Each is at most 0.0014% of its command. The lowering reads the rows only for an x86
+  7,405 more and 298,732 fewer. Each is at most 0.0016% of its command. The lowering reads the rows only for an x86
   builtin's call, which `sqlite3.c` doesn't have, and `-fsyntax-only` lowers none of `main.c`'s. `-c`'s emission
   initializes `x86_semantics.c`'s effects table (`c_check_program_emit.c`), to which `h890` adds the rows of 102
   forms, and `-fsyntax-only` emits nothing. This record attributes none of these differences further.
