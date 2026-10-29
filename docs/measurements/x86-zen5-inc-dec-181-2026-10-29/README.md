@@ -48,21 +48,25 @@ each locked log starts at its command's first line, and `logs/all.out` keeps onl
 
 ## Results
 
-Medians of the three processes (each a median of 11 passes); every case and process agrees with the others, each
-experiment to within 0.06% (cycles per instruction, or per pair in the mixes and before `jo`):
+Each case's median of the three processes' medians (each over 11 passes), in cycles per instruction, or per pair in
+the mixes and before `jo`; every case and process agrees with the others, each experiment to within 0.06%:
 
 | Case | Independent | Six chains | Chain (written operand) | Chain (source) | Mix with ADD | Mix with IMUL | Before `jo` |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| `inc` r32, `dec` r32 | 0.1884 | 0.2144 | 1.0000 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `add` r32, imm8, `sub` r32, imm8 | 0.1884 | 0.2144 | 1.0000 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `inc` r64, `dec` r64 | 0.1884 | 0.2144 | 1.0000 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
-| `add` r64, imm8, `sub` r64, imm8 | 0.1884 | 0.2144 | 1.0000 | 1.0000 | 0.3756 | 0.5003 | 0.3348 |
+| `inc` r32 | 0.188367 | 0.214426 | 1.000020 | 1.000020 | 0.375645 | 0.500267 | 0.334774 |
+| `dec` r32 | 0.188370 | 0.214426 | 1.000021 | 1.000020 | 0.375602 | 0.500264 | 0.334777 |
+| `add` r32, imm8 | 0.188329 | 0.214429 | 1.000020 | 1.000021 | 0.375627 | 0.500266 | 0.334778 |
+| `sub` r32, imm8 | 0.188360 | 0.214410 | 1.000021 | 1.000021 | 0.375631 | 0.500267 | 0.334779 |
+| `inc` r64 | 0.188367 | 0.214412 | 1.000020 | 1.000020 | 0.375607 | 0.500265 | 0.334775 |
+| `dec` r64 | 0.188380 | 0.214413 | 1.000020 | 1.000020 | 0.375616 | 0.500266 | 0.334774 |
+| `add` r64, imm8 | 0.188363 | 0.214414 | 1.000020 | 1.000020 | 0.375658 | 0.500265 | 0.334779 |
+| `sub` r64, imm8 | 0.188378 | 0.214430 | 1.000020 | 1.000020 | 0.375586 | 0.500268 | 0.334778 |
 
 Over the 24 runs of each experiment (eight cases, three processes): independent 0.188312 to 0.188394 cycles, six
 chains 0.214347 to 0.214475, both chains 1.000020 to 1.000023, the ADD mix 0.375570 to 0.375672, the IMUL mix
 0.500257 to 0.500278 and before `jo` 0.334771 to 0.334807 cycles per pair. Each instruction retired as one macro-op
 (0.999999 to 1.000000 with the empty loop subtracted), each mix pair as two, and each pair of an instruction and its
-`jo` as one (1.000024 to 1.000025): all four fuse with the branch. The two chains are one loop for these
+`jo` as one (1.000000 to 1.000025 over the 24 runs): all four fuse with the branch. The two chains are one loop for these
 one-register forms (the same code hash).
 
 So `inc` and `dec` cost what `add` and `sub` with an imm8 cost on Zen 5, before a conditional branch too, and match the
@@ -70,6 +74,12 @@ model's observations (GPR latency 1, throughput 48/256 = 0.1875 of a cycle, one 
 them, as it did: the two trees' `sqlite3.c` objects are the same bytes, SHA-256
 `9048dda48896c43fd071e610d050c465d05d141a23689669bf272f1b35bbdcd0`, so the head changes neither Tier 0's code size
 nor its code's speed.
+
+The branch experiment's `jo` is never taken for these eight cases: their chains start at 3 and move by at most 3 per
+instruction, 20 times an iteration, which stays far inside 32 bits at the harness's most iterations. #841 since
+restricts the experiment to the 35 of the model's 57 cases for which that holds (`x86_zen5_branch_case`), after its
+review found that multiplies overflow, shifts by 3 leave OF undefined and forms that write no flags leave the `jo`
+reading earlier flags; these eight are among them, so their rows stand.
 
 ## Limits
 
