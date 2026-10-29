@@ -1,0 +1,938 @@
+diff --git a/src/buster/compiler/c_check_corpus.c b/src/buster/compiler/c_check_corpus.c
+index c625d84..e3cdbc8 100644
+--- a/src/buster/compiler/c_check_corpus.c
++++ b/src/buster/compiler/c_check_corpus.c
+@@ -632,7 +632,8 @@ static void check_corpus_repair(CheckCorpusPath* path, const Parser* original, P
+ // check_corpus_deferred_reread, its state reads the unit first on that many lanes, which leaves in the state's memory
+ // what it wrote, or with check_corpus_deferred_poison every byte it pushed poisoned (check_deferred_poison), and the
+ // path's reading, on fresh arenas of its own, takes the state's memory over from it: check_corpus_deferred_kept says
+-// whether it kept every arena the first reading had.
++// whether it kept every arena the first reading had. With check_corpus_deferred_stamp, every lane's last body's stamp is
++// set to it between the readings (check_deferred_stamp).
+ static uint32_t check_corpus_deferred_lanes;
+ static CheckInputBindingMode check_corpus_deferred_bindings;
+ static bool check_corpus_deferred_every_lane = true;
+@@ -645,6 +646,7 @@ static bool check_corpus_deferred_timing;
+ static const uint32_t* check_corpus_deferred_cpus;
+ static uint32_t check_corpus_deferred_reread;
+ static bool check_corpus_deferred_poison;
++static uint32_t check_corpus_deferred_stamp;
+ static bool check_corpus_deferred_kept;
+ static CheckDeferredMemory check_corpus_deferred_before;
+ 
+@@ -742,6 +744,10 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
+                     {
+                         check_deferred_poison(path->deferred, 0xa5);
+                     }
++                    if (check_corpus_deferred_stamp != 0)
++                    {
++                        check_deferred_stamp(path->deferred, check_corpus_deferred_stamp);
++                    }
+                     check_corpus_deferred_before = path->deferred->memory;
+                     Arena* arenas[] = { &path->types_arena, &path->index_arena, &path->input_arena, &path->scratch };
+                     const uint64_t capacities[] = { type_capacity_bytes(capacity), type_index_capacity_bytes(capacity), UINT64_C(1) << 36, UINT64_C(1) << 36 };
+diff --git a/src/buster/compiler/c_check_deferred.c b/src/buster/compiler/c_check_deferred.c
+index d5da14d..97ea9af 100644
+--- a/src/buster/compiler/c_check_deferred.c
++++ b/src/buster/compiler/c_check_deferred.c
+@@ -50,9 +50,13 @@
+ #define BUSTER_CHECK_DEFERRED_LANE_TOKENS 1024
+ #define BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS 4
+ // A lane's arenas (CheckDeferredArenas), in this order in one mapping: its reader's records, its scratch and its
+-// bodies' results of 64 GB each, its copy of the top level's table of 16 GB and the table's index of 4 GB.
+-#define BUSTER_CHECK_DEFERRED_LANE_ARENAS 5
+-#define BUSTER_CHECK_DEFERRED_LANE_BYTES ((UINT64_C(3) << 36) + (UINT64_C(1) << 34) + (UINT64_C(1) << 32))
++// bodies' results of 64 GB each, its copy of the top level's table of 16 GB, the table's index of 4 GB and its per-name
++// columns of 4 GB.
++#define BUSTER_CHECK_DEFERRED_LANE_ARENAS 6
++#define BUSTER_CHECK_DEFERRED_LANE_BYTES ((UINT64_C(3) << 36) + (UINT64_C(1) << 34) + (UINT64_C(2) << 32))
++// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name: a lane's per-name columns committed
++// before its bodies (check_deferred_lane_commit).
++#define BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE 23
+ 
+ // The top level's counts where its walk skipped a body.
+ typedef struct CheckDeferredCut CheckDeferredCut;
+@@ -142,7 +146,10 @@ struct CheckDeferredResult
+ };
+ 
+ // A lane's arenas, in one mapping that the state keeps across its readings (check_deferred_lane_arenas): its reader's
+-// records and scratch, its bodies' results, and its copy of the top level's table and the table's index.
++// records and scratch, its bodies' results, its copy of the top level's table and the table's index, and its per-name
++// columns, at places they keep from one reading to the next (check_deferred_lane_names): the names they have room for,
++// their bytes, the names whose entries are committed (the columns' and the intrinsics' cache's), the last body's stamp,
++// and whether the columns that start as none may hold anything else (the tests' poison).
+ typedef struct CheckDeferredArenas CheckDeferredArenas;
+ struct CheckDeferredArenas
+ {
+@@ -152,6 +159,13 @@ struct CheckDeferredArenas
+     Arena results;
+     Arena types;
+     Arena type_index;
++    Arena names;
++    uint32_t name_room;
++    uint32_t stamp;
++    uint64_t name_bytes;
++    uint32_t names_committed;
++    uint32_t intrinsics_committed;
++    bool names_dirty;
+ };
+ 
+ // The state's memory, which its readings share: the reader's own arena, the top level's table and its record of
+@@ -187,6 +201,8 @@ struct CheckDeferredLane
+     uint32_t* points;
+     uint32_t* handles;
+     uint32_t key_count;
++    // The top level's event that each of the body's proxies copies (check_deferred_heads), for its result's ids.
++    uint32_t* proxies;
+     // The record of a body's type changes, made once with room for the largest body and taken back for each: a body
+     // keeps its changes packed in `results`, so that its walk touches the same pages as the last body's.
+     TypeChanges changes;
+@@ -379,12 +395,16 @@ static void* check_deferred_copy(Arena* arena, const void* source, uint64_t used
+ }
+ 
+ // `arena` taken back to empty, reserved with `capacity` first if it has no memory: the state's own arena and the top
+-// level's table's, which its first reading reserves on the calling thread.
++// level's table's, which its first reading reserves on the calling thread. In base pages throughout, as the lanes' are
++// (check_deferred_lane_arenas): the top level's table has the caller's capacities, each column room for every type the
++// unit could make, far apart, and the state's arena a log of the top level's linked updates with room for two a token,
++// of which a reading touches a little at each one's start. In huge pages each start's first touch cleared a 2 MB page,
++// as the driver's table's columns did (#528).
+ static void check_deferred_arena(Arena* arena, uint64_t capacity)
+ {
+     if (arena->base == 0)
+     {
+-        *arena = arena_reserve(capacity);
++        *arena = arena_reserve_small(capacity, capacity);
+     }
+     arena_pop_to(arena, 0);
+ }
+@@ -399,8 +419,8 @@ static void check_deferred_arena(Arena* arena, uint64_t capacity)
+ // results, a few megabytes on sqlite3.c, where a huge page would be cleared whole the first time any of it is touched.
+ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
+ {
+-    Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index };
+-    const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32 };
++    Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index, &arenas->names };
++    const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32, UINT64_C(1) << 32 };
+     if (arenas->mapping == 0)
+     {
+         uint8_t* mapping = mmap(0, BUSTER_CHECK_DEFERRED_LANE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+@@ -428,6 +448,116 @@ static bool check_deferred_lane_arenas(CheckDeferredArenas* arenas)
+     return arenas->mapping != 0;
+ }
+ 
++// The pages of `column`'s entries from `from` to `to`, each of `bytes`, committed (MADV_POPULATE_WRITE).
++static void check_deferred_commit(void* column, uint32_t from, uint32_t to, uint64_t bytes)
++{
++    const uintptr_t begin = ((uintptr_t)column + from * bytes) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    const uintptr_t end = ((uintptr_t)column + to * bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    if (to > from)
++    {
++        // The advice only commits the pages, zeroed as a fault would: the columns work whether or not the kernel takes
++        // it.
++        madvise((void*)begin, end - begin, BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE);
++    }
++}
++
++// The pages of the entries a reading of `names` names takes in the lane's per-name columns, committed past those an
++// earlier reading took, each column's in one call (MADV_POPULATE_WRITE; the intrinsics' cache only where the reader has
++// one): the heads' first three times `names` and the others' first `names`. A body's heads and walk touch a few entries
++// of every column, far apart, and their faults, a few at each body, took a woken lane's walks on #697's units of sixteen
++// bodies of 993 tokens to four times main's, whose copies of the top level's columns committed theirs together.
++static void check_deferred_lane_commit(CheckDeferredLane* lane, uint32_t names)
++{
++    CheckDeferredArenas* arenas = lane->arenas;
++    CheckInputReader* reader = &lane->reader;
++    const uint32_t from = arenas->names_committed;
++    if (names > from)
++    {
++        check_deferred_commit(reader->bindings.heads, from * C_BINDING_NAMESPACES, names * C_BINDING_NAMESPACES, sizeof(uint32_t));
++        check_deferred_commit(reader->parameter_seen, from, names, sizeof(uint32_t));
++        check_deferred_commit(reader->member_seen, from, names, sizeof(uint32_t));
++        check_deferred_commit(lane->stamps, from, names, sizeof(uint32_t));
++        check_deferred_commit(reader->linked_declarations, from, names, sizeof(uint32_t));
++        check_deferred_commit(reader->linked_types, from, names, sizeof(TypeId));
++        check_deferred_commit(reader->builtin_names, from, names, sizeof(uint16_t));
++        arenas->names_committed = names;
++    }
++    if (reader->intrinsic_names != 0 && names > arenas->intrinsics_committed)
++    {
++        check_deferred_commit(reader->intrinsic_names, arenas->intrinsics_committed, names, sizeof(uint32_t));
++        arenas->intrinsics_committed = names;
++    }
++}
++
++// The lane's per-name columns, in its names arena at places they keep from one reading to the next, so that a lane
++// copies none of the top level's:
++//   - The columns every body leaves as none come first: the binding heads and the parameters' and members' marks, which
++//     a walk takes back as its scopes close and check_deferred_heads_clear after it, for the names the body spells.
++//   - Then the stamps, which only grow from body to body and reading to reading (check_deferred_heads).
++//   - Then the linked declarations and types and the intrinsics' and builtins' caches, which each body sets for the names
++//     it spells before its walk reads them (check_deferred_heads, check_deferred_name_state).
++// A reading with more names than the places have room for lays them out again, on zero pages. The entries of a reading's
++// names are committed before its bodies (check_deferred_lane_commit). The tests' poison (check_deferred_poison) leaves
++// the columns that start as none dirty, and the next reading clears them. Whether the columns fit.
++static bool check_deferred_lane_names(const CheckDeferred* deferred, CheckDeferredLane* lane, uint32_t names)
++{
++    CheckDeferredArenas* arenas = lane->arenas;
++    CheckInputReader* reader = &lane->reader;
++    Arena* arena = &arenas->names;
++    uint64_t room = arenas->name_room;
++    if (names > room)
++    {
++        room = room != 0 ? room : 4096;
++        while (room < names)
++        {
++            room *= 2;
++        }
++        if (arenas->name_bytes != 0)
++        {
++            madvise(arena->base, arenas->name_bytes, MADV_DONTNEED);
++        }
++        arenas->name_bytes = 0;
++        arenas->names_committed = 0;
++        arenas->intrinsics_committed = 0;
++        arenas->stamp = 0;
++        arenas->names_dirty = false;
++    }
++    // A name's three heads, its six columns of four bytes and the builtins' two, with each column's alignment.
++    bool valid = room <= UINT32_MAX && room * (C_BINDING_NAMESPACES * 4 + 6 * 4 + 2) + 10 * 64 <= arena->capacity;
++    arena_pop_to(arena, 0);
++    uint32_t* heads = valid ? arena_push_array(arena, room * C_BINDING_NAMESPACES, sizeof(uint32_t), 64) : 0;
++    uint32_t* parameter_seen = heads != 0 ? arena_push_array(arena, room, sizeof(uint32_t), 64) : 0;
++    uint32_t* member_seen = parameter_seen != 0 ? arena_push_array(arena, room, sizeof(uint32_t), 64) : 0;
++    uint32_t* stamps = member_seen != 0 ? arena_push_array(arena, room, sizeof(uint32_t), 64) : 0;
++    const uint64_t none_bytes = arena->length;
++    uint32_t* linked_declarations = stamps != 0 ? arena_push_array(arena, room, sizeof(uint32_t), 64) : 0;
++    TypeId* linked_types = linked_declarations != 0 ? arena_push_array(arena, room, sizeof(TypeId), 64) : 0;
++    uint32_t* intrinsic_names = linked_types != 0 ? arena_push_array(arena, room, sizeof(uint32_t), 64) : 0;
++    uint16_t* builtin_names = intrinsic_names != 0 ? arena_push_array(arena, room, sizeof(uint16_t), 64) : 0;
++    valid = builtin_names != 0;
++    if (valid)
++    {
++        if (arenas->names_dirty)
++        {
++            memset(arena->base, 0, none_bytes);
++            arenas->stamp = 0;
++            arenas->names_dirty = false;
++        }
++        arenas->name_room = (uint32_t)room;
++        arenas->name_bytes = arena->length;
++        reader->bindings.heads = heads;
++        reader->parameter_seen = parameter_seen;
++        reader->member_seen = member_seen;
++        reader->linked_declarations = linked_declarations;
++        reader->linked_types = linked_types;
++        reader->intrinsic_names = deferred->top_reader->intrinsic_names != 0 ? intrinsic_names : 0;
++        reader->builtin_names = builtin_names;
++        lane->stamps = stamps;
++        check_deferred_lane_commit(lane, names);
++    }
++    return valid;
++}
++
+ // A lane's copy of the top level's reader, with room for the largest body, in its arenas: whether it fits.
+ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLane* lane)
+ {
+@@ -459,56 +589,54 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
+     valid &= reader->warning_index != 0;
+     input->deferred_tokens = 0;
+     Arena* arena = &arenas->output;
+-    // The top level's events, the lane's own after them.
+-    const uint64_t events = (uint64_t)top->bindings.count + room * 4;
++    // The lane's events, none of them the top level's: a body's stream starts with the file scope's events its heads
++    // reach (check_deferred_heads, a proxy for each, two names' keys a name at most) and the top level's last event,
++    // then the body's own.
++    const uint64_t proxies = room * 2 + 1;
++    const uint64_t events = proxies + room * 4;
+     CBindings* bindings = &reader->bindings;
+     bindings->capacity = valid && events < UINT32_MAX ? (uint32_t)events : 0;
+-    bindings->heads = valid ? check_deferred_copy(arena, 0, 0, (uint64_t)names * C_BINDING_NAMESPACES, sizeof(uint32_t)) : 0;
+-    bindings->active = bindings->heads != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->key = bindings->active != 0 ? check_deferred_copy(arena, top->bindings.key, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->declaration = bindings->key != 0 ? check_deferred_copy(arena, top->bindings.declaration, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->point = bindings->declaration != 0 ? check_deferred_copy(arena, top->bindings.point, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->end = bindings->point != 0 ? check_deferred_copy(arena, top->bindings.end, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->previous = bindings->end != 0 ? check_deferred_copy(arena, top->bindings.previous, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->depth = bindings->previous != 0 ? check_deferred_copy(arena, top->bindings.depth, top->bindings.count, events + 1, sizeof(uint32_t)) : 0;
+-    bindings->operation = bindings->depth != 0 ? check_deferred_copy(arena, top->bindings.operation, top->bindings.count, events + 1, sizeof(uint8_t)) : 0;
+-    bindings->kind = bindings->operation != 0 ? check_deferred_copy(arena, top->bindings.kind, top->bindings.count, events + 1, sizeof(uint8_t)) : 0;
+-    valid = bindings->kind != 0;
++    // The heads, the per-name columns and the stamps, in the lane's places for them (check_deferred_lane_names).
++    valid = valid && check_deferred_lane_names(deferred, lane, names);
++    bindings->active = valid ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->key = bindings->active != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->declaration = bindings->key != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->point = bindings->declaration != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->end = bindings->point != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->previous = bindings->end != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->depth = bindings->previous != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint32_t)) : 0;
++    bindings->operation = bindings->depth != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
++    bindings->kind = bindings->operation != 0 ? check_deferred_copy(arena, 0, 0, events + 1, sizeof(uint8_t)) : 0;
++    lane->proxies = bindings->kind != 0 ? check_deferred_copy(arena, 0, 0, proxies, sizeof(uint32_t)) : 0;
++    valid = lane->proxies != 0;
+     if (valid)
+     {
+-        memset(bindings->heads, 0, (uint64_t)names * C_BINDING_NAMESPACES * sizeof(uint32_t));
+-        bindings->base = top->bindings.count;
+-        bindings->count = top->bindings.count;
++        bindings->base = 0;
++        bindings->count = 0;
+         bindings->active_count = 0;
+         bindings->valid = true;
+     }
+-    // The per-name and per-tag arrays the walk writes, the scope stacks and the appended tables, the lane's own.
++    // The per-tag arrays the walk writes, the scope stacks and the appended tables, the lane's own.
+     const uint64_t tags = (uint64_t)lane->types.tags.capacity;
+-    reader->parameter_seen = valid ? check_deferred_copy(arena, top->parameter_seen, names, names, sizeof(uint32_t)) : 0;
+-    reader->member_seen = reader->parameter_seen != 0 ? check_deferred_copy(arena, top->member_seen, names, names, sizeof(uint32_t)) : 0;
+-    reader->linked_declarations = reader->member_seen != 0 ? check_deferred_copy(arena, top->linked_declarations, names, names, sizeof(uint32_t)) : 0;
+-    reader->linked_types = reader->linked_declarations != 0 ? check_deferred_copy(arena, top->linked_types, names, names, sizeof(TypeId)) : 0;
+-    reader->builtin_names = reader->linked_types != 0 ? check_deferred_copy(arena, top->builtin_names, names, names, sizeof(uint16_t)) : 0;
+-    reader->tag_completions = reader->builtin_names != 0 ? check_deferred_copy(arena, top->tag_completions, top->types->tags.count, tags, sizeof(uint32_t)) : 0;
++    reader->tag_completions = valid ? check_deferred_copy(arena, top->tag_completions, top->types->tags.count, tags, sizeof(uint32_t)) : 0;
+     // Whether each enum has a fixed base: the top level's for its tags, and the lane's own for those its bodies make,
+     // which take the indices after the top level's and are set where each is made (check_input_tag_identity).
+     reader->enum_fixed = reader->tag_completions != 0 ? check_deferred_copy(arena, top->enum_fixed, top->types->tags.count, tags, sizeof(uint8_t)) : 0;
+     valid = reader->enum_fixed != 0;
+     if (valid && top->intrinsic_names != 0)
+     {
+-        // The intrinsics' cache, which each body sets for the names it spells as source order's is at its opening
+-        // (check_deferred_name_state) and fills for those it decodes, and their tables, after the top level's of which
+-        // each body appends its own declarations and calls.
++        // The intrinsics' tables, after the top level's of which each body appends its own declarations and calls; their
++        // cache, which each body sets for the names it spells as source order's is at its opening
++        // (check_deferred_name_state) and fills for those it decodes, is among the lane's per-name columns.
+         // A body decodes each name once at most, a name the top level decoded after its opening among them: room for the
+         // top level's declarations and as many again as the top level has room for.
+         const uint64_t declarations = (uint64_t)top_input->intrinsic_declaration_count + top_input->intrinsic_declaration_capacity;
+         input->intrinsic_declaration_capacity = declarations < UINT32_MAX ? (uint32_t)declarations : UINT32_MAX;
+-        reader->intrinsic_names = check_deferred_copy(arena, top->intrinsic_names, top->pp->table->count, top->pp->table->count, sizeof(uint32_t));
+         input->intrinsic_declarations = check_deferred_copy(arena, top_input->intrinsic_declarations, top_input->intrinsic_declaration_count,
+                                                             (uint64_t)input->intrinsic_declaration_capacity + 1, sizeof(CheckInputIntrinsicDeclaration));
+         input->intrinsic_calls = check_deferred_copy(arena, top_input->intrinsic_calls, top_input->intrinsic_call_count,
+                                                      (uint64_t)top_input->intrinsic_call_capacity + 1, sizeof(CheckInputIntrinsicCall));
+-        valid = reader->intrinsic_names != 0 && input->intrinsic_declarations != 0 && input->intrinsic_calls != 0;
++        valid = input->intrinsic_declarations != 0 && input->intrinsic_calls != 0;
+     }
+     if (valid && top->transparent_unions != 0)
+     {
+@@ -519,15 +647,10 @@ static bool check_deferred_lane_prepare(CheckDeferred* deferred, CheckDeferredLa
+     // Two keys for each name the body and its parameters spell, at most.
+     const uint64_t keys = room * 2;
+     valid = valid && type_changes_initialize(&lane->changes, &arenas->results, (uint32_t)(room * 8 + 64), (uint32_t)(room * 8 + 64), (uint32_t)(room * 2 + 64));
+-    lane->stamps = valid ? check_deferred_copy(arena, 0, 0, names, sizeof(uint32_t)) : 0;
+-    lane->keys = lane->stamps != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
++    lane->keys = valid ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
+     lane->points = lane->keys != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
+     lane->handles = lane->points != 0 ? check_deferred_copy(arena, 0, 0, keys, sizeof(uint32_t)) : 0;
+     valid = lane->handles != 0;
+-    if (valid)
+-    {
+-        memset(lane->stamps, 0, (uint64_t)names * sizeof(uint32_t));
+-    }
+     reader->scope_marks = valid ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
+     reader->scope_ends = reader->scope_marks != 0 ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
+     reader->scope_openings = reader->scope_ends != 0 ? check_deferred_copy(arena, 0, 0, room + 2, sizeof(uint32_t)) : 0;
+@@ -622,18 +745,42 @@ static void check_deferred_name_state(const CheckDeferred* deferred, CheckDeferr
+     }
+ }
+ 
+-// Sets the lane's heads of every name the body (`body`) and its parameters spell to the file scope's at the body's
++// The lane's event `slot` a copy of the file scope's `event`: a proxy of it in the body's stream (check_deferred_heads).
++static void check_deferred_proxy(CBindings* bindings, uint32_t slot, const CBindings* file, uint32_t event)
++{
++    bindings->key[slot] = file->key[event];
++    bindings->declaration[slot] = file->declaration[event];
++    bindings->point[slot] = file->point[event];
++    bindings->end[slot] = file->end[event];
++    bindings->previous[slot] = file->previous[event];
++    bindings->depth[slot] = file->depth[event];
++    bindings->operation[slot] = file->operation[event];
++    bindings->kind[slot] = file->kind[event];
++}
++
++// Sets the lane's heads of every name the body (`cut`'s) and its parameters spell to the file scope's at the body's
+ // opening: the binding state source order's reader has there, for the names the body can look up. Each name once (by
+-// the lane's stamps), its label head none and its ordinary and tag heads from the history, 16 keys at a time
+-// (c_environment_lookup_batch), each checked against the restores (check_deferred_visible, which the rare declaration
+-// that ended takes). The keys stay for check_deferred_heads_clear. Whether the history took every key.
+-static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lane, const CheckDeferredCut* cut, uint32_t body)
++// the lane's stamps: the body's is one past the last body's, on the lane, in this reading or an earlier one), its label
++// head none and its ordinary and tag heads from the history, 16 keys at a time (c_environment_lookup_batch), each checked
++// against the restores (check_deferred_visible, which the rare declaration that ended takes); and its other per-name
++// columns that the walk reads, from the top level's (check_deferred_name_state, and the builtins' cache). The keys
++// stay for check_deferred_heads_clear. Whether the history took every key.
++static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lane, const CheckDeferredCut* cut)
+ {
+     CheckInputReader* reader = &lane->reader;
++    const CheckInputReader* top = deferred->top_reader;
+     const Parser* parser = reader->parser;
+     CBindings* bindings = &reader->bindings;
+     const uint32_t names = bindings->name_capacity;
+-    const uint32_t stamp = body + 1;
++    CheckDeferredArenas* arenas = lane->arenas;
++    arenas->stamp += 1;
++    if (arenas->stamp == 0)
++    {
++        // The stamps wrapped: none of them is a body's again.
++        memset(lane->stamps, 0, (uint64_t)arenas->name_room * sizeof(uint32_t));
++        arenas->stamp = 1;
++    }
++    const uint32_t stamp = arenas->stamp;
+     uint32_t count = 0;
+     for (uint32_t pass = 0; pass < 2; pass += 1)
+     {
+@@ -649,6 +796,7 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
+                 lane->points[count] = cut->opening;
+                 lane->points[count + 1] = cut->opening;
+                 bindings->heads[C_BINDING_LABEL * names + name] = 0;
++                reader->builtin_names[name] = top->builtin_names[name];
+                 check_deferred_name_state(deferred, lane, name, cut);
+                 count += 2;
+             }
+@@ -656,22 +804,49 @@ static bool check_deferred_heads(CheckDeferred* deferred, CheckDeferredLane* lan
+         }
+     }
+     const CEnvironment* environment = &deferred->environment;
++    const CBindings* file = environment->bindings;
+     const bool valid = c_environment_lookup_batch(environment, lane->keys, lane->points, count, lane->handles);
++    // Each head the history gives is the top level's event, which the body's stream gets a proxy of, in its order: the
++    // walk reads the file scope's events at its heads alone. Then the top level's last event before the body, whose
++    // point the walk reads as the stream's last before its first own event (check_input_vla_bound's `cached`), as in
++    // source order's stream there. A copy of the top level's whole stream gave the top level's last event, after the
++    // body where the top level goes on, so that a bound's names read before the body's first event seemed read
++    // already and the body reported an error source order doesn't: such a unit went to source order.
++    uint32_t proxy = 0;
+     for (uint32_t i = 0; i < count; i += 1)
+     {
+-        const uint32_t handle = valid ? lane->handles[i] : 0;
+-        const bool ended = handle != 0 && environment->bindings->end[handle - 1] != BUSTER_C_BINDING_NONE;
+-        bindings->heads[lane->keys[i]] = ended ? check_deferred_visible(environment, lane->keys[i], cut->opening, handle) : handle;
++        uint32_t handle = valid ? lane->handles[i] : 0;
++        const bool ended = handle != 0 && file->end[handle - 1] != BUSTER_C_BINDING_NONE;
++        handle = ended ? check_deferred_visible(environment, lane->keys[i], cut->opening, handle) : handle;
++        if (handle != 0)
++        {
++            check_deferred_proxy(bindings, proxy, file, handle - 1);
++            lane->proxies[proxy] = handle - 1;
++            proxy += 1;
++            handle = proxy;
++        }
++        bindings->heads[lane->keys[i]] = handle;
++    }
++    if (cut->events != 0)
++    {
++        check_deferred_proxy(bindings, proxy, file, cut->events - 1);
++        lane->proxies[proxy] = cut->events - 1;
++        proxy += 1;
+     }
++    bindings->base = proxy;
++    bindings->count = proxy;
+     lane->key_count = count;
+     lane->history_reads += count / 2;
+     return valid;
+ }
+ 
+-// Takes the heads check_deferred_heads set, and what the walk left in them, back to none.
++// Takes the heads check_deferred_heads set, and what the walk left in them and in the parameters' and members' marks,
++// back to none: the walk writes them for the names the body spells alone, and the next body, in this reading or a later
++// one, takes them as none (check_deferred_lane_names).
+ static void check_deferred_heads_clear(CheckDeferredLane* lane)
+ {
+-    CBindings* bindings = &lane->reader.bindings;
++    CheckInputReader* reader = &lane->reader;
++    CBindings* bindings = &reader->bindings;
+     const uint32_t names = bindings->name_capacity;
+     for (uint32_t i = 0; i < lane->key_count; i += 2)
+     {
+@@ -679,6 +854,8 @@ static void check_deferred_heads_clear(CheckDeferredLane* lane)
+         bindings->heads[C_BINDING_ORDINARY * names + name] = 0;
+         bindings->heads[C_BINDING_TAG * names + name] = 0;
+         bindings->heads[C_BINDING_LABEL * names + name] = 0;
++        reader->parameter_seen[name] = 0;
++        reader->member_seen[name] = 0;
+     }
+     lane->key_count = 0;
+ }
+@@ -777,10 +954,10 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
+         reader->predefined_types[i] = made ? top->predefined_types[i] : 0;
+         reader->predefined_positions[i] = made ? top->predefined_positions[i] : BUSTER_CHECK_NONE;
+     }
+-    reader->bindings.count = reader->bindings.base;
++    // The body's stream starts with its proxies (check_deferred_heads), none active.
+     reader->bindings.active_count = 0;
+     reader->bindings.valid = true;
+-    const bool history = check_deferred_heads(deferred, lane, cut, body);
++    const bool history = check_deferred_heads(deferred, lane, cut);
+     // The table as the top level's was at the opening: its later types hidden, its later definitions withdrawn.
+     const TypeViewMark view = type_view_mark(types);
+     types->hidden_begin = cut->types;
+@@ -884,6 +1061,16 @@ static void check_deferred_body(CheckDeferred* deferred, CheckDeferredLane* lane
+         result->depth = check_deferred_keep(arena, reader->bindings.depth + base, events, sizeof(uint32_t), &kept);
+         result->operation = check_deferred_keep(arena, reader->bindings.operation + base, events, sizeof(uint8_t), &kept);
+         result->kind = check_deferred_keep(arena, reader->bindings.kind + base, events, sizeof(uint8_t), &kept);
++        // The ids in the body's events, as the merge reads them: an own event's the top level's count past its place
++        // after the proxies, and a proxy's (a declaration a body's one shadows) the top level's event it copies.
++        const uint32_t top_events = top->bindings.count;
++        for (uint32_t e = 0; kept && e < events; e += 1)
++        {
++            const uint32_t previous = result->previous[e];
++            result->previous[e] = previous == 0 ? 0 : previous <= base ? lane->proxies[previous - 1] + 1 : previous - base + top_events;
++            const uint32_t end = result->end[e];
++            result->end[e] = end == BUSTER_C_BINDING_NONE ? end : end - base + top_events;
++        }
+         result->string_count = input->string_count - top_input->string_count;
+         result->strings = check_deferred_keep(arena, input->strings + top_input->string_count, result->string_count, sizeof(CheckInitString), &kept);
+         result->region_count = input->region_count - top_input->region_count;
+@@ -2118,6 +2305,16 @@ static void check_deferred_release(CheckDeferred* deferred)
+     arena_release(&memory->arena);
+ }
+ 
++// For the tests (test-checker-deferred): every lane's last body's stamp set to `stamp`, so that UINT32_MAX makes each
++// lane's stamps wrap at its next body (check_deferred_heads).
++static __attribute__((unused)) void check_deferred_stamp(CheckDeferred* deferred, uint32_t stamp)
++{
++    for (uint32_t lane = 0; lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
++    {
++        deferred->memory.lanes[lane].stamp = stamp;
++    }
++}
++
+ // For the tests (test-checker-deferred): every byte the state's last reading left pushed in its memory set to `byte`,
+ // as a later reading of the state finds what earlier ones wrote, which it must not read as zeros.
+ static __attribute__((unused)) void check_deferred_poison(CheckDeferred* deferred, uint8_t byte)
+@@ -2134,11 +2331,14 @@ static __attribute__((unused)) void check_deferred_poison(CheckDeferred* deferre
+     for (uint32_t lane = 0; lane < BUSTER_CHECK_DEFERRED_MAX_LANES; lane += 1)
+     {
+         CheckDeferredArenas* arenas = memory->lanes + lane;
+-        Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index };
++        Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index, &arenas->names };
+         for (uint32_t i = 0; arenas->mapping != 0 && i < BUSTER_CHECK_DEFERRED_LANE_ARENAS; i += 1)
+         {
+             memset(list[i]->base, byte, list[i]->length);
+         }
++        // The per-name columns that a reading leaves as none hold the poison too, which the next reading clears
++        // (check_deferred_lane_names).
++        arenas->names_dirty |= arenas->mapping != 0 && arenas->names.length != 0;
+     }
+ }
+ 
+diff --git a/src/buster/compiler/c_check_deferred_test.c b/src/buster/compiler/c_check_deferred_test.c
+index 41f2488..cf11b2a 100644
+--- a/src/buster/compiler/c_check_deferred_test.c
++++ b/src/buster/compiler/c_check_deferred_test.c
+@@ -157,6 +157,14 @@ static const CheckDeferredFixture check_deferred_fixtures[] =
+       "int f(int n, int a[n][n+1], int (*callback)(int m, int b[m]), int z[n+2]) { typedef int A[n]; A a0; { A a1; int b[n+2]; } return sizeof a0; }\n"
+       "int g(int m, int (*p)[m+2]) { __typeof__(int[m+3]) a, b; return sizeof a + sizeof b + sizeof *p; }\n"
+       "int h(int k, int a[k]) { typedef int A[k+1]; A b; return sizeof b; }\n", true },
++    // Bounds of file-scope names in bodies without parameters, whose first events are the bounds' uses: the last event
++    // before them in a lane's stream is the top level's last before the body (check_deferred_heads), as in source order's,
++    // and not its last at all, a declaration after the body, which made a lane take the bound's names as read already
++    // and report an error source order doesn't.
++    { "vla-bound-of-file-scope-name", "int n = 2;\nint f(void) { int a[n]; return (int)sizeof a; }\nint later = 3;\n", true },
++    { "vla-bounds-of-file-scope-names",
++      "int n = 2;\nint m = 3;\nint f(void) { int a[m]; int b[n]; return (int)sizeof a + (int)sizeof b; }\n"
++      "int g(void) { int c[n + 1][n]; return (int)sizeof c; }\nint later = 3;\nint after(void) { return later; }\n", true },
+     { "varargs",
+       "int sum(int count, ...) { __builtin_va_list list; __builtin_va_start(list, count); int total = 0;\n"
+       "  for (int i = 0; i < count; i += 1) total += __builtin_va_arg(list, int); __builtin_va_end(list); return total; }\n"
+@@ -361,22 +369,23 @@ static bool check_deferred_test_no_input(void)
+     return quiet && strstr(text, "made no input") != NULL;
+ }
+ 
+-// The state's memory (c_check_deferred.c, check_deferred_lane_arenas): a lane's five arenas in one mapping, in order and
++// The state's memory (c_check_deferred.c, check_deferred_lane_arenas): a lane's six arenas in one mapping, in order and
+ // end to end with their capacities, writable to their last byte, kept with their pages when the state takes them back
+-// for its next reading, and its own arena likewise; then every mapping unmapped by check_deferred_release, which leaves
+-// the state as a zeroed one.
++// for its next reading, and its own arena likewise; the lanes' mappings and the state's own three arenas in base pages
++// to their last byte (check_deferred_arena); then every mapping unmapped by check_deferred_release, which leaves the
++// state as a zeroed one.
+ static bool check_deferred_test_memory(void)
+ {
+     static CheckDeferred state;
+     state = (CheckDeferred){ 0 };
+     const uint32_t lanes[] = { 0, 5, BUSTER_CHECK_DEFERRED_MAX_LANES - 1 };
+-    const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32 };
++    const uint64_t capacities[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 36, UINT64_C(1) << 34, UINT64_C(1) << 32, UINT64_C(1) << 32 };
+     uint8_t* mappings[BUSTER_ARRAY_LENGTH(lanes)] = { 0 };
+     bool valid = true;
+     for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(lanes); l += 1)
+     {
+         CheckDeferredArenas* arenas = state.memory.lanes + lanes[l];
+-        Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index };
++        Arena* list[BUSTER_CHECK_DEFERRED_LANE_ARENAS] = { &arenas->output, &arenas->scratch, &arenas->results, &arenas->types, &arenas->type_index, &arenas->names };
+         valid &= check_deferred_lane_arenas(arenas);
+         mappings[l] = arenas->mapping;
+         uint64_t offset = 0;
+@@ -405,6 +414,18 @@ static bool check_deferred_test_memory(void)
+     valid = valid && own != 0 && arena_push(&state.memory.arena, 4096, 64) == own;
+     check_deferred_arena(&state.memory.arena, UINT64_C(1) << 36);
+     valid = valid && state.memory.arena.base == own && state.memory.arena.length == 0;
++    check_deferred_arena(&state.memory.top, UINT64_C(1) << 40);
++    check_deferred_arena(&state.memory.top_index, UINT64_C(1) << 34);
++    const uintptr_t firsts[] = { (uintptr_t)mappings[0], (uintptr_t)mappings[2], (uintptr_t)state.memory.arena.base, (uintptr_t)state.memory.top.base,
++                                 (uintptr_t)state.memory.top_index.base };
++    const uint64_t sizes[BUSTER_ARRAY_LENGTH(firsts)] = { BUSTER_CHECK_DEFERRED_LANE_BYTES, BUSTER_CHECK_DEFERRED_LANE_BYTES, state.memory.arena.capacity,
++                                                          state.memory.top.capacity, state.memory.top_index.capacity };
++    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(firsts); i += 1)
++    {
++        bool found = false;
++        valid = firsts[i] != 0 && sizes[i] != 0 && lane_test_vm_flag(firsts[i], "nh", &found) && found;
++        valid = valid && lane_test_vm_flag(firsts[i] + sizes[i] - 1, "nh", &found) && found && !lane_test_vm_flag(firsts[i], "hg", &found);
++    }
+     check_deferred_release(&state);
+     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+     unsigned char resident = 0;
+@@ -420,6 +441,119 @@ static bool check_deferred_test_memory(void)
+     return valid;
+ }
+ 
++// Whether every page of the `bytes` from `begin` is resident (mincore).
++static bool check_deferred_test_resident(const uint8_t* begin, uint64_t bytes)
++{
++    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
++    const uintptr_t first = (uintptr_t)begin & ~(uintptr_t)(page - 1);
++    const uint64_t pages = ((uintptr_t)begin + bytes - first + page - 1) / page;
++    bool result = begin != 0;
++    for (uint64_t i = 0; result && i < pages; i += 1)
++    {
++        unsigned char resident = 0;
++        result = mincore((void*)(first + i * page), page, &resident) == 0 && (resident & 1) != 0;
++    }
++    return result;
++}
++
++// Whether the kernel takes MADV_POPULATE_WRITE (Linux 5.14), which check_deferred_lane_names asks for.
++static bool check_deferred_test_populates(void)
++{
++    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
++    void* probe = mmap(0, page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    const bool result = probe != MAP_FAILED && madvise(probe, page, BUSTER_CHECK_DEFERRED_MADV_POPULATE_WRITE) == 0;
++    if (probe != MAP_FAILED)
++    {
++        munmap(probe, page);
++    }
++    return result;
++}
++
++// A lane's per-name columns (c_check_deferred.c, check_deferred_lane_names): from room for 4,096 names, in its names
++// arena in order, each on a 64-byte line and clear of the next, the pages of the reading's names' entries committed and
++// none past them (where the kernel takes MADV_POPULATE_WRITE: check_deferred_lane_commit), the columns that start as none
++// zero; at the same places for a reading of fewer names and for the next reading, with what the last left in them, but
++// for the columns that start as none where a reading was poisoned (check_deferred_poison), which are cleared with the
++// stamp; the intrinsics' cache only where the top level has one; laid out again on zero pages for more names than the
++// room, their entries committed again; and refused for more than the arena holds, after which a reading of fewer names
++// takes the places of the room it had.
++static bool check_deferred_test_lane_names(void)
++{
++    static CheckDeferred state;
++    static CheckInputReader top;
++    static CheckDeferredLane lane;
++    static uint32_t intrinsics[1];
++    state = (CheckDeferred){ .top_reader = &top };
++    top = (CheckInputReader){ .intrinsic_names = intrinsics };
++    lane = (CheckDeferredLane){ .arenas = state.memory.lanes };
++    CheckDeferredArenas* arenas = lane.arenas;
++    CheckInputReader* reader = &lane.reader;
++    bool valid = check_deferred_lane_arenas(arenas);
++    const bool populates = check_deferred_test_populates();
++    uint8_t* first[8] = { 0 };
++    for (uint32_t layout = 0; valid && layout < 2; layout += 1)
++    {
++        const uint32_t room = layout == 0 ? 4096 : 8192;
++        const uint32_t names = layout == 0 ? 100 : 4097;
++        valid = check_deferred_lane_names(&state, &lane, names) && arenas->name_room == room && arenas->stamp == 0 && arenas->names_committed == names &&
++                arenas->intrinsics_committed == names;
++        uint8_t* columns[8] = { (uint8_t*)reader->bindings.heads, (uint8_t*)reader->parameter_seen, (uint8_t*)reader->member_seen, (uint8_t*)lane.stamps,
++                                (uint8_t*)reader->linked_declarations, (uint8_t*)reader->linked_types, (uint8_t*)reader->intrinsic_names, (uint8_t*)reader->builtin_names };
++        const uint64_t bytes[8] = { (uint64_t)room * C_BINDING_NAMESPACES * 4, (uint64_t)room * 4, (uint64_t)room * 4, (uint64_t)room * 4,
++                                    (uint64_t)room * 4, (uint64_t)room * sizeof(TypeId), (uint64_t)room * 4, (uint64_t)room * 2 };
++        // The names' entries committed as they are laid out, before anything reads them, and the rest of each column's
++        // room not: its last page is past them.
++        for (uint32_t c = 0; valid && populates && c < 8; c += 1)
++        {
++            const uint64_t used = bytes[c] / room * names;
++            valid = check_deferred_test_resident(columns[c], used) && !check_deferred_test_resident(columns[c] + bytes[c] - 1, 1);
++        }
++        valid = valid && columns[0] == arenas->names.base && arenas->name_bytes == arenas->names.length;
++        for (uint32_t c = 0; valid && c < 8; c += 1)
++        {
++            valid = columns[c] != 0 && ((uintptr_t)columns[c] & 63) == 0 && (c == 7 || columns[c] + bytes[c] <= columns[c + 1]) &&
++                    columns[c] + bytes[c] <= arenas->names.base + arenas->names.length;
++            // The columns that start as none: zero, on the first layout's fresh pages and on the second's cleared ones.
++            for (uint64_t b = 0; valid && c < 4 && b < bytes[c]; b += 1)
++            {
++                valid = columns[c][b] == 0;
++            }
++            first[c] = layout == 0 ? columns[c] : first[c];
++        }
++        valid = valid && (layout == 0 || reader->bindings.heads == (uint32_t*)first[0]);
++        if (valid && layout == 0)
++        {
++            // What a reading leaves: kept for the next, at the same places, for fewer names.
++            reader->bindings.heads[5] = 7;
++            reader->parameter_seen[5] = 9;
++            lane.stamps[5] = 3;
++            reader->linked_declarations[5] = 11;
++            reader->builtin_names[5] = 13;
++            arenas->stamp = 3;
++            top.intrinsic_names = 0;
++            valid = check_deferred_lane_names(&state, &lane, 50) && reader->bindings.heads == (uint32_t*)first[0] && lane.stamps == (uint32_t*)first[3] &&
++                    reader->intrinsic_names == 0 && reader->bindings.heads[5] == 7 && reader->parameter_seen[5] == 9 && lane.stamps[5] == 3 &&
++                    reader->linked_declarations[5] == 11 && reader->builtin_names[5] == 13 && arenas->stamp == 3;
++            // A poisoned reading: the columns that start as none cleared, with the stamp, and the others left to the
++            // bodies, which set them before they read them.
++            check_deferred_poison(&state, 0xa5);
++            top.intrinsic_names = intrinsics;
++            valid = valid && arenas->names_dirty && check_deferred_lane_names(&state, &lane, 4096) && !arenas->names_dirty && reader->bindings.heads == (uint32_t*)first[0] &&
++                    reader->bindings.heads[5] == 0 && reader->parameter_seen[5] == 0 && lane.stamps[5] == 0 && arenas->stamp == 0 &&
++                    reader->linked_declarations[5] == 0xa5a5a5a5u && reader->builtin_names[5] == 0xa5a5;
++            reader->member_seen[room - 1] = 1;
++            lane.stamps[room - 1] = 1;
++            arenas->stamp = 1;
++        }
++    }
++    // More names than the arena holds: refused, and fewer taken at the room's places again, its columns as none.
++    valid = valid && !check_deferred_lane_names(&state, &lane, UINT32_MAX) && arenas->name_room == 8192;
++    valid = valid && check_deferred_lane_names(&state, &lane, 100) && arenas->name_room == 8192 && reader->bindings.heads == (uint32_t*)arenas->names.base &&
++            lane.stamps[100] == 0 && arenas->stamp == 0;
++    check_deferred_release(&state);
++    return valid;
++}
++
+ // The merge's scans of a column's tokens (check_deferred_entries, check_deferred_entries64 and check_deferred_count_bytes)
+ // against their scalar twins, on ranges of every length to 300 from five starts, of columns that end at a PROT_NONE page,
+ // with entries at random tokens at four densities: of 32-bit values whose none is 0 or BUSTER_CHECK_NONE, of 64-bit ones
+@@ -959,19 +1093,23 @@ static int run_checker_deferred_tests(int count, char** arguments)
+             }
+         }
+         // A unit that merges, read on 8 lanes by a state that read it before: on one lane and on eight with every byte
+-        // that reading pushed in the state's memory poisoned, and on eight with what it wrote there. A reading takes over
+-        // the memory of the state's earlier ones, the lanes' among it, and must read as it does fresh.
+-        for (uint32_t l = 0; valid && expected && size == 0 && l < 3; l += 1)
++        // that reading pushed in the state's memory poisoned, on eight with what it wrote there, and on one with every
++        // lane's stamp then set to its last (check_deferred_stamp), which each lane's next body wraps: the one lane's
++        // first body's names were stamped as the wrapped stamp's first. A reading takes over the memory of the state's
++        // earlier ones, the lanes' among it, and must read as it does fresh.
++        for (uint32_t l = 0; valid && expected && size == 0 && l < 4; l += 1)
+         {
+             check_corpus_deferred_lanes = 8;
+             check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+-            check_corpus_deferred_reread = l == 0 ? 1 : 8;
++            check_corpus_deferred_reread = l == 0 || l == 3 ? 1 : 8;
+             check_corpus_deferred_poison = l < 2;
++            check_corpus_deferred_stamp = l == 3 ? UINT32_MAX : 0;
+             CheckCorpusOutcome outcome;
+             check_corpus_measure(path, &options, false, true, &outcome);
+             const uint32_t first = check_corpus_deferred_reread;
+             check_corpus_deferred_reread = 0;
+             check_corpus_deferred_poison = false;
++            check_corpus_deferred_stamp = 0;
+             const uint64_t most = check_deferred_test_lanes(outcome.deferred_bodies, outcome.deferred_body_tokens, outcome.tokens - outcome.deferred_body_tokens,
+                                                             outcome.deferred_largest_body, outcome.deferred_second_body, 8, true);
+             const bool passed = outcome.prepared && outcome.equal && outcome.deferred_equal && outcome.deferred && outcome.deferred_active == most &&
+@@ -980,7 +1118,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
+             failures += !passed;
+             if (!passed)
+             {
+-                fprintf(stderr, "test-checker-deferred: %s on 8 lanes after a reading on %u%s: %s\n", name, first, l < 2 ? " whose memory was poisoned" : "",
++                fprintf(stderr, "test-checker-deferred: %s on 8 lanes after a reading on %u%s: %s\n", name, first,
++                        l < 2 ? " whose memory was poisoned" : l == 3 ? " whose lanes' stamps were then at their last" : "",
+                         !outcome.prepared ? "not preprocessed" : !outcome.deferred_equal ? "the deferred result differs" :
+                         !outcome.equal ? "the scalar and vector paths differ" : !outcome.deferred ? "not merged" :
+                         !check_corpus_deferred_kept ? "the state's memory wasn't kept" : "not every lane, or its reader copied by too many of them or by none");
+@@ -1096,6 +1235,13 @@ static int run_checker_deferred_tests(int count, char** arguments)
+     {
+         fprintf(stderr, "test-checker-deferred: the state's memory wasn't laid out, kept or released as it should be\n");
+     }
++    const bool names = check_deferred_test_lane_names();
++    checks += 1;
++    failures += !names;
++    if (!names)
++    {
++        fprintf(stderr, "test-checker-deferred: a lane's per-name columns weren't laid out, kept, cleared or refused as they should be\n");
++    }
+     if (!keep && valid)
+     {
+         rmdir(directory);
+diff --git a/src/buster/compiler/c_types.c b/src/buster/compiler/c_types.c
+index 860ec12..5c7412b 100644
+--- a/src/buster/compiler/c_types.c
++++ b/src/buster/compiler/c_types.c
+@@ -754,8 +754,8 @@ static __attribute__((unused)) String8 type_print(const TypeTable* table, Arena*
+ static __attribute__((unused)) bool type_changes_initialize(TypeChanges* changes, Arena* arena, uint32_t count, uint32_t parameters, uint32_t members);
+ static __attribute__((unused)) void type_changes_at(TypeTable* table, uint32_t position);
+ // Copies `source` into `table`, its columns from `arena` with room for `extra` more of each kind of record, and its index
+-// from `index_arena`, with room for the source's types and BUSTER_TYPE_COPY_INDEX_SLACK more, which grows past them as any
+-// index does (type_view_reset takes it back to a mark). False, with the arenas as they were, without room.
++// from `index_arena`, with room for the source's types and a slack more (BUSTER_TYPE_COPY_INDEX_SLACK), which grows past
++// them as any index does (type_view_reset takes it back to a mark). False, with the arenas as they were, without room.
+ static __attribute__((unused)) bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra);
+ // Takes a copy back to the counts it had (`mark`, from type_view_mark), the types made since out of its index, and
+ // hides nothing. An index that grew since is rebuilt at the mark's size.
+@@ -981,8 +981,10 @@ static const TypeBuiltin type_builtins[BUSTER_TYPE_CODE_COMPLEX] = {
+ #define BUSTER_TYPE_BUCKET_SLOTS 4
+ #define BUSTER_TYPE_BUCKET_BYTES 64
+ #define BUSTER_TYPE_INITIAL_BUCKETS 64
+-// The types past a copy's own that its index has room for before it grows (type_copy).
++// The types past a copy's own that its index has room for before it grows (type_copy): at most this many, and at most
++// as many as the source's types, but no fewer than the minimum.
+ #define BUSTER_TYPE_COPY_INDEX_SLACK 4096
++#define BUSTER_TYPE_COPY_INDEX_MINIMUM 512
+ _Static_assert(sizeof(TypeSlot) * BUSTER_TYPE_BUCKET_SLOTS == BUSTER_TYPE_BUCKET_BYTES, "a bucket is a cache line");
+ _Static_assert(sizeof(TypeLookupBucket) == BUSTER_TYPE_COLUMN_ALIGNMENT, "a lookup bucket is a cache line");
+ 
+@@ -5861,6 +5863,32 @@ static bool type_index_rebuild(TypeTable* table, uint64_t buckets, uint32_t type
+     return result;
+ }
+ 
++// The index made the source's, slot for slot, in the memory it has and past it: the same types in the same slots, as a
++// rebuild at the source's size would place them from the same columns. If the arena can't hold it, the index stays as
++// it was, as type_index_rebuild leaves it.
++static bool type_index_copy_slots(TypeTable* table, const TypeTable* source)
++{
++    TypeIndex* index = &table->index;
++    const uint64_t start = (uint64_t)((uint8_t*)index->slots - index->arena->base);
++    const uint64_t slots = (uint64_t)source->index.bucket_count * BUSTER_TYPE_BUCKET_SLOTS;
++    arena_pop_to(index->arena, start);
++    TypeSlot* copy = arena_push_array(index->arena, slots, sizeof(TypeSlot), BUSTER_TYPE_COLUMN_ALIGNMENT);
++    const bool result = copy != 0;
++    if (result)
++    {
++        memcpy(copy, source->index.slots, slots * sizeof(TypeSlot));
++        index->slots = copy;
++        index->bucket_count = source->index.bucket_count;
++        index->count = source->index.count;
++    }
++    else
++    {
++        arena_pop_to(index->arena, start);
++        arena_push_array(index->arena, (uint64_t)index->bucket_count * BUSTER_TYPE_BUCKET_SLOTS, sizeof(TypeSlot), BUSTER_TYPE_COLUMN_ALIGNMENT);
++    }
++    return result;
++}
++
+ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, Arena* index_arena, TypeCapacity extra)
+ {
+     const uint64_t length = arena->length;
+@@ -5920,14 +5948,28 @@ static bool type_copy(TypeTable* table, const TypeTable* source, Arena* arena, A
+         table->char_unsigned = source->char_unsigned;
+         // type_find_or_add grows the index past 3 types a bucket. An index for every type the copy may hold would be mostly
+         // empty, and its probes would miss the caches: #113's lanes each copy a unit's table with room for eight types a
+-        // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane.
+-        const uint64_t slack = extra.types < BUSTER_TYPE_COPY_INDEX_SLACK ? extra.types : BUSTER_TYPE_COPY_INDEX_SLACK;
+-        uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
+-        while (buckets * 3 < (uint64_t)table->types.count + slack + 1)
++        // token of its largest body, 232,048 for sqlite3.c's 3,256, an index of 8 MB a lane. So it has room for a slack
++        // of types past the source's, no more than BUSTER_TYPE_COPY_INDEX_SLACK and than the source's own (512 at
++        // least): a copy that outgrows it places its types again as any index does, in time proportional to those types.
++        // A larger slack cost every copy its pages, a memset copy's first touches: 32 of the 55 to 63 page faults of a
++        // lane's table on #697's units of a few hundred to a few thousand types. The source's index is copied as it is
++        // where it has the room, its slots rather than its types placed again.
++        const uint64_t own = source->index.count > BUSTER_TYPE_COPY_INDEX_MINIMUM ? source->index.count : BUSTER_TYPE_COPY_INDEX_MINIMUM;
++        uint64_t slack = extra.types < BUSTER_TYPE_COPY_INDEX_SLACK ? extra.types : BUSTER_TYPE_COPY_INDEX_SLACK;
++        slack = slack < own ? slack : own;
++        if ((uint64_t)source->index.count + slack + 1 <= 3ull * source->index.bucket_count)
++        {
++            valid = type_index_copy_slots(table, source);
++        }
++        else
+         {
+-            buckets *= 2;
++            uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
++            while (buckets * 3 < (uint64_t)table->types.count + slack + 1)
++            {
++                buckets *= 2;
++            }
++            valid = type_index_rebuild(table, buckets, table->types.count);
+         }
+-        valid = type_index_rebuild(table, buckets, table->types.count);
+     }
+     if (!valid)
+     {
+diff --git a/src/buster/compiler/c_types_deferred_test.c b/src/buster/compiler/c_types_deferred_test.c
+index 2f99618..3eb54d6 100644
+--- a/src/buster/compiler/c_types_deferred_test.c
++++ b/src/buster/compiler/c_types_deferred_test.c
+@@ -569,6 +569,71 @@ static bool type_deferred_unit(TypeTestTally* tally, TypeDeferredCoverage* cover
+     return valid;
+ }
+ 
++// A copy's index (type_copy): the source's slots copied as they are where its index has room for the copy's slack (no
++// more than BUSTER_TYPE_COPY_INDEX_SLACK and than the source's own types, BUSTER_TYPE_COPY_INDEX_MINIMUM at least), and
++// the source's types placed again with room for the slack otherwise. Chains of 100 pointers (their slack the minimum,
++// past the 64 buckets their index has), 7,000 (BUSTER_TYPE_COPY_INDEX_SLACK, which the 4,096 buckets theirs grew to
++// have room for) and 9,000 (whose don't). The copy finds every type of the source's at its id, and grows past its room
++// as any index does.
++static void type_deferred_index_copies(TypeTestTally* tally)
++{
++    static const uint32_t lengths[] = { 100, 7000, 9000 };
++    static const bool copied[] = { false, true, false };
++    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(lengths); c += 1)
++    {
++        TypeTestTable source = { 0 };
++        TypeTestTable copy = { 0 };
++        bool valid = type_test_table_open(&source, lengths[c] + 64);
++        TypeId last = BUSTER_TYPE_INT;
++        for (uint32_t i = 0; valid && i < lengths[c]; i += 1)
++        {
++            last = type_pointer(&source.table, last);
++            valid = last != 0;
++        }
++        copy.arena = arena_reserve(UINT64_C(1) << 28);
++        copy.index_arena = arena_reserve(UINT64_C(1) << 26);
++        const TypeCapacity extra = { .types = 16384, .parameters = 64, .tags = 64, .members = 64 };
++        valid = valid && type_copy(&copy.table, &source.table, &copy.arena, &copy.index_arena, extra);
++        type_test_expect(tally, valid, "deferred index copies", "a copy couldn't be made");
++        if (valid)
++        {
++            const TypeIndex* index = &source.table.index;
++            const uint64_t own = index->count > BUSTER_TYPE_COPY_INDEX_MINIMUM ? index->count : BUSTER_TYPE_COPY_INDEX_MINIMUM;
++            const uint64_t slack = own < BUSTER_TYPE_COPY_INDEX_SLACK ? own : BUSTER_TYPE_COPY_INDEX_SLACK;
++            uint64_t buckets = BUSTER_TYPE_INITIAL_BUCKETS;
++            while (buckets * 3 < (uint64_t)source.table.types.count + slack + 1)
++            {
++                buckets *= 2;
++            }
++            const bool same = copied[c] ? copy.table.index.bucket_count == index->bucket_count &&
++                                              memcmp(copy.table.index.slots, index->slots, (uint64_t)index->bucket_count * BUSTER_TYPE_BUCKET_BYTES) == 0 :
++                                          copy.table.index.bucket_count == buckets && buckets > index->bucket_count;
++            type_test_expect(tally, same && copy.table.index.count == index->count, "deferred index copies",
++                             copied[c] ? "the source's slots weren't copied as they are" : "the index wasn't made again with room for the slack");
++            // Every type of the source's at its id, none made again.
++            TypeId found = BUSTER_TYPE_INT;
++            for (uint32_t i = 0; found != 0 && i < lengths[c]; i += 1)
++            {
++                const TypeId next = type_pointer(&copy.table, found);
++                found = next != 0 && type_index(next) < source.table.types.count && source.table.types.base[type_index(next)] == found ? next : 0;
++            }
++            type_test_expect(tally, found == last && copy.table.types.count == source.table.types.count, "deferred index copies",
++                             "the copy doesn't find the source's types at their ids");
++            // Past its room, one type more than it holds: the index doubled, and the source's types still found.
++            const uint32_t room = copy.table.index.bucket_count;
++            TypeId more = last;
++            for (uint64_t i = (uint64_t)copy.table.index.count; more != 0 && i <= 3ull * room; i += 1)
++            {
++                more = type_pointer(&copy.table, more);
++            }
++            type_test_expect(tally, more != 0 && copy.table.index.bucket_count == room * 2 && type_pointer(&copy.table, BUSTER_TYPE_INT) == type_pointer(&source.table, BUSTER_TYPE_INT),
++                             "deferred index copies", "the copy's index didn't grow past its room");
++        }
++        type_test_table_close(&copy);
++        type_test_table_close(&source);
++    }
++}
++
+ // A view's batch requests pass its hidden types over, as one at a time; a replay refuses an incomplete record; and a
+ // view whose index grew is taken back as it was.
+ static void type_deferred_fixtures(TypeTestTally* tally, Arena* arena)
+@@ -643,6 +708,7 @@ static bool type_test_deferred(uint64_t seed, uint32_t count)
+     Arena arena = arena_reserve(UINT64_C(1) << 32);
+     uint64_t random = seed * 0x9E3779B97F4A7C15ull + 113;
+     type_deferred_fixtures(&tally, &arena);
++    type_deferred_index_copies(&tally);
+     static const uint32_t lane_counts[4] = { 1, 2, 3, 8 };
+     for (uint32_t u = 0; u < count && tally.failures == 0; u += 1)
+     {
