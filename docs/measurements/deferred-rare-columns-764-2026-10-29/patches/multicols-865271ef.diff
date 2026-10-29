@@ -1,0 +1,110 @@
+diff --git a/src/buster/compiler/c_check_deferred.c b/src/buster/compiler/c_check_deferred.c
+index 0ab02df2..9757fde0 100644
+--- a/src/buster/compiler/c_check_deferred.c
++++ b/src/buster/compiler/c_check_deferred.c
+@@ -307,6 +307,8 @@ struct CheckDeferred
+     // The lanes the bodies ran on, as the first records it: `lanes`, or fewer when the bodies' tokens pay for fewer or the
+     // bodies are fewer.
+     uint32_t active;
++    // The lanes the rule gives the bodies by the mask's runs, before the top level's walk (check_deferred_shared).
++    uint32_t planned;
+     uint64_t top_ns;
+     uint64_t environment_ns;
+     uint64_t lanes_ns;
+@@ -2183,6 +2185,23 @@ static void check_deferred_primary_part(CheckDeferred* deferred)
+     }
+ }
+ 
++// The lanes the bodies take: one, and one more per `lane_tokens` of the bodies' tokens (`total` of them in `bodies`)
++// beyond their critical path, the larger of the largest body and twice the second largest, no more than `lanes` or
++// the bodies (check_deferred_bodies says why).
++static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body, uint32_t lane_tokens)
++{
++    const uint64_t second = (uint64_t)second_body * 2;
++    const uint64_t path = largest > second ? largest : second;
++    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / lane_tokens;
++    const uint32_t most = deferred->lanes < bodies ? deferred->lanes : bodies;
++    return paid < most ? (uint32_t)paid : most;
++}
++
++static bool check_deferred_shared(const CheckDeferred* deferred)
++{
++    return deferred->planned > 1;
++}
++
+ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader)
+ {
+     CheckInput* input = reader->output;
+@@ -2279,11 +2298,7 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
+     const uint32_t count = reader->parser->tokens.count;
+     deferred->top_tokens = count > total ? (uint32_t)(count - total) : 0;
+     deferred->lane_tokens = BUSTER_CHECK_DEFERRED_LANE_TOKENS + deferred->top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS;
+-    const uint64_t second = (uint64_t)deferred->second_body * 2;
+-    const uint64_t path = deferred->largest_body > second ? deferred->largest_body : second;
+-    const uint64_t paid = deferred->every_lane ? UINT64_MAX : 1 + (total > path ? total - path : 0) / deferred->lane_tokens;
+-    const uint32_t most = deferred->lanes < deferred->body_count ? deferred->lanes : deferred->body_count;
+-    const uint32_t active = paid < most ? (uint32_t)paid : most;
++    const uint32_t active = check_deferred_rule(deferred, total, deferred->body_count, deferred->largest_body, deferred->second_body, deferred->lane_tokens);
+     // The lanes' parts, cut here rather than by the lanes, which would wait at lane_parts_by_cost's sync for the last of
+     // them to wake: the first lane, this thread, starts its part at once (check_deferred_lane).
+     deferred->parts = valid && deferred->body_count != 0 ? parts_by_cost(deferred->costs, deferred->body_count, active, deferred->boundaries, deferred->order) : 0;
+@@ -2442,6 +2457,9 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
+     bool valid = mask != 0 && types->types.count == BUSTER_TYPE_BUILTIN_COUNT && types->tags.count == 1 && types->changes == 0 && lanes != 0 &&
+                  lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
+     uint32_t bodies = 0;
++    uint64_t body_tokens = 0;
++    uint32_t largest = 0;
++    uint32_t second = 0;
+     if (valid)
+     {
+         memset(mask, 0, (uint64_t)count + 1);
+@@ -2450,12 +2468,19 @@ static bool check_input_deferred(CheckDeferred* deferred, CheckInput* input, con
+             const uint32_t close = parser->tree.parents[token];
+             if (parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY && close > token && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
+             {
+-                memset(mask + token, 1, (uint64_t)close - token + 1);
++                const uint32_t tokens = close - token + 1;
++                memset(mask + token, 1, tokens);
+                 bodies += 1;
++                body_tokens += tokens;
++                second = tokens > largest ? largest : tokens > second ? tokens : second;
++                largest = tokens > largest ? tokens : largest;
+                 token = close;
+             }
+         }
+     }
++    const uint32_t top_tokens = count > body_tokens ? (uint32_t)(count - body_tokens) : 0;
++    deferred->planned = check_deferred_rule(deferred, body_tokens, bodies, largest, second,
++                                            BUSTER_CHECK_DEFERRED_LANE_TOKENS + top_tokens / BUSTER_CHECK_DEFERRED_LANE_TOP_TOKENS);
+     deferred->cuts = valid ? BUSTER_ARENA_PUSH_ARRAY(&deferred->memory.arena, CheckDeferredCut, (uint64_t)bodies + 1) : 0;
+     deferred->body_capacity = bodies;
+     valid = valid && deferred->cuts != 0;
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 1db16bc2..f677cf80 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -450,6 +450,8 @@ typedef struct CheckInputReader CheckInputReader;
+ typedef struct CheckDeferred CheckDeferred;
+ static void check_deferred_cut(CheckInputReader* reader, uint32_t opening);
+ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* reader);
++// Whether the deferred reader's rule gives the bodies more than one lane, which write the token columns at once.
++static bool check_deferred_shared(const CheckDeferred* deferred);
+ // The top level's updates of a name's linked declaration and type, by position, from which a lane takes the state at its
+ // body's opening.
+ static void check_deferred_linked(CheckInputReader* reader, uint32_t name, uint32_t position);
+@@ -6066,9 +6068,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     X(tag_ends, uint32_t)
+ #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
+     const uint64_t sparse_small = ((0 BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+-    const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES)) + c_bindings_bytes(pp->table->count, count * 4 + 1);
++    const uint64_t sparse_columns = 0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES);
++    const uint64_t sparse_bytes = sparse_small + sparse_columns + c_bindings_bytes(pp->table->count, count * 4 + 1);
+ #undef BUSTER_CHECK_SPARSE_BYTES
+-    Arena sparse = valid ? arena_reserve_small(sparse_bytes, sparse_small > BUSTER_ARENA_SMALL_BYTES ? sparse_small : BUSTER_ARENA_SMALL_BYTES) : (Arena){ 0 };
++    // Deferred bodies' lanes write their entries of the token columns at once (#764): base pages through them.
++    const uint64_t sparse_shared = (sparse_small + sparse_columns + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
++    const uint64_t sparse_base = deferred != 0 && check_deferred_shared(deferred) ? sparse_shared : sparse_small;
++    Arena sparse = valid ? arena_reserve_small(sparse_bytes, sparse_base > BUSTER_ARENA_SMALL_BYTES ? sparse_base : BUSTER_ARENA_SMALL_BYTES) : (Arena){ 0 };
+ #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
+     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+     BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
