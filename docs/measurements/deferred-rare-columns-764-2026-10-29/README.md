@@ -382,9 +382,10 @@ and SO5 disagree in sign on `sqlite3.c` (+1.1% and −0.8%).
   (2,608 bodies, 0 differences, its symbols the same as clang's but the one documented inlined function;
   `logs/checker-sqlite-head-3b87d0c9.tsv`).
 - The mutation check (`scripts/mutants.sh`, `logs/mutants.txt`): four mutants of `3b87d0c9`, each built at `-O1` on the
-  owner's laptop, where `test-checker-deferred` must fail. The lanes never planned (`planned` always 1): 669 failures.
-  #791's first head's policy, base pages at every deferred reading: 432. `check_input_sparse_arena` ignoring the policy:
-  1, the mapping check. The second largest body taken wrong in the plan: 27, the rule's fixtures.
+  owner's mini PC (AMD Ryzen 9 7940HS), where `test-checker-deferred` must fail. The lanes never planned (`planned`
+  always 1): 669 failures. #791's first head's policy, base pages at every deferred reading: 432.
+  `check_input_sparse_arena` ignoring the policy: 1, the mapping check. The second largest body taken wrong in the plan:
+  27, the rule's fixtures.
 
 ## Limitations
 
@@ -393,7 +394,7 @@ and SO5 disagree in sign on `sqlite3.c` (+1.1% and −0.8%).
   exit status 1 in its first round's two runs, after which its other rounds were stopped), and gives no figure. The
   driver reads by source order, whose arena this change leaves as it was; SO5 and SOI measure source order's reader.
 - Campaign D1's trees `cols`, `multicols` and `pop` exist only as the commits named above and their patches here.
-- The mutation check ran on the owner's laptop (AMD Ryzen 9 7940HS, a Zen 4 core with AVX-512), not on the 9700X.
+- The mutation check ran on the owner's mini PC (AMD Ryzen 9 7940HS, a Zen 4 core with AVX-512), not on the 9700X.
 - Everything ran with transparent huge pages `always` (defrag `madvise`); other settings weren't measured.
 - The synthetic units are A2's, of one statement shape; B5's trade-off on real code is `sqlite3.c`'s and c-testsuite's
   (all of whose programs the rule reads on one lane).
