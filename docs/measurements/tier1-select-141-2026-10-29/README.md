@@ -90,13 +90,14 @@ range over the placements in parentheses:
 | wide | pipeline | vector | 79.058 | 78.639 | -0.53% (-1.11 to +1.40) | -0.02% |
 
 The plan is faster at every placement by the vector path, and at all but one by the scalar twin (`chain` +0.20% at
-one). The whole pipeline is faster at five of the six placements on every row; at the sixth, the head's code 704 bytes
-later, its runs were slower in all three rounds (`pressure`'s scalar twin 248.6 against 184.8 to 186.9 ns at the other
-placements, its vector path 178.7 against 146.1 to 148.0), where main's at the same shift weren't. The 9700X's
-counters of that executable (`logs/counters-704.txt`; its runs are timed, so it completes fewer instructions in about
-the same cycles) show it dispatching 1.28% of its operations from the legacy decoders against 0.87% at shift 0 and
-main's 0.92% at 704: the op cache missing on that layout's hot code, a placement of that executable rather than work
-the change adds.
+one). The whole pipeline's changes at five of the six placements run -4.07% to +0.43%, faster everywhere but at the
+first placement for `chain`'s and `wide`'s scalar twin (+0.21%, +0.43%) and `wide`'s vector path (+0.01%). At the
+sixth, the head's code 704 bytes later, its runs were slower in all three rounds (`pressure`'s scalar twin 248.7 ns
+against 184.9 to 186.6 at the other placements, its vector path 178.9 against 146.5 to 147.9), where main's at the same
+shift weren't. The 9700X's counters of that executable (`logs/counters-704.txt`; its runs are timed, so it completes
+fewer instructions in about the same cycles) show 1.37% of its dispatched operations coming from the legacy decoders,
+the rest from the op cache, against 0.94% at shift 0 and main's 0.99% at 704: the op cache missing on that layout's hot
+code, a placement of that executable rather than work the change adds.
 
 The records are the same: every row's structure is main's in every run, and `test-tier1-select --manifest` lists the
 same records.
