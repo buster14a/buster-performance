@@ -99,7 +99,7 @@ the plan, which the benchmark inlines, by more than its 2.75 instructions per no
 
 The plan is faster outside the floor on four rows: the vector path's three shapes and `wide`'s scalar twin. Every other
 row's median is lower than main's (-0.26% to -2.08%), within the floor: no row is slower. The pipeline's ranges reach
-+5.4% to +33.9% through one of the head's placements, its code 704 bytes later, whose runs were slower in all three
++1.7% to +33.9% through one of the head's placements, its code 704 bytes later, whose runs were slower in all three
 rounds (`pressure`'s scalar twin 248.7 ns against 184.9 to 186.6 at its other placements, its vector path 178.9 against
 146.5 to 147.9), where main's at the same shift weren't. The 9700X's counters of that executable
 (`logs/counters-704.txt`; its runs are timed, so it completes fewer instructions in about the same cycles) show 1.37% of
