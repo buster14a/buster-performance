@@ -59,8 +59,8 @@ The frozen `sqlite3.c` (the CI corpus's) with `-DSQLITE_OMIT_LOAD_EXTENSION -DSQ
 | `-c` wall, head | +0.03% | +0.05% | +0.13% |
 | `-c` wall, main again | −0.01% | −0.10% | +0.01% |
 
-So the single placement's `-E` difference was the code's placement: over placements and copies the head is within
-main's own floor in every round, for both commands.
+The single placement's `-E` difference is consistent with placement sensitivity: over placements and copies the head is within
+main's own floor in every round for both commands. These empirical A/A controls do not resolve a smaller changed-code cost.
 
 ## Limitations
 
