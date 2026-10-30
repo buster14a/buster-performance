@@ -30,6 +30,40 @@ and the current README. Earlier categorical wording about repeated root indices 
 property of this trace; the current statement is only that the schema supplies graph indices
 without source/function attribution and aggregation does not deduplicate them.
 
+## Final published-head addendum
+
+`final-head-b68/` comes from `/home/david/Documents/Codex/2026-10-30/tak/work/pr883-finalsan`.
+It records fresh complete O3 combined-sanitizer checker execution of published commit
+`b68c62de6f3a15eb70056835925979bc3079a433`, tree
+`88dc687093996c6f9360676bd0e40c5a4101c073`, with both post-run source archives
+independently verified against all 805 tracked public-tree blobs. The receipt records
+remote-head checks before and after execution. This is new final-head execution, not
+a relabeling of the earlier 9b33/5648 results.
+
+All 76 copied raw addendum files match their originals; its `raw-copy-verification.tsv`,
+`raw-files.sha256` and `raw-copy-check.log` record the transfer checks. Fresh per-host
+versions, argument metadata, 41-unit compile streams, binary identities, detector proofs,
+runtime settings, unfiltered checker logs, statuses and empty-report audits are separate
+from the original/corrected historical directories. Probe executables, compiler binaries,
+objects, corpus data and draft PR-body planning text are omitted. Metadata normalization
+and NUL-argument rendering follow the same disclosed inspection transformations below.
+
+The original 206 copied raw files remain byte-identical, including failed runs and the
+earlier 9b33/5648 inventory. A separate fresh b68/88dc trace and matched-object comparison
+is added under `final-head-b68/inventory/` only after independent source/identity and
+reaggregation review. Its origin is
+`/home/david/Documents/Codex/2026-10-30/tak/work/pr883-final-inventory`; all 55 copied raw
+files match that source and have their own copy ledger/hash checks. The trace compiler
+uses exact public b68 plus the reviewed diagnostic-only patch, and the untraced compiler
+is the source-identical final-head native O3 sanitizer binary, with the instrumentation
+difference disclosed. New binary hashes, exact common argv/cwd, raw records and aggregation,
+strict audit, object identities and post-run source/input checks are all retained.
+
+Fresh observed counts and object bytes match the earlier run, but this is independent
+execution on b68/88dc, not reuse of the 9b33/5648 receipt. No compiled binaries, objects,
+source archive or corpus contents are copied. Later main/source compositions, timing and
+the whole repository correctness inventory remain outside these bounded qualifications.
+
 ## New curation and derivations
 
 `README.md`, this provenance note, the copy ledger, metadata audit, package manifest and source
@@ -61,4 +95,5 @@ corpus remain outside this package. Source revisions and binary/object/input has
 The original locally retained oracle-failure directories also contain generated sources and binaries;
 this bounded packet retains the complete checker failure logs instead of copying those directories.
 Their source tests are recoverable from the exact recorded Buster tree. No measurement timings,
-second-input campaign, performance conclusion or later-head sanitizer execution is added here.
+second-input campaign or performance conclusion is added. The final-head sanitizer and
+diagnostic addendum is limited to exact b68/88dc; it does not execute later main.
