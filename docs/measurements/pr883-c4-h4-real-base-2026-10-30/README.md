@@ -1,0 +1,46 @@
+# H4 support build and real C4 BASE structural preparation for Buster #883
+
+This packet records the cold H4 support build and the **new real C4 BASE objects/zero structural preparation**. One BASE producer completed0; root accepted its exact BASE structural scope after independent full review. Produced Buster images were never invoked. Candidate construction, nonzero placements, runtime/semantic checks, numeric resolved operands, PT_LOAD checks and timing remain separate; this does not make [Buster #883](https://github.com/buster14a/buster/pull/883) ready.
+
+## Chronology and source lineage
+
+| Record | Actual outcome and scope |
+|---|---|
+| [Prior C4 helper/local packet](https://github.com/buster14a/buster-performance/tree/6c0adb6cca04d93f396168596363199aec8f0cb3/docs/measurements/pr883-c4-local-helper-2026-10-30) | Exact source26/producer17 and local controls. The old C3 real MAIN1 remains failed; copied-data successes retain local scope. |
+| [H4 cold support stage](raw/c4-support-stage-v4/README.txt) |37 operations:35 zero, two expected specific ENOENT exits. One official nine-unit C17/O2 support compile0. New helper288698b1…/121520bytes was not invoked or downloaded **during this stage**. |
+| [New real BASE producer](raw/objects-zero-v4-base/REPORT.txt) |63 operations:62 zero and one exact expected ENOENT exit. One objects invocation, original session29419, MAIN0; all52 child status files are exact0-newline. This later invocation executes helper288 to run C/-S/as/link producers, while treating generated objects/images as data. |
+| [Later root acceptance](raw/ROOT-C4-BASE-ACCEPTANCE-v1.json) |At21:17:37UTC, acceptance818d2ec2… binds exact RAW347/PAYLOAD307/report/archive/snapshot and independent whole review. Acceptance is BASE objects and shift-zero structural preparation only. |
+
+The original support README/SUMMARY and BASE reportc9fb895c…/summary34360dd4… retain their captured PENDING language. The separate acceptance note supplies the later disposition. The support stage’s historical “never invoked” statement remains stage-scoped. No old report, failed C3 attempt, previous helper package or earlier PR is rewritten.
+
+The helper source is exactly the prior [PR160 commit6c0adb6cca04d93f396168596363199aec8f0cb3](https://github.com/buster14a/buster-performance/commit/6c0adb6cca04d93f396168596363199aec8f0cb3), treeea664fe6d3f9243329342b78c29c8f310e307f4f: source26 manifestf0715d7f…, producer17 manifest0b8b569d…. [Exact source lineage](derived/producer-source-lineage.json) verifies all17 transferred files against those public SHA256/Git blobs; duplicate source and source archives are indexed rather than recopied. The BASE input is ce1bea1eeb8ece6db744726875b136fba023d317/treeb50d57fbe44c3a7225e60ba6e2d3cfd67b3bebf2,805 files, manifest2c8613c3…. Candidate references were preserved as files; no candidate807 source construction or fresh source-tree verification occurred.
+
+## Actual structural result
+
+[PINNED-IDENTITIES.json](PINNED-IDENTITIES.json) supplies full identities. Direct-normal and inside-0/compiler both match qualified normaldb8cbb44…. Original checker object8.o and inside-0/checker.o both match b8783141…. Native whole-image/object/canonical-source comparisons returned0. No produced compiler/image was run, even for help.
+
+The retained complete [object proof](raw/objects-zero-v4-base/payload/objects-base-v4/inside-0/object-proof.json) passes shift0,12905 symbols,118045 relocations and zero disclosures. The complete [linked proof](raw/objects-zero-v4-base/payload/objects-base-v4/inside-0/linked-proof.json) retains every810 owned-function/8763 operand record: base0x8fb000,1834623 hot bytes,4096 alignment and35052 masked bytes. Its PT_LOAD/numeric/runtime limits remain false.
+
+[Normalization](raw/objects-zero-v4-base/payload/objects-base-v4/normalization.json) records the one guarded BASE raw-to-canonical edit at line812247, check_test_action_constraints+0xcf1, preserving DC C0 via .byte0xdc,0xc0. Its data-only scope does not erase the surrounding real producer execution. Full assemblies are omitted with hashes; [bounded verbatim context](derived/normalization-assembly-context.json) retains the exact guarded region and original offsets/identities.
+
+All41 original comma-terminated Clang-MJ streams, exact child argv/stdout/stderr/status files, full effective C/as/direct-link/zero-link driver traces, nine flags and41 source entries are included. The compiler construction uses O3/march=znver5 and Wild; actual C/as triple is x86_64-unknown-linux-gnu, CPUznver5, with empty explicit feature arrays. No feature enumeration or runtime ISA qualification is inferred. The support compile’s distinct C17/O2 options remain separate.
+
+The snapshot has304 exact members:307 produced regular artifacts minus snapshot.sha256, prepared.json and ready.nul. Both excluded binding records are separately hashed. Ready retains its original four NUL fields and buster-hot-placement-c-v3 schema identifier; settings retains nine fields. This objects/zero ready record grants no resume/inside/nonzero/runtime or landing authority. There is no inside-0/complete.json and no invented internal source-post child status: reaching internal hp_verify_sources is source-backed by frozen hp_method.c:760. Full external BASE805/source17/toolchain/reference postchecks and native comparisons are separately retained.
+
+## Protocol and historical precision
+
+Both readiness surveys retain their11 operations/RAW48, bounded tested-path absence and owner observations. They establish no universal installation absence or idle/priority entitlement. Every actual support/BASE operation used its own genuine existing exclusive.sh lock, clean environment before the wrapper, and470s TERM plus10s kill bound inside the lock; waiting stayed outside. No outer series hold, manual HELD/CORES, reserve/priority change or CI cancellation occurred. [The locking precision note](raw/H4-SUPPORT-LOCKING-SCOPE-PRECISION-v1.txt) distinguishes legitimate wrapper owner-file bookkeeping from direct/manual owner writes.
+
+All actual operation receipts/original sessions/polls are preserved. BASE outer stderr29509bytes plus childstderr14491bytes were reviewed: queue/foreign-owner data, one expected absence, and four effective-driver traces. Quoted foreign time-runs/shell/Python command strings are owner metadata, not this producer’s executions or measurements. Clocks include queue/platform delays and establish chronology only. Support packaging permission/CWD failures and the BASE extraction-check wrong-CWD failure/corrected0 remain recorded; no artifact/producer retry follows from their correction.
+
+## Selected portable archive
+
+[ORIGINAL-COPY-INDEX.json](ORIGINAL-COPY-INDEX.json) maps931 exact raw copies/5720073bytes to their original paths, SHA256, sizes and modes. [OMITTED-PAYLOADS.json](OMITTED-PAYLOADS.json) completes the1008-member leaf union with77 omissions. All260 small BASE payload files/974885bytes remain included, including41 raw MJ streams,52 statuses,58 NUL files and the full849102-byte linked proof. Raw bytes, empty files and NUL delimiters are unchanged.
+
+Omissions comprise44 ELF objects/images, three large assemblies, three archives, ten full toolchain inventory copies and17 already-public source files. The ten complete9178-record inventories are byte-identical to exact prior [PR147 commit14d689f72e27f131b8973933346a1118bd6816fc](https://github.com/buster14a/buster-performance/commit/14d689f72e27f131b8973933346a1118bd6816fc) blobs; [complete public references](derived/prior-complete-ledger-references.json) give full SHA256/size/blob/file links. Source ledgers and all NEW operation/postcheck/driver/proof/snapshot/ready/MJ/status records remain available here. Compiled/assembly/archive omitted bytes retain exact local paths/hashes. H4’s support binary was remote-only/not downloaded, explicitly distinguished from local omissions. [SYMLINK-INDEX.json](SYMLINK-INDEX.json) retains the external four-link ledgers; the enumerated local evidence roots contain no symlink leaves.
+
+Historical manifests retain their original cwd and scope. BASE RAW347 covers metadata, **not archive or payload**; PAYLOAD307 separately covers the extracted artifact tree. Those original indexes can name omitted files and are not a complete public payload. Verify this selected packet using PORTABLE-SHA256SUMS, which excludes itself; its detached digest is supplied in the publication handoff. Git retains executable bits rather than all Unix permission bits; original mode/stat ledgers remain authoritative. [Curator integrity checks](derived/curation-integrity-check.json) are hash/data checks, not repeated qualification or experiments.
+
+## Provenance and remaining gates
+
+See [PROVENANCE.md](PROVENANCE.md). The prior PR147 normal/C1-C2/first-failure scope and [PR151](https://github.com/buster14a/buster-performance/pull/151) sanitizer archive remain separate. No historical DCO/source certification is added. Root accepted exact BASE structural preparation only; the separate reviewer/merger retains landing decisions. Candidate/nonzero/per-image runtime, numeric/PT_LOAD/semantic/sanitizer controls, two-input A/A/candidate timing and final #883 composition/readiness remain pending separate evidence and disposition.

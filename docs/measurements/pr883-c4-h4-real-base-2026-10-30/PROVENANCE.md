@@ -1,0 +1,11 @@
+# Provenance
+
+This additive packet curates original H4 support-stage/readiness/proposal receipts, new real C4 BASE producer/readiness/proposal receipts, exact metadata/NUL streams and later root acceptance. Original absolute paths, commands, source revisions, failed local inspection history and pending report wording remain byte-exact. Curator JSON/context indexes are separately labeled derived; they execute no archived command.
+
+Helper source26/producer17 is already public at buster-performance6c0adb6cca04d93f396168596363199aec8f0cb3/treeea664fe6d3f9243329342b78c29c8f310e307f4f. Exact17 source byte hashes/Git blobs are linked in derived/producer-source-lineage.json, retaining the source copyright/SPDX and project Apache-2.0 WITH LLVM-exception notices there. No helper source was changed or newly imported here.
+
+BASE compiler source is ce1bea1eeb8ece6db744726875b136fba023d317/treeb50d57fbe44c3a7225e60ba6e2d3cfd67b3bebf2,805 files. Its component-specific licensing/notices remain those of that source. The bounded generated assembly context records check_test_action_constraints from the pinned source and exact official Clang build, with full original assembly identities; it does not distribute the complete mixed compiler source/image.
+
+Clang23.1.4, its resource headers/runtimes, Wild, host system headers/libraries and the source/image inputs are external build/runtime dependencies. Their paths/identities appear as evidence; their implementation bytes, compiled support/compiler images, objects, source archives, full large assembly and binary artifact archive are not bundled by this packet. Complete9178-file toolchain digest inventories are linked to exact prior public PR147 blobs rather than repeated. Digest-line/version/driver metadata does not relabel those external components as first-party implementations.
+
+Original measurement prose, first-party helper references and new curator prose/data follow the existing project terms in [LICENSE](../../../LICENSE); identified components retain their applicable terms described by [THIRD_PARTY_NOTICES.md](../../../THIRD_PARTY_NOTICES.md) and retained source provenance. This publication adds no historical DCO certification, no broader source grant and no merge/landing authority.
