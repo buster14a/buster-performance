@@ -130,8 +130,10 @@ same 0x1570b2c bytes of `.text`) and whose `-c` object of `sqlite3.c` is base's;
 - **Base's code at the head's addresses runs about as slowly as the head's:** `pad` ran about as many extra cycles
   as the head in `-c` (+0.19% against +0.21%) and more in `-fsyntax-only` (+0.75% against +0.33%), with as many extra
   branch mispredictions in `-fsyntax-only` (+1.39% against +1.33%) and more than half of the head's in `-c` (+1.14%
-  against +2.06%), while it runs 4,097 instructions more than base. So the head's extra cycles in these runs are what
-  its code's placement, 32 KB later, costs base's own code too, rather than code the head runs.
+  against +2.06%), while it runs 4,097 instructions more than base. This control shows that moving base's code can
+  produce a slowdown of similar scale, making placement a plausible contributor to the head's difference in these
+  runs. It does not attribute all of the head's extra cycles to placement or exclude changed executed work as a
+  contributor.
 - **Not attributed:** these runs are of one executable each, whose cycles a byte-identical copy alone moves by about
   0.3% (the profiling guide's buster14a/buster#502), so the record compares `pad`'s cycles with the head's no finer
   than that; and the rest of the head's mispredictions in `-c`, 30,660 more than `pad`'s (0.9% of base's), it doesn't
