@@ -33,3 +33,12 @@ The directory's `PROVENANCE.md` identifies exact source/generator/tool inputs
 and distinguishes those snapshots from original helper code. External SQL,
 system headers and toolchain packages remain runtime dependencies; omitted
 large binaries/outputs retain their digests and explicit private dispositions.
+
+`docs/measurements/licm-867-2026-10-30/` records original LICM qualification
+orchestration, an evidence-only adapter and a summary reader under the project
+default terms. Its `fixtures/pr915-sqlite-normalize.c` adapts the two public-domain
+normalization loops at lines 38497-38498 of the frozen SQLite 3.53.2 amalgamation,
+SHA-256 `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`.
+The SQLite disclaimer/blessing is retained there; the report identifies the
+standalone interface and result adaptation. Other fixture code is original;
+Clang is an external build/behavior tool, with no implementation imported.

@@ -1,0 +1,138 @@
+diff --git a/src/buster/compiler/ir_optimize_passes_benchmark.c b/src/buster/compiler/ir_optimize_passes_benchmark.c
+index 233a32ab..442ea293 100644
+--- a/src/buster/compiler/ir_optimize_passes_benchmark.c
++++ b/src/buster/compiler/ir_optimize_passes_benchmark.c
+@@ -10,6 +10,10 @@ struct IrPassBenchmarkResult
+     IrFunction function;
+     uint64_t analysis_bytes;
+     uint32_t changed;
++    uint32_t eligible_loops;
++    uint64_t sweeps;
++    uint64_t visits;
++    bool fallback;
+ };
+ 
+ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena* scratch, uint32_t pass, bool scalar, IrPassBenchmarkResult* result)
+@@ -35,6 +39,10 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
+         candidate.function = run.function;
+         candidate.analysis_bytes = run.scratch_bytes;
+         candidate.changed = run.moved;
++        candidate.eligible_loops = run.eligible_loops;
++        candidate.sweeps = run.sweeps;
++        candidate.visits = run.visits;
++        candidate.fallback = run.fallback;
+     }
+     else if (pass == 2)
+     {
+@@ -99,6 +107,44 @@ static bool ir_pass_benchmark_fields(Arena* arena, IrFunction* f, uint32_t field
+     return created;
+ }
+ 
++// Evidence-only adapter: prepare one original C loop through the normal checker,
++// typed lowering and SSA promotion before the existing public-pass timing begins.
++static bool ir_pass_benchmark_source(Arena* arena, IrFunction* f, const char* source)
++{
++    Arena lowered = arena_reserve(64ull << 20);
++    Arena table = arena_reserve(64ull << 20);
++    Arena output = arena_reserve(64ull << 20);
++    Arena twin = arena_reserve(64ull << 20);
++    Arena scratch = arena_reserve(128ull << 20);
++    IrSourceFile file = { 0 };
++    bool valid = lowered.base != 0 && table.base != 0 && output.base != 0 && twin.base != 0 && scratch.base != 0;
++    if (valid)
++    {
++        ir_source_prepare(&file, source, NULL, 0, &lowered, &table);
++        valid = file.status == IR_SOURCE_PREPARED && file.count == 1;
++    }
++    IrFunction input = { 0 };
++    IrFunction scalar = { 0 };
++    if (valid)
++    {
++        const IrSourceFunction* function = &file.functions[0];
++        valid = ir_lower_typed(function->function, function->result_type, function->symbol_count, &output, &scratch, &input).error == IR_OK;
++        valid = valid && ir_lower_typed_scalar(function->function, function->result_type, function->symbol_count, &twin, &scratch, &scalar).error == IR_OK;
++        valid = valid && ir_lower_test_equal(&input, &scalar) && input.parameter_count == 1;
++    }
++    if (valid)
++    {
++        valid = ssa_ir_promote(&input, arena, &scratch, f).error == IR_OK;
++    }
++    printf("licm-source file=%s prepared=%u functions=%u instructions=%u\n", source, valid, file.count, valid ? f->instruction_count : 0);
++    arena_release(&scratch);
++    arena_release(&twin);
++    arena_release(&output);
++    arena_release(&table);
++    arena_release(&lowered);
++    return valid;
++}
++
+ static bool ir_pass_benchmark_fixture(Arena* arena, IrFunction* f, IrOptimizeTest* generator, uint32_t pass, uint32_t shape, uint32_t length, uint32_t fields)
+ {
+     bool valid = false;
+@@ -112,7 +158,8 @@ static bool ir_pass_benchmark_fixture(Arena* arena, IrFunction* f, IrOptimizeTes
+     }
+     else if (pass == 1)
+     {
+-        valid = shape == 0 ? ir_optimize_test_random_dag(arena, f, generator, 32) : shape == 1 ? ir_licm_test_nested(arena, f) : ir_licm_test_chain(arena, f, generator, length);
++        const char* source = getenv("BUSTER_LICM_SOURCE");
++        valid = shape == 0 ? ir_optimize_test_random_dag(arena, f, generator, 32) : shape == 1 ? source != NULL ? ir_pass_benchmark_source(arena, f, source) : ir_licm_test_nested(arena, f) : ir_licm_test_chain(arena, f, generator, length);
+     }
+     else
+     {
+@@ -152,10 +199,37 @@ static bool ir_pass_benchmark_check(const IrFunction* input, const IrPassBenchma
+         else
+         {
+             const IrOptimizeExecution before = ir_optimize_test_execute(input, scratch, parameter, 0);
++            const char* source_kind = getenv("BUSTER_LICM_SOURCE_KIND");
++            const bool source_control = pass == 1 && shape == 1 && getenv("BUSTER_LICM_SOURCE") != NULL;
++            uint64_t expected = (parameter + 13) * 7;
++            if (source_control)
++            {
++                valid = source_kind != NULL && before.status == 1;
++                if (valid && strcmp(source_kind, "sqlite-normalize") == 0)
++                {
++                    uint64_t highest = 0;
++                    for (uint64_t bit = 0; bit < 64; bit += 1)
++                    {
++                        highest = (parameter >> bit) != 0 ? bit : highest;
++                    }
++                    expected = highest > 3 ? 10 * (highest - 3) : 0;
++                }
++                else if (valid && strcmp(source_kind, "noloop") != 0)
++                {
++                    expected = 0;
++                    for (uint64_t i = 0; i < (parameter & 7); i += 1)
++                    {
++                        const uint64_t invariant = (parameter + 13) * 7;
++                        expected += strcmp(source_kind, "nested") == 0 ? 3 * (invariant ^ i) + 3 : invariant ^ i;
++                    }
++                }
++                valid = valid && before.value == expected;
++            }
+             for (uint32_t path = 0; valid && path < 2; path += 1)
+             {
+                 const IrOptimizeExecution after = ir_optimize_test_execute(&reference[path].function, scratch, parameter, 0);
+                 valid = before.status != 4 && before.status == after.status && before.value == after.value && (pass == 2 || before.effects == after.effects);
++                valid = valid && (!source_control || (after.status == 1 && after.value == expected));
+             }
+         }
+     }
+@@ -226,6 +300,18 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
+                 valid = ir_pass_benchmark_once(&input, &outputs[path], &scratch, pass, path == 0, &reference[path]);
+             }
+             valid = valid && ir_pass_benchmark_check(&input, reference, pass, shape, fields, &promoted, &scratch);
++            if (valid && pass == 1)
++            {
++                printf("licm-stats shape=%s scalar-loops=%u vector-loops=%u scalar-sweeps=%" PRIu64 " vector-sweeps=%" PRIu64 " scalar-visits=%" PRIu64 " vector-visits=%" PRIu64 " scalar-fallback=%u vector-fallback=%u\n", shapes[pass][shape], reference[0].eligible_loops, reference[1].eligible_loops, reference[0].sweeps, reference[1].sweeps, reference[0].visits, reference[1].visits, reference[0].fallback, reference[1].fallback);
++                if (shape == 1 && getenv("BUSTER_LICM_SOURCE") != NULL)
++                {
++                    const char* source_kind = getenv("BUSTER_LICM_SOURCE_KIND");
++                    const bool noloop = source_kind != NULL && strcmp(source_kind, "noloop") == 0;
++                    valid = valid && (noloop ? reference[1].eligible_loops == 0 && reference[1].changed == 0 : reference[1].eligible_loops != 0 && reference[1].changed != 0);
++                    ir_print(&input, &scratch, stdout);
++                    ir_print(&reference[1].function, &scratch, stdout);
++                }
++            }
+             if (valid)
+             {
+                 printf("ir-pass %s %s input=%u scalar-output=%u vector-output=%u scalar-changed=%u vector-changed=%u scalar-output-bytes=%" PRIu64 " vector-output-bytes=%" PRIu64 " scalar-analysis-bytes=%" PRIu64 " vector-analysis-bytes=%" PRIu64 "\n", names[pass], shapes[pass][shape], input.instruction_count, reference[0].function.instruction_count, reference[1].function.instruction_count, reference[0].changed, reference[1].changed, reference[0].function.arena_bytes, reference[1].function.arena_bytes, reference[0].analysis_bytes, reference[1].analysis_bytes);
