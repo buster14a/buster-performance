@@ -117,9 +117,10 @@ median from round 1.
 
 ## Limitations
 
-- **Placement.** One placement of each build was timed. Where code lands moves times like these by up to about 1.5%
-  (`docs/profiling.md`'s "Comparing two versions"), so the wall-time differences are within placement's reach. The
-  cycle and memory differences are not.
+- **Placement.** One placement of each build was timed. `docs/profiling.md`'s "Comparing two versions" reports
+  context-specific timing controls, including about 1.5%; these do not establish a placement bound for this comparison.
+  The observed wall-time, cycle and memory deltas are consistent with the lane-count change, but this experiment did
+  not isolate placement's contribution or measure a cycle/RSS placement floor.
 - **The timed head.** It carried `6fcb4489`'s tests, which `7bfaee29` changed. They are compiled into the same
   executable but not run by these commands.
 - **Exit statuses.** The `--time-stages` and `cores_cost` runs' statuses weren't logged; each wrote its whole report.
