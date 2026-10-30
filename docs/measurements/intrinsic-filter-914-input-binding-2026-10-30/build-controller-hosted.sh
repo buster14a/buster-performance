@@ -53,7 +53,8 @@ printf '%s\n' "$GITHUB_SHA" > "$receipt/trigger-sha.txt"
 test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
 git show -s --format=fuller HEAD > "$receipt/commit.txt"
 git rev-parse HEAD 'HEAD^{tree}' > "$receipt/git-identities.txt"
-printf 'reviewed_source_commit=%s\n' 0ead6f9a5f136039c15f28b56dd92d846a5ef04a > "$receipt/source-binding.txt"
+printf 'original_protocol_review_commit=%s\nbinding_fix_parent=%s\n' \
+    0ead6f9a5f136039c15f28b56dd92d846a5ef04a 66149e3b47205b16f70ad2f5899baaa8c4c5e0d3 > "$receipt/source-binding.txt"
 printf 'repository=%s\nref=%s\nevent=%s\nrun_id=%s\nrun_attempt=%s\nrunner_environment=%s\n' \
     "$GITHUB_REPOSITORY" "$GITHUB_REF" "$GITHUB_EVENT_NAME" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_ENVIRONMENT" > "$receipt/run.txt"
 printf '%s\n' "$PWD" > "$receipt/build-working-directory.txt"
@@ -62,17 +63,17 @@ uname -a > "$receipt/uname.txt"
 cp /etc/os-release "$receipt/os-release.txt"
 grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo > "$receipt/cpu-model.txt"
 
-# All four previously reviewed preparation files, including the 611-line C blob,
-# remain exact. Neither the controller nor another compiled program is run here.
+# Freeze all four corrected source/protocol files; original 0ead/66149 remain history.
+# Neither this controller nor another compiled program is run here.
 cat > "$receipt/frozen-source.sha256" <<'HASHES'
-c62b7db050a5d37bf5dcfe06b80e3519c0e1fd1452fa19a317da3950203ff5cc  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/profile914.c
-44c3719d7425ed3ba3011e1b2c5d88f14b2095e3347ae30bff205e3f60c31d1c  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/PLAN.md
-6fb47a3db0be74eb324d39a11e512f989513c8f75fb8e2754647d4f62e6ac6b2  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/DEPENDENCIES.tsv
-924849323fa27ecfd83ca48f6037d32de1264b1a9cc67e1b325fab731de98182  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/PROVENANCE.md
+5f7e12028829fbed3bd5ac92fdb80e0d003376a25f69ae1a08b41de008c1ea17  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/profile914.c
+b95694b55c05470b317e1b0f417bebebeb504b968ffaddbb02a2d8b8d3cedcb3  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/PLAN.md
+9bf91cf0488d3690f26fe2110b059099dff9044a0dd6e6b1858dcb932927af25  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/DEPENDENCIES.tsv
+a106c74445ad91ca945f4bf849438326dd68b2dc23b016803084bb151d1b7c2b  docs/measurements/intrinsic-filter-914-input-binding-2026-10-30/PROVENANCE.md
 HASHES
 sha256sum --check --strict "$receipt/frozen-source.sha256" > "$receipt/frozen-source-check.txt"
-test "$(wc -l < "$source")" -eq 611
-test "$(git hash-object --no-filters "$source")" = 0939d4855bd606a8f0950b462d9384b2268d29ad
+test "$(wc -l < "$source")" -eq 613
+test "$(git hash-object --no-filters "$source")" = beaa45b167b0413da525271c426167e43156fc5f
 git ls-tree HEAD -- "$directory/profile914.c" "$directory/PLAN.md" "$directory/DEPENDENCIES.tsv" "$directory/PROVENANCE.md" > "$receipt/source-git-blobs.txt"
 cp "$source" "$directory/PLAN.md" "$directory/DEPENDENCIES.tsv" "$directory/PROVENANCE.md" "$receipt/source/"
 cp "$directory/build-controller-hosted.sh" "$directory/HOSTED-BUILD.md" "$receipt/source/"

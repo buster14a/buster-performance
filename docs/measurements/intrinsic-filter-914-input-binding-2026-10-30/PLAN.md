@@ -1,8 +1,10 @@
 # Frozen-input binding remedy: preparation, with no new execution
 
-This is an unbuilt, unexecuted controller and a bounded plan for the remaining
+This is an unbuilt, unexecuted prospective target-pin correction and bounded plan for the remaining
 [#893](https://github.com/buster14a/buster/issues/893) frozen-SQLite predicate.
-It records no new verification, measurement, source qualification or acceptance.
+It records authenticated read-only target identities, no new measurement,
+source qualification or acceptance. The original 611-line controller's inert
+hosted build remains historical; it does not build this corrected source.
 The coordinating reviewer must independently review the exact additive commit
 and resource plan before authorizing staging or execution. No further user
 confirmation is requested by this preparation.
@@ -32,7 +34,7 @@ failed or insufficient attempt is retained and stops the plan; no automatic
 retry, added repetition matrix or favorable-result selection is authorized.
 
 No compiler implementation or Buster rebuild,220-unit rerun,A/A campaign,
-placement sweep, full sanitizer matrix, temporary workflow or CI dispatch is
+placement sweep, full sanitizer matrix, compiler-project temporary workflow or CI dispatch is
 included. Historical146's199 packet files, manifests, seven release assets/tag,
 old results/rejected attempts,140 and the additive21664f reporting note remain
 byte-for-byte intact. New verification cannot bind any old capture. This plan
@@ -42,8 +44,9 @@ does not measure current main or the prospective source merge.
 
 1. Review this exact C source, its full additive diff, expected identities and
    the lock/core/timeout plan. It deliberately invokes no shell command text.
-   This preparation has not compiled or run it, including its verification or
-   child modes. No syntax/build/test success is claimed.
+   This corrected preparation has not compiled or run it, including verification
+   or child modes. Original run 41105728145 built the earlier source only.
+   See `HOSTED-BUILD.md` for the exact reviewed build route and new source hashes.
 2. Recheck the applicable ordinary hosted source checks and source provenance
    for the intended pair before hardware use. Candidate58b's already recorded
    normal run41071125153 includes both hosted correctness configurations and
@@ -61,7 +64,7 @@ does not measure current main or the prospective source merge.
    Retain the full command, source commit/tree and source bytes, compiler/tool
    identity, stdout/stderr and genuine status. Independent review must bind the
    resulting executable to this exact source before it is staged. Its SHA is
-   **unknown now**; `APPROVED_WRAPPER_SHA256` below is an unfilled execution gate,
+   **unknown for the correction**; `APPROVED_WRAPPER_SHA256` below is an unfilled execution gate,
    not an invented identity. This compilation is not authorized by preparation.
 
 ## New private snapshot, during a later authorized staging step only
@@ -122,15 +125,19 @@ this private snapshot. `-nostdinc` and the three explicit bundled include roots
 are retained. Record actual before/after verification in the new arm receipt.
 
 Copy the two original compiler bytes and reviewed offline reader/adapter into
-the new layout without modifying them. Verify every expected hash in
-`DEPENDENCIES.tsv` before accepting the staged layout. Record actual executable
-and runtime dependency resolution from ELF metadata, preserving the original
-loader/libc and reader libdw/libelf identities. If dependencies differ or cannot
-be identified, stop for review rather than rebuild or silently substitute.
+the new layout without modifying them. Verify the applicable role-specific
+expected hashes in `DEPENDENCIES.tsv` before accepting the staged layout.
+The target capture perf/libdw/libelf pins are the actual read-only benchpress
+identities from 18:34 UTC; the unchanged f48c2d/a89708/1cff58 pins belong to
+historical offline analysis and are not target recorder expectations.
+Record actual executable/runtime resolution from ELF metadata; preserve the
+original target loader/libc and keep offline reader/adapter/runtime identities
+separate. If an applicable dependency differs or cannot be identified, stop
+for review rather than rebuild or silently substitute.
 The controller checks known identities before/after and records matching actual
 hashes of system taskset,sha256sum,timeout and the existing exclusive wrapper.
-Those extra system-tool identities are unknown in this preparation, not claimed
-to be frozen146 inputs. The root should read/freeze them for execution review.
+Those extra system-tool identities were recorded by current read-only preflight,
+not as frozen 146 inputs. Root must freeze/recheck the actual values before use.
 
 No command above has been run by this preparation. Staging itself needs the
 coordinating root's later bounded go-ahead and a fair, per-command resource plan;
@@ -164,7 +171,14 @@ noninteractive target `cores help` returned127; this is not a universal absence
 claim. If it is absent in the actual reviewed execution environment, retain that
 read-only receipt and use the normal host lock. The controller requires both
 CPU2 andCPU3 in its inherited allowed mask before narrowing; it never treats an
-unavailable CPU as permission to escape a grant.
+unavailable CPU as permission to escape a grant. Read-only preflight found cores
+absent from the actual `/usr/local/bin:/usr/bin:/bin` PATH and four known paths;
+current AGENTS makes its grant rule conditional on availability. That observed
+condition permits the normal fair global host-lock route, not a priority bypass
+or a claim of global absence. CPU2/3 are allowed/online/distinct, while CPU10 is
+offline and stays untouched. Recheck the actual environment before each arm;
+if cores appears, use its authenticated current grant/order or stop. No install,
+new scheduler helper or reservation is authorized by this plan.
 
 The reviewed per-arm command shape, conditional on those resource checks and
 the root's later go-ahead, is:

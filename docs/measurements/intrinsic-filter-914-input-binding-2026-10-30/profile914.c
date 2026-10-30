@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE.
-// PREPARATION ONLY: this source has not been built or executed. See PLAN.md.
+// PREPARATION ONLY: this prospective pin correction is unbuilt/unexecuted. See PLAN.md.
 // Original bounded controller. Existing perf/reader programs are external dependencies.
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -372,12 +372,14 @@ static bool profile_identities(const char* root, const char* self_hash, bool aft
         "/usr/bin/perf", "/usr/lib/libc.so.6", "/usr/lib/ld-linux-x86-64.so.2", "/usr/lib/libdw.so.1", "/usr/lib/libelf.so.1",
         "/usr/bin/taskset", "/usr/bin/sha256sum", "/usr/bin/timeout", "/home/david/buster-fast-bench/exclusive.sh",
     };
+    // Recording-host identities from the authorized 2026-10-30 read-only preflight.
+    // Historical offline-analysis identities remain separately named in DEPENDENCIES.tsv.
     static const char* const external_expected[] = {
-        "f48c2da1af219a48d5b959f4f874b3c6e64eab07211610c9435558898fe625dc",
+        "a6da58ffc54b3c9bfe8d0d046ade1dbc70e8f5121932e35de916ad39162f7d4f",
         "02c8c3d06180beee9c7d0392aa85736c7d19f274a81e7f8f0b3d9e28e0641524",
         "f5e11cc62f8f2c24dff532982559f4303dba3b17e7450551372a88c8e7ea8757",
-        "a89708a8f51ac2969c33cbb2f56a9209f18447a652b6f14ba84453476fa63c3e",
-        "1cff588f1129943c7391fab3e16d95eaa6586cf3c0483e7f95e50784f1389d94",
+        "14a4563f6fce1ce85c449ee79f0d877984ecb16c71b18103b72b2b4f57dc8786",
+        "13d3e3cb54d6120d87a0569ac67be05c029f8cd2e4bf44e75936b2721c8e08af",
         NULL, NULL, NULL, NULL,
     };
     bool valid = profile_hash_text(self_hash);

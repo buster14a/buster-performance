@@ -1,9 +1,12 @@
 # Controller-only hosted build route — preparation only
 
-This addition prepares the next ordinary GitHub-hosted compilation and identity
-receipt for reviewed preparation `0ead6f9a5f136039c15f28b56dd92d846a5ef04a`.
-The original four files and the 611-line controller remain byte-for-byte exact.
-There is no build result or new executable hash yet. Independent review of this
+This addition prepares a new ordinary GitHub-hosted build after the prospective
+target-tool pin correction. The full original protocol was reviewed at
+`0ead6f9a5f136039c15f28b56dd92d846a5ef04a`; its original 611-line source and
+first build at `66149e3b47205b16f70ad2f5899baaa8c4c5e0d3` remain historical.
+The current 613-line source changes only three recording-host hash constants
+and comments; offline-analysis identities remain separately documented.
+No build result or executable hash exists for this corrected source. Review of this
 exact workflow/recipe commit must precede root's go-ahead and any push that
 would trigger it. This is an internal scoped build gate, not another request
 for user permission.
@@ -22,7 +25,10 @@ It also refuses a non-GitHub-hosted runner or another repository/ref/event.
 **Do not push this branch yet.** Root will authorize that ordinary hosted build
 after independent exact-workflow review. No push, CI execution, artifact upload,
 physical-host staging, lock/core allocation, controller execution or measurement
-has occurred during preparation.
+has occurred for this corrected preparation. Original run 41105728145 completed
+only the earlier controller build, with inert ELF SHA256
+`a6b580585e2c77c7b2fe66281a25072359a95cca5a829a1bd1a62bd0f810430d`;
+that artifact was never executed and does not bind the corrected source.
 
 ## Approved tool and action identities
 
@@ -61,19 +67,23 @@ no external compiler implementation or runtime ELF is imported into Git.
 
 Checkout names the actual triggering `github.sha`, persists no credentials and
 uses sparse checkout for the controller directory and workflow. The job records
-the actual commit/tree, source Git blob identities and all four frozen source
-SHA256 checks. In particular:
+the actual commit/tree, source Git blob identities and all four corrected
+source/protocol SHA256 checks. The original protocol review commit and this
+additive binding correction's parent are recorded separately from the actual
+triggering/source commit. In particular:
 
 ```text
-profile914.c Git blob 0939d4855bd606a8f0950b462d9384b2268d29ad
-profile914.c SHA256 c62b7db050a5d37bf5dcfe06b80e3519c0e1fd1452fa19a317da3950203ff5cc
-profile914.c lines 611
+profile914.c Git blob beaa45b167b0413da525271c426167e43156fc5f
+profile914.c SHA256 5f7e12028829fbed3bd5ac92fdb80e0d003376a25f69ae1a08b41de008c1ea17
+profile914.c lines 613
 ```
 
 The new source is compiled once as one C translation unit, then that object is
 linked once by the same official Clang driver and the disposable image's GNU
-BFD linker. Baseline `-march=x86-64 -mtune=generic` avoids introducing a new host
-ISA requirement into this launcher. The substantive flags are:
+BFD linker. Controller source flags remain `-march=x86-64 -mtune=generic`.
+The original final ELF nevertheless declared x86-64-v3;
+the corrected artifact needs a fresh actual ELF/runtime/host compatibility
+review rather than a baseline-only deployment claim. The flags are:
 
 ```text
 --no-default-config -std=c17 -O2 -Wall -Wextra -Werror
