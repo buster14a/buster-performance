@@ -41,9 +41,11 @@ ended. The lock's own messages went to a separate directory that is not publishe
   compared with by `same_output`: the fragment count, offsets, starts, ends, kinds and registers, and the spill and
   interval counts. The other public fields (`value_registers`, `spill_ids`, `spill_values` and the statistics) were not
   compared in this record. The references are also checked with `tier1_allocation_verify` up to 4,096 intervals.
-  Medians of 11 samples, configurations rotating within each sample. The repetition count is calibrated once, so that
-  `vector-current`'s batch takes at least 2 ms, and every configuration reuses it: faster configurations' samples are
-  shorter in proportion to their cost, down to about 0.7 ms (temps-pressure's both-fixes, 0.37 of the baseline).
+  Medians of 11 samples, configurations rotating within each sample. The repetition count is calibrated once on
+  `vector-current` against a 2 ms threshold, then reused for every configuration. Faster configurations can have
+  shorter batches. About 0.7 ms is only an illustrative estimate from that threshold (temps-pressure's both-fixes,
+  0.37 of the baseline cost), not a retained observed batch minimum. The selected repetition count, calibration
+  elapsed time and individual batch durations were not retained.
 - `scripts/make_proto.sh`: makes `proto_impl.c` from the measured `tier1_allocate.c` by `sed`: `tier1_allocate_impl`
   with a variant parameter. Bit 0 replaces the prefix sum and pointer-jumping coloring with `proto_color`, which
   resolves each start's register in the same LIFO matching loop. Bit 1 replaces `tier1_allocate_scan` with
