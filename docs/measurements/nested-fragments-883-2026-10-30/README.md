@@ -8,7 +8,7 @@ or all-expression coverage claim.
 
 ## Exact source boundaries
 
-The successful sanitizer runs executed private archives of tree
+The earlier successful sanitizer runs executed private archives of tree
 `5648a6b82f166faea3d3d4cbc7b3c2093836ce43` **before** the corresponding integration commit
 was created. The committed tree of [9b33f1331f542254fb0f0a695f052ab8ba6f3ef8](https://github.com/buster14a/buster/commit/9b33f1331f542254fb0f0a695f052ab8ba6f3ef8)
 was then verified identical. That commit normally composes the original PR head
@@ -18,10 +18,11 @@ All four files changed by #883 remain byte-identical to the original PR head.
 
 The tested commit is now a public ancestor of PR head
 `b68c62de6f3a15eb70056835925979bc3079a433`, whose tree is
-`88dc687093996c6f9360676bd0e40c5a4101c073`. **The full sanitizer and inventory results in
-this packet apply to 9b33/5648, not to b68/88dc or later main.** The later composition's
-ordinary checker runs and [CI run 41043258950](https://github.com/buster14a/buster/actions/runs/41043258950)
-are separate evidence and are not included or reclassified here.
+`88dc687093996c6f9360676bd0e40c5a4101c073`. The historical `original/`, `corrected/`
+and `inventory/` records retain their original scopes. **New `final-head-b68/` sanitizer
+and SQLite diagnostic runs execute exact b68/88dc; the earlier inventory remains scoped
+to 9b33/5648.** Neither set executes later main. Ordinary checker runs and [CI run 41043258950](https://github.com/buster14a/buster/actions/runs/41043258950)
+remain separate evidence and are not reclassified as these sanitizer executions.
 
 The original failed runs used clean composition tree
 `d7dd1b1c7b94be3c318132c4db72c19a7c35e541`, from the same original PR/main parents.
@@ -73,9 +74,82 @@ they are not passes. Neither stage emitted a checker sanitizer report. The corre
 qualify this checker command on the exact corrected tree; they do not establish O1, TSan, MSan,
 fuzz acceptance, a 9700X performance result, or compiler-contribution certification.
 
-## Non-timing SQLite attempted-root diagnostic
+## New published-head qualification: b68/88dc
 
-After both corrected sanitizer checker runs finished, a fresh archive of the same tree was built
+The historical packet landed through [buster-performance #133](https://github.com/buster14a/buster-performance/pull/133).
+The separate `final-head-b68/` addendum records **new execution** of public commit
+[b68c62de6f3a15eb70056835925979bc3079a433](https://github.com/buster14a/buster/commit/b68c62de6f3a15eb70056835925979bc3079a433),
+tree `88dc687093996c6f9360676bd0e40c5a4101c073`, after its publication. The public head
+was independently checked before and after the runs. Both fresh source archives were
+verified against all 805 tracked blobs of that exact public tree.
+
+Each complete native/baseline build again records 41 O3 units with
+`address,undefined,bounds` instrumentation, followed by the same unfiltered
+`test-checker --seed 133` command under the approved fatal runtime configuration.
+All eight **fresh** fatal symbolized detector proofs pass in each configuration;
+proof reports remain separate from the empty real checker report directories.
+Both child-report audits run unconditionally. The host is the same Ryzen 9 7940HS,
+with Clang 23.1.4, native AVX-512 and baseline scalar configurations, using the
+two-core FIFO budget. No test filters or changed counts are introduced.
+
+| Exact b68/88dc host build | Checks | Assertion failures | Checker exit | Child-report audit exit |
+| --- | ---: | ---: | ---: | ---: |
+| native | 537,526 | 0 | 0 | 0 |
+| x86-64 | 539,630 | 0 | 0 | 0 |
+
+The new binaries' SHA-256 identities are recorded, with no executable included:
+
+- Native: `1c1db11d64f8ece9fd40ce3b4a0ed1ee4c30dd4a66a8771578fd383c82419ff2`.
+- Baseline: `bb416c36d7e26221863cfa1acf409d82682923b66d9495b55eed2825fc2fe5dd`.
+
+`final-head-b68/receipt.txt`, source/blob manifests, per-architecture compiler versions,
+arguments, compile metadata, detector proofs, checker logs, statuses, policy and audit
+files provide the new evidence. This qualifies the complete default checker command
+under the combined O3 sanitizers on exact b68/88dc. The new inventory below is separately
+executed; the earlier inventory/object comparison is not relabeled. These checker runs
+do not qualify the entire correctness inventory, other sanitizer modes, performance,
+contribution certification, or any later source composition.
+
+### Fresh b68/88dc SQLite diagnostic and object comparison
+
+After both final-head sanitizer checker runs finished, a new plain native O3 trace compiler
+was built from a fresh archive of exact public b68/88dc plus the same reviewed trace-only
+patch. Its SHA-256 is
+`2a777f00263fe20128ec4c61a6bae256436827073f76a3209a8a89b4008ac480`.
+The aggregator and patch are byte-identical to the reviewed earlier tools. Both 805-file
+source manifests and all 781 frozen headers are rechecked after execution.
+
+The fresh one-lane diagnostic uses the frozen inputs, explicit target/header/predefine
+flags and source epoch described below; its exact argv/cwd are in
+`final-head-b68/inventory/`. These are newly collected results:
+
+| Fresh b68/88dc diagnostic | Count |
+| --- | ---: |
+| Attempted-root calls | 11,290 |
+| Accepted calls | 275 |
+| Accepted visited-node sum | 1,473 |
+| Emitted typed entries | 1,472 |
+
+The raw stream contains 11,290 records and 627,965 bytes with no other stderr lines.
+Full refusal outcomes and visited/entry-size bands are in the new TSV. The independently
+collected counts equal the earlier ones; their source and execution receipts remain
+separate. The dispatch-attempt, partial-subtree and source-attribution limits described
+below apply equally here. No all-expression coverage or performance inference is made.
+
+The new source-matched untraced compile reuses the final-head native **ASan O3** binary
+identified above (`1c1db11d…`); its host instrumentation differs from the plain trace
+build. Both runs use identical complete target argv, cwd, input/output arguments and
+`SOURCE_DATE_EPOCH=1792454400`, with fresh approved fatal sanitizer policy and audit for
+the untraced run. Trace compile, aggregation, untraced compile, audit and object comparison
+all exit 0. Both new objects have SHA-256
+`9c75f7ea5e3230be22028f593bc804565cb22fabb0360a5541ee4d1896c3d3cc`.
+The equality is freshly observed, not assumed from the historical hash. It establishes
+object identity only for these two frozen-input compiles. Public PR head b68 was checked
+before the trace build and after comparison. No timing or source-branch change was made.
+
+## Earlier 9b33/5648 SQLite attempted-root diagnostic
+
+After both earlier corrected sanitizer checker runs finished, a fresh archive of tree 5648 was built
 with only the existing `BUSTER_CHECK_LOWER_FRAGMENT_TRACE` diagnostic enabled by the recorded
 `inventory/trace-flag.patch`. The build is separate, native O3 without sanitizer instrumentation;
 its pre/post source manifests differ only at `build.sh`. It must not be used for timing.
@@ -132,16 +206,21 @@ sanitizer suppression, source branch rewrite or timing campaign was introduced.
 
 - `original/` and `corrected/`: unmodified build, detector-proof, checker, audit, status, runtime,
   source and binary-hash receipts. Empty checker-report lists represent the audited empty report directories.
-- `inventory/`: raw attempted-root records, original C aggregator and its controls, exact trace patch,
+- `final-head-b68/`: separate fresh published-head source, build, detector, checker, binary-identity,
+  policy, status and audit receipts, plus its byte-copy ledger and metadata-inspection derivations.
+- `final-head-b68/inventory/`: the separately executed b68 diagnostic, exact source/tools/argv,
+  raw trace/aggregation and matched-source sanitized-host object comparison, with its own copy ledger.
+- `inventory/`: earlier 9b33/5648 attempted-root records, original C aggregator and its controls, exact trace patch,
   input/source/binary/object identities, commands, failures, successful results and object comparison.
 - `source/`: raw-copy ledger/checks, public commit/tree identities, and the 41-unit metadata audit.
 - `PROVENANCE.md`: origins, derivations and omitted artifacts. `package.sha256` verifies the packaged bytes.
 
-All 206 copied raw files are byte-identical to their recorded local sources. Recorded
+All 206 earlier raw files remain unchanged; the 76 new published-head sanitizer files and
+55 fresh inventory files are also byte-identical to their recorded local sources. Recorded
 `compile_commands.json` files are Clang `-MJ` fragment streams, not JSON arrays; the accompanying
 `compile_commands.normalized.json` files remove only each line's trailing comma and wrap the
-objects in an array for inspection. `original/compile-flags-native.argv.txt` renders the preserved
-NUL-delimited argv as one argument per line. Neither derivation changes compilation flags.
+objects in an array for inspection. The accompanying `*.argv.txt` files render preserved
+NUL-delimited compile argv as one argument per line. Neither derivation changes compilation flags.
 
 Compiler/probe/aggregator executables, object files, frozen corpus contents, full source archives,
 Git index files and generated failed-test binaries are omitted. NUL-delimited **argument metadata**
