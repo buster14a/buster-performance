@@ -9,8 +9,8 @@ It answers four questions:
 
 1. What does the current `tier1_allocate` cost per interval, by path, and what do two minimal fixes change?
 2. Where does the time go?
-3. What do the same lifetimes cost when an allocator takes them as the instruction stream the selector already has,
-   scalar and with an in-register AVX-512 kernel?
+3. What do similar lifetimes cost when an allocator takes them as the instruction stream the selector already has,
+   scalar and with an in-register AVX-512 kernel? (Similar, not identical: see "How the stream inputs differ".)
 4. For scale, what does LLVM's register allocation cost on `sqlite3.c` on the same machine?
 
 ## Sources and host
@@ -35,14 +35,20 @@ ended. The lock's own messages went to a separate directory that is not publishe
 
 - `scripts/harness.c`: whole `tier1_allocate` calls on ten synthetic workloads (the four of
   `benchmark-tier1-allocation`, mostly-short temporaries with 5% and 15% long values, and one reuse chain), five
-  configurations each, outputs compared byte for byte with the path's own `tier1_allocate` or
-  `tier1_allocate_scalar` (and checked with `tier1_allocation_verify` up to 4,096 intervals). Medians of 11 samples
-  of at least 2 ms, configurations rotating within each sample.
+  configurations each. Every timed configuration, the current algorithm's included, runs `proto_allocate_impl`, the
+  generated copy of `tier1_allocate_impl` (variant 0 is the current algorithm). The production entry points
+  `tier1_allocate` and `tier1_allocate_scalar` run only before timing, as the oracles each configuration's output is
+  compared with by `same_output`: the fragment count, offsets, starts, ends, kinds and registers, and the spill and
+  interval counts. The other public fields (`value_registers`, `spill_ids`, `spill_values` and the statistics) were not
+  compared in this record. The references are also checked with `tier1_allocation_verify` up to 4,096 intervals.
+  Medians of 11 samples, configurations rotating within each sample. The repetition count is calibrated once, so that
+  `vector-current`'s batch takes at least 2 ms, and every configuration reuses it: faster configurations' samples are
+  shorter in proportion to their cost, down to about 0.7 ms (temps-pressure's both-fixes, 0.37 of the baseline).
 - `scripts/make_proto.sh`: makes `proto_impl.c` from the measured `tier1_allocate.c` by `sed`: `tier1_allocate_impl`
   with a variant parameter. Bit 0 replaces the prefix sum and pointer-jumping coloring with `proto_color`, which
   resolves each start's register in the same LIFO matching loop. Bit 1 replaces `tier1_allocate_scan` with
   `proto_scan`, which frees a register at its interval's end event instead of checking 32 slots at every start.
-- `scripts/stream.c`: the temps-fit and one-chain lifetimes as an instruction stream (two fixed use slots per
+- `scripts/stream.c`: temps-fit-like and one-chain lifetimes as an instruction stream (two fixed use slots per
   instruction, instruction i defines value i), two classes of 16 registers. Last-use bits by a backward scan and by a
   "last reader" pass; assignment with one 64-bit free mask in a register, with and without forwarding the last two
   definitions' registers. An independent simulation checks every use.
@@ -59,10 +65,10 @@ ended. The lock's own messages went to a separate directory that is not publishe
 ### 1. `tier1_allocate`, whole calls
 
 Cycles per interval, medians of 11 (`logs/9700x/intervals-1.log`; `intervals-2.log`, the second round, is within
-4.2% of it everywhere). "Vector now" is `tier1_allocate`, "scalar now" is `tier1_allocate_scalar`'s path, "resolved"
-is variant 1, "end events" variant 2 and "both fixes" variant 3 of `proto_allocate_impl`. Each variant's output was
-compared byte for byte with its path's `tier1_allocate` or `tier1_allocate_scalar`; the harness exits 1 on a
-difference, and both rounds exit 0.
+4.2% of it everywhere). All five columns are `proto_allocate_impl`: "vector now" and "scalar now" are variant 0 (the
+current algorithm) on each path, "resolved" is variant 1, "end events" variant 2 and "both fixes" variant 3. Each
+configuration's output was compared by `same_output` (the fields listed above) with its path's `tier1_allocate` or
+`tier1_allocate_scalar`; the harness exits 1 on a difference, and both rounds exit 0.
 
 | Workload | Intervals | Peak (GPR/vector) | On the vector path | Vector now | Vector, resolved | Both fixes | Scalar now | Scalar, end events |
 | --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -101,9 +107,26 @@ intervals, summed by source line into phases (`scripts/phases.awk`).
 as `tier1_allocate.c`'s): it reloads `input->ends` (`0x8(%r15)`) twice per element and `input->count` (`0x5c(%r15)`)
 once, since under `-fno-strict-aliasing` each store may change the input struct.
 
-### 3. The same lifetimes as an instruction stream
+### 3. Similar lifetimes as an instruction stream
 
-Two classes of 16 registers, cycles per instruction (`logs/9700x/stream-1.log`; rounds 2 and 3 within 0.6%):
+#### How the stream inputs differ
+
+`stream.c` and `levels_gen.c` draw temps-fit-like lengths with the interval harness's generator, but they are similar
+synthetic shapes, not the interval workloads' lifetimes under another representation:
+
+- with two use slots per instruction, a use whose instruction already has two is postponed to the next instruction
+  with a free slot, and a use past the stream's end is dropped (its value is never killed);
+- the stream generators reset the random state for each workload, while the interval harness continues it from the
+  4,096-interval temps-fit workload into the 65,536-interval one.
+
+A data-only reconstruction of both generators finds 206 postponed and 7 dropped uses at 4,096 instructions (every
+requested length the same), and 3,067 postponed and 7 dropped uses at 65,536, where 45,659 of the requested lengths
+differ. The comparisons inside each prototype (scalar against AVX-512, against twins) use one input and are not
+affected; the comparison with the interval workloads is between similar shapes.
+
+#### Results
+
+Two classes of 16 registers, cycles per instruction (`logs/9700x/stream-1.log`; rounds 2 and 3 within about 0.7%):
 
 | Lifetimes | Instructions | Kills, backward scan | Kills, last reader | Assignment, lowest free | Lowest free, forwarding |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -112,7 +135,7 @@ Two classes of 16 registers, cycles per instruction (`logs/9700x/stream-1.log`; 
 | one-chain | 4,096 | 3.07 | 3.00 | 13.02 | 7.71 |
 | one-chain | 65,536 | 3.08 | 2.96 | 13.02 | 7.68 |
 
-One class of 32 registers, assignment only (`logs/9700x/levels-1.log`; round 2 within 0.6%):
+One class of 32 registers, assignment only (`logs/9700x/levels-1.log`; round 2 within about 0.6%):
 
 | Lifetimes | Instructions | Lowest free | Levels, scalar twin | Levels, AVX-512 | Levels, AVX-512 v2 |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -137,7 +160,8 @@ v2 runs 330 instructions per 21-instruction chunk.
 ### 4. LLVM on `sqlite3.c`
 
 One `-ftime-report` run per level (`logs/9700x/llvm-O2.log`, `llvm-O0.log`); instructions counted in the objects'
-`objdump -d`.
+`objdump -d`, after allocation (at `-O2` its spill code, 5.8% of them, is included in the denominator). The times
+are each pass's total CPU time from one run, not matched counter measurements.
 
 | Level | Instructions | Passes | Time | Per instruction |
 | --- | ---: | --- | ---: | ---: |
@@ -166,3 +190,13 @@ The `-O2` assembly's annotations (`logs/9700x/llvm-O2-asm.log`): 3,640 spills, 9
   `-ftime-report` run per optimization level; cycle figures for them assume 5.5 GHz.
 - The phase profile is one configuration (`vector-resolved`) on one workload (temps-fit, 4,096 intervals).
 - Exploratory runs earlier the same day (hand-copied, not part of this record) gave the same numbers within about 2%.
+
+## Corrections
+
+After [review 5718346232](https://github.com/buster14a/buster-performance/pull/157#pullrequestreview-5718346232), on
+2026-10-30, without changing the logs or rerunning anything: the timed configurations are described as
+`proto_allocate_impl` throughout (the production entry points are the pre-timing oracles); the calibration is
+described as `vector-current`'s, reused for every configuration; `same_output`'s compared fields replace "byte for
+byte"; the stream inputs are described as similar shapes, with the reconstruction's counts; the stream rounds' spread
+is about 0.7% (0.65%), not within 0.6%; and the LLVM denominator is stated as the objects' instructions after
+allocation.
