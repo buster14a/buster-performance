@@ -97,3 +97,39 @@ this bounded packet retains the complete checker failure logs instead of copying
 Their source tests are recoverable from the exact recorded Buster tree. No measurement timings,
 second-input campaign or performance conclusion is added. The final-head sanitizer and
 diagnostic addendum is limited to exact b68/88dc; it does not execute later main.
+
+## Propagated repair qualification addendum
+
+`propagated-cecd/` comes from
+`/home/david/Documents/Codex/2026-10-30/tak/work/pr883-propagated-qualification`.
+It records five fresh roles on actual commit `cecd49628570e28004254a5639f10d74a13d3346`,
+tree `4558f8ae3a7260670a186df0871088b250df1a3f`, created before freezing/execution.
+Ordered parents are b68 and accepted main ce1; the latter includes #918. All five 807-file
+archives and their modes were independently checked against that exact committed tree,
+and post-run source/binary checks pass. The source archives themselves are omitted.
+
+The 202 raw copies, their exact original paths/hashes and byte comparisons are recorded
+in its ledger/check log. They include source/controller manifests, every role's full
+build/compile/runtime/proof/test/audit/status receipts, the explicit ordinary-metadata
+label erratum and resolved preparation-wrapper failure. Raw controller, original derived
+labels and all prior historical records remain unchanged. Actual ordinary compile records
+carry no sanitizer; the corrected summary says 0 sanitizer units, versus 41 for each
+address/thread role. It does not recast the original mislabeled field as valid coverage.
+
+`inspection/` uses the previously disclosed comma-removal/JSON-array and NUL-to-newline
+inspection transformations only; retained raw metadata remains authoritative. The copy
+script and new README/provenance/ledgers/manifests are original curation, not imported
+compiler implementation. Clang, sanitizer runtimes, lld and system dependencies remain
+external tools. The repository's existing terms/notices continue to apply; no license
+or compiler contribution/DCO policy is imported or modified.
+
+Raw shell-escaped command captures retain the original trailing argument separator;
+a narrowly scoped attribute preserves those bytes without changing the source captures.
+
+Compiler/probe executables, objects, generated temporary test inputs and binaries, full
+source archives and Git indices are omitted. Source/binary hashes and completed local
+verification receipts identify the retained local artifacts. No new trace/inventory or
+timing data is collected. This addendum qualifies cecd's recorded commands only, not later
+main bfcfc35f, global coverage, throughput, full-suite/fuzz acceptance, original-material
+certification or draft readiness. The public-head guard remains historical to its check;
+publication of the additive source/evidence is coordinated separately.
