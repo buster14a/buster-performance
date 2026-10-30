@@ -4,7 +4,9 @@ This packet records two bounded qualifications for [Buster #883](https://github.
 complete default checker runs under O3 ASan/UBSan/bounds in native and baseline host builds,
 and one non-timing frozen-SQLite attempted-root diagnostic with a matched-source object comparison.
 It preserves the original failed checker runs as well as the corrected runs. It makes no speedup
-or all-expression coverage claim.
+or all-expression coverage claim. The separate `propagated-cecd/` addendum adds fresh
+ordinary/combined-sanitizer checker and native TSan shared-emission qualification on a
+later integration commit; it adds no SQLite inventory or timing execution.
 
 ## Exact source boundaries
 
@@ -16,7 +18,7 @@ was then verified identical. That commit normally composes the original PR head
 `c78ca51554ff895c8149a8d7f05307e53236b911` and the one fixture correction described below.
 All four files changed by #883 remain byte-identical to the original PR head.
 
-The tested commit is now a public ancestor of PR head
+The tested commit became a public ancestor of recorded PR head
 `b68c62de6f3a15eb70056835925979bc3079a433`, whose tree is
 `88dc687093996c6f9360676bd0e40c5a4101c073`. The historical `original/`, `corrected/`
 and `inventory/` records retain their original scopes. **New `final-head-b68/` sanitizer
@@ -33,7 +35,75 @@ through pointer output instead of returning a bfloat16 scalar. The special input
 remain, and the per-architecture checker counts are unchanged. See `source/commit-trees.txt`,
 `source/original-corrected-paths.txt`, and the original/corrected source receipts.
 
-## Complete checker command under combined sanitizers
+## Propagated shared-emission repair: cecd/4558
+
+Fresh qualification executed actual commit
+[`cecd49628570e28004254a5639f10d74a13d3346`](https://github.com/buster14a/buster/commit/cecd49628570e28004254a5639f10d74a13d3346),
+tree `4558f8ae3a7260670a186df0871088b250df1a3f`. It normally merges recorded public
+#883 head `b68c62de` with accepted main `ce1bea1eeb8ece6db744726875b136fba023d317`,
+which includes the [shared-emission lifetime repair #918](https://github.com/buster14a/buster/pull/918).
+The commit existed before all five fresh source archives and executions. Each archive's
+807 source blobs and executable modes were independently matched to the exact commit;
+all post-run source and binary checks passed. The four owned fragment implementation/test
+files still match original `0797050b` byte-for-byte; every other entry matches ce1.
+
+These are newly observed results on cecd, with one invocation per role:
+
+| Host build / instrumentation | Full command | Checks | Failures | Test exit | Audit exit |
+| --- | --- | ---: | ---: | ---: | ---: |
+| native ordinary O3 | `test-checker --seed 133` | 538,217 | 0 | 0 | n/a |
+| baseline x86-64 ordinary O3 | same | 540,321 | 0 | 0 | n/a |
+| native O3 ASan/UBSan/bounds | same | 538,217 | 0 | 0 | 0 |
+| baseline x86-64 O3 ASan/UBSan/bounds | same | 540,321 | 0 | 0 | 0 |
+| native O3 TSan | `test-check-units --keep` | 552 | 0 | 0 | 0 |
+
+Clang 23.1.4 and lld built all 41 units per role on the Ryzen 9 7940HS. Both address
+configurations instrument all units with `address,undefined,bounds`, and TSan instruments
+all 41 with `thread`. Ordinary builds have zero sanitizer-instrumented units. Each address
+role passes eight fresh fatal symbolized detector controls; TSan passes a fresh fatal
+symbolized race control, each expected-failure exit 86. The actual-suite report audits
+are empty. The approved fatal/leak/stack-lifetime runtime policy is retained, with audits
+after the tests regardless of status. Existing host-feature skips and TSan's existing
+reservation-test exclusion remain explicit; no additional case filter, suppression,
+relaxation or successful retry replaces a failure.
+
+The native TSan test observes 314 shared helper parts and retains the existing shared
+object/linked-output identity and generated-program execution controls. This qualifies
+the complete recorded checker commands and focused shared-emission test, not the whole
+repository correctness inventory or fuzzing. No unsupported target instruction is forced.
+Heavy calls use separate core grants: proof 1, build 2, checker/test 3 physical cores.
+Exact cwd, NUL argv, grants, compiler arguments, metadata, binary hashes, policy, logs,
+statuses and before/after source checks are retained in `propagated-cecd/raw/`.
+
+The raw ordinary `metadata-counts.txt` files mistakenly call the total-unit alias
+`instrumented_units=41`. They are preserved unchanged beside the frozen controller.
+`propagated-cecd/raw/METADATA-NOTE.txt` and `metadata-summary.tsv` explicitly correct that label from the
+actual compile records: ordinary sanitizer units 0, address/thread 41. Independent review
+checked the flags directly; no execution was repeated for this bookkeeping correction.
+The earlier post-merge wrapper's reserved-variable error is likewise retained in preparation
+history; it caused no compiler/checker retry and no lost numeric merge status is invented.
+
+`propagated-cecd/raw-copy-verification.tsv` maps all 202 copied raw receipts to their local
+originals; every copy is byte-identical. Its inspection files only normalize Clang `-MJ`
+fragments into JSON arrays or render retained NUL argv as lines. Compiler/probe binaries,
+objects, generated temporary test inputs, full source archives and Git index files are
+omitted. The raw guards record public #883 still at b68 through qualification; main had
+advanced to `bfcfc35f11ceecfebf00d1b708656047703a1f50` afterward, outside this executed tree.
+
+Historical d7dd failures, 9b33/5648 successes/inventory and b68/88dc successes/inventory
+remain unchanged and keep their original scopes. **No new cecd SQLite inventory or timing
+campaign ran.** Older attempted-root counts/object identities do not transfer to cecd.
+These checks make no throughput, global-expression-coverage, original-material certification,
+draft-readiness, bare-parent or later-main execution claim.
+
+The retained controllers/copy script use historical absolute working paths and refuse
+existing destinations. They are audit/reproduction context, not a portable automatic rerun.
+Raw shell-escaped command captures retain their trailing argument separator through a
+narrow whitespace attribute for those captures; the NUL argv remains alongside them.
+The previous package manifest is retained as `propagated-cecd/previous-package.sha256`;
+use the current top-level `package.sha256` to verify the expanded record.
+
+## Earlier complete checker command under combined sanitizers
 
 Host: AMD Ryzen 9 7940HS (Zen 4), Linux, Clang 23.1.4. This host meets the native AVX-512
 predicate; `BUSTER_HOST_ARCH=x86-64` separately exercises the baseline scalar fallback.
