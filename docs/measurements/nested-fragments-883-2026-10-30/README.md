@@ -2,11 +2,12 @@
 
 This packet records two bounded qualifications for [Buster #883](https://github.com/buster14a/buster/pull/883):
 complete default checker runs under O3 ASan/UBSan/bounds in native and baseline host builds,
-and one non-timing frozen-SQLite attempted-root diagnostic with a matched-source object comparison.
+and non-timing frozen-SQLite attempted-root diagnostics with matched-source object comparisons.
 It preserves the original failed checker runs as well as the corrected runs. It makes no speedup
 or all-expression coverage claim. The separate `propagated-cecd/` addendum adds fresh
 ordinary/combined-sanitizer checker and native TSan shared-emission qualification on a
-later integration commit; it adds no SQLite inventory or timing execution.
+later integration commit. Its separately executed `propagated-cecd/inventory/` now adds
+a fresh SQLite diagnostic/object comparison on that exact commit. No timing campaign is added.
 
 ## Exact source boundaries
 
@@ -91,8 +92,9 @@ omitted. The raw guards record public #883 still at b68 through qualification; m
 advanced to `bfcfc35f11ceecfebf00d1b708656047703a1f50` afterward, outside this executed tree.
 
 Historical d7dd failures, 9b33/5648 successes/inventory and b68/88dc successes/inventory
-remain unchanged and keep their original scopes. **No new cecd SQLite inventory or timing
-campaign ran.** Older attempted-root counts/object identities do not transfer to cecd.
+remain unchanged and keep their original scopes. Those five qualification roles contain
+no SQLite inventory or timing campaign; the separate new inventory is described below.
+Older attempted-root counts/object identities do not transfer to cecd.
 These checks make no throughput, global-expression-coverage, original-material certification,
 draft-readiness, bare-parent or later-main execution claim.
 
@@ -102,6 +104,73 @@ Raw shell-escaped command captures retain their trailing argument separator thro
 narrow whitespace attribute for those captures; the NUL argv remains alongside them.
 The previous package manifest is retained as `propagated-cecd/previous-package.sha256`;
 use the current top-level `package.sha256` to verify the expanded record.
+
+### Fresh cecd/4558 SQLite diagnostic and object comparison
+
+After source cecd was public and the five-role qualification was complete, one fresh
+non-timing diagnostic executed exact `cecd49628570e28004254a5639f10d74a13d3346` / tree
+`4558f8ae3a7260670a186df0871088b250df1a3f`. Independent setup review matched all 807
+archive paths, blobs and modes. Only the byte-exact reviewed trace patch enables the
+existing diagnostic in `build.sh`; the original C17 aggregator is likewise byte-identical.
+All 41 trace-build units use native O3 without sanitizers; the trace compiler SHA256 is
+`16abf9f9f50af1ffbc331ea415452d7e97cd7fe1b19f8c8eb1bff82c1a454f72`.
+
+The comparison reuses the source-matched cecd native O3 ASan/UBSan/bounds compiler
+qualified above, SHA256
+`b7e4c7e1bbd2b7301922ea60ddb7418acc7bbd7581b309bd8232029ec23956e0`.
+Its sanitizer host instrumentation differs from the plain trace build; these binaries
+are not represented as otherwise identical. Its previous full checker/detector execution
+is not rerun or relabeled. The new input compile has fresh approved fatal runtime policy,
+separate reports and an unconditional audit, which exits 0 with no compiler/child report.
+
+Both new compiles use identical complete target argv, cwd, output path and
+`SOURCE_DATE_EPOCH=1792454400`: one lane, `-c`, explicit x86_64-linux-gnu target, `-march=znver5`,
+GNU17, `-nostdinc`, pinned predefines and three frozen include directories. Only the output
+directory changes from the earlier corrected original target argv; no unsupported-option
+bypass is introduced. No generated target object is executed. Each compile has its own
+one-core grant; trace/tool builds use separate two/one-core grants.
+
+The fresh input checks verify SQLite SHA256
+`0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, GNU17 predefines
+`a39036d8215977b5a205f7fd3c4e7dfe6576b58eaa76a7bb0b0e214a164e8d33`, and all 781 frozen
+header-tree files (manifest SHA256 `2375b54d1e13fa840facbf6c2bf0be68bf360faff0c7092342e2d0462390e691`).
+Both 807-file source manifests, the frozen inputs and both compiler identities are rechecked
+after execution. Public-head guards observe cecd before and after the comparison.
+
+| Newly observed cecd diagnostic | Count |
+| --- | ---: |
+| Attempted-root calls | 11,290 |
+| Accepted calls | 275 |
+| Accepted visited-node sum | 1,473 |
+| Emitted typed entries | 1,472 |
+
+The new raw trace has 11,290 records, 627,965 bytes and no other stderr lines. Full outcomes
+and visit/entry bands remain in the TSV; independent reaggregation and arithmetic reproduce
+them exactly. These are calls that reach the nested-fragment gate after the adjacent path
+fails. Adjacent successes/pre-gate refusals are omitted; refusal visits can be partial,
+and fallback can attempt descendants. Graph indices lack function/source attribution and
+are not deduplicated. There is no all-expression denominator, rejection percentage, unique
+expression coverage or per-operator attribution in this schema.
+
+Trace compile, aggregation, untraced compile, strict audit and comparison all exit 0.
+The two new unmodified objects compare identically at SHA256
+`9c75f7ea5e3230be22028f593bc804565cb22fabb0360a5541ee4d1896c3d3cc`.
+Counts, trace/TSV hashes and object bytes happen to equal earlier records, but these are
+distinct new executions with their own source, binaries, commands, policy and status receipts.
+The equality establishes identity for these two frozen-input compiles only; no older result
+was substituted, and no corpus-wide semantic or throughput conclusion follows.
+
+`propagated-cecd/inventory/raw/` contains 84 byte-identical copies from the new execution.
+Its own copy ledger/check log maps them to original paths and hashes. `inspection/` only
+normalizes the retained Clang metadata or renders NUL argv; `CURATION.txt` records those
+native CLI transformations. Compiled tools/compilers, objects, full source archives and
+frozen corpus contents are omitted. The redundant full host macro dump remains local with
+its original hash; inspection retains only the first-party `BUSTER_HOST_VECTOR=1` predicate.
+Original hash lists retain the omitted dump's identity and are not portable package checks.
+The preceding 593-entry package manifest is retained
+as `propagated-cecd/inventory/previous-package.sha256`; all preceding raw records remain
+unchanged. Final measured compositions, timing, original-material certification and draft
+readiness remain separate; this record makes no later-main or performance claim.
 
 ## Earlier complete checker command under combined sanitizers
 

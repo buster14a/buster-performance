@@ -128,8 +128,52 @@ a narrowly scoped attribute preserves those bytes without changing the source ca
 
 Compiler/probe executables, objects, generated temporary test inputs and binaries, full
 source archives and Git indices are omitted. Source/binary hashes and completed local
-verification receipts identify the retained local artifacts. No new trace/inventory or
-timing data is collected. This addendum qualifies cecd's recorded commands only, not later
+verification receipts identify the retained local artifacts. Those five roles collect no
+trace/inventory or timing data. This qualification covers cecd's recorded commands only, not later
 main bfcfc35f, global coverage, throughput, full-suite/fuzz acceptance, original-material
 certification or draft readiness. The public-head guard remains historical to its check;
 publication of the additive source/evidence is coordinated separately.
+
+## Fresh cecd inventory/object-comparison successor
+
+`propagated-cecd/inventory/` comes from
+`/home/david/Documents/Codex/2026-10-30/tak/work/pr883-cecd-inventory` and adds one fresh
+non-timing frozen-SQLite attempted-root diagnostic on public cecd/tree4558. Its original
+source archive contains all 807 recorded commit paths, blobs and modes; only the exact
+reviewed trace define changes `build.sh`. The original aggregator and trace patch are
+copied byte-for-byte from the previously reviewed preparation. All input/source/tool
+identities and exact commands are retained; no previous trace or result is relabeled.
+
+The 84 raw copies match their local originals and are mapped by this successor's copy
+ledger/hash checks. They include the fresh raw trace/aggregation, one-lane commands,
+runtime/audit/status files, source/input/header/compiler/object identities, full trace
+build metadata and pre/post verification receipts. The reused untraced binary is the
+new cecd native combined-sanitizer compiler identified in #137's qualification receipts;
+its different host instrumentation is explicitly disclosed. Its full checker/proof runs
+are not performed again. The fresh untraced input compile has separate fatal runtime
+configuration and an empty unconditional audit.
+
+The only new curation uses native CLI copying, byte comparisons and hashing, plus the
+already audited metadata comma-removal/JSON-array and NUL-to-newline transformations.
+`CURATION.txt` records those operations. No new functional supporting tool or test logic
+is introduced; the retained C aggregator and archived execution controllers are unchanged.
+The repository's existing notices/terms remain, with no license change or imported
+compiler certification/DCO policy. Clang, sanitizer runtimes and the frozen external
+SQLite/predefines/header inputs remain external; only hashes and diagnostics are included.
+
+All existing raw records, counts and identities remain unchanged. The previous complete
+593-entry manifest is retained separately before expanding `package.sha256`. No compiled
+binary, target object, full source archive or frozen corpus content is copied. New trace
+counts and object bytes happen to equal historical observations, but fresh independent
+reaggregation, source binding and object/runtime review support the new cecd execution.
+This establishes attempted-root counts and object identity for two input compiles, not
+global expression coverage, timing, corpus-wide semantics, later-main execution or final
+measured-composition qualification.
+
+The full mixed compiler/system-header macro dump `host-vector.txt` is a redundant local
+setup artifact and is omitted from this bounded successor. Its original hash remains
+in the unmodified setup/receipt hash lists and `inspection/host-vector-omitted.sha256`; only the
+first-party BUSTER_HOST_VECTOR predicate from cecd's host_isa.h is selected for inspection.
+This avoids incorporating additional macro/header contents. The original local dump is
+unchanged. Use the top-level package manifest to verify included bytes; original receipt
+hash lists retain their source identities, including this explicit omitted artifact.
