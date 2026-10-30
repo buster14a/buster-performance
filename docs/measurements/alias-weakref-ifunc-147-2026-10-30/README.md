@@ -36,8 +36,8 @@ time-runs --runs 21 --list -c ...`, five rounds whose trees' order rotates (`log
   1,334,511,583 to 1,334,511,592 at the head: +126,500 (+0.0095%), which this record doesn't attribute.
 - **`-c` time** (`logs/ab-alias.log`, one placement, medians of five rounds' medians of 21 processes): 129.050 ms on
   main and 128.006 ms at the head (−0.81%; the head's round medians 127.867 to 128.101, main's 128.996 to 129.169),
-  user cycles 607.09M and 600.66M (−1.06%). The head runs more instructions, so the difference is the code's
-  placement, not a gain this record claims.
+  user cycles 607.09M and 600.66M (−1.06%). The cause of this one-placement timing difference
+  remains unresolved, with placement a possible contributor. This record claims no gain.
 
 ## Limitations
 
