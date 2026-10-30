@@ -12,7 +12,7 @@ local walk, lookup and preparation costs remain in the whole compilation and
 The complete qualification passes. Shipping SQLite whole-process wall upper
 medians are 1.03% lower in the ordinary state and 0.93% lower after the recorded
 light-integer conditioning. Charged LOWER is 8.83% lower in the ordinary-layout
-stage campaign. Layout/copy sensitivity remains visible, including an
+stage campaign. Layout/copy sensitivity remains visible, including a
 per-round all-cross-copy envelope crossing zero. These results support the bounded reuse
 change and its work reduction; they do not claim every copy/layout contrast
 wins, a corpus-wide speedup, or qualification of later integrated main.
