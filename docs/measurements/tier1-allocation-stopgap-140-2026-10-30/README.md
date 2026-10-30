@@ -41,11 +41,12 @@ separate directory that is not published.
 | `test-head-tier1-allocation-seed7`, `-seed99` (4,000 cases each) | 31,546 and 31,549 checks, 0 failures |
 | `test-head-tier1-liveness`, `-emit`, `-frame` | 20,433, 179,845 and 2,273,931 checks, 0 failures |
 | `test-head-tier1-pipeline` (`--cross-check`) | 3,554 checks, 0 failures; 1,024 native and 512 Clang results |
-| `differential-main`, `differential-head` | 3,210 cases on both entry points: every status, every public field's hash and the retained bytes identical in all 6,420 runs |
+| `differential-main`, `differential-head` | 3,210 cases on both entry points, 6,420 main/head pairs: 6,204 successful results agree in the logical-field hash and retained bytes; 216 constraint refusals agree in status and restore the arena |
 
-`scripts/differential.c` hashes every public field of `Tier1Allocation`: fragment count and columns, value registers,
+`scripts/differential.c` hashes the logical fields of each successful `Tier1Allocation`: fragment count and columns, value registers,
 spill ids and values, the interval counts, splits and peak pressures. It also prints the status, the retained bytes
-and the arena's growth. Its cases are:
+and the arena's growth. For constraint refusals, the hash, retained and scratch values are zero placeholders; the
+result fields are not inspected. Its cases are:
 - `benchmark-tier1-allocation`'s four workloads, and the review record's six;
 - 3,000 of `tier1_allocate_test.c`'s generated shapes: fixed ranges, narrowed masks, hints, rematerialization, and
   required uses on every fifth;
@@ -87,6 +88,6 @@ The ranges of main and head never overlap.
 - `benchmark-tier1-allocation`'s four synthetic workloads only: Tier 1 compiles no corpus yet.
 - Five processes per tree and mode for the plain and isolated runs, three for the runs after scalar work; each
   benchmark process reports medians of 11 samples, calibrated on the vector path.
-- The differential compares 64-bit FNV-1a hashes of every public field, not the fields' bytes side by side; a hash
-  collision would hide a difference.
+- The differential compares 64-bit FNV-1a hashes of successful results' logical fields, not the fields' bytes side
+  by side; a hash collision would hide a difference. Constraint refusals compare status and arena restoration only.
 - The local mutant and code checks have no receipts in this record.
