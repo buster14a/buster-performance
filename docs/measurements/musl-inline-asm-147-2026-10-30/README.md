@@ -11,7 +11,7 @@ first the branch as it was (`1398de7b`), which showed an AT&T parsing regression
 - main: `7f8577861b5836b62689aa61b28155815ca5ecb3`
 - head, first run: `1398de7bc7776b112633579d2414ca7f34934a68` (the branch's three commits and its merge of main)
 - head, second run: `c169c6ee4d71bf4537719bbcd1cbdc2f3cbe576b` (with the CI floor's commit and the fix), the tree
-  `dbf7d9d97fef29710edbdf85833ed3f24a90434d` of the pushed `07a5ae890c3e78d1a8ed4c4f75fd65fdf33b3b2b`, whose commit
+  `dbf7d9d97fef29710edbdf85833ed3f24a90434d` of the pushed `07a5ae898fabf3aaeae2cf54243e5ffd11a4c303`, whose commit
   message alone differs
 
 Each tree is `git archive` of its commit, with a `COMMIT` file (`logs/COMMIT-*`), built on the host with
@@ -47,8 +47,8 @@ the lock's waiting messages, which name other sessions' commands, are left out (
   −0.0019%), which this record doesn't attribute.
 - **`-c` time** (`logs/ab-asm.log`, one placement, medians of five rounds' medians of 21 processes): 128.974 ms on
   main and 128.546 ms at `1398de7b` (−0.33%; the head's round medians 128.450 to 128.665 were below main's 128.838
-  to 129.137 in every round), user cycles 606.88M and 604.47M (−0.40%). The default path's code doesn't change, so
-  this is the code's placement, not a gain this record claims.
+  to 129.137 in every round), user cycles 606.88M and 604.47M (−0.40%). The cause of this one-placement timing difference
+  remains unresolved, with placement a possible contributor. This record claims no gain.
 - **`benchmark-assembler`**, medians of five processes of each tree's total milliseconds (each process a 21-pass
   median):
 
