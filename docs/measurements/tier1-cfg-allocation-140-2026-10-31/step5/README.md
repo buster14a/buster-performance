@@ -115,6 +115,22 @@ placements and copies"). The build: the checker's unit, the longest, takes 40.0 
 first, one of the final) against 36.6 to 36.9 s at base (four builds), since it now compiles Tier 1's modules for the
 driver: the build is 3.1 s longer.
 
+## Later: the entry's moves
+
+After `2fa64125` (merged as buster#972), the parameters' entry moves (`tier1_emit_cfg_entry`), measured by
+`9700x/queue-e.sh PREVIOUS HEAD`: HEAD's build, then speedtest1 by HEAD's `--tier1` and `--tier1 --scalar` against the
+previous head's `--tier1` build, 11 rounds in a rotating order, and `perf stat` of both `--tier1` builds:
+
+| Head | What | `--tier1` | `--scalar` | previous head's `--tier1` | instructions (head / previous) |
+| --- | --- | ---: | ---: | ---: | --- |
+| `f23d23f5` | a parameter live across a call free at its definition too, in a callee-saved register from the entry on | 288.4 ms | 287.1 ms | 286.4 ms | 6,459 M / 6,431 M |
+| `9dff1aad` | every parameter free only where an allocation fails a use, the entry's moves bringing them | 284.9 ms | 282.8 ms | 286.2 ms | 6,431 M / 6,431 M |
+
+`f23d23f5` cut the saves around calls from 10,355 to 1,536 pairs but spilled more (6,290 stores and 7,484 reloads
+against 3,439 and 4,111) and ran slower, so `9dff1aad` keeps a bound parameter bound and frees them only where the
+allocation needs it: Tier 1 then takes speedtest1's three functions it refused (2,210 of 2,709) at the previous head's
+speed. Every build's hash is unchanged (`head-*/verify-*.txt`).
+
 ## Limitations
 
 - The `--tier1` build is both tiers' code: Tier 1's share of the run's cycles is 56% (843 of 1,496 M), and its hottest
