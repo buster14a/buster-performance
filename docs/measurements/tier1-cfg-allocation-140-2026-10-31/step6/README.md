@@ -16,6 +16,8 @@ David's request.
 - **Division by 2^k**: unsigned, a shift or a mask; signed, `TIER1_RULE_DIVIDE_POWER`'s bias sequence (`mov; sar; shr;
   lea; sar`, or `and; sub` for the remainder), rather than `div` and its fixed registers.
 
+The follow-ups of buster#977's review (buster#989) are measured in [`review-followups/`](review-followups/README.md).
+
 ## Revisions
 
 | Role | Commit | What |
