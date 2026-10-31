@@ -10,6 +10,9 @@ import subprocess
 import tempfile
 import time
 
+from metric_collect import collect_metric
+from metric_qualification import Inventory
+
 p = argparse.ArgumentParser()
 p.add_argument('--compiler', required=True)
 p.add_argument('--corpus', required=True)
@@ -21,9 +24,14 @@ p.add_argument('--profile-runs', type=int, default=20)
 p.add_argument('--max-events', type=int, default=0, help='smoke-test limit; 0 means all per-thread CPU events')
 p.add_argument('--max-metrics', type=int, default=0, help='smoke-test limit; 0 means all per-thread core metrics')
 p.add_argument('--no-profiles', action='store_true')
+p.add_argument('--metrics-only', action='store_true', help='skip counters, stages and profiles; requires explicit --metric selections')
+p.add_argument('--metric', action='append', default=[], help='exact formula to collect; repeat to select affected formulas')
+p.add_argument('--metric-time-control', help='compiled metric-time-control.c; required to qualify duration-based formulas')
 a = p.parse_args()
+if a.metrics_only and not a.metric:
+    p.error('--metrics-only requires at least one explicit --metric')
 out = Path(a.out).resolve()
-out.mkdir(parents=True, exist_ok=True)
+out.mkdir(parents=True, exist_ok=False)
 compiler = str(Path(a.compiler).resolve())
 corpus = Path(a.corpus).resolve()
 os.environ['LC_ALL'] = 'C'
@@ -71,6 +79,7 @@ inventory_run = output(['perf', 'list', '--json'])
 if inventory_run['status']:
     raise SystemExit('perf list --json failed: ' + inventory_run['output'])
 inventory = json.loads(inventory_run['output'])
+metric_inventory = Inventory(inventory)
 (out / 'perf-list.json').write_text(json.dumps(inventory, indent=2) + '\n')
 (out / 'perf-list-details.txt').write_text(output(['perf', 'list', '--details'])['output'])
 metadata = {
@@ -85,6 +94,11 @@ metadata = {
     'profile_runs': a.profile_runs, 'counter_repetitions': a.repetitions,
     'stage_repetitions': a.stage_repetitions,
     'local_cores': a.local_cores,
+    'metric_policy': 'buster-perf-metric-v1',
+    'metrics_only': a.metrics_only, 'selected_metrics': a.metric,
+    'inventory_sha256': sha256(out / 'perf-list.json'),
+    'campaign_sha256': sha256(__file__),
+    'metric_qualification_sha256': sha256(Path(__file__).with_name('metric_qualification.py')),
 }
 (out / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
 
@@ -107,6 +121,13 @@ with tempfile.TemporaryDirectory(prefix='buster-microarch-') as scratch:
     events = sorted({e['EventName'] for e in inventory if e.get('Unit') == 'cpu'
                      and e.get('EventName') and '/' not in e['EventName']})
     metrics = sorted({e['MetricName'] for e in inventory if e.get('Unit') == 'default_core' and e.get('MetricName')})
+    if a.metric:
+        unknown = sorted(set(a.metric) - set(metrics))
+        if unknown:
+            raise SystemExit('metrics absent from captured inventory: ' + ', '.join(unknown))
+        metrics = sorted(set(a.metric))
+    if a.metrics_only:
+        events = []
     if a.max_events:
         events = events[:a.max_events]
     if a.max_metrics:
@@ -135,7 +156,7 @@ with tempfile.TemporaryDirectory(prefix='buster-microarch-') as scratch:
                 print('failed', kind, workload, variant, repetition, row['status'], flush=True)
             return row
         # Process-level anchors: include user and kernel for system time and faults.
-        for rep in range(a.stage_repetitions):
+        for rep in range(0 if a.metrics_only else a.stage_repetitions):
             for workload, cmd in workloads.items():
                 record('baseline', workload, 'process', rep,
                        ['-e', 'task-clock,cycles,instructions,branches,branch-misses,page-faults,minor-faults,major-faults,context-switches,cpu-migrations', '--', *cmd])
@@ -152,13 +173,27 @@ with tempfile.TemporaryDirectory(prefix='buster-microarch-') as scratch:
                     record('counter', workload, group, rep, ['-e', ev, '--', *cmd])
             if index % 10 == 0:
                 print('counter group', index + 1, 'of', len(groups), flush=True)
-        # Each formula gets its own invocation. The output reports multiplexing or failures.
+        # Explicit privilege formulas keep their modifiers. Unsupported domains
+        # are recorded as unsupported, not silently coerced to per-process user.
+        affinity = out / '_affinity.txt'
         for index, metric in enumerate(metrics):
             for workload, cmd in workloads.items():
-                record('metric', workload, metric, 0, ['--all-user', '-M', metric, '--', *cmd])
+                capture = out / 'metric-captures' / f'{index:04d}-{workload}'
+                row = collect_metric(metric_inventory, metric, cmd, capture,
+                                     wrap=lambda command: wrapped(command, affinity),
+                                     time_control=a.metric_time_control)
+                row.update(workload=workload, repetition=0,
+                           inventory_sha256=metadata['inventory_sha256'],
+                           environment_sha256=sha256(out / 'environment.json'),
+                           affinity=affinity.read_text().strip() if row.get('perf_argv') and affinity.exists() else None)
+                (capture / 'record.json').write_text(json.dumps(row, indent=2, allow_nan=False) + '\n')
+                log.write(json.dumps(row, allow_nan=False) + '\n')
+                log.flush()
+                if not row['qualification']['eligible']:
+                    print('unqualified metric', workload, metric, row['qualification']['qualification'], row['qualification']['reason'], flush=True)
             if index % 25 == 0:
                 print('metric', index + 1, 'of', len(metrics), flush=True)
-    if not a.no_profiles:
+    if not a.no_profiles and not a.metrics_only:
         profiles = out / 'profiles'
         profiles.mkdir(exist_ok=True)
         for workload, cmd in workloads.items():
