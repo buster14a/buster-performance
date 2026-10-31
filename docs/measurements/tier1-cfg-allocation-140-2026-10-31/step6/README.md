@@ -136,15 +136,17 @@ runs 5,412.5 M instructions at base and 4,968.4 M at head (−8.2%), 4.1% less t
 - A narrow value's zero extension to an integer: its register is zero-extended past its width already (the loads,
   truncations, parameters, results and constants that make narrow values write them so), but `zext` is a `movzx`
   again, 4,146 times in the `--tier1` executable right after the `movzx` load that filled the register (4,026 in Tier
-  0's). It could be a copy.
+  0's). It could be a copy (buster#981).
 - `&&`, `||` and `?:` results: the lowering keeps them in untyped temporary frame slots (`BUSTER_IR_SLOT_TEMPORARY`,
   of type void), which SSA promotion leaves in memory (`ssa_ir.c` promotes typed slots alone): each is a store and a
-  load through the object's address, as `yy_find_shift_action`'s `mov %edx, (%rax)` and `mov (%rax), %eax`.
+  load through the object's address, as `yy_find_shift_action`'s `mov %edx, (%rax)` and `mov (%rax), %eax` (buster#983).
 - A frame object's address is a `lea` into a register (4,053 in the executable) rather than part of the memory
-  operands that use it: the frame's layout gives the object's offset only at emission.
+  operands that use it: the frame's layout gives the object's offset only at emission (buster#982).
 - Tier 1's pipeline runs SCCP, dead code and CFG cleanup alone, no loop-invariant motion: `sqlite3StrICmp`'s loop
-  computes `sqlite3UpperToLower`'s address twice per character.
-- `sqlite3VdbeExec`, the hottest function (811 of head's 5,860 samples), is Tier 0's: Tier 1 refuses its switch.
+  computes `sqlite3UpperToLower`'s address twice per character (buster#139's passes).
+- `sqlite3VdbeExec`, the hottest function (811 of head's 5,860 samples), is Tier 0's: Tier 1 refuses its switches'
+  jump tables (`br_indirect` over 180 labels), as it refuses `yy_reduce`'s and `sqlite3Parser`'s `Token` by value
+  (buster#789).
 
 ## Limitations
 
