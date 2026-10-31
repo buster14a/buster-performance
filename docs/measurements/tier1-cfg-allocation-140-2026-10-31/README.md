@@ -2,7 +2,9 @@
 
 Evidence for [buster#140](https://github.com/buster14a/buster/issues/140)'s steps 1 to 3: allocation over a CFG
 (`tier1_cfg.c`), its independent checker, and its corpus validity and costs. By Claude, at David's request. Step 4, Tier
-1's native edge moves, is in [`step4/`](step4/README.md).
+1's native edge moves, is in [`step4/`](step4/README.md); step 5, Tier 1 through the C driver's `--tier1` with
+correctness by #142's programs and SQLite's speedtest1 and its run time against Tier 0 and clang, in
+[`step5/`](step5/README.md).
 
 ## Revisions
 
