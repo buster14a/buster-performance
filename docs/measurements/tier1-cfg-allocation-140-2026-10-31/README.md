@@ -1,7 +1,8 @@
 # Tier 1 register allocation over CFGs (#140), 2026-10-31
 
 Evidence for [buster#140](https://github.com/buster14a/buster/issues/140)'s steps 1 to 3: allocation over a CFG
-(`tier1_cfg.c`), its independent checker, and its corpus validity and costs. By Claude, at David's request.
+(`tier1_cfg.c`), its independent checker, and its corpus validity and costs. By Claude, at David's request. Step 4, Tier
+1's native edge moves, is in [`step4/`](step4/README.md).
 
 ## Revisions
 
