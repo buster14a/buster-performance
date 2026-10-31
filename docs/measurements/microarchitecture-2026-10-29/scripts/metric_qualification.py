@@ -294,6 +294,10 @@ def qualify(record, inventory, historical=False):
               'reported_value': None, 'reported_unit_and_name': None,
               'scope': None, 'minimum_counter_duty_percent': None, 'operands': []}
     try:
+        if record.get('status') is None and record.get('collector_schema') == 'buster-perf-metric-v1':
+            # Re-evaluate a planned refusal; do not trust a stored qualification
+            # or mislabel an unsupported, never-launched formula as a workload failure.
+            inventory.plan(name)
         if record.get('status') != 0:
             reject('failed', 'collector/workload did not succeed')
         definition = inventory.definition(name)
