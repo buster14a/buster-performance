@@ -1,6 +1,6 @@
 #!/bin/bash
 S=/tmp/claude-1000/-home-david-dev-ai-claude-buster--claude-worktrees-issues-764-791-a11500/dd149312-20c0-4fbd-9e60-11bb4742da92/scratchpad
-cd /home/david/dev/ai/claude/buster/.claude/worktrees/issues-764-791-a11500
+cd "${TREE:-/home/david/dev/ai/claude/buster/.claude/worktrees/issues-764-791-a11500}" || exit 1
 F=src/buster/compiler/c_check_target_feature.c
 D=src/buster/compiler/c_checker_driver.c
 restore() { cp $S/mutants/c_check_target_feature.orig.c $F; cp $S/mutants/c_checker_driver.orig.c $D; }
@@ -13,7 +13,7 @@ for m in ${MUTANTS:-no-predicate prepass one-error order boundary unit-map names
     cores -n 1 -- ./build/compiler test-checker-driver --executable ./build/compiler > $S/mutants/test-$m.log 2>&1
     status=$?
     echo "mutant $m: test status $status, $(grep -E '^checker-driver: [0-9]+ checks' $S/mutants/test-$m.log)"
-    grep -E '^test-checker: .*(compare|predicate)' $S/mutants/test-$m.log | head -4 | cut -c1-200
+    grep -E '^test-checker: .*(compare|predicate|side effect|FENV_ACCESS)' $S/mutants/test-$m.log | head -4 | cut -c1-200
 done
 restore
 echo "mutants done"

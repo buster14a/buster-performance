@@ -14,7 +14,9 @@ added. This record keeps:
    which the check skips, and of stb_image at `-march=native`, whose `<emmintrin.h>` intrinsics call x86 builtins,
    which the check now reads: main against the head by instructions and with one executable per tree (`first/`), and
    by time over six placements of the checker's unit (`placements/`);
-2. the mutation check of the new rules' tests (`mutants/`).
+2. the mutation check of the new rules' tests (`mutants/`);
+3. the review's fix (`1daf9f6d`): its cost by the same measurement (`review/`), and the mutation check of its
+   two conditions.
 
 ## Sources
 
@@ -132,8 +134,52 @@ each. The first run (`mutants/run-first.log`), with the test file before the hea
 as the pre-pass walks a body only for a call that fails. The head adds "a compare of a predicate past 7 in a function
 whose attribute adds AVX, which another builtin's error walks", which fails it (`mutants/run-unit-map-rerun.log`).
 
+## The review's fix
+
+The review of buster#949 found that the check took a call as folded where each argument was a constant, though
+`(side(), 5u)` keeps 5u's constant beside its side effect, and clang folds no call whose evaluation has a side effect.
+`1daf9f6d` counts an argument toward a folded call only without `BUSTER_CHECK_SIDE_EFFECT` and
+`BUSTER_CHECK_FP_ENVIRONMENT`: a test of two flags per constant argument of a call the check reads.
+
+**Sources:** `merge`, `10ec3db80815282116bc9f8658b7b64d904c4e92`, the branch's head before the fix (`c1167e17` with main
+`79fe1235` merged), and `fix`, `1daf9f6df5174e93d1e876a473e15bf7b50c7f82`, its next commit. `manifests/` has both
+manifests, which match the trees on the 9700X (`manifests/compare.txt`).
+
+**Method:** `scripts/queue-review.sh` is `queue.sh` with these trees: each built (`build-tree.sh`) and then measured
+(`measure.sh merge fix`, the first measurement's method), each in a hold of its own. It moved the first measurement's logs
+aside first, as `measure.sh` appends to its logs. `review/` has the builds' and the measurement's logs, and `analyze.py`'s
+output.
+
+**Results:** every build, drive and timed run exits 0, and both trees write the same objects for both units
+(`review/measure.log`). The medians of the rounds' means' differences, and for the times the per-round ratios' median
+and range:
+
+| `-c` of | instructions | cycles | task clock |
+|---|---:|---:|---:|
+| `sqlite3.c` | −34,137 (−0.0025%) | −0.05% (−0.59% to +0.21%) | −0.00% (−0.35% to +0.26%) |
+| stb_image `-march=native` | −16,866 (−0.0089%) | −0.04% (−0.85% to +0.43%) | −0.26% (−1.03% to +0.18%) |
+
+The fix's flag test costs nothing these runs can see. `sqlite3.c` doesn't run the check, and stb_image's fewer
+instructions can't be the test's own work, which only adds instructions, and which its calls of parameters rarely reach:
+both differences come from code generation and layout around the changed function, as the first comparison's −44,393 on
+`sqlite3.c` did. A tree's instructions vary by at most 33 (`sqlite3.c`) and 2,895 (stb_image) within a round.
+
+**Mutation check:** `mutants/run.sh` ran the two new mutants of `mutants/apply.py` on the 7940HS, each built and run
+against `test-checker-driver --executable ./build/compiler`. They ran on a copy of `1daf9f6d`'s tree (`TREE`, which the
+script now takes; the first run's tree was the worktree), whose `c_check_target_feature.c` and `c_checker_driver.c` hash
+to `796ba469…` and `87d98ae8…` (`mutants/run-review.log`, whose lines the script cuts at 200 characters):
+
+| mutant | what it breaks | failures |
+|---|---|---:|
+| `no-side-effect` | an argument with a side effect counts toward a folded call | 4 |
+| `no-fp-environment` | an argument of floating work under `FENV_ACCESS` counts toward a folded call | 4 |
+
+Each fails only its own fixture, by both paths and both routes: the driver gives the lowering's refusal, where clang's
+first error is the builtin's feature at the call (`2:27`).
+
 ## Limitations
 
 - The time differences are of one layout of each tree's checker section; the instructions are the precise comparison.
+- The review's fix was compared with one executable per tree, not over placements.
 - The mutants and the head's tests ran on the 7940HS (Zen 4), not the 9700X; the 9700X ran the builds and the timings.
 - `perf stat` counted user-mode events of the whole process; the check's own share was not sampled apart.

@@ -40,6 +40,10 @@ elif name == "names":
 elif name == "message":
     d = swap(d, "const char* features = error->predicate ? \"avx\" : error->builtin->features;", "const char* features = error->builtin->features;")
     d = swap(d, "const uint32_t features_length = error->predicate ? 3u : error->builtin->features_length;", "const uint32_t features_length = error->builtin->features_length;")
+elif name == "no-side-effect":
+    f = swap(f, "(value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0", "(value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0")
+elif name == "no-fp-environment":
+    f = swap(f, "(value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0", "(value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0")
 else:
     raise SystemExit("unknown mutant")
 open(feature_path, 'w').write(f)
