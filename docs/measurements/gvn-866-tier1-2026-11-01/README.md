@@ -92,6 +92,24 @@ Tier 1's CFG allocation pays for that in edge moves and spills. The option stays
 off, and routing C source through GVN by default waits for a variant that
 accounts for allocation cost.
 
+## The 9700X pair
+
+The same commands on the approved Ryzen 7 9700X (Zen 5), head `fe3f3c79`, every
+process taking the shared lock and pinned to CPU 2 (`tier1-cost-9700x.sh`,
+`9700x.log`, `9700x-raw.log`):
+
+| | text | compile time |
+| --- | ---: | ---: |
+| `sqlite3.c --tier1` | 1,440,195 B | 363 ms (median of four clean runs) |
+| `sqlite3.c --tier1 --tier1-gvn` | 1,613,155 B (+12.0%) | 487 ms (+34.2%) |
+
+The first base run's 243,805 ms is the wait for a CI job holding the lock and is
+not a compile. Tier 1 compiles the same 2,171 of 2,604 functions either way;
+the solver adds 51,212 instructions, 1,034 spill stores, 1,191 reloads and
+4,990 edge moves. The byte totals are larger than the 7940HS run's because that
+run is an earlier commit of the compiler; the relative changes agree (12.0%
+against 12.1%, +34.2% against +33.0% and +21.2%).
+
 ## Behaviour
 
 `behaviour.sh` compiles and runs c-testsuite's 220 programs both ways: 219
@@ -105,8 +123,8 @@ dropped before the follow-up commit.
 
 ## Files
 
-- `synthetic-ab.sh`, `tier1-cost.sh`, `behaviour.sh`, `two-file-check.sh` — the
-  harnesses.
+- `synthetic-ab.sh`, `tier1-cost.sh`, `tier1-cost-9700x.sh`, `behaviour.sh`,
+  `two-file-check.sh` — the harnesses.
 - `*.log` — their raw output, copied unedited.
 
 ## Provenance
