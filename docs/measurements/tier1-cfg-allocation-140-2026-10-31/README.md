@@ -4,7 +4,8 @@ Evidence for [buster#140](https://github.com/buster14a/buster/issues/140)'s step
 (`tier1_cfg.c`), its independent checker, and its corpus validity and costs. By Claude, at David's request. Step 4, Tier
 1's native edge moves, is in [`step4/`](step4/README.md); step 5, Tier 1 through the C driver's `--tier1` with
 correctness by #142's programs and SQLite's speedtest1 and its run time against Tier 0 and clang, in
-[`step5/`](step5/README.md).
+[`step5/`](step5/README.md); and step 6, the selection's walks that made Tier 1's code faster than Tier 0's
+(buster#977), in [`step6/`](step6/README.md).
 
 ## Revisions
 
