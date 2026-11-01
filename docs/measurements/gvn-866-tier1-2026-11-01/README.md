@@ -108,9 +108,10 @@ accounts for allocation cost.
 
 ## The 9700X pair
 
-The same commands on the approved Ryzen 7 9700X (Zen 5), head `fe3f3c79`, every
-process taking the shared lock and pinned to CPU 2 (`tier1-cost-9700x.sh`,
-`9700x.log`, `9700x-raw.log`):
+The same procedure on the approved Ryzen 7 9700X (Zen 5), at the code head
+`fe3f3c79`, without `-fno-asynchronous-unwind-tables` because that head's
+driver no longer needs it, every process taking the shared lock and pinned to
+CPU 2 (`tier1-cost-9700x.sh`, `9700x.log`, `9700x-raw.log`):
 
 | | text | compile time |
 | --- | ---: | ---: |
