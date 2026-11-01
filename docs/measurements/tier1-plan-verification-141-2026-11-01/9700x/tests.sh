@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# tests.sh TREE: the suites the change touches, each one hold of the shared lock, logs in TREE-tests/.
+. ~/buster-fast-bench/claude-141-remaining/common.sh
+t=$1
+out=$PWD/$t-tests
+mkdir -p $out
+run() {
+    local name=$1
+    shift
+    "$lock" bash -c "cd $t && $* > $out/$name.log 2>&1; echo \"exit \$?\" >> $out/$name.log"
+    echo "$name: $(grep -E 'checks|tests:|exit' $out/$name.log | tail -2 | tr '\n' ' ')"
+}
+run select ./build/compiler test-tier1-select
+run pipeline ./build/compiler test-tier1-pipeline --cross-check
+run emit ./build/compiler test-tier1-emit
+run cfg ./build/compiler test-tier1-cfg
+run c-testsuite ./build/compiler test-c-testsuite --tier1 --jobs 8 --subset tests/c-testsuite/subset.txt $CTS
+run call-graph ./build.sh check-call-graph
+echo done > $out/done
