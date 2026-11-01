@@ -7,21 +7,35 @@ whose record is `gvn-866-2026-10-31`. This one covers the third: the pass's
 compile-time and generated-code effects once the Tier 1 pipeline can exercise
 it, and the independent corroboration of the other two on a second host.
 
-## Trees and host
+## Trees and hosts
 
-- Base: `main` at `f152e637`, the merge this PR is based on.
-- Candidate: the PR head, `6b3f6d55` (plus the review follow-up, which changes
-  only the option's plumbing, the arena's reservation and the tests; the pass
-  itself and every figure here are the pass commit's).
-- GVN pass: as merged in `b1c51527` (#946). This PR does not change it.
-- Host: **Ryzen 9 7940HS** (Zen 4), 8 cores / 16 threads, Clang 23, wild
-  linker, `BUSTER_DEBUG_INFO=0`. This is *not* the locked 9700X; the 9700X's
-  compile-time pair has not been taken.
-- Every run took the shared-core queue (`cores`, `CORES_TITLE`/`CORES_LINK`
-  set); the queue lines are in the raw logs. Single runs were pinned with
-  `taskset` where the log says so. The host runs other sessions' builds, so
-  the wall-clock figures vary between runs; the instruction and byte counts do
-  not.
+- Base: `main` at `f152e637`, the merge the compiler PR is based on.
+- Candidate heads: `6b3f6d55` for the 7940HS runs (the pass and the option), and
+  `fe3f3c79` — that head with `main` merged again — for the 9700X pair. The
+  review follow-ups change only the option's plumbing, the arena's reservation
+  and the tests; the pass itself and every relative figure here are the pass
+  commit's.
+- GVN pass: as merged in `b1c51527` (#946). The compiler PR does not change it.
+- Hosts: a **Ryzen 9 7940HS** (Zen 4), 8 cores / 16 threads, shared with other
+  sessions' builds, and the approved **Ryzen 7 9700X** (Zen 5), 8 cores, under
+  its shared lock. Both Clang 23, wild linker, `BUSTER_DEBUG_INFO=0`.
+- The 7940HS runs took the shared-core queue (`cores`, `CORES_TITLE`/`CORES_LINK`
+  set); the queue lines are in the raw logs. The 9700X runs each took
+  `~/buster-fast-bench/exclusive.sh` and were pinned with `taskset -c 2`, so one
+  of them waited for a CI job holding the lock (see "The 9700X pair").
+- Why the two hosts' absolute byte totals differ: their trees are different
+  commits. Later `main` gives Tier 1 more functions and more code (labels and
+  indirect jumps, masks), so `sqlite3.c`'s baseline text is 1,283,627 bytes at
+  `6b3f6d55` and 1,440,195 at `fe3f3c79`. The relative change is the
+  comparable quantity and agrees across hosts.
+- The 7940HS command line carries `-fno-asynchronous-unwind-tables` because the
+  driver *required* it at that head: Tier 1's code then refused unwind tables.
+  `main` since made Tier 1 emit them, so the 9700X pair runs without the flag,
+  which is why its timings include unwind-table generation. `.text` is
+  unaffected either way, and each pair compares like with like.
+- Tier 1 compiles 2,155 of `sqlite3.c`'s 2,604 functions at `6b3f6d55` and 2,171
+  at `fe3f3c79`; the difference is the later head's wider selection, not the
+  option, which changes neither count.
 
 ## Synthetic and source-derived pass cost (corroboration)
 
@@ -122,6 +136,12 @@ and `records=30` with it for the pair it uses, where the option was silently
 dropped before the follow-up commit.
 
 ## Files
+
+Paths of another session's checkout, where a log recorded them, are written
+`$CORPUS` for c-testsuite's pinned commit `5c72756`; every other byte of those
+logs is as the run printed it. The scripts read `REPO` (a compiler checkout),
+`CORPUS` (that c-testsuite checkout) and `SQLITE3_C` from the environment. The
+`sqlite3.c` both hosts used is named by its size and SHA-256 in `9700x.log`.
 
 - `synthetic-ab.sh`, `tier1-cost.sh`, `tier1-cost-9700x.sh`, `behaviour.sh`,
   `two-file-check.sh` — the harnesses.

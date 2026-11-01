@@ -1,7 +1,7 @@
 #!/bin/bash
 # Snapshot both GVN builds as standalone binaries, then time them at matched settings.
 set -u
-REPO=/home/david/.local/share/opencode/worktree/11a4cd/shiny-canyon
+REPO=${REPO:?set REPO to a buster checkout}
 OUT=/tmp/opencode/gvn866
 CPU=${1:-4}
 PROCS=${2:-5}

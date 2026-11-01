@@ -1,10 +1,10 @@
 #!/bin/bash
 # #866's Tier 1 measurement: compile time (5 runs each) and generated code (text bytes, records) with and without GVN.
 set -u
-REPO=/home/david/.local/share/opencode/worktree/11a4cd/shiny-canyon
+REPO=${REPO:?set REPO to a buster checkout}
 OUT=/tmp/opencode/gvn866/t1
-C=/home/david/.cache/buster-scratch-x87/ct/c-testsuite/tests/single-exec
-S=/home/david/.cache/claude-lane-arenas/sqlite3.c
+C=$CORPUS/tests/single-exec
+S=${SQLITE3_C:?set SQLITE3_C to the sqlite3.c measured}
 cd "$REPO" || exit 1
 
 # Compile time on sqlite3.c: 5 runs each way, wall clock in ms.
