@@ -1,0 +1,152 @@
+name: Tests and Zen 5 benchmarks
+
+# A one-off A/B for buster#873 (buster#1037) on the 9700X, dispatched by hand on a short-lived branch that holds this
+# file alone in place of the usual workflow, and deleted after its run: main at the pull request's fork point against
+# its head, on the frozen sqlite3.c. The job hooks hold the shared host lock for the job, as for any CI job; keep it
+# short, since other jobs give up after waiting 10 minutes for the lock.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-fast-9700x-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ab:
+    name: A/B of buster#1037 on the Ryzen 7 9700X
+    if: ${{ github.repository_id == '1421805693' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: znver5
+      BASE_SHA: 0d79975f60bb1442f9713c108a217dc2e60d583b
+      HEAD_SHA: 210cd5808d4f1f493dcce64789d256f754effcb7
+      SHIFTS: 0 704 1408 2048 2752 3456
+    steps:
+      - name: Verify benchmark host
+        run: |
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          uname -r
+          awk '/^Cpus_allowed_list:/' /proc/self/status
+          perf --version
+
+      - name: Check out the pull request's head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          path: head
+          persist-credentials: false
+
+      - name: Stage official Clang 23.1.4 in the private runner cache
+        run: bash head/tools/ci/setup-benchpress.sh
+
+      - name: Check out main at the fork point
+        run: |
+          # The public base commit alone, without tokens, as the branch-sizing A/B fetches it.
+          GIT_TERMINAL_PROMPT=0 timeout 60s git -C head -c credential.helper= -c http.extraHeader= fetch \
+              --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$BASE_SHA"
+          git -C head worktree add --detach "$GITHUB_WORKSPACE/base" "$BASE_SHA"
+          git -C head rev-parse HEAD
+          git -C base rev-parse HEAD
+          test "$(git -C head rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git -C base rev-parse HEAD)" = "$BASE_SHA"
+          clang --version
+
+      - name: Build both trees at six placements of the checker's unit
+        run: |
+          for tree in base head; do
+              (cd "$tree" && BUSTER_DEBUG_INFO=0 taskset -c 0-7 ./build.sh shifts "$RUNNER_TEMP/shifts/$tree" main_unit_checker.c $SHIFTS)
+          done
+          sha256sum base/build/compiler head/build/compiler "$RUNNER_TEMP"/shifts/*/compiler-*
+
+      - name: Measure
+        run: |
+          set -euo pipefail
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          sqlite="$corpus/sqlite/sqlite3.c"
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite" | sha256sum --check
+          frozen=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc
+              -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          out="$RUNNER_TEMP/ab-873"
+          mkdir -p "$out"
+          # Both executables at paths of the same length, so that argv[0] leaves their stacks at the same offset (#445).
+          base="$GITHUB_WORKSPACE/base/build/compiler"
+          head="$GITHUB_WORKSPACE/head/build/compiler"
+
+          echo "=== objects"
+          for b in base head; do
+              taskset -c 2 "${!b}" "${frozen[@]}" -c "$sqlite" -o "$out/$b.o"
+          done
+          sha256sum "$out/base.o" "$out/head.o"
+          cmp "$out/base.o" "$out/head.o"
+
+          echo "=== counters: 10 rounds, the builds' order alternating by round, one process each"
+          events=cycles:u,instructions:u,ls_bad_status2.stli_other:u,ls_stlf:u,task-clock
+          for round in $(seq 1 10); do
+              order="base head"
+              if [ $((round % 2)) = 0 ]; then order="head base"; fi
+              for mode in c syntax; do
+                  for b in $order; do
+                      if [ "$mode" = c ]; then flag=(-c "$sqlite" -o "$out/stat.o"); else flag=(-fsyntax-only "$sqlite"); fi
+                      taskset -c 2 perf stat -x, -e "$events" -o "$out/stat.csv" -- "${!b}" "${frozen[@]}" "${flag[@]}"
+                      if grep -E '<not (supported|counted)>' "$out/stat.csv"; then
+                          echo "::error::perf didn't count every event"
+                          exit 1
+                      fi
+                      awk -F, -v mode="$mode" -v b="$b" -v round="$round" \
+                          '$1 ~ /^[0-9.]+$/ { printf "STAT %s %s %s %s %s\n", mode, b, round, $3, $1 }' "$out/stat.csv"
+                  done
+              done
+          done
+
+          echo "=== stli_other by function: 3 compiles of -c per build, a sample every 1009 events"
+          for b in base head; do
+              taskset -c 2 perf record -q -e ls_bad_status2.stli_other:u -c 1009 -o "$out/stli-$b.data" -- \
+                  bash -c 'for run in 1 2 3; do "$@" > /dev/null 2>&1 || exit 1; done' stli "${!b}" "${frozen[@]}" -c "$sqlite" -o "$out/stli.o"
+              echo "--- $b"
+              perf report -i "$out/stli-$b.data" --stdio --no-children --sort symbol --percent-limit 0.3 2> /dev/null | grep -v '^#' | sed '/^$/d' | head -n 45
+          done
+
+          echo "=== stages: 11 rounds of -c, the builds' order alternating by round"
+          for round in $(seq 1 11); do
+              order="base head"
+              if [ $((round % 2)) = 0 ]; then order="head base"; fi
+              for b in $order; do
+                  taskset -c 2 "${!b}" --time-stages "${frozen[@]}" -c "$sqlite" -o "$out/stages.o" 2> "$out/stages.txt"
+                  sed "s/^/STAGES $b $round /" "$out/stages.txt"
+              done
+          done
+
+          echo "=== whole drivers over placements and copies (#509): main, the head, and main again as the floor"
+          builds=()
+          for b in base:base head:head base-again:base; do
+              for s in $SHIFTS; do
+                  builds+=(--build "${b%%:*}" "$RUNNER_TEMP/shifts/${b#*:}/compiler-$s")
+              done
+          done
+          # The job holds the host lock already: ab runs without --lock.
+          "$head" ab --rounds 2 --cpu 2 "$head" \
+              -- time-runs --runs 3 --copies 2 "${builds[@]}" \
+              --list "${frozen[@]}" -fsyntax-only "$sqlite" \
+              --list "${frozen[@]}" -c "$sqlite" -o /dev/null
+
+      - name: Keep the raw captures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ab-873
+          path: ${{ runner.temp }}/ab-873
+          retention-days: 14
