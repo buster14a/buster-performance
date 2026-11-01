@@ -42,8 +42,8 @@ thousand in stb_image. The cycle and time differences stay within the rounds' ow
 
 ### The bisect
 
-`de4b645`'s increase was found by a bisect (`scripts/bis.sh`, `runs/bisect/status`). It used one `instructions:u`
-count per tree, for both units:
+`de4b645`'s increase was found by a bisect (`scripts/bis.sh`, `runs/bisect/status`). It ran two rounds of one
+`instructions:u` count per tree and unit, on fresh `git archive` trees of `b823d1c` and `3dcb96b`:
 - `vA`: `3dcb96b` with `c_check_input.c` and `c_check_intrinsic_input.c` reverted to `b823d1c`. It counts as base,
   within 5,000 instructions.
 - `vB`: `3dcb96b` with the new names reverted (the supplementary scope, the helpers and the leaves). It counts as
@@ -66,5 +66,5 @@ the 9700X, each in a hold of its own:
 
 Every one passed.
 
-A third head, `3dcb96b`, was measured too, but its tree on the host held `b823d1c`'s sources apart from one test file.
-That run, and its tests, are not part of this record.
+An earlier measure of `3dcb96b` used a tree on the host that held `b823d1c`'s sources apart from one test file. That
+run, and its tests, are not part of this record. The bisect's `3dcb96b` tree was a fresh archive.
