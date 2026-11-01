@@ -147,3 +147,63 @@ start now go through its passes.
 - The measured head is `d8b21f2` on `1b032be`. The pull request's commit is the same change on #1016's merged head and
   main; the identity check above covers the rebase onto #1016's review.
 - These programs' variadic definitions are cold: the record shows what Tier 1 now covers, not a speedup.
+
+## At the merged head `512167d`
+
+buster#1060's last head merged main into its review commits. `512167d` merges main `7c77948` into `6e5abdc`. Its
+commits on top of the measured `d8b21f2` are:
+
+- `3463e0f`, the overflow area past the pushes;
+- `39ee814`, #178's recomputed definition that an edge reads;
+- `6e5abdc`, the review's tests.
+
+The 9700X measured `512167d` against `7c77948`, the main it merges. The setup is the one above, through
+`9700x/merged-512167d/queue11.sh`, whose output is `queue-11.log` (lock-wait lines removed). The pull request's own
+9700X job ran the suites on `512167d`, green.
+
+**Coverage** (`programs-head-512167d/reports/`) is the same as at `d8b21f2`:
+
+| Input | Functions | Tier 1 at base | At head |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 2,668 | 2,197 | 2,215 |
+| Lua 5.4.8 | 1,088 | 963 | 968 |
+
+Function-level refusals drop from 28 to 6 for `sqlite3.c` and from 5 to 0 for Lua.
+
+**speedtest1** (`programs-head-512167d/st/`): 11 rotating rounds, all three `--verify` hashes `1248168 a7fa3957...`.
+
+| Build | Median wall | Range | Instructions | Cycles |
+| --- | ---: | --- | ---: | ---: |
+| base `--tier1` | 217.30 ms | 216.78 to 223.27 ms | 4,289.3 M | 1,108.3 M |
+| head `--tier1` | 219.07 ms | 217.82 to 223.84 ms | 4,286.1 M | 1,114.4 M |
+| head Tier 0 | 258.90 ms | 257.82 to 264.62 ms | 5,694.2 M | 1,330.8 M |
+
+The ranges overlap, so this shows no change in speed.
+
+**Lua** (`programs-head-512167d/lua/`): every script prints clang -O0's output from both Tier 1 builds. Medians over 11
+rotating rounds, base to head:
+
+| Script | Base | Head |
+| --- | ---: | ---: |
+| calls | 31.77 ms | 31.77 ms |
+| tables | 59.18 ms | 57.56 ms |
+| strings | 54.78 ms | 53.30 ms |
+| arithmetic | 67.86 ms | 67.85 ms |
+| closures | 74.22 ms | 76.50 ms |
+
+Every script's ranges overlap. Closures' are 73.20 to 76.16 against 75.58 to 77.38 ms, with equal instruction counts.
+
+**Compile time, `--tier1 -c sqlite3.c`** (`compile-tier1-ab.log`, `compile-stat-*.csv`): `ab` of `time-runs`, 5 rounds of
+21 runs per tree.
+
+- The median round goes from 366.93 to 368.38 ms (+0.40%).
+- The rounds' ranges, 366.47 to 367.03 ms against 368.26 to 369.01 ms, don't overlap, so the increase is real.
+- Instructions go from 4,943.3 M to 4,959.8 M (+0.33%).
+- Tier 1 compiles 18 more functions.
+
+**#142's campaign** (`diff-head-512167d/campaign.tsv`, seeds 4900 to 4939) generated 80 programs, and 66 pass. The other
+14 fail first in clang's own steps, none in Buster's:
+
+- 7 Csmith runs take longer than 30 s, under clang -O0 and under both of Buster's tiers;
+- 5 YARPGen compiles exit with status 1 under clang and both tiers;
+- 2 Csmith compiles exceed the harness's output limit under clang -O0 and -O2. Both tiers compile and run them.
