@@ -25,7 +25,9 @@ on. Now the typed-stream lowering widens them at the call boundary, in the emiss
   ([buster-performance#201](https://github.com/buster14a/buster-performance/pull/201)), with `tests5.sh` for this
   piece's suites. `common.sh` has the paths, options and lock metadata. The queue ran `9700x/queue13.sh`:
   `./build.sh base-13b7d81 head-d5156c7 && ./tests5.sh head-d5156c7 && ./programs.sh base-13b7d81 head-d5156c7 &&
-  ./campaign.sh head-d5156c7 d5156c7 5000 5039`. The queue's next step tests another head, which isn't part of this record.
+  ./campaign.sh head-d5156c7 d5156c7 5000 5039`. Its output is `9700x/queue-13.log`, with lock-wait lines removed.
+  The script was stopped during the campaign, which ran on to its end, because its next step tested an older copy of
+  the later commits.
 - Inputs:
   - the frozen `sqlite3.c` (`~/buster-fast-bench/preprocessor-corpora-astra-01a158dd/sqlite/sqlite3.c`), with
     `-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`;
@@ -57,8 +59,15 @@ on. Now the typed-stream lowering widens them at the call boundary, in the emiss
 | `test-c-testsuite --cross-check` on the subset | 220 of 220 pass |
 | `./build.sh check-call-graph` | exit 0 |
 
-#142's campaign at head (seeds 5000 to 5039, `9700x/diff-head-d5156c7/`) is still running. This record gets its results
-when it ends.
+#142's campaign at head (`campaign.sh`, Csmith `0cdc710` and YARPGen `1adb290`, two programs per generator a hold,
+Buster's Tier 0 and `--tier1 -fno-asynchronous-unwind-tables` against clang -O0 and -O2, seeds 5000 to 5039;
+`tally.sh` wrote `9700x/diff-head-d5156c7/campaign.tsv`, one line per program with every step's status): 80 programs, 66
+pass. The 14 others fail in clang's own steps, none in Buster's:
+
+- 8 YARPGen programs whose clang links fail, relocations truncated past the small code model. Buster refuses each
+  too: 5 for an atom past 2 GB, 2 for an image past the executable's limits and 1 for a call of more than 239
+  arguments.
+- 6 Csmith programs whose runs pass 30 s under clang -O0, clang -O2 and both of Buster's tiers.
 
 ## Coverage
 
