@@ -126,7 +126,7 @@ that completed printed. The 19 failures are all clang's own steps, as the 14 of 
 
 ## Addendum: the PR's head, after main's merge (`ca6f9096`)
 
-buster#999's head `ca6f909630...` (`ca6f90962304e6b7377ebfed5406f166ff417c25`) merges main `ec945e6` into the
+buster#999's head `ca6f90962304e6b7377ebfed5406f166ff417c25` merges main `ec945e6` into the
 branch and stops a definition left out from owning its register. Its tree manifest is `bc2682be0872efc6...`, the same as
 `git archive`'s locally, and its `build/compiler` `ee05f466f262f3f4...` (`receipts-9700x-ca6f9096.txt`). Main's #989
 puts constants added to an index into the displacement, and #991 makes a canonical narrow value's zero extension a
