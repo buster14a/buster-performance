@@ -124,6 +124,33 @@ build's run status and output hash):
 No case's builds disagreed: of the 63 cases Tier 1's build ran to completion, every one printed what each other build
 that completed printed. The 19 failures are all clang's own steps, as the 14 of #140's step 5 were.
 
+## Addendum: the PR's head, after main's merge (`ca6f9096`)
+
+buster#999's head `ca6f909630...` (`ca6f90962304e6b7377ebfed5406f166ff417c25`) merges main `ec945e6` into the
+branch and stops a definition left out from owning its register. Its tree manifest is `bc2682be0872efc6...`, the same as
+`git archive`'s locally, and its `build/compiler` `ee05f466f262f3f4...` (`receipts-9700x-ca6f9096.txt`). Main's #989
+puts constants added to an index into the displacement, and #991 makes a canonical narrow value's zero extension a
+copy, so there are fewer constants to recompute and fewer spills without rematerialization too. The same commands
+(`9700x/run-tree-ca6f9096.out`, `9700x/logs-tree-ca6f9096/`, `9700x/st-tree-ca6f9096/`):
+
+- Tests: every Tier 1 suite above, c-testsuite's 220 by `--tier1`, and `test-checker-driver` 47,983 checks, 0 failures.
+- Spills and frames, vector path:
+
+| Corpus | Build | Records | Stores | Reloads | Slots | Frame bytes | Recomputed | Left out |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| c-testsuite's subset | none | 9,175 | 22 | 22 | 12 | 16,568 | 0 | 0 |
+| | head | 9,142 | 0 | 0 | 0 | 16,472 | 22 | 11 |
+| `sqlite3.c` | none | 147,419 | 3,296 | 3,902 | 1,092 | 173,698 | 0 | 0 |
+| | head | 146,544 | 2,473 | 2,804 | 856 | 172,354 | 1,097 | 76 |
+| musl | none | 89,252 | 2,052 | 2,456 | 649 | 228,432 | 0 | 0 |
+| | head | 88,606 | 1,447 | 1,614 | 469 | 227,264 | 841 | 52 |
+| speedtest1 | none | 152,517 | 3,338 | 3,909 | 1,103 | 180,530 | 0 | 0 |
+| | head | 151,611 | 2,486 | 2,802 | 861 | 179,154 | 1,106 | 78 |
+
+- speedtest1, 5 rounds (`9700x/times-20261101T000709/`), the same `--verify` hash: Tier 0 256.91 ms (256.67–257.41), Tier 1
+  without rematerialization 221.88 ms (221.12–223.79), with it 222.26 ms (221.84–222.44); 4,411,361,541 and
+  4,406,250,735 user instructions, 1,127,823,560 and 1,131,337,781 cycles: alike again.
+
 ## Limits
 
 - The counts are static: each spill store or reload is a record of the code, not an execution of one.
