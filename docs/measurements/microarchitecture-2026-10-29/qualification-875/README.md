@@ -60,21 +60,49 @@ Hosted [CI run 41195496425](https://github.com/buster14a/buster-performance/acti
 
 ## Fresh collection contract
 
-The campaign now plans each formula before launch. Ordinary supported core formulas retain user-process scope; formulas with explicit privilege modifiers retain those domains and do not receive `--all-user`. Unsupported system/uncore formulas are recorded as unsupported rather than silently reinterpreted.
+The campaign plans each formula before launch. Ordinary supported core formulas retain user-process scope; formulas with explicit privilege modifiers retain those domains and do not receive `--all-user`. Software events such as `context-switches` keep their full domain too: a blanket user-only override silently zeroed them on the 9700X. Unsupported system/uncore formulas are recorded as unsupported rather than silently reinterpreted.
 
-Each accepted fresh metric requires effective attributes extracted by `perf evlist -v` from that invocation's retained `perf stat record` data, together with command, data hash, raw counts, pinned inventory and explicit scope. Descendant inheritance and operand privilege consistency are checked. The historical capture did not retain these effective attributes; its scope evidence is explicitly weaker and limited to the exact pinned collector/input pair.
+Each accepted fresh metric requires effective attributes from the same invocation, together with command, data hash, raw counts, pinned inventory and explicit scope. The collector prefers `perf evlist -v` on the retained `perf stat record` data; when that perf build cannot read its own data back (7.2.9-1 on the 9700X reports `HEADER_COMPRESSED`), it parses the invocation's `perf stat -vvv` `perf_event_attr` blocks instead. Descendant inheritance and operand privilege consistency are checked. The historical capture did not retain these effective attributes; its scope evidence is explicitly weaker and limited to the exact pinned collector/input pair.
 
 The evaluator does not execute formula text. It supports a bounded arithmetic/function subset and rejects unknown syntax, conflicting definitions, cycles and unresolved prerequisites. It recomputes with decimal arithmetic, uses unscaled dependent formulas, applies the top-level scale once, and requires supported units, finite nonnegative operands, positive denominators and at least 99% counter duty. Unsupported grammar or units fail closed.
 
-For duration formulas, compile `scripts/metric-time-control.c` and supply `--metric-time-control PATH`. That helper times a separate fresh workload process with `CLOCK_MONOTONIC`, fork to wait. A positive captured duration must be within a factor of two of that independent control. This is a deliberately broad sanity bound, not calibration, and never substitutes for perf's denominator. Missing or zero duration remains invalid.
+For duration formulas, compile `scripts/metric-time-control.c` and supply `--metric-time-control PATH`. That helper times a separate fresh workload process with `CLOCK_MONOTONIC`, fork to wait. A positive captured duration must be within a factor of two of that independent control. This is a deliberately broad sanity bound, not calibration, and never substitutes for perf's denominator.
+
+On the 9700X's perf 7.2.9-1, `perf stat record` reports `duration_time` as zero whenever another event shares the invocation, although the same invocation prints a positive `seconds time elapsed`. The collector retains that printed value as `duration_source=perf-elapsed`, hashes the invocation text, and still requires the independent control; Python wrapper time is never used. A missing or zero elapsed value, or a control that disagrees, still invalidates the rate.
 
 `campaign.py --metrics-only` requires explicit repeated `--metric NAME` selections and skips the unrelated counter, stage and sampling sweeps. A new output directory is required. The campaign's CPU pinning is **not** the shared-host lock: direct host operation must route each workload invocation, including its separate time control, through the existing `exclusive.sh` per-run wrapper. CI jobs whose runner hooks already hold that lock must not take it recursively.
 
-## Acceptance still outstanding
+## Fresh locked-9700X acceptance (2026-11-01)
 
-No locked-9700X recollection was performed for this change. Before closing #875, run only the affected supported formula families and explicit controls on the 9700X, with CPU 2 affinity, the recorded governor/SMT state and shared-host serialization. Retain compiler/source/corpus identities, actual perf/kernel versions, the new formula inventory, effective attributes, data hashes and independent time receipts. Check the privilege split and sum against an independent raw control collected over the same domains; check time-based rates against a positive measured duration and the independent workload-time control. Permission or PMU failures stay unavailable/unsupported, never numeric zero.
+The acceptance recollection was executed on the locked Ryzen 7 9700X with CPU 2 affinity and one `exclusive.sh` acquisition per perf or control invocation. It uses the archived native compiler from the same source commit because the original CI executable was not retained.
 
-The 32-formula `affected-metrics.txt` is a **review list**, not permission to force every entry into process scope. Several entries require separate system/uncore support. The eight rounded display values can already be recovered from archived operands and do not require a broad recollection. New records must live beside this addendum, not replace the original capture. No speedup, fresh hardware success or root cause for the captured zero duration is claimed here.
+| Input | Identity |
+| --- | --- |
+| Compiler | `native/compiler`, SHA-256 `bc9fd0d427db66f1b4d50f05e763838e77de41cf24cb1057d2c9ca816cf27c1d` |
+| Compiler source | `586c2ae2e40f117f27330307944a6d64566e0882` |
+| Corpus | manifest SHA-256 `391e729af6587355050881752558e790299cfe638c7dc7803bd028a8535ebcbd`; SQLite SHA-256 `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d` |
+| Predefines | SHA-256 `a39036d8215977b5a205f7fd3c4e7dfe6576b58eaa76a7bb0b0e214a164e8d33` |
+| Host | Ryzen 7 9700X, microcode `0xb404038`, 15 CPUs online, CPU 2 affinity |
+| perf / kernel | `7.2.9-1` / `6.18.50-2-lts`; `perf_event_paranoid=-1`, THP `always` |
+| Clang used for metadata | `23.1.1` |
+
+[fresh-2026-11-01](fresh-2026-11-01) retains the campaign and control records. The 15 affected formulas from the review list were collected for preprocess, syntax and compile: **45 metric records**. **39 are valid**, **3 are genuine-zero** (`lpm_cycles_guest`, because guest cycles are zero on bare metal with a positive denominator), and **3 are unavailable** (`lpm_l3_accesses`; the kernel refuses its `l3_lookup_state.all_coherent_accesses_to_l3` `max()` operand per thread, so it is not forced into process scope). Thus **42 records qualify**; none of the 32-entry review list was forced into a domain it cannot measure.
+
+The privilege split now survives collection. The compile workload is **85.51% user / 14.07% kernel / 0% guest**, syntax **83.62 / 16.22 / 0**, preprocess **81.85 / 17.83 / 0**. The independent raw controls, collected in separate invocations with `perf stat -e cpu-cycles:uH,cpu-cycles:kHh,cpu-cycles:G`, give **85.42 / 14.58 / 0**, **83.52 / 16.48 / 0** and **81.57 / 18.43 / 0**; every share is within 0.3 percentage points. The effective attributes show `cpu-cycles:uH` with `exclude_kernel=1`, `cpu-cycles:kHh` with `exclude_user=1`, and `cpu-cycles:G` with `exclude_host=1`. The old 50/50 split and doubled total do not reproduce.
+
+The 33 duration records have a positive captured duration. The per-metric fresh-process controls agree with the captured values within **0.779 to 1.041** (the contract's bound is 0.5 to 2). `lpm_cs_rate` is **69.1, 87.8 and 85.8 context switches/s**, from raw counts 1, 9 and 11. Its `context-switches` software event is collected without `--all-user`; a blanket user-only override zeroed it during probing.
+
+The hardware run exposed and fixed three collector assumptions that hosted fake-perf tests could not:
+
+1. `perf stat record` writes a data file this perf build cannot read back (`HEADER_COMPRESSED`), so `perf evlist -v` fails. The collector now parses the same invocation's `perf stat -vvv` `perf_event_attr` blocks. It still retains the data file and its SHA-256.
+2. `duration_time` is zero whenever another event shares the invocation, while the same invocation prints a positive `seconds time elapsed`. The collector records `duration_source=perf-elapsed`, retains the printed value and text hash, and still requires the independent control; it never uses Python wrapper time.
+3. A software event such as `context-switches` belongs to the full process domain; applying `--all-user` silently zeroed it. Formulas with software operands now use the formula scope.
+
+`fresh-control.py` also supports raw-only controls (`--no-time-control`) so that a contended host can run the independent privilege check without rerunning per-metric time controls; the controls above used that mode because the campaign already has one fresh-process time receipt per duration record.
+
+The 32-formula `affected-metrics.txt` remains a **review list**, not permission to force every entry into process scope. The bandwidth, UMC and other system/uncore families were not run per-thread. New records live beside the addendum, not over the original capture. This is a qualification of the affected formulas; it claims no speedup or new top-down result.
+
+The collection code used for the fresh records is `campaign.py` `5a29057df11b45414b525e562122894c6b795aa98c31627501d8ce21fbf1768f`, `metric_collect.py` `310372151caf14a072c0fd11b78852e8a3918644815659dd2e0afc15d34df93b` and `metric_qualification.py` `806114026a39bbc37a4823cba9389bcf16516df21359c287f0e1ef66592ba586`; the controls used `fresh-control.py` `db84fe3e0b01e6c8d12308e95216cc89870003601dedaca4cd79466f344a64c6` and `metric_workloads.py` `b5f7017b8aa5426110b5927d739a99f1655479a9a56d3275aeb5e1beeb381c26`; the reader is `qualify-fresh.py` `ea8bf1a94f1b0837bbc1f24e462d6a34b67449e6b1dd7f787056e43632d65891`. The fresh records' `environment.json` and `SHA256SUMS` bind them to the hashes above.
 
 ## Provenance
 

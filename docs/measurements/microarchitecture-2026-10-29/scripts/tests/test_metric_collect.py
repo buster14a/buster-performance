@@ -20,7 +20,7 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(kwargs['env']['LC_ALL'], 'C')
             if argv[:3] == ['perf', 'stat', 'record']:
                 Path(argv[argv.index('-o') + 1]).write_bytes(b'fake stat capture for unit test')
-                return subprocess.CompletedProcess(argv, status, '', record['perf_stat'])
+                return subprocess.CompletedProcess(argv, status, '', live(record, scope)['perf_stat'])
             self.assertEqual(argv[:3], ['perf', 'evlist', '-v'])
             return subprocess.CompletedProcess(argv, evlist_status, live(record, scope)['perf_evlist'], '')
         return run
@@ -30,7 +30,7 @@ class CollectionTests(unittest.TestCase):
             out = Path(temporary) / 'one'
             row = collect_metric(INVENTORY, BRANCH['variant'], ['/compiler', 'input.c'], out)
             self.assertTrue(row['qualification']['eligible'], row)
-            self.assertEqual(row['qualification']['qualification'], 'rounded-to-zero')
+            self.assertEqual(row['qualification']['qualification'], 'valid')
             self.assertEqual(run.call_count, 2)
             self.assertEqual(len(row['stat_data_sha256']), 64)
             self.assertTrue((out / 'stat.data').is_file())
@@ -49,10 +49,11 @@ class CollectionTests(unittest.TestCase):
             self.assertEqual(row['qualification']['qualification'], 'failed')
             self.assertIsNone(row['qualification']['value'])
 
-    def test_evlist_failure_never_accepts_display(self):
+    def test_evlist_failure_uses_verbose_attributes(self):
         with tempfile.TemporaryDirectory() as temporary, patch('metric_collect.subprocess.run', side_effect=self.fake(BRANCH, evlist_status=2)):
             row = collect_metric(INVENTORY, BRANCH['variant'], ['/compiler'], Path(temporary) / 'one')
-            self.assertFalse(row['qualification']['eligible'])
+            self.assertTrue(row['qualification']['eligible'], row)
+            self.assertEqual(row['qualification']['scope_evidence'], 'perf-verbose-attrs')
 
     def test_unknown_metric_is_not_launched(self):
         with tempfile.TemporaryDirectory() as temporary, patch('metric_collect.subprocess.run') as run:

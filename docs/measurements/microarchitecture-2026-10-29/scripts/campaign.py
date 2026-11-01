@@ -5,13 +5,13 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import tempfile
 import time
 
 from metric_collect import collect_metric
 from metric_qualification import Inventory
+from metric_workloads import describe_workloads, workload_commands
 
 p = argparse.ArgumentParser()
 p.add_argument('--compiler', required=True)
@@ -27,6 +27,10 @@ p.add_argument('--no-profiles', action='store_true')
 p.add_argument('--metrics-only', action='store_true', help='skip counters, stages and profiles; requires explicit --metric selections')
 p.add_argument('--metric', action='append', default=[], help='exact formula to collect; repeat to select affected formulas')
 p.add_argument('--metric-time-control', help='compiled metric-time-control.c; required to qualify duration-based formulas')
+p.add_argument('--exclusive', help='shared-host exclusive.sh; each perf and time-control invocation takes the lock separately')
+p.add_argument('--exclusive-owner', default=os.environ.get('EXCLUSIVE_OWNER', 'buster-perf-metric'))
+p.add_argument('--exclusive-title', default=os.environ.get('EXCLUSIVE_TITLE', ''))
+p.add_argument('--exclusive-link', default=os.environ.get('EXCLUSIVE_LINK', ''))
 a = p.parse_args()
 if a.metrics_only and not a.metric:
     p.error('--metrics-only requires at least one explicit --metric')
@@ -40,6 +44,10 @@ os.environ.pop('CPATH', None)
 os.environ.pop('C_INCLUDE_PATH', None)
 os.environ['CORES_TITLE'] = 'Buster microarchitecture counter sweep'
 os.environ['CORES_LINK'] = 'https://github.com/buster14a/buster'
+if a.exclusive:
+    os.environ['EXCLUSIVE_OWNER'] = a.exclusive_owner
+    os.environ['EXCLUSIVE_TITLE'] = a.exclusive_title
+    os.environ['EXCLUSIVE_LINK'] = a.exclusive_link
 
 
 def output(command):
@@ -61,7 +69,11 @@ def wrapped(command, affinity_path):
         shell = 'printf "%s\\n" "$CORES_CPUS" > "$1"; shift; exec taskset -c "${CORES_CPUS%%,*}" "$@"'
         return ['cores', '-n', '1', '--', 'bash', '-c', shell, 'pin', str(affinity_path), *command]
     affinity_path.write_text('2\n')
-    return ['taskset', '-c', '2', *command]
+    pinned = ['taskset', '-c', '2', *command]
+    if a.exclusive:
+        # The shared-host lock is held for this single invocation only.
+        return [a.exclusive, *pinned]
+    return pinned
 
 
 def execute(command, stat_path=None, stdout_path=None, stderr_path=None):
@@ -102,21 +114,10 @@ metadata = {
 }
 (out / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
 
-base = ['--predefines', str(corpus / 'provenance/gnu17-pinned-predefines.txt'),
-        '--clang-features', '-march=znver5', '-std=gnu17', '-nostdinc',
-        '-isystem', str(corpus / 'headers/usr/lib/clang/23/include'),
-        '-isystem', str(corpus / 'headers/usr/local/include'),
-        '-isystem', str(corpus / 'headers/usr/include'), '-I' + str(corpus / 'sqlite')]
-source = str(corpus / 'sqlite/sqlite3.c')
 with tempfile.TemporaryDirectory(prefix='buster-microarch-') as scratch:
     scratch = Path(scratch)
-    object_file = str(scratch / 'sqlite.o')
-    workloads = {
-        'preprocess': [compiler, '-E', '-P', *base, '-o', '/dev/null', source],
-        'syntax': [compiler, '-fsyntax-only', *base, source],
-        'compile': [compiler, '-c', *base, '-o', object_file, source],
-    }
-    descriptions = {k: shlex.join(v).replace(compiler, '<COMPILER>').replace(str(corpus), '<CORPUS>').replace(str(scratch), '<SCRATCH>') for k, v in workloads.items()}
+    workloads = workload_commands(compiler, corpus, scratch / 'sqlite.o')
+    descriptions = describe_workloads(workloads, compiler, corpus, scratch)
     (out / 'commands.json').write_text(json.dumps(descriptions, indent=2) + '\n')
     events = sorted({e['EventName'] for e in inventory if e.get('Unit') == 'cpu'
                      and e.get('EventName') and '/' not in e['EventName']})

@@ -17,7 +17,7 @@ def collect_metric(inventory, metric, command, destination, wrap=lambda command:
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=False)
     row = {'kind': 'metric', 'variant': metric, 'status': None, 'perf_stat': '',
-           'workload_argv': list(command), 'collector_schema': 'buster-perf-metric-v1'}
+           'workload_argv': list(command), 'collector_schema': 'buster-perf-metric-v2'}
     try:
         plan = inventory.plan(metric)
     except Rejected as error:
@@ -27,7 +27,7 @@ def collect_metric(inventory, metric, command, destination, wrap=lambda command:
         return row
     row['collection_scope'] = plan['scope']
     data = destination / 'stat.data'
-    argv = ['perf', 'stat', 'record', '--no-big-num', '-x', ';', '-o', str(data), *plan['arguments'], '--', *command]
+    argv = ['perf', 'stat', 'record', '--no-big-num', '-vvv', '-o', str(data), *plan['arguments'], '--', *command]
     row['perf_argv'] = argv
     row['executed_argv'] = wrap(argv)
     environment = dict(os.environ, LC_ALL='C')
@@ -36,7 +36,8 @@ def collect_metric(inventory, metric, command, destination, wrap=lambda command:
         # success from that text. Both exit status and mandatory operands matter.
         run = subprocess.run(row['executed_argv'], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                              text=True, errors='replace', env=environment, check=False)
-        row.update(status=run.returncode, perf_stat=run.stderr)
+        row.update(status=run.returncode, perf_stat=run.stderr,
+                   perf_stat_sha256=hashlib.sha256(run.stderr.encode()).hexdigest())
         (destination / 'stat.stderr').write_text(run.stderr)
         if data.is_file():
             row['stat_data_sha256'] = hashlib.sha256(data.read_bytes()).hexdigest()

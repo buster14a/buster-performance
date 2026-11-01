@@ -11,7 +11,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from metric_qualification import Inventory, Rejected, archived_capture, parse_evlist, qualify
+from metric_qualification import (Inventory, Rejected, archived_capture, parse_elapsed,
+                                  parse_evlist, parse_verbose, parse_verbose_attributes, qualify)
 
 ENTRIES = [
     {'EventName': name, 'Unit': 'cpu', 'Encoding': encoding}
@@ -52,9 +53,25 @@ def changed(record, old, new):
     return result
 
 
+def verbose_text(record):
+    lines = []
+    for line in record['perf_stat'].splitlines():
+        fields = line.split(';')
+        if len(fields) < 5 or not fields[2]:
+            continue
+        name, count, runtime, duty = fields[2], fields[0], int(fields[3] or 0), Decimal(fields[4] or 0)
+        enabled = max(runtime, 1)
+        running = int(duty * enabled / 100)
+        lines.append(f'{name}: {count} {enabled} {running}')
+    elapsed = record.get('elapsed_seconds', '0.125')
+    lines.append(f'       {elapsed} seconds time elapsed')
+    return '\n'.join(lines) + '\n'
+
+
 def live(record, scope='user'):
     result = copy.deepcopy(record)
     result.update(collection_scope=scope, evlist_status=0, stat_data_sha256='a' * 64,
+                  collector_schema='buster-perf-metric-v2',
                   perf_argv=['perf', 'stat', 'record', *(['--all-user'] if scope == 'user' else []), '-M', record['variant'], '--', '/compiler'])
     attrs = []
     for line in record['perf_stat'].splitlines():
@@ -69,6 +86,13 @@ def live(record, scope='user'):
                      'G': 'exclude_host: 1'}.get(name.split(':')[-1], '')
         attrs.append(f'{name}: type: 4 (cpu), size: 128, config: 0xc2 (event), inherit: 1' + (', ' + flags if flags else ''))
     result['perf_evlist'] = '\n'.join(attrs)
+    blocks = []
+    for line in attrs:
+        name, rest = line.split(': ', 1)
+        blocks.extend(('Opening: ' + name, 'perf_event_attr:'))
+        blocks.extend('  ' + field.replace(': ', ' ', 1) for field in rest.split(', '))
+    result['perf_stat'] = '\n'.join(blocks + [verbose_text(record)]) + '\n'
+    result['perf_stat_sha256'] = 'b' * 64
     return result
 
 
@@ -103,7 +127,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_effective_kernel_override_rejected(self):
         record = live(USER, 'formula')
-        record['perf_evlist'] = record['perf_evlist'].replace('exclude_user: 1, exclude_guest: 1', 'exclude_kernel: 1, exclude_guest: 1')
+        record['perf_stat'] = record['perf_stat'].replace('  exclude_user 1', '  exclude_kernel 1')
         self.result(record, 'semantically-invalid', historical=False)
 
     def test_zero_duration_is_not_zero_rate(self):
@@ -119,8 +143,23 @@ class QualificationTests(unittest.TestCase):
     def test_positive_duration_conversion(self):
         record = live(changed(LOAD, '0;;duration_time', '125000000;;duration_time'))
         record['time_sanity_seconds'] = '0.125'
-        result = self.result(record, 'rounded-to-zero', True, historical=False)
+        result = self.result(record, 'valid', True, historical=False)
         self.assertEqual(Decimal(result['value']), Decimal(540701410) * 8)
+
+    def test_elapsed_fallback_requires_control_and_positive_time(self):
+        record = live(changed(LOAD, '0;;duration_time', '0;;duration_time'))
+        record['time_sanity_seconds'] = '0.125'
+        result = self.result(record, 'valid', True, historical=False)
+        self.assertEqual(Decimal(result['value']), Decimal(540701410) / Decimal('0.125'))
+        rows = {row['event']: row for row in result['operands']}
+        self.assertEqual(rows['duration_time']['duration_source'], 'perf-elapsed')
+        record['perf_stat'] = record['perf_stat'].replace('0.125 seconds time elapsed', '')
+        self.result(record, 'unavailable', historical=False)
+
+    def test_duplicate_verbose_operand_is_rejected(self):
+        record = live(BRANCH)
+        record['perf_stat'] += 'ex_ret_brn: 1 125374788 125374788\n'
+        self.result(record, 'semantically-invalid', historical=False)
 
     def test_duration_requires_independent_sanity(self):
         self.result(live(changed(LOAD, '0;;duration_time', '125000000;;duration_time')), 'semantically-invalid', historical=False)
@@ -167,11 +206,11 @@ class QualificationTests(unittest.TestCase):
 
     def test_live_attributes_required(self):
         record = live(BRANCH)
-        record['perf_evlist'] = ''
+        record['perf_stat'] = 'ex_ret_brn: 211482428 125374788 125374788\n'
         self.result(record, 'unavailable', historical=False)
 
     def test_live_user_scope(self):
-        self.result(live(BRANCH), 'rounded-to-zero', True, historical=False)
+        self.result(live(BRANCH), 'valid', True, historical=False)
 
     def test_live_scope_mismatch(self):
         record = live(BRANCH)
@@ -185,7 +224,7 @@ class QualificationTests(unittest.TestCase):
 
     def test_live_inheritance_required(self):
         record = live(BRANCH)
-        record['perf_evlist'] = record['perf_evlist'].replace('inherit: 1', 'inherit: 0')
+        record['perf_stat'] = record['perf_stat'].replace('  inherit 1', '  inherit 0')
         self.result(record, 'semantically-invalid', historical=False)
 
     def test_wrong_metric_unit(self):
@@ -238,10 +277,60 @@ class QualificationTests(unittest.TestCase):
         entries = [*ENTRIES, {'EventName': 'ex_ret_brn', 'Unit': 'amd_df'}]
         self.result(BRANCH, 'unsupported', inventory=Inventory(entries))
 
+    def test_software_and_amd_l3_are_process_core(self):
+        entries = [*ENTRIES,
+                   {'EventName': 'context-switches', 'Unit': 'software', 'Encoding': 'software/config=3/'},
+                   {'EventName': 'l3_lookup_state.l3_miss', 'Unit': 'amd_l3', 'Encoding': 'amd_l3/event=4,umask=1/'},
+                   metric('cs_rate', r'd_ratio(context\-switches, duration_time)', '1ctxsw/s'),
+                   metric('l3_misses', 'd_ratio(l3_lookup_state.l3_miss, duration_time)', '1accesses per sec')]
+        inventory = Inventory(entries)
+        self.assertEqual(inventory.domain('cs_rate'), 'process-core')
+        self.assertEqual(inventory.domain('l3_misses'), 'process-core')
+        plan = inventory.plan('cs_rate')
+        self.assertEqual(plan['scope'], 'formula')
+        self.assertNotIn('--all-user', plan['arguments'])
+
     def test_evlist_zero_defaults_and_annotations(self):
         parsed = parse_evlist('cycles:u: type: 0 (PERF_TYPE_HARDWARE), size: 128, config: 0 (PERF_COUNT_HW_CPU_CYCLES), inherit: 1, exclude_kernel: 1')
         self.assertEqual(parsed['cpu-cycles:u']['exclude_user'], 0)
         self.assertEqual(parsed['cpu-cycles:u']['exclude_kernel'], 1)
+
+    def test_verbose_counts_and_attributes(self):
+        text = '''Opening: cycles:u
+perf_event_attr:
+  type                             0
+  size                             128
+  config                           0
+  inherit                          1
+  exclude_kernel                   1
+------------------------------------------------------------
+Opening: duration_time
+perf_event_attr:
+  type                             4294967294
+  size                             128
+  config                           1
+  inherit                          1
+------------------------------------------------------------
+cycles:u: -1: 1 2 2
+cycles:u: 10 20 20
+duration_time: 0 1 1
+
+       0.250000000 seconds time elapsed
+'''
+        rows = {row['event']: row for row in parse_verbose(text)}
+        self.assertEqual(rows['cycles:u']['count'], '10')
+        self.assertEqual(rows['cycles:u']['duty_percent'], '100')
+        self.assertEqual(parse_elapsed(text), Decimal('0.25'))
+        attributes = parse_verbose_attributes(text)
+        self.assertEqual(attributes['cpu-cycles:u']['exclude_kernel'], 1)
+        self.assertEqual(attributes['cpu-cycles:u']['size'], 128)
+        self.assertEqual(attributes['duration_time']['type'], 4294967294)
+
+    def test_verbose_duplicate_and_missing_attributes(self):
+        duplicate = 'cycles:u: 1 1 1\ncycles:u: 2 1 1\n'
+        with self.assertRaises(Rejected):
+            parse_verbose(duplicate)
+        self.assertEqual(parse_verbose_attributes('cycles:u: 1 1 1\n'), {})
 
     def test_evlist_incomplete_and_duplicate(self):
         for text in ('cycles:u: type: 0, config: 0', 'cycles:u: type: 0, size: 16, config: 0', 'cycles:u: size: 128\ncycles:u: size: 128'):

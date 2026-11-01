@@ -86,6 +86,117 @@ def parse_stat(text):
     return rows
 
 
+VERBOSE_ROW = re.compile(r'^(.*?):\s+(-1:\s+)?([0-9]+)\s+([0-9]+)\s+([0-9]+)\s*$')
+ELAPSED_ROW = re.compile(r'^\s*(' + NUMBER + r')\s+seconds time elapsed\s*$')
+
+
+def parse_verbose(text):
+    """Read perf stat -vvv's final per-event count/enabled/running lines.
+
+    The initial read before the workload starts carries a -1 marker and is
+    ignored; the final read is the one the CSV printer would show. A repeated
+    final event must agree, or its raw operand is ambiguous.
+    """
+    rows, final = [], {}
+    for line in text.splitlines():
+        elapsed = ELAPSED_ROW.match(line)
+        if elapsed:
+            rows.append({'event': 'elapsed', 'count': elapsed.group(1),
+                         'unit': 's', 'runtime_ns': '', 'duty_percent': '',
+                         'display_value': '', 'display_label': ''})
+            continue
+        match = VERBOSE_ROW.match(line.strip())
+        if not match or match.group(2):
+            continue
+        event, count, enabled, running = match.group(1), match.group(3), int(match.group(4)), int(match.group(5))
+        if enabled <= 0:
+            reject('unavailable', 'event has no enabled time: ' + event)
+        duty = Decimal(running) * 100 / Decimal(enabled)
+        if duty < 0 or duty > 100:
+            reject('unavailable', 'event has invalid enabled/running time: ' + event)
+        row = {'event': event, 'count': count, 'unit': '',
+               'runtime_ns': str(enabled), 'duty_percent': str(duty),
+               'display_value': '', 'display_label': ''}
+        if event in final:
+            if final[event]['count'] != count or final[event]['runtime_ns'] != row['runtime_ns']:
+                reject('semantically-invalid', 'ambiguous raw operand: ' + event)
+        else:
+            final[event] = row
+            rows.append(row)
+    if not rows:
+        reject('unavailable', 'no operand rows')
+    return rows
+
+
+def parse_elapsed(text):
+    for line in text.splitlines():
+        match = ELAPSED_ROW.match(line)
+        if match:
+            value = decimal(match.group(1))
+            if value > 0:
+                return value
+    return None
+
+
+def parse_verbose_attributes(text):
+    """Read perf stat -vvv's per-event perf_event_attr blocks.
+
+    The blocks are printed when the event is opened, in the same invocation as
+    the counts. This is the fallback when a perf build cannot read its own
+    stat.data file back (the archived 7.2.9-1 build reports a broken
+    HEADER_COMPRESSED record).
+    """
+    result, current, fields = {}, None, {}
+
+    def complete():
+        nonlocal current, fields
+        if current is None:
+            return
+        if not fields:
+            reject('unavailable', 'no effective event attributes: ' + current)
+        attributes = {key: 0 for key in (*FLAGS, 'inherit', 'type', 'config')}
+        for key, raw in fields.items():
+            if key not in ('type', 'config', 'inherit', *FLAGS):
+                continue
+            numeric = re.fullmatch(r'(0x[0-9a-fA-F]+|[0-9]+)(?:\s+\([^\n]*\))?', raw.strip())
+            if not numeric:
+                reject('unsupported', 'unrecognized effective attribute: ' + key)
+            attributes[key] = int(numeric.group(1), 0)
+        size = fields.get('size', '')
+        if not re.fullmatch(r'[0-9]+', size) or int(size) < 64:
+            reject('unavailable', 'incomplete effective event attributes: ' + current)
+        attributes['size'] = int(size)
+        attributes['printed_attributes'] = ', '.join(f'{key}: {value}' for key, value in fields.items())
+        name = canonical(current)
+        if name in result and result[name] != attributes:
+            reject('semantically-invalid', 'ambiguous effective event attributes: ' + name)
+        result[name] = attributes
+        current, fields = None, {}
+
+    in_attributes = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        match = re.match(r'^Opening:\s+(.+)$', stripped)
+        if match:
+            complete()
+            current = match.group(1).strip()
+            in_attributes = False
+            continue
+        if stripped == 'perf_event_attr:':
+            in_attributes = True
+            fields = {}
+            continue
+        if in_attributes:
+            if stripped.startswith('---') or not stripped:
+                in_attributes = False
+                continue
+            field = re.match(r'^(\w+)\s+(.+)$', stripped)
+            if field:
+                fields[field.group(1)] = field.group(2).strip()
+    complete()
+    return result
+
+
 def parse_evlist(text):
     """Read perf evlist -v's complete per-event attribute lines, not labels.
 
@@ -201,13 +312,19 @@ class Inventory:
             base = re.sub(r':[ukHGhp]+$', '', operand)
             if base == 'duration_time':
                 continue
-            if unit not in (None, 'cpu') or (unit is None and base not in GENERIC):
+            # software events are per-process under perf stat; amd_l3 is a
+            # core PMU event on Zen 5 (tested per process), unlike the uncore
+            # amd_df and amd_umc units.
+            if unit not in (None, 'cpu', 'software', 'amd_l3') or (unit is None and base not in GENERIC):
                 reject('unsupported', 'not a supported process-core operand: ' + operand)
         return 'explicit-domains' if any(modifiers(x) for x in leaves) else 'process-core'
 
     def plan(self, name, requested='auto'):
         domain = self.domain(name)
-        scope = ('formula' if domain == 'explicit-domains' else 'user') if requested == 'auto' else requested
+        # Software events (context switches) count in the kernel as well; a
+        # blanket --all-user can silently zero them. Keep their full domain.
+        software = any(self.event(x).get('Unit') == 'software' for x in self.leaves(name) if x != 'duration_time')
+        scope = ('formula' if domain == 'explicit-domains' or software else 'user') if requested == 'auto' else requested
         if scope not in ('user', 'formula'):
             reject('unsupported', 'unsupported collection scope')
         if scope == 'user' and any(set(modifiers(x)) & set('khHG') for x in self.leaves(name)):
@@ -294,7 +411,7 @@ def qualify(record, inventory, historical=False):
               'reported_value': None, 'reported_unit_and_name': None,
               'scope': None, 'minimum_counter_duty_percent': None, 'operands': []}
     try:
-        if record.get('status') is None and record.get('collector_schema') == 'buster-perf-metric-v1':
+        if record.get('status') is None and record.get('collector_schema') in ('buster-perf-metric-v1', 'buster-perf-metric-v2'):
             # Re-evaluate a planned refusal; do not trust a stored qualification
             # or mislabel an unsupported, never-launched formula as a workload failure.
             inventory.plan(name)
@@ -307,7 +424,8 @@ def qualify(record, inventory, historical=False):
             [result['formula'], result['scale_unit'], definition.get('Unit')],
             separators=(',', ':')).encode()).hexdigest()
         result['formula_closure_sha256'] = hashlib.sha256(json.dumps(inventory.formula_identity(name), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-        rows = parse_stat(record.get('perf_stat', ''))
+        verbose = record.get('collector_schema') == 'buster-perf-metric-v2'
+        rows = parse_verbose(record.get('perf_stat', '')) if verbose else parse_stat(record.get('perf_stat', ''))
         result['operands'] = rows
         displayed = [row for row in rows if row['display_label'].split() and row['display_label'].split()[-1] == name]
         if len(displayed) > 1:
@@ -320,18 +438,28 @@ def qualify(record, inventory, historical=False):
             reject('unsupported', 'formula has no retained operands')
         scope = 'user' if historical else record.get('collection_scope')
         result['scope'] = scope
-        result['scope_evidence'] = ('pinned-collector:' + ARCHIVE_COMMIT) if historical else 'perf-evlist'
+        result['scope_evidence'] = ('pinned-collector:' + ARCHIVE_COMMIT) if historical else ('perf-verbose-attrs' if verbose else 'perf-evlist')
         if scope not in ('user', 'formula'):
             reject('unavailable', 'collection scope not established')
         if scope == 'user' and any(set(modifiers(x)) & set('khHG') for x in leaves):
             reject('semantically-invalid', 'blanket --all-user overrides explicit privilege domains')
-        attributes = {} if historical else parse_evlist(record.get('perf_evlist', ''))
+        if historical:
+            attributes = {}
+        elif verbose:
+            attributes = parse_verbose_attributes(record.get('perf_stat', ''))
+            if not attributes:
+                reject('unavailable', 'effective attributes are not bound to the stat capture')
+        else:
+            attributes = parse_evlist(record.get('perf_evlist', ''))
         if not historical:
             argv = record.get('perf_argv', [])
             options = argv[:argv.index('--')] if '--' in argv else argv
             if any(x in options for x in ('-a', '--all-cpus', '-C', '--cpu', '-p', '--pid', '-t', '--tid', '--all-kernel')) or any(x.startswith(('--cpu=', '--pid=', '--tid=')) for x in options) or ('--all-user' in options) != (scope == 'user'):
                 reject('semantically-invalid', 'command and declared scope disagree')
-            if record.get('evlist_status') != 0 or not record.get('stat_data_sha256'):
+            if verbose:
+                if not record.get('perf_stat_sha256') or not record.get('stat_data_sha256'):
+                    reject('unavailable', 'effective attributes are not bound to the stat capture')
+            elif record.get('evlist_status') != 0 or not record.get('stat_data_sha256'):
                 reject('unavailable', 'effective attributes are not bound to the stat capture')
         values, duties, signatures = {}, [], set()
         for operand in sorted(leaves):
@@ -349,12 +477,31 @@ def qualify(record, inventory, historical=False):
             if duty < 99:
                 reject('underscheduled', 'operand below 99% duty: ' + operand)
             if operand == 'duration_time':
-                if value <= 0:
-                    reject('semantically-invalid', 'zero/nonpositive duration_time')
-                if row['unit'] not in ('', 'ns', 'nsec'):
-                    reject('unsupported', 'unverified duration_time unit')
-                # perf's raw tool counter is nanoseconds; MetricExpr consumes seconds.
-                value /= Decimal(1000000000)
+                if verbose:
+                    if value > 0:
+                        if row['unit'] not in ('', 'ns', 'nsec'):
+                            reject('unsupported', 'unverified duration_time unit')
+                        # perf's raw tool counter is nanoseconds; MetricExpr consumes seconds.
+                        value /= Decimal(1000000000)
+                        row['duration_source'] = 'duration_time'
+                    else:
+                        elapsed = parse_elapsed(record.get('perf_stat', ''))
+                        if elapsed is None or elapsed <= 0:
+                            reject('unavailable', 'no positive captured duration')
+                        # perf stat record reports the duration_time tool counter
+                        # as zero when it shares a group with CPU events. The
+                        # same invocation's seconds-time-elapsed line is the
+                        # retained perf measurement, not wrapper time; the
+                        # independent control below still has to accept it.
+                        value = elapsed
+                        row['duration_source'] = 'perf-elapsed'
+                else:
+                    if value <= 0:
+                        reject('semantically-invalid', 'zero/nonpositive duration_time')
+                    if row['unit'] not in ('', 'ns', 'nsec'):
+                        reject('unsupported', 'unverified duration_time unit')
+                    # perf's raw tool counter is nanoseconds; MetricExpr consumes seconds.
+                    value /= Decimal(1000000000)
                 sanity = record.get('time_sanity_seconds')
                 if not historical and (sanity is None or decimal(sanity) <= 0 or
                         not Decimal('0.5') <= value / decimal(sanity) <= Decimal('2')):
