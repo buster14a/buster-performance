@@ -16,6 +16,12 @@ stores the six argument registers there and, after testing `al`, the eight vecto
   `sqlite3.c` by both paths and Lua 5.4.8's 34 sources compile by `--tier1 -c` into the same bytes as at `d8b21f2`
   (`identity2.sh`: 35 objects identical, 0 differ; `9700x/identity-head-d8b21f2-base-9089500.txt`). `2adf700`, the
   review's last commit, changes only a test, so the copy on it (`9d46ddb`) has `9089500`'s code.
+- The pull request's commit is `d0acf30`, the same change on main `26e452c` (buster#1016 merged). Main had taken
+  buster#177's unwind tables for Tier 1's frames (`check_tier1_frame`) in the meantime, after this measurement. At
+  `d0acf30` the change's suites pass again in the session's cloud container: Tier 1's, the frame's,
+  `test-check-debug --cross-check`, c-testsuite's subset by `--tier1`, the call graph, and `test-checker-driver` but
+  for 10 checks of library functions' implicit declarations, which the container's clang 23.1.5 diagnoses otherwise
+  than the 9700X's (the variadic fixture passes). The pull request's 9700X job runs the whole suite.
 - Each tree is `git archive` of its commit, built by `BUSTER_DEBUG_INFO=0 ./build.sh` (`9700x/logs-build/`).
 - Host: the Ryzen 7 9700X (benchpress). Every build, test and measurement held `~/buster-fast-bench/exclusive.sh`
   once, with owner `claude-141-remaining`, and every timed run was pinned to CPU 2.
