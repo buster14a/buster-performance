@@ -2,9 +2,9 @@
 # The reviewer's two-file check: does --tier1-gvn reach each unit's lanes in a multi-file command, and is a single
 # file still changed by it?
 set -u
-REPO=/home/david/.local/share/opencode/worktree/11a4cd/shiny-canyon
+REPO=${REPO:?set REPO to a buster checkout}
 OUT=/tmp/opencode/gvn866/t1
-C=/home/david/.cache/buster-scratch-x87/ct/c-testsuite/tests/single-exec
+C=$CORPUS/tests/single-exec
 cd "$REPO" || exit 1
 mkdir -p "$OUT/review"
 R="$OUT/review"

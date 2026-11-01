@@ -1,9 +1,9 @@
 #!/bin/bash
 # Does --tier1-gvn change what c-testsuite's programs do? Compile each way, run both, compare status and output.
 set -u
-REPO=/home/david/.local/share/opencode/worktree/11a4cd/shiny-canyon
+REPO=${REPO:?set REPO to a buster checkout}
 OUT=/tmp/opencode/gvn866/t1/behaviour
-C=/home/david/.cache/buster-scratch-x87/ct/c-testsuite/tests/single-exec
+C=$CORPUS/tests/single-exec
 cd "$REPO" || exit 1
 mkdir -p "$OUT"
 same=0; differ=0; skipped=0

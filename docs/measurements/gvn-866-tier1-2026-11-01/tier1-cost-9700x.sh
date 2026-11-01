@@ -2,11 +2,11 @@
 # The 9700X half of #866's compile-time pair: -c --tier1 against -c --tier1 --tier1-gvn, five runs each, CPU 2,
 # every process under the shared host lock.
 set -u
-cd /home/david/buster-fast-bench/gvn866-tier1/repo || exit 1
-S=${1:-/home/david/buster-fast-bench/refine-claude/inputs/sqlite3.c}
+cd "${REPO:-$HOME/buster-fast-bench/gvn866-tier1/repo}" || exit 1
+S=${1:?usage: tier1-cost-9700x.sh SQLITE3_C}
 OUT=/tmp/gvn866-9700x
 mkdir -p "$OUT"
-LOCK=/home/david/buster-fast-bench/exclusive.sh
+LOCK=${LOCK:-$HOME/buster-fast-bench/exclusive.sh}
 export EXCLUSIVE_OWNER=solve-866-tier1
 export EXCLUSIVE_TITLE="solve 866 tier1 9700x pair"
 export EXCLUSIVE_LINK="https://github.com/buster14a/buster/pull/1020"
