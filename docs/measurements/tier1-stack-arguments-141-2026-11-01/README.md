@@ -17,7 +17,7 @@ sixth in the stack's 8-byte slots:
 
 - base: buster `9b9e43a`, buster#1086's head (the narrow call boundary on main `6135b68`).
 - head: buster `3146ff1`, the change's commit on `9b9e43a`.
-- The pull request's commit is the same change on main after buster#1086 merged.
+- The pull request's commit is `c1c16f1`, the same change on main `e3a9c49` after buster#1086 merged.
 - Each tree is `git archive` of its commit, built by `BUSTER_DEBUG_INFO=0 ./build.sh` (`9700x/logs-build/`).
 - Host: the Ryzen 7 9700X (benchpress). Every build, test and measurement held `~/buster-fast-bench/exclusive.sh`
   once, with owner `claude-141-remaining`, and every timed run was pinned to CPU 2.
