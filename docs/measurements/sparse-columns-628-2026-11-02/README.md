@@ -13,11 +13,13 @@ the change was designed from.
 | `head-93f2085f` | [`93f2085f6229d98375434de84721116509a7479e`](https://github.com/buster14a/buster/tree/93f2085f6229d98375434de84721116509a7479e) | the change on `3ce71ec3` |
 | `main-dac5b770` | [`dac5b770b00a5fad3bbf69d655718f3ad7cdfa67`](https://github.com/buster14a/buster/tree/dac5b770b00a5fad3bbf69d655718f3ad7cdfa67) | main when the branch was merged with it |
 | `head-67f7bf51` | [`67f7bf51a830898adbc6e47ae8d122211283f9c5`](https://github.com/buster14a/buster/tree/67f7bf51a830898adbc6e47ae8d122211283f9c5) | the change merged with `dac5b770` |
+| `head-3950f15b` | [`3950f15b04c9d6a4782c52866a6a4b541d424bfa`](https://github.com/buster14a/buster/tree/3950f15b04c9d6a4782c52866a6a4b541d424bfa) | the review's fixes on `67f7bf51` (the shared pool's region claims, the merge's masked loads) |
+| `head-647ff951` | [`647ff9510556f15f56300d19e47e69a921a62640`](https://github.com/buster14a/buster/tree/647ff9510556f15f56300d19e47e69a921a62640) | a test's fix and docs on `3950f15b`: the tests' tree |
 
-Each tree is `git archive` of its commit, with a `COMMIT` file. The branch's later commits change only a test and
-docs: their production code is `67f7bf51`'s.
+Each tree is `git archive` of its commit, with a `COMMIT` file. `3950f15b`'s production code is the branch's last; the
+commits after it change only a test and docs.
 
-`receipts.txt` has the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, the four
+`receipts.txt` (and `round3/executables.sha256` for the last two trees) has the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, the four
 executables' SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
 `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, with the `compile_time` step's options:
 
@@ -69,6 +71,19 @@ user instructions 1,274.16 → 1,272.08 M, kernel cycles 93.38 → 88.70 M, peak
 `check-input` 49.053 → 47.701 ms. Every round has B 1.68 to 2.74 ms faster.
 
 Every object is the same bytes as its main's, in both rounds, by all four variants.
+
+Round 3, `main-dac5b770` (A) against `head-3950f15b` (B), the review's fixes: task clock 117.065 → 115.895 ms, user
+cycles 554.74 → 553.54 M, user instructions 1,274.18 → 1,272.85 M (0.75 M more than `67f7bf51`'s: the directory's acquire
+loads and the exhaustion test), kernel cycles 93.78 → 89.27 M, peak RSS 323,608 → 296,856 KiB, `check-input` 48.999 →
+47.511 ms. Every round has B 0.66 to 1.56 ms faster; every object is the same bytes, by all four variants.
+
+## Tests
+
+`tests/summary.txt`: the checker's tests of `head-647ff951` on the 9700X, by `./build/compiler parallel --jobs 8`
+under one hold (`scripts/tests4.sh`, its list `scripts/tests.list`): `test-checker --seed 133`'s 4 parts (735,821
+checks), `test-checker-deferred`, `test-check-lanes`, `test-checker-corpus --deferred 8 --id-order 153` and
+`test-c-testsuite --cross-check` on c-testsuite (`5c727565`), `test-check-units --corpus`, and
+`./build.sh check-call-graph`: all passed.
 
 ## Limitations
 
