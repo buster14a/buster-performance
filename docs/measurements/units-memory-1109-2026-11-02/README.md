@@ -43,6 +43,14 @@ Every 9700X run held the host's lock (`exclusive.sh`) for itself alone; times we
    64 MB, which single-file commands don't read). Columns: unit, setting, status, wall ms, `--time-stages` total ms,
    system ms, peak RSS KB, the reported `huge-pages` setting.
 
+4. **The 41 (now 42) sources linked into one executable** (`scripts/link-queue.sh`, `scripts/units-link.sh`, 9700X):
+   buster `a5f0fbc232fa75997e43c60e5d63abac5fdddac5` (the branch after merging main and the fix that gives a lane's
+   memory back before it helps on the board), built under the lock (`9700x/build-a5f0fbc2.log`, with the binary's
+   sha256); then two rounds of #1109's own command, `-o selfhost ... -lm -lpthread` with build.sh's flags, by default
+   and with `--units-memory=12884901888`, and `-c` with that budget. `9700x/link1.tsv` columns: run, status, wall ms,
+   peak RSS KB, lanes, the self-hosted compiler's `--version` status (0: it runs; `-c` runs give the objects' count
+   instead), the `units memory:` report, error lines.
+
 ## Results
 
 Calibration: 78 units, all status 0; units of 300,000 tokens or more took 446 to 644 bytes a token (`main.c` 534,
@@ -65,6 +73,16 @@ Huge pages vs base pages (9700X, head, medians):
 | `lvm.c`, `-c` (10 runs each) | 12.64 ms | 12.78 ms | 82 MB | 36 MB |
 | `sqlite3.c`, `-c` (6) | 117.38 ms | 144.59 ms | 315 MB | 248 MB |
 | `main.c`, `-fsyntax-only` (3) | 1,709.89 ms | 2,106.25 ms | 3,484 MB | 3,251 MB |
+
+The 42 sources linked (9700X, `a5f0fbc2`; the self-hosted compiler ran `--version` in every link run):
+
+| run | wall | peak | units that waited |
+|---|---|---|---|
+| linked, default budget | 9.35, 8.63 s | 27.7, 28.1 GiB | 0 |
+| linked, `--units-memory` 12 GiB | 10.97, 10.93 s | 10.99, 10.98 GiB | 9, 9 |
+| `-c`, `--units-memory` 12 GiB | 10.87, 10.76 s | 10.86, 10.92 GiB | 9, 9 |
+
+The links the lanes keep add 60 to 130 MB to the budgeted peak, inside the eighth the budget leaves.
 
 ## Limitations
 
