@@ -197,8 +197,11 @@ the machine was building at the time, and main ran slower than the head.
 - **The scan for owed loads** (`tier1_emit_owed`) costs 3.09 M instructions in all, 0.053% of the compile. The second
   call's result goes to a volatile variable, so it isn't removed, and it runs with branches the first call has just
   trained. So this prices the scan's instructions, not any branch misses of its own. A bound computed at each call,
-  so that nodes before the first that can need a load back skip the scan, would take two binary searches for each of
-  the 28,027 registers the calls save. That is most of what it would save, so it isn't worth doing.
+  so that nodes before the first that can need a load back skip the scan, would add two binary searches (the owner's
+  next use, its fragment's end) for each of the 28,027 registers the calls save, and nodes from the bound on would
+  still be scanned. At a few iterations of a few instructions each, that is a good part of the 3.09 M. The rest, a few
+  hundredths of a percent, is below what the 9700X resolves over placements (its floor here is about ±0.3% for one
+  round), so the bound isn't worth its complexity.
 - **`rbp` as a sixth callee-saved register** costs 3.72 M instructions, in allocation with one more register.
   `report-*.txt` holds what it buys in `sqlite3.c`: 309,182 records against 314,228, 11,265 spill stores against
   12,900, 13,855 spill loads against 15,385, 15,079 call stores against 16,156 and 21,382 call loads against 22,810.
