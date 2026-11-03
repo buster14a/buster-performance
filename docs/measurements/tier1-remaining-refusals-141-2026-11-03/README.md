@@ -6,7 +6,8 @@ Evidence for [buster#1204](https://github.com/buster14a/buster/pull/1204), which
 - long double on the x87;
 - the calling convention's rarer aggregate shapes and the aggregates it ignores;
 - the IR's vectors;
-- two follow-up commits that cut what the long double and vector support costs code that uses neither.
+- two follow-up commits that cut what the long double and vector support costs code that uses neither. They took
+  instructions away but ran slower over code placements (below), and buster#1204 reverts them (`9a26fd50`).
 
 Everything below ran on the Ryzen 7 9700X (benchpress). Each build and each measurement held
 `~/buster-fast-bench/exclusive.sh` once (owner `claude-141-wide`), and every timed process was pinned to CPU 2.
@@ -176,9 +177,32 @@ that rotates by round (`ab9/compile-tier1-ab.log`). The rounds' medians (ms):
 - Commit 8 reads 0.31% slower than commit 7, and commit 9 reads 0.09% faster than commit 8. That leaves commit 9
   0.22% slower than commit 7 with 8.54 M (0.15%) fewer instructions, as the cycles above read.
 - One executable per tree is one placement of its code. buster's profiling guide ("Comparing two versions", #509)
-  puts a whole compile's difference below about 0.2% under what this comparison resolves. `place10.sh` compares
-  commit 7 and commit 9 over six placements of the checker's unit and three fresh copies each, with commit 7 twice as
-  the floor (`place10/`).
+  puts a whole compile's difference below about 0.2% under what this comparison resolves. So `place10.sh` compares
+  commit 7 and commit 9 over placements (below).
+
+## Commits 7 and 9 over placements (`place10/`)
+
+`place10.sh` follows #509's method ("Comparing two versions" in buster's `docs/profiling.md`):
+- Each tree's `./build.sh shifts` links its objects at six placements of `main_unit_checker.c`'s code: 0, 704, 1,408,
+  2,112, 2,816 and 3,520 bytes later (`shifts-*.log`). The unit's `.text` is aligned to 64.
+- `time-runs` then runs every placement from three fresh copies in turn, 3 runs per round, 3 rounds under `ab`.
+- Commit 7's executables run twice (`c27be772-again`), as the comparison's floor
+  (`compile-tier1-placements.log`, 486 runs).
+
+| Round | `ldscan` against `c27be772`, wall | user cycles | `c27be772-again` against `c27be772`, wall | user cycles |
+| --- | --- | --- | --- | --- |
+| 1 | +0.16% (placements −0.14% to +0.51%) | +0.17% (−0.07% to +0.53%) | −0.04% (−0.28% to +0.28%) | +0.00% (−0.25% to +0.24%) |
+| 2 | +0.10% (−0.21% to +0.47%) | +0.13% (−0.20% to +0.55%) | −0.05% (−0.38% to +0.23%) | −0.03% (−0.34% to +0.23%) |
+| 3 | +0.20% (−0.09% to +0.47%) | +0.17% (−0.06% to +0.54%) | −0.02% (−0.22% to +0.26%) | +0.01% (−0.18% to +0.26%) |
+
+- Commit 9 reads slower in every round, by 0.10% to 0.20%, with 0.15% fewer instructions. Commit 7 against itself
+  stays within 0.05%.
+- #509 counts a difference within the floors when it is within the reference's against itself and its range over the
+  placements includes 0. This one's range includes 0 but is past the reference's own difference.
+- buster#1204 had set that as the bar for keeping commits 8 and 9, so it reverts both (`9a26fd50`). It keeps their
+  test of the x87 stack's depth (`e7312716`), which doesn't depend on them.
+- `place10-failed/` is the first attempt. It asked for shifts in steps of 688 bytes, which the unit's 64-byte
+  alignment refuses (`shifts-head-c27be772.log`), so its comparison ran no process.
 
 ## Limitations
 
