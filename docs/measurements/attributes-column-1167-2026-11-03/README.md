@@ -15,13 +15,15 @@ against the change, main's profile, and a map of what `-c` holds at its peak (on
 | `head-ebd8cf4e` | [`ebd8cf4ed0a79694c15e60298fd89c757c465072`](https://github.com/buster14a/buster/tree/ebd8cf4ed0a79694c15e60298fd89c757c465072) | the attributes' change on `b70deb47` (round 4) |
 | `main-703ae9f5` | [`703ae9f581b00c2cbb4061e907d0951b11ea9637`](https://github.com/buster14a/buster/tree/703ae9f581b00c2cbb4061e907d0951b11ea9637) | main when the branch was last merged with it |
 | `head-49f066ba` | [`49f066baf6763825d05e7a9b153e1410e61abaef`](https://github.com/buster14a/buster/tree/49f066baf6763825d05e7a9b153e1410e61abaef) | the branch, both changes, merged with `703ae9f5` (round 5) |
+| `main-a4a2182a` | [`a4a2182ad770bd22f25f843b934ba690bac9b1c8`](https://github.com/buster14a/buster/tree/a4a2182ad770bd22f25f843b934ba690bac9b1c8) | main when the branch was merged with it after the review |
+| `head-5550ad48` | [`5550ad4893a58867a46fe6fdd33ffca59db5aaf3`](https://github.com/buster14a/buster/tree/5550ad4893a58867a46fe6fdd33ffca59db5aaf3) | the branch with the review's fixes, merged with `a4a2182a` (round 7) |
 
 Each tree is `git archive` of its commit, with a `COMMIT` file, built by its own `./build.sh` (Clang 23.1.1,
 `-march=native`, which is znver5 there, with debug info). The branch's next commit, `94c8167b`, changes the wide
 group's two masked loads to their unaligned form, which the baseline host's intrinsics have; the measured executable
 has the aligned form, on addresses that are aligned either way.
 
-`receipts.txt` (round 4's) and `round5/receipts.txt` have the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, both executables'
+`receipts.txt` (round 4's), `round5/receipts.txt` and `round7/receipts.txt` have the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, both executables'
 SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
 `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, with the `compile_time` step's options:
 
@@ -32,7 +34,7 @@ SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
 ## Method
 
 On the Ryzen 7 9700X (`benchpress`), pinned to CPU 2, under the host's lock (`exclusive.sh`), one hold per script
-(`scripts/`, run by `round4.sh` and `round5.sh`):
+(`scripts/`, run by `round4.sh`, `round5.sh` and `round7.sh`):
 
 - `build.sh TREE`: the tree's `./build.sh`.
 - `objects.sh BASE HEAD OUT`: `-c` by each tree, by default, `--scalar`, `--lanes 8` (unpinned) and `-g`, each object
@@ -43,7 +45,7 @@ On the Ryzen 7 9700X (`benchpress`), pinned to CPU 2, under the host's lock (`ex
   reference (`round4/measure-A.txt`, `measure-B.txt`).
 - `prof.sh TREE`: main's profile, `perf stat -r 5` and `perf record -F 20000` of 5 compiles (`profile-main/`).
 
-`round4/summary.txt` and `round5/summary.txt` keep the scripts' own output lines; the host lock's messages, which name other sessions'
+`round4/summary.txt`, `round5/summary.txt` and `round7/summary.txt` keep the scripts' own output lines; the host lock's messages, which name other sessions'
 commands, are left out.
 
 The peak map (`peak-map/`) ran on the laptop (Ryzen 9 7940HS, Linux 7.3), on main `b70deb47` with
@@ -90,6 +92,21 @@ Every round has B 0.64 to 1.42 ms faster. Every object is the same bytes, by all
 
 Every round has B 1.76 to 2.80 ms faster, and every object is the same bytes, by all four variants. Main's peak rose from
 `b70deb47`'s 291,208 KiB to `703ae9f5`'s 295,172 KiB, by main's own changes between them.
+
+`round7/`, `main-a4a2182a` (A) against `head-5550ad48` (B), the branch with the review's fixes (the emission's scan,
+the helpers), the same way:
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 110.870 ms | 108.830 ms |
+| user cycles | 527.75 M | 518.40 M |
+| user instructions | 1,200.13 M | 1,199.12 M |
+| kernel cycles | 87.28 M | 84.88 M |
+| page faults | 4,974 | 4,973 |
+| peak RSS (`measure-compile`'s `wait4`) | 295,152 KiB | 287,136 KiB |
+| `check-input` (`measure-compile`'s stages) | 43.761 ms | 42.134 ms |
+
+Every round has B 1.92 to 2.51 ms faster, and every object is the same bytes, by all four variants.
 
 `profile-main/symbol.txt`: `clear_page_erms` 11.95% of `-c`'s samples, `check_input_run` 7.22% (most of it the
 expressions' coded walk, `c_check_expression_input.c`, inlined), `check_input_resolve_range` 4.74%,
