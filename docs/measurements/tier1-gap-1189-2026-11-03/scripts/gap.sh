@@ -2,7 +2,8 @@
 # gap.sh BUILDS OUT: main-96b6cbcd's TSVs and tables from the record's inputs, into OUT, by tools/gap.c. BUILDS holds
 # the four executables st-t1, lua-t1, st-clang2 and lua-clang2, whose SHA-256s main-96b6cbcd/inputs.sha256 gives with
 # their disassemblies' (GNU objdump 2.42's); main-96b6cbcd/callgrind.tar.zst holds their callgrind runs. Each output is
-# compared with the record's.
+# compared with the record's. The tables take clang's inlining remarks from main-96b6cbcd/inlined-*.tsv
+# (scripts/inlining.sh).
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd)
 M=$R/main-96b6cbcd
@@ -27,8 +28,8 @@ for s in $scripts; do
     ./gap count lua-t1.dis cg/$s-t1.txt.cg '???' 0x108000 "$M/lua.kinds" > $s-t1.tsv
     ./gap count lua-clang2.dis cg/$s-clang2.txt.cg "$(object cg/$s-clang2.txt.cg)" 0 > $s-clang2.tsv
 done
-./gap table st-t1.tsv -- st-clang2.tsv > st-table.md
-./gap table $(for s in $scripts; do echo $s-t1.tsv; done) -- $(for s in $scripts; do echo $s-clang2.tsv; done) > lua-table.md
+./gap table st-t1.tsv -- st-clang2.tsv --inlined "$M/inlined-st.tsv" > st-table.md
+./gap table $(for s in $scripts; do echo $s-t1.tsv; done) -- $(for s in $scripts; do echo $s-clang2.tsv; done) --inlined "$M/inlined-lua.tsv" > lua-table.md
 for f in st-t1.tsv st-clang2.tsv $(for s in $scripts; do echo $s-t1.tsv $s-clang2.tsv; done) st-table.md lua-table.md; do
     cmp -s $f "$M/$f" && echo "$f: the record's" || echo "$f: DIFFERS from the record's"
 done

@@ -86,10 +86,17 @@ Every build gives speedtest1's verification hash `1248168 a7fa3957840af6d608d53f
 | constants | 59.7 M (3.2%) | −24.3 M (−0.7%) |
 | arithmetic and the rest | −47.2 M (−2.5%) | 87.9 M (2.5%) |
 
-**Corrections.** The record's first versions (`caa66550`, `02f5d050`) had three errors, which buster-performance#236's and buster#1230's reviews found:
+**Corrections.** The record's first versions (`caa66550`, `02f5d050`) had three errors and an unsupported claim, which buster-performance#236's and buster#1230's reviews found:
 - **`rbp`'s operands were all the stack's.** That put clang -O2's loads and stores through `rbp` among the stack's: 16.7 M of speedtest1's and 54.1 M of Lua's. The stack's share of the gap was 22.5% and 25.8%, other loads' and stores' 12.1% and 9.3%. No other cause changes, and none crosses 5%.
 - **The untagged instructions were the node's.** Only the origin columns change.
-- **The calls counted Tier 1's PLT stubs as the program's.** Buster's executables call the C library through PLT stubs, clang's without them, so 7.33 M of speedtest1's calls and 14.21 M of Lua's were the C library's calls on Tier 1's side alone. The tables now give them apart. Without them, `--tier1` makes 70.29 M calls into speedtest1's own code against clang's 25.62 M, and 91.79 M into Lua's against 54.20 M (were 77.62 M and 106.00 M). Of speedtest1's, 1.37 M go to the unit's atomic helpers and 68.92 M to its functions. The calls clang doesn't make are 44.67 M and 37.60 M (were 52.00 M and 51.81 M), and their callees run 1,121.4 M and 960.3 M of Tier 1's instructions.
+- **The calls counted Tier 1's PLT stubs as the program's.** Buster's executables call the C library through PLT stubs, clang's without them, so 7.33 M of speedtest1's calls and 14.21 M of Lua's were the C library's calls on Tier 1's side alone. The tables now give them apart. Without them, `--tier1` makes 70.29 M calls into speedtest1's own code against clang's 25.62 M, and 91.79 M into Lua's against 54.20 M (were 77.62 M and 106.00 M). Of speedtest1's, 1.37 M go to the unit's atomic helpers and 68.92 M to its functions. The calls clang doesn't make are 44.67 M and 37.60 M (were 52.00 M and 51.81 M). Their callees' instructions in Tier 1 are estimated at 1,121.4 M and 960.3 M: each callee's instructions times the share of its calls that clang doesn't make, from its average per call.
+
+**Calls clang doesn't make, and inlining.** A callee's calls by Tier 1 less its calls by clang are a count difference. Clang may have inlined them, or removed them otherwise. The first versions called that difference inlining without evidence. The evidence now comes from clang's own inlining remarks (`-Rpass=inline`):
+- **The rebuild.** `scripts/inlining.sh` builds clang -O2's speedtest1 and Lua with those remarks. Both executables are the measured ones byte for byte, by `inputs.sha256`, so the remarks describe the code that ran.
+- **The remarks.** `main-96b6cbcd/inlined-st.tsv` and `inlined-lua.tsv` keep each remark's callee and caller: 8,239 and 1,320 of them.
+- **What they cover.** On speedtest1, 43.29 M of the 44.67 M calls go to callees clang inlined at one call site or more. 1.37 M go to the unit's atomic helpers, which are no function for clang to inline, and 0.01 M to other callees. On Lua, all 37.60 M go to callees clang inlined.
+- **The tables.** The callee tables give each callee's remarks. Most of their callees have no symbol left in clang's executables: all their calls were inlined or removed.
+- **What this doesn't show.** The match is by callee, not by call site: it doesn't show which call sites' dynamic calls were the inlined ones.
 
 All twelve TSVs and both tables are regenerated from the original inputs (`scripts/gap.sh`, below); Tier 1's TSVs differ only by `main`'s helpers.
 
@@ -150,6 +157,7 @@ Callgrind's counts above (`*/instructions.txt`) are a little higher than the 970
 ## Reproducing
 
 - **The tables, from the original inputs.** `main-96b6cbcd/callgrind.tar.zst` holds the twelve callgrind runs that made `main-96b6cbcd/`'s TSVs: speedtest1 and the five Lua scripts, by `--tier1` and clang -O2. `main-96b6cbcd/inputs.sha256` gives the SHA-256 of the four executables they ran, and of their GNU objdump 2.42 disassemblies. `scripts/gap.sh BUILDS OUT`, with those executables in BUILDS, regenerates every TSV and table and compares each with the record's; here all fourteen are the record's. The executables aren't retained, since they would carry Lua's and SQLite's code; a rebuild by step 1 is checked against their hashes.
+- **Clang's inlining remarks.** `scripts/inlining.sh SQLITE SPEEDTEST LUA OUT` rebuilds clang -O2's executables with `-Rpass=inline`, checks their hashes and compares the remarks' pairs with `main-96b6cbcd/inlined-*.tsv`; here both are the record's.
 - **The builds and runs.** `scripts/progs.sh`, `run.sh` and `measure.sh` take a scratch directory as `S`, which holds them and:
   - `corpus/sqlite/sqlite3.c`;
   - `inputs/st/` with `speedtest1.c` and `speedtest1-unity.c`;

@@ -13,9 +13,11 @@
 //       function of its own, "(unnamed code after NAME)". An rbp operand is the stack's only in a function that makes
 //       rbp its frame pointer.
 //
-//   gap table T1.tsv... -- CLANG.tsv...
+//   gap table T1.tsv... -- CLANG.tsv... [--inlined REMARKS]
 //       Sums each side's TSVs and prints the tables by cause, type, origin and function. The instructions without a
-//       tag are "unattributed", never the node's, with their functions listed by why they have none.
+//       tag are "unattributed", never the node's, with their functions listed by why they have none. REMARKS, the
+//       "callee<TAB>caller" pairs of clang's inlining remarks, says which callees of the calls clang doesn't make it
+//       inlined.
 //
 // Only instructions in BINARY's own code count: the C library's (memcpy, strlen, ...) are other objects in the run.
 #define _GNU_SOURCE
@@ -762,23 +764,74 @@ static int by_tier1(const void* a, const void* b)
     return x->tier1 < y->tier1 ? 1 : x->tier1 > y->tier1 ? -1 : 0;
 }
 
-// A PLT stub is the C library's call, which clang's executables make without one: it is no call clang inlined.
+// A PLT stub is the C library's call, which clang's executables make without one: no call clang leaves out.
 static bool is_plt(const char* function)
 {
     return strstr(function, "@plt") != 0;
 }
 
-// Tier 1's calls into a callee less clang's: the calls clang doesn't make, which it inlined.
-static uint64_t inlined_calls_of(const Total* t)
+// Tier 1's calls into a callee less clang's: calls clang doesn't make. A count difference alone doesn't say why;
+// clang may have inlined the calls or removed them otherwise. Its inlining remarks (--inlined) name the callees it
+// inlined somewhere.
+static uint64_t missing_calls_of(const Total* t)
 {
     return !is_plt(t->function) && t->tier1_calls > t->clang_calls ? t->tier1_calls - t->clang_calls : 0;
 }
 
-static int by_inlined(const void* a, const void* b)
+static int by_missing(const void* a, const void* b)
 {
-    const uint64_t u = inlined_calls_of(a);
-    const uint64_t v = inlined_calls_of(b);
+    const uint64_t u = missing_calls_of(a);
+    const uint64_t v = missing_calls_of(b);
     return u < v ? 1 : u > v ? -1 : 0;
+}
+
+// --inlined FILE: "callee<TAB>caller" lines, one per inlining remark (`clang -Rpass=inline`) of clang's build.
+static char** remarked;
+static uint32_t* remarked_counts;
+static uint32_t remarked_count;
+static bool remarks_given;
+
+static uint32_t remarks_of(const char* function)
+{
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < remarked_count; i += 1)
+    {
+        count = strcmp(remarked[i], function) == 0 ? remarked_counts[i] : count;
+    }
+    return count;
+}
+
+static void read_inlined(const char* path)
+{
+    FILE* file = fopen(path, "r");
+    if (file == 0)
+    {
+        perror(path);
+        exit(1);
+    }
+    remarks_given = true;
+    char* line = 0;
+    size_t size = 0;
+    while (getline(&line, &size, file) > 0)
+    {
+        line[strcspn(line, "\t\n")] = 0;
+        uint32_t found = remarked_count;
+        for (uint32_t i = 0; i < remarked_count; i += 1)
+        {
+            found = strcmp(remarked[i], line) == 0 ? i : found;
+        }
+        if (found == remarked_count)
+        {
+            remarked = realloc(remarked, (remarked_count + 1) * sizeof(char*));
+            remarked_counts = realloc(remarked_counts, (remarked_count + 1) * sizeof(uint32_t));
+            remarked[remarked_count] = strdup(line);
+            remarked_counts[remarked_count] = 0;
+            remarked_count += 1;
+        }
+        remarked_counts[found] += 1;
+    }
+    free(line);
+    fclose(file);
 }
 
 static int by_unattributed(const void* a, const void* b)
@@ -805,6 +858,11 @@ static int table(int argc, char** argv)
         if (strcmp(argv[i], "--") == 0)
         {
             side = 1;
+        }
+        else if (strcmp(argv[i], "--inlined") == 0 && i + 1 < argc)
+        {
+            read_inlined(argv[i + 1]);
+            i += 1;
         }
         else
         {
@@ -931,24 +989,44 @@ static int table(int argc, char** argv)
         }
         printf(" %.1f, %.1f, %.1f |\n", millions(t->origins[0] + t->origins[1] + t->origins[2] + t->origins[3]), millions(t->origins[4] + t->origins[5]), millions(t->origins[6]));
     }
-    qsort(totals, total_count, sizeof(Total), by_inlined);
-    uint64_t inlined_calls = 0;
-    uint64_t inlined_instructions = 0;
+    qsort(totals, total_count, sizeof(Total), by_missing);
+    uint64_t missing_calls = 0;
+    uint64_t missing_instructions = 0;
+    uint64_t remarked_calls = 0;
+    uint64_t unnamed_calls = 0;
     for (uint32_t i = 0; i < total_count; i += 1)
     {
         const Total* t = &totals[i];
-        const uint64_t inlined = inlined_calls_of(t);
-        inlined_calls += inlined;
-        inlined_instructions += inlined != 0 ? (uint64_t)((double)t->tier1 * (double)inlined / (double)t->tier1_calls) : 0;
+        const uint64_t missing = missing_calls_of(t);
+        missing_calls += missing;
+        // An estimate: the callee's instructions in Tier 1, by the share of its calls clang doesn't make.
+        missing_instructions += missing != 0 ? (uint64_t)((double)t->tier1 * (double)missing / (double)t->tier1_calls) : 0;
+        remarked_calls += remarks_of(t->function) != 0 ? missing : 0;
+        unnamed_calls += starts(t->function, "(unnamed code after ") ? missing : 0;
     }
-    printf("\nCalls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): %.2f M, whose callees' bodies run %.1f M of Tier 1's instructions\n\n",
-           millions(inlined_calls), millions(inlined_instructions));
-    printf("| Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M |\n| --- | ---: | ---: | ---: | ---: | ---: |\n");
+    printf("\nCalls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang, a count difference): %.2f M. Their callees' instructions in Tier 1, each "
+           "callee's scaled by the share of its calls clang doesn't make (an estimate from its average per call): %.1f M\n",
+           millions(missing_calls), millions(missing_instructions));
+    if (remarks_given)
+    {
+        printf("\nOf those calls, by clang's inlining remarks (-Rpass=inline): to callees it inlined at one call site or more %.2f M, to code without a symbol after a "
+               "function (no function to inline) %.2f M, to other callees %.2f M\n",
+               millions(remarked_calls), millions(unnamed_calls), millions(missing_calls - remarked_calls - unnamed_calls));
+    }
+    printf("\n| Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M | clang's inlining remarks |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for (uint32_t i = 0; i < total_count && i < 15; i += 1)
     {
         const Total* t = &totals[i];
-        printf("| `%s` | %.2f | %.2f | %.1f | %.1f | %.1f |\n", t->function, millions(t->tier1_calls), millions(t->clang_calls), millions(t->tier1), t->tier1_calls != 0 ? (double)t->tier1 / (double)t->tier1_calls : 0.0,
+        printf("| `%s` | %.2f | %.2f | %.1f | %.1f | %.1f |", t->function, millions(t->tier1_calls), millions(t->clang_calls), millions(t->tier1), t->tier1_calls != 0 ? (double)t->tier1 / (double)t->tier1_calls : 0.0,
                millions(t->origins[9] + t->origins[8]));
+        if (remarks_given)
+        {
+            printf(" %" PRIu32 " |\n", remarks_of(t->function));
+        }
+        else
+        {
+            printf(" - |\n");
+        }
     }
     return 0;
 }
@@ -961,7 +1039,7 @@ int main(int argc, char** argv)
     }
     if (argc < 6 || strcmp(argv[1], "count") != 0)
     {
-        fprintf(stderr, "usage: gap count DISASSEMBLY CALLGRIND OBJECT BASE [KINDS]\n       gap table T1.tsv... -- CLANG.tsv...\n");
+        fprintf(stderr, "usage: gap count DISASSEMBLY CALLGRIND OBJECT BASE [KINDS]\n       gap table T1.tsv... -- CLANG.tsv... [--inlined REMARKS]\n");
         return 2;
     }
     read_disassembly(argv[2]);

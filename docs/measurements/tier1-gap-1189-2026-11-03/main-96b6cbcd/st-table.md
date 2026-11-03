@@ -102,22 +102,24 @@ Dynamic calls into the program's own code: Tier 1 70.29 M, clang -O2 25.62 M; in
 | `sqlite3DbMallocRawNN` | 22.9 | 15.8 | 7.1 | 1.30 M / 1.25 M | 0.0 | 0.0 | 1.5 | 2.5 | 0.0 | 0.2 | 2.9 | 0.0, 0.0, 0.0 |
 | `walFindFrame` | 21.3 | 9.7 | 11.6 | 0.09 M / 0.09 M | 3.0 | 6.4 | 0.1 | 0.4 | 0.7 | 1.4 | 0.6 | 2.4, 4.7, 0.4 |
 
-Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): 44.67 M, whose callees' bodies run 1121.4 M of Tier 1's instructions
+Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang, a count difference): 44.67 M. Their callees' instructions in Tier 1, each callee's scaled by the share of its calls clang doesn't make (an estimate from its average per call): 1121.4 M
 
-| Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| `yy_find_shift_action` | 1.93 | 0.00 | 43.9 | 22.8 | 0.0 |
-| `sqlite3BtreeCursorHasMoved` | 1.44 | 0.00 | 8.6 | 6.0 | 0.0 |
-| `(unnamed code after main)` | 1.37 | 0.00 | 2.8 | 2.1 | 0.0 |
-| `yy_find_reduce_action` | 1.23 | 0.00 | 12.3 | 10.0 | 0.0 |
-| `sqlite3DbNNFreeNN` | 1.17 | 0.02 | 15.0 | 12.8 | 2.3 |
-| `sqlite3VdbeOneByteSerialTypeLen` | 1.06 | 0.00 | 4.2 | 4.0 | 0.0 |
-| `sqlite3Parser` | 0.70 | 0.00 | 91.0 | 129.7 | 8.4 |
-| `yy_shift` | 0.70 | 0.00 | 27.7 | 39.5 | 7.0 |
-| `sqlite3VdbeAddOp3` | 0.64 | 0.02 | 16.2 | 25.1 | 1.3 |
-| `sqlite3AddInt64` | 0.61 | 0.00 | 10.4 | 17.0 | 0.0 |
-| `btreeParseCell` | 0.61 | 0.00 | 13.3 | 22.0 | 1.2 |
-| `sqlite3BtreePayloadSize` | 0.58 | 0.00 | 4.0 | 7.0 | 1.2 |
-| `fetchPayload` | 0.58 | 0.00 | 5.8 | 10.0 | 0.0 |
-| `sqlite3BtreePayloadFetch` | 0.58 | 0.00 | 2.3 | 4.0 | 1.2 |
-| `sqlite3Get4byte` | 0.50 | 0.00 | 5.5 | 11.0 | 0.0 |
+Of those calls, by clang's inlining remarks (-Rpass=inline): to callees it inlined at one call site or more 43.29 M, to code without a symbol after a function (no function to inline) 1.37 M, to other callees 0.01 M
+
+| Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M | clang's inlining remarks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `yy_find_shift_action` | 1.93 | 0.00 | 43.9 | 22.8 | 0.0 | 1 |
+| `sqlite3BtreeCursorHasMoved` | 1.44 | 0.00 | 8.6 | 6.0 | 0.0 | 3 |
+| `(unnamed code after main)` | 1.37 | 0.00 | 2.8 | 2.1 | 0.0 | 0 |
+| `yy_find_reduce_action` | 1.23 | 0.00 | 12.3 | 10.0 | 0.0 | 1 |
+| `sqlite3DbNNFreeNN` | 1.17 | 0.02 | 15.0 | 12.8 | 2.3 | 35 |
+| `sqlite3VdbeOneByteSerialTypeLen` | 1.06 | 0.00 | 4.2 | 4.0 | 0.0 | 1 |
+| `sqlite3Parser` | 0.70 | 0.00 | 91.0 | 129.7 | 8.4 | 1 |
+| `yy_shift` | 0.70 | 0.00 | 27.7 | 39.5 | 7.0 | 1 |
+| `sqlite3VdbeAddOp3` | 0.64 | 0.02 | 16.2 | 25.1 | 1.3 | 197 |
+| `sqlite3AddInt64` | 0.61 | 0.00 | 10.4 | 17.0 | 0.0 | 4 |
+| `btreeParseCell` | 0.61 | 0.00 | 13.3 | 22.0 | 1.2 | 1 |
+| `sqlite3BtreePayloadSize` | 0.58 | 0.00 | 4.0 | 7.0 | 1.2 | 8 |
+| `fetchPayload` | 0.58 | 0.00 | 5.8 | 10.0 | 0.0 | 1 |
+| `sqlite3BtreePayloadFetch` | 0.58 | 0.00 | 2.3 | 4.0 | 1.2 | 2 |
+| `sqlite3Get4byte` | 0.50 | 0.00 | 5.5 | 11.0 | 0.0 | 91 |
