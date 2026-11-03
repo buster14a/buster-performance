@@ -206,3 +206,20 @@ the machine was building at the time, and main ran slower than the head.
   `report-*.txt` holds what it buys in `sqlite3.c`: 309,182 records against 314,228, 11,265 spill stores against
   12,900, 13,855 spill loads against 15,385, 15,079 call stores against 16,156 and 21,382 call loads against 22,810.
 - Fewer records save some of both back downstream, so the pull request's total is +5.57 M.
+
+## The later heads' output (`local/identity/`)
+
+The measurements above are `6e1e6121`'s, and the placement campaign's are `3b195d57`'s. Since `6e1e6121`, the pull
+request has merged main `703ae9f5` (`a29b1683`, whose tree `8b07e868` keeps), made the call-save bookkeeping cheaper
+(`3b195d57`) and named a refused call's kinds past its 16th argument (`1938a55f`). None of these is measured again here.
+What was checked is whether they change Tier 1's output, on the owner's minipc. `same.sh OLD NEW OUT` compiles Lua
+5.4.8's 34 sources (with `measure.sh`'s language flags), the amalgamation's `sqlite3.c` and `speedtest1-unity.c`
+(`inputs.sha256`, with the benchmark's sqlite flags) by `--tier1 -c` with two compilers, and compares each object
+(`compilers.txt`, `objects-*.sha256`):
+
+- `8b07e868` against `1938a55f` (`same-8b07-head.log`): all 36 objects are byte-identical. The bookkeeping and the
+  reporting change no output.
+- `6e1e6121` against `1938a55f` (`same-6e1e-head.log`): Lua's 34 objects are byte-identical, so the Lua counts above
+  are the head's too. `sqlite3.o` and `speedtest1.o` differ, both 32 bytes of `.text` smaller at the head
+  (1,266,273 → 1,266,241 and 1,366,220 → 1,366,188); since the head's are `8b07e868`'s, the difference comes in with
+  main's merge, not this pull request's later commits.
