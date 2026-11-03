@@ -4,6 +4,8 @@
 # the units-memory report, appended to OUT.
 export LC_ALL=C
 tree=$1; out=$2; label=$3; shift 3
+# The lock's owner line, which exclusive.sh wrote as this run took it: the run's receipt that it held the lock.
+head -1 /var/lib/buster-9700x/owner >> "${out%.tsv}-holds.txt"
 work=$(mktemp -d ~/buster-fast-bench/1109-claude/run.XXXXXX)
 cd "$tree" || exit 1
 mapfile -d '' sources < <(./build.sh print-sources)
