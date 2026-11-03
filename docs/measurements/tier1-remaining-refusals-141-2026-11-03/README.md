@@ -221,7 +221,7 @@ the median of the rounds' medians. The scripts' build lines are in `queue*-run.l
 | --- | --- | --- | --- | --- | --- |
 | `bisect11/`, `ab11/` | commit 11 (`9a26fd50`) | commit 12 (`3a2ce1b5`) | 5,852.95 M → 5,853.90 M (+0.95 M, +0.016%) | 2,382.74 M → 2,385.43 M (+0.11%) | 448.76 → 448.95 ms (+0.04%) |
 | `bisect12/` | `3a2ce1b5` | `head-12x` | 5,853.898 M → 5,853.906 M (+7,556) | 2,384.14 M → 2,384.86 M (+0.03%) | not run |
-| `bisect14/`, `ab14/` | main `730eea0a` | head `c5f4863a` | 5,821.32 M → 5,850.85 M (+29.53 M, +0.51%) | 2,393.36 M → 2,396.31 M (+0.12%) | running |
+| `bisect14/`, `ab14/` | main `730eea0a` | head `c5f4863a` | 5,821.32 M → 5,850.85 M (+29.53 M, +0.51%) | 2,393.36 M → 2,396.31 M (+0.12%) | 450.55 → 451.49 ms (+0.21%) |
 
 - Commit 12 adds a test of the plan's or the request's path to each vector scan, and a count in each scan's vector
   branch. Its round medians overlap commit 11's: 448.27 to 449.17 ms against 448.80 to 449.36 ms.
@@ -229,7 +229,8 @@ the median of the rounds' medians. The scripts' build lines are in `queue*-run.l
   `./build.sh check-call-graph` reported the static one as split state). It costs 7,556 instructions per compile.
 - The head against its main: +29.53 M instructions, within 0.22 M of the sum of the commits' own costs as measured on
   earlier bases (−0.33 M, +15.25 M, +1.76 M, +11.67 M, +0.95 M and +0.01 M: 29.31 M; commit 14 wasn't measured alone).
-  `ab14/` is still running; its wall time will be added here.
+- Its wall time: the head is slower in every round, by 0.48 to 1.49 ms; the round medians are 450.40 to 450.84 ms for
+  main and 451.03 to 451.89 ms for the head (`ab14/`, 210 runs).
 
 ## #142's campaign at the head (`campaign.sh`, `diff-head-c5f4863a/`, `diff-scalar-head-c5f4863a/`)
 
