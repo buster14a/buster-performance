@@ -246,3 +246,11 @@ longer the head's byte for byte. Lua's counts were taken again on the minipc, by
 The call stores and loads are `6e1e6121`'s exactly; main's #1204 made both trees' code smaller around them. Tier 1
 compiles all 1,104 functions at both. `lua-run.sh`'s scripts give clang -O0's build's output at the merge. Nothing
 was timed again.
+
+## After main's #1245 (`f55bd18b`)
+
+The pull request then merged main `b06ab2cd` (`f55bd18b`), whose #1245 passes a call's 64-byte vector argument parts
+in zmm16 and on rather than the red zone's staging slots. By `same.sh` against `f6d0e4ed`'s build
+(`same-f6d0-merge.log`, `objects-f6d0-merge.sha256`), Lua's 34 objects are byte-identical, so the Lua counts in the
+section above are `f55bd18b`'s too. `sqlite3.o` and `speedtest1.o` differ, 2,684 and 2,681 bytes of `.text` smaller
+(1,186,676 → 1,183,992 and 1,242,548 → 1,239,867). Nothing was counted or timed again.
