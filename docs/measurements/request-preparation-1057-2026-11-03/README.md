@@ -5,16 +5,27 @@ buster14a/buster#1141, which made the C driver and the real-source benchmarks
 share one request's configuration (`c_check_request.c`) and one source
 preparation (`c_check_source_prepare.c`), measured on the locked 9700X.
 
-**Result:** no measurable cost. Per command, the merge runs between 1,604
-fewer and 587 more instructions than main, out of 1.4 million (a tiny file) to
-1.2 billion (`sqlite3.c`'s `-c`): 0.00003% of `sqlite3.c`'s compile, which
-leaves no per-token tax. Wall time is within each build's own spread, at most
-1.2% apart at the median. Every `-c` object is byte for byte main's. The
-source benchmarks time the same work: their counts and timed regions are
-the same, and only the merge prints its configuration receipt.
-`benchmark-lowering-source`'s process runs 0.031% more instructions, outside
-its timed region and in no more time: its preparation now selects and checks
-the file's target features once, as `-c` does.
+**Result**, for the inputs and method below (whole processes on one CPU,
+medians of 5 to 41 runs):
+
+- The C driver's commands run between 20,003 fewer and 587 more instructions
+  per command than main's. The single files (a tiny file, `tools/ci/changes.c`,
+  `sqlite3.c`) differ by 1,604 fewer to 587 more; Lua 5.4.8's 33 units in one
+  command by about 20,000 fewer, about 600 per unit. On these inputs, from
+  1.4 million instructions (a tiny file) to 1.2 billion (`sqlite3.c`'s `-c`),
+  the difference doesn't grow with the input: they show no added work per
+  token.
+- No time regression shows on these inputs: every wall-time median is within
+  1.22% of main's, and each build's range of runs overlaps the other's. That
+  doesn't rule out a cost smaller than the runs' spread.
+- Every `-c` object is byte for byte main's, Lua's 33 included.
+- The source benchmarks report the same counts and timed regions on both
+  builds, and only the merge prints its configuration receipt. Their whole
+  processes do differ: `benchmark-backend-source`'s runs 609,260 fewer
+  instructions (0.006%), and `benchmark-lowering-source`'s 4,505,849 more
+  (0.031%) in no more wall time, for the selection and target-feature check
+  that its preparation now runs once per file, as `-c` does, outside the
+  timed region.
 
 ## Source revisions and trees
 
@@ -57,6 +68,15 @@ process ran on CPU 2 (`taskset -c 2`).
 - each build's `-c` objects of the three files, compared byte for byte
   (`logs/receipts.txt`: "objects identical", with their `sha256sum`s).
 
+`scripts/corpus.sh`, in a fourth hold, added a representative multi-file
+corpus beside `sqlite3.c`: Lua 5.4.8's 33 units but `luac.c`, the sources
+#1128's record measured, copied on the host and not into this record
+(`logs/lua-sources.txt`: their `sha256sum`s, the same as that record's), with `-std=gnu99 -DLUA_COMPAT_5_3
+-DLUA_USE_LINUX -w`, as one command by `--lanes 1 -fsyntax-only` and by
+`--lanes 1 -c`, 11 runs (`logs/lua.log`), then each build's 33 objects
+compared byte for byte (`logs/receipts.txt`: "lua objects identical";
+`logs/lua-objects.txt`).
+
 `time-runs` keeps no output of the processes it times, so `scripts/outputs.sh`,
 in a second hold, ran each source benchmark once per build for its own report
 (`logs/output-*-754475d4.log`, `logs/output-*-4670b2eb.log`).
@@ -83,17 +103,24 @@ instructions' range over the runs in brackets.
 | `changes.c` `-c` | 21 | 7.917 → 7.883 (−0.42%) | 25.936 → 26.095 (+0.61%) | 63,570,059 [63,569,795–63,570,489] → 63,568,455 [63,568,143–63,568,663] (−1,604) |
 | `sqlite3.c` `-c` | 11 | 112.309 → 112.223 (−0.08%) | 527.823 → 528.570 (+0.14%) | 1,215,785,766 [1,215,785,749–1,215,785,907] → 1,215,786,163 [1,215,786,154–1,215,786,178] (+397) |
 | `sqlite3.c` `-fsyntax-only` | 11 | 89.167 → 89.370 (+0.23%) | 406.938 → 408.998 (+0.51%) | 903,854,433 [903,854,418–903,854,452] → 903,855,020 [903,855,006–903,855,039] (+587) |
+| Lua's 33 units `--lanes 1 -fsyntax-only` | 11 | 59.950 → 60.159 (+0.35%) | 270.722 → 271.893 (+0.43%) | 741,327,601 [741,323,246–741,328,194] → 741,307,598 [741,304,929–741,308,133] (−20,003) |
+| Lua's 33 units `--lanes 1 -c` | 11 | 70.094 → 70.599 (+0.72%) | 319.846 → 322.033 (+0.68%) | 847,785,264 [847,780,795–847,786,094] → 847,765,941 [847,764,487–847,766,774] (−19,323) |
 | `benchmark-backend-source` `sqlite3.c` | 5 | 656.661 → 660.375 (+0.57%) | 3,504.737 → 3,523.936 (+0.55%) | 9,630,170,403 → 9,629,561,143 (−609,260) |
 | `benchmark-lowering-source` `sqlite3.c` (third hold) | 5 | 1,024.968 → 1,023.769 (−0.12%) | 5,520.128 → 5,512.423 (−0.14%) | 14,479,142,381 [14,479,142,077–14,479,143,144] → 14,483,648,230 [14,483,648,003–14,483,654,450] (+4,505,849) |
 
 The wall times' ranges overlap in every row (the logs' `(min to max)`), and
-user cycles move by less than 1% either way: the 9700X shows no time cost.
-The instruction counts, which vary by at most 900 within a build, show the
-change's whole per-command work. The driver's argument scan
-(`check_request_scan`) and refusal (`check_request_refusal`) replace the loop's
-own comparisons, and the shared program options replace a copy of the same
-three fields, so a tiny file's `-c` runs 829 fewer instructions and
-`sqlite3.c`'s 397 more, whatever the input's size: no work per token.
+user cycles move by less than 1% either way: no time regression shows, which
+leaves open a cost below the runs' spread. In the single-file rows and
+`benchmark-backend-source`'s, the instruction counts vary by under 900 between
+a build's runs; in Lua's by up to 5,299, and in `benchmark-lowering-source`'s
+by 1,067 for main and 6,447 for the head. Each row's difference is larger
+than its spread, so it is the change's own per-command work. The
+driver's argument scan (`check_request_scan`) and refusal
+(`check_request_refusal`) replace the loop's own comparisons, and the shared
+program options replace a copy of the same three fields: a tiny file's `-c`
+runs 829 fewer instructions and `sqlite3.c`'s 397 more, and on these inputs
+the difference doesn't grow with their size. Lua's 33 units in one command run
+about 600 fewer instructions per unit.
 
 `benchmark-backend-source` now prepares its file as `-c` does, the
 target-feature check included, outside its timed region. Its whole process
@@ -124,6 +151,10 @@ debug=off overrides=path:vector,selection:reachable+all,unwind:off,debug:off`.
 
 - One host, one CPU (2), one session's run; the 9700X was shared through its
   lock with CI and other sessions between the holds, never during them.
+- The corpus is two programs: `sqlite3.c`, one large unit, and Lua's 33
+  units. Other programs' inputs (more headers, other options) may differ.
+- Medians of 5 to 41 runs bound what the wall times can show: a cost smaller
+  than a row's spread would not show.
 - `time-runs` times whole processes, so the instruction counts include process
   start and exit, which both builds share.
 - The record compares #1141's merge with its first parent only: it doesn't
