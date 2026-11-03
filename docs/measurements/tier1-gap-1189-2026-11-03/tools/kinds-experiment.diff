@@ -1,0 +1,361 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index eecb0ca9..dc69f59b 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -609,6 +609,8 @@ struct CheckEmitRun
+     // With --tier1, each body's complete outcome and its published code's counts (zero on refusal).
+     CheckTier1Outcome* tier1_outcomes;
+     CheckTier1Counts* tier1_counts;
++    // Experiment (#1189): each Tier 1 body's records' origins, with BUSTER_TIER1_KINDS.
++    char** tier1_kinds;
+     uint64_t* costs;
+     uint64_t* boundaries;
+     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
+@@ -796,6 +798,10 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
+                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, lane->scratch, &run->codes[b], &run->tier1_counts[b], fault);
+     outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
+     run->tier1_outcomes[b] = outcome;
++    if (run->tier1_kinds != 0 && outcome.category == CHECK_TIER1_SUCCESS && tier1_emit_kinds != 0)
++    {
++        run->tier1_kinds[b] = strndup((const char*)tier1_emit_kinds, run->codes[b].count);
++    }
+     return outcome;
+ }
+ 
+@@ -1854,6 +1860,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
+     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
+     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
++    run.tier1_kinds = tier1 && getenv("BUSTER_TIER1_KINDS") != NULL ? calloc(count, sizeof(char*)) : 0;
+     if (run.tier1_outcomes != 0)
+     {
+         // A body a failure before it left unreached has no outcome, never success.
+@@ -3148,6 +3155,25 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+             arena_pop_to(&lanes->arenas[lane].bytes, 0);
+         }
+     }
++    if (valid && run.tier1_kinds != 0)
++    {
++        FILE* kinds = fopen(getenv("BUSTER_TIER1_KINDS"), "a");
++        for (uint32_t b = 0; kinds != NULL && b < count; b += 1)
++        {
++            const SymbolId symbol = program->object_symbols[program->bodies[b].object];
++            const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
++            if (run.tier1_kinds[b] != 0 && name != 0)
++            {
++                fprintf(kinds, "%.*s\t%s\n", (int)result->link.names.length[name], (const char*)result->link.names.bytes[name], run.tier1_kinds[b]);
++            }
++            free(run.tier1_kinds[b]);
++        }
++        if (kinds != NULL)
++        {
++            fclose(kinds);
++        }
++        free(run.tier1_kinds);
++    }
+     // With --tier1-refusals, each body Tier 0 compiled, in source order, by its symbol's name.
+     for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && lanes->tier1_refusals != NULL && b < count; b += 1)
+     {
+diff --git a/src/buster/compiler/c_check_tier1.c b/src/buster/compiler/c_check_tier1.c
+index a0498805..8fc2db76 100644
+--- a/src/buster/compiler/c_check_tier1.c
++++ b/src/buster/compiler/c_check_tier1.c
+@@ -333,6 +333,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
+             .certify = certify,
+         };
+         uint32_t node = BUSTER_IR_NONE;
++        if (getenv("BUSTER_TIER1_KINDS") != NULL && tier1_emit_kinds == 0)
++        {
++            tier1_emit_kinds = malloc(UINT64_C(1) << 24);
++        }
++        if (tier1_emit_kinds != 0)
++        {
++            memset(tier1_emit_kinds, '?', UINT64_C(1) << 20);
++        }
+         Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
+         bool forced_nested = false;
+         if (error == TIER1_EMIT_OK && fault != NULL && fault->stage == CHECK_TIER1_EMISSION && fault->cause != CHECK_TIER1_CAUSE_EMISSION)
+diff --git a/src/buster/compiler/tier1_emit.c b/src/buster/compiler/tier1_emit.c
+index f25c3440..b767d321 100644
+--- a/src/buster/compiler/tier1_emit.c
++++ b/src/buster/compiler/tier1_emit.c
+@@ -482,11 +482,21 @@ static bool tier1_emit_append(Tier1EmitBuffer* buffer, X86Instruction instructio
+     const bool room = buffer->count < buffer->capacity;
+     if (room)
+     {
++        if (tier1_emit_kinds) tier1_emit_kinds[buffer->count] = tier1_emit_kind;
+         buffer->records[buffer->count++] = instruction;
+     }
+     return room;
+ }
+ 
++static bool tier1_emit_append_kind(Tier1EmitBuffer* buffer, X86Instruction instruction, uint8_t kind)
++{
++    const uint8_t saved = tier1_emit_kind;
++    tier1_emit_kind = kind;
++    const bool room = tier1_emit_append(buffer, instruction);
++    tier1_emit_kind = saved;
++    return room;
++}
++
+ // The flags live between two nodes' records, where fragment transitions and edge moves run: none. Selection keeps each
+ // flag's producer and its readers in one node's records (a compare and its setcc, conditional jump or cmov), as its
+ // constants' immediate requests already assume (tier1_select_request's live_flags 0), so that a recomputed zero is a
+@@ -513,7 +523,7 @@ static Tier1EmitError tier1_emit_copy(Tier1EmitResult* result, const Tier1Remate
+             .addend = copy.addend,
+         };
+     }
+-    error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, copy.instruction) ? error : TIER1_EMIT_MEMORY;
++    error = error != TIER1_EMIT_OK || tier1_emit_append_kind(buffer, copy.instruction, 'r') ? error : TIER1_EMIT_MEMORY;
+     result->rematerializations += error == TIER1_EMIT_OK;
+     return error;
+ }
+@@ -561,7 +571,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const
+             {
+                 error = TIER1_EMIT_ALLOCATION;
+             }
+-            else if (!tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, allocation->registers[f - 1], false)))
++            else if (!tier1_emit_append_kind(buffer, tier1_emit_spill(prepared, allocation, frame, value, allocation->registers[f - 1], false), 'S'))
+             {
+                 error = TIER1_EMIT_MEMORY;
+             }
+@@ -595,7 +605,7 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const
+         {
+             const bool reload = previous == BUSTER_TIER1_ALLOCATE_SPILL && allocation->spill_ids[value] < frame->count;
+             error = reload ? error : TIER1_EMIT_ALLOCATION;
+-            if (error == TIER1_EMIT_OK && !tier1_emit_append(buffer, tier1_emit_spill(prepared, allocation, frame, value, reg, true)))
++            if (error == TIER1_EMIT_OK && !tier1_emit_append_kind(buffer, tier1_emit_spill(prepared, allocation, frame, value, reg, true), 'L'))
+             {
+                 error = TIER1_EMIT_MEMORY;
+             }
+@@ -645,7 +655,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
+     bool appended = rows && count != 0;
+     for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+     {
+-        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, false));
++        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append_kind(buffer, tier1_emit_call_save(emitted, reg, false), 'C');
+         emitted->call_stores += (saved >> reg) & 1;
+     }
+     for (uint32_t r = 0; appended && r < count; r += 1)
+@@ -654,7 +664,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
+     }
+     for (uint32_t reg = 0; appended && reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
+     {
+-        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append(buffer, tier1_emit_call_save(emitted, reg, true));
++        appended = ((saved >> reg) & 1) == 0 || tier1_emit_append_kind(buffer, tier1_emit_call_save(emitted, reg, true), 'R');
+         emitted->call_loads += (saved >> reg) & 1;
+     }
+     return appended ? TIER1_EMIT_OK : !rows ? TIER1_EMIT_ALLOCATION : count == 0 ? TIER1_EMIT_INVALID : TIER1_EMIT_MEMORY;
+@@ -751,6 +761,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+ {
+     const IrFunction* function = plan->function;
+     const IrCall* call = &function->calls[function->b[node]];
++    const uint8_t kind_saved = tier1_emit_kind;
++    tier1_emit_kind = 'a';
+     const uint64_t scratch_mark = scratch->length;
+     const uint32_t result_type = function->type[node];
+     const bool general_result = result_type != IR_VOID && tier1_select_float_width(result_type) == 0;
+@@ -847,7 +859,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+     {
+         if ((saved >> reg) & 1)
+         {
+-            if (!tier1_emit_append(buffer, tier1_emit_call_save(result, reg, false)))
++            if (!tier1_emit_append_kind(buffer, tier1_emit_call_save(result, reg, false), 'C'))
+             {
+                 error = TIER1_EMIT_MEMORY;
+             }
+@@ -987,7 +999,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+     {
+         if ((saved >> reg) & 1)
+         {
+-            if (!tier1_emit_append(buffer, tier1_emit_call_save(result, reg, true)))
++            if (!tier1_emit_append_kind(buffer, tier1_emit_call_save(result, reg, true), 'R'))
+             {
+                 error = TIER1_EMIT_MEMORY;
+             }
+@@ -995,6 +1007,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+         }
+     }
+     arena_pop_to(scratch, scratch_mark);
++    tier1_emit_kind = kind_saved;
+     return error;
+ }
+ 
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 27d8e7f8..332ec923 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -250,7 +250,7 @@ static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, Tier1Em
+ {
+     const uint16_t form = area <= 127 ? (release ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8) : (release ? X86_FORM_ADD_RM64_IMM32 : X86_FORM_SUB_RM64_IMM32);
+     const X86Instruction record = { .form = form, .rm = X86_REGISTER_RSP, .immediate = (int32_t)area };
+-    return area == 0 || tier1_emit_append(buffer, record) ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
++    return area == 0 || tier1_emit_append_kind(buffer, record, 'a') ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
+ }
+ 
+ // The inverse of a conditional jump's form, or X86_FORM_NONE for a form the selector doesn't choose.
+@@ -1137,7 +1137,7 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
+     {
+         const uint32_t width = emitted->prepared.sizes[value];
+         const X86Instruction load = { .displacement = offset, .reg = source, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32 };
+-        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
++        error = tier1_emit_append_kind(buffer, load, 'L') ? error : TIER1_EMIT_MEMORY;
+         emitted->spill_loads += 1;
+     }
+     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
+@@ -1170,7 +1170,7 @@ static Tier1EmitError tier1_emit_cfg_aggregate_copy(Tier1EmitResult* emitted, ui
+     if (error == TIER1_EMIT_OK && !registered && kind == BUSTER_TIER1_ALLOCATE_SPILL && tier1_emit_cfg_slot(emitted, location, &offset))
+     {
+         const X86Instruction load = { .displacement = offset, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
+-        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
++        error = tier1_emit_append_kind(buffer, load, 'L') ? error : TIER1_EMIT_MEMORY;
+         emitted->spill_loads += 1;
+     }
+     else if (error == TIER1_EMIT_OK && !registered && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
+@@ -1220,6 +1220,8 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
+     const IrFunction* function = plan->function;
+     const Tier1CfgInput* input = &emitted->cfg_input;
+     const Tier1Allocation* allocation = &emitted->cfg.allocation;
++    const uint8_t kind_saved = tier1_emit_kind;
++    tier1_emit_kind = 'p';
+     uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS];
+     uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS];
+     uint32_t vector_sources[BUSTER_ABI_VECTOR_ARGUMENTS];
+@@ -1338,10 +1340,11 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
+             const uint32_t width = emitted->prepared.sizes[node];
+             const X86Instruction store = { .displacement = slot, .reg = target, .rm = (uint8_t)emitted->frame.base_register, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
+             error = !in_vector && !in_register && !in_slot ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+-            error = error == TIER1_EMIT_OK && in_slot ? (tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY) : error;
++            error = error == TIER1_EMIT_OK && in_slot ? (tier1_emit_append_kind(buffer, store, 'S') ? error : TIER1_EMIT_MEMORY) : error;
+             emitted->spill_stores += error == TIER1_EMIT_OK && in_slot;
+         }
+     }
++    tier1_emit_kind = kind_saved;
+     return error;
+ }
+ 
+@@ -1359,6 +1362,7 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
+         const uint32_t node = emitted->value_nodes[cfg->move_values[m]];
+         const uint32_t width = emitted->prepared.sizes[node];
+         X86Instruction records[2] = { { 0 }, { 0 } };
++        uint8_t record_kinds[2] = { 'e', 'e' };
+         uint32_t record_count = 0;
+         int32_t offset = 0;
+         // A mask (#179) between opmask registers (k0 the class's scratch among them) and slots, by kmov of its width:
+@@ -1380,11 +1384,13 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
+         }
+         else if (vector && from_vector && tier1_emit_cfg_slot(emitted, to, &offset))
+         {
++            record_kinds[record_count] = 'T';
+             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(from & 15), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->store };
+             emitted->spill_stores += 1;
+         }
+         else if (vector && to_vector && tier1_emit_cfg_slot(emitted, from, &offset))
+         {
++            record_kinds[record_count] = 'U';
+             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(to & 15), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->load };
+             emitted->spill_loads += 1;
+         }
+@@ -1398,11 +1404,13 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
+         }
+         else if (mask && from_mask && tier1_emit_cfg_slot(emitted, to, &offset))
+         {
++            record_kinds[record_count] = 'T';
+             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(from & 7), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = forms->store };
+             emitted->spill_stores += 1;
+         }
+         else if (mask && to_mask && tier1_emit_cfg_slot(emitted, from, &offset))
+         {
++            record_kinds[record_count] = 'U';
+             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(to & 7), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = forms->load };
+             emitted->spill_loads += 1;
+         }
+@@ -1419,6 +1427,7 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
+             emitted->edge_moves += error == TIER1_EMIT_OK;
+             if (to >= 16)
+             {
++                record_kinds[record_count] = 'T';
+                 records[record_count++] = (X86Instruction){ .displacement = offset, .reg = target, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
+             }
+         }
+@@ -1428,11 +1437,13 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
+         }
+         else if (from < 16 && tier1_emit_cfg_slot(emitted, to, &offset))
+         {
++            record_kinds[record_count] = 'T';
+             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)from, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
+             emitted->spill_stores += 1;
+         }
+         else if (to < 16 && tier1_emit_cfg_slot(emitted, from, &offset))
+         {
++            record_kinds[record_count] = 'U';
+             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)to, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32 };
+             emitted->spill_loads += 1;
+         }
+@@ -1443,7 +1454,7 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t fi
+         }
+         for (uint32_t r = 0; error == TIER1_EMIT_OK && r < record_count; r += 1)
+         {
+-            error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
++            error = tier1_emit_append_kind(buffer, records[r], record_kinds[r]) ? error : TIER1_EMIT_MEMORY;
+         }
+         emitted->edge_moves += error == TIER1_EMIT_OK ? record_count : 0;
+     }
+@@ -1486,7 +1497,7 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
+ // records are in: its branch slot and goal go in the pending columns.
+ static Tier1EmitError tier1_emit_cfg_jump(Tier1EmitBuffer* buffer, uint16_t form, uint32_t goal, uint32_t* pending_branches, uint32_t* pending_goals, uint32_t* pending, Tier1EmitResult* emitted)
+ {
+-    const bool room = buffer->branch_count < buffer->branch_capacity && tier1_emit_append(buffer, (X86Instruction){ .form = form });
++    const bool room = buffer->branch_count < buffer->branch_capacity && tier1_emit_append_kind(buffer, (X86Instruction){ .form = form }, 'j');
+     if (room)
+     {
+         buffer->branches[buffer->branch_count] = buffer->count - 1;
+@@ -2061,7 +2072,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const
+                                 .mode = BUSTER_X86_MEMORY_BASE,
+                                 .form = pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
+                             };
+-                            error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
++                            error = tier1_emit_append_kind(&buffer, record, pass == 0 ? 'C' : 'R') ? error : TIER1_EMIT_MEMORY;
+                             emitted->call_stores += pass == 0;
+                             emitted->call_loads += pass == 1;
+                         }
+@@ -2082,7 +2093,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const
+                                 .mode = BUSTER_X86_MEMORY_BASE,
+                                 .form = pass == 0 ? forms->store : forms->load,
+                             };
+-                            error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
++                            error = tier1_emit_append_kind(&buffer, record, pass == 0 ? 'C' : 'R') ? error : TIER1_EMIT_MEMORY;
+                             emitted->call_stores += pass == 0;
+                             emitted->call_loads += pass == 1;
+                         }
+diff --git a/src/buster/compiler/tier1_frame_emit.c b/src/buster/compiler/tier1_frame_emit.c
+index dac9daa9..efbb62ea 100644
+--- a/src/buster/compiler/tier1_frame_emit.c
++++ b/src/buster/compiler/tier1_frame_emit.c
+@@ -40,6 +40,10 @@ struct Tier1EmitBuffer
+     uint32_t branch_capacity;
+ };
+ 
++// Experiment (#1189), not for main: each record's origin, a letter, where tier1_emit_kinds points.
++static _Thread_local uint8_t* tier1_emit_kinds;
++static _Thread_local uint8_t tier1_emit_kind = 'n';
++
+ typedef enum Tier1FrameEmitError
+ {
+     TIER1_FRAME_EMIT_OK,
+@@ -91,6 +95,7 @@ static uint16_t tier1_frame_emit_form(uint16_t imm8, uint16_t imm32, int64_t val
+ static void tier1_frame_emit_add(Tier1EmitBuffer* buffer, X86Instruction record)
+ {
+     buffer->records[buffer->count] = record;
++    if (tier1_emit_kinds) tier1_emit_kinds[buffer->count] = 'f';
+     buffer->count += 1;
+ }
+ 
+@@ -324,6 +329,7 @@ static Tier1FrameEmitError tier1_frame_emit(const Tier1Frame* frame, bool epilog
+         if (temporary.count != 0)
+         {
+             memcpy(buffer->records + buffer->count, temporary.records, (uint64_t)temporary.count * sizeof(X86Instruction));
++            if (tier1_emit_kinds) memset(tier1_emit_kinds + buffer->count, 'f', temporary.count);
+         }
+         buffer->count += temporary.count;
+         buffer->branch_count += temporary.branch_count;
