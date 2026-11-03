@@ -164,8 +164,21 @@ rotates by round. Then a `perf record` (cycles at 20 kHz, 5 compiles) of the fir
 
 ## Commits 7, 8 and 9 by wall time (`ab9/`)
 
-`queue9.sh` runs `ab` of `--tier1 -c sqlite3.c` by `c27be772`, `vscan` and `ldscan`, 5 rounds of 21 runs. It was still
-waiting for the lock when this record was first committed, and its figures will be added here.
+`queue9.sh` runs `ab` of `--tier1 -c sqlite3.c` by `c27be772`, `vscan` and `ldscan`: 5 rounds of 21 runs, in an order
+that rotates by round (`ab9/compile-tier1-ab.log`). The rounds' medians (ms):
+
+| Tree | Rounds' medians | Median |
+| --- | --- | ---: |
+| `c27be772` (commit 7) | 447.759, 448.036, 448.048, 448.209, 448.908 | 448.048 |
+| `vscan` (commit 8) | 449.235, 449.391, 449.446, 449.963, 450.244 | 449.446 |
+| `ldscan` (commit 9) | 448.663, 448.899, 449.048, 449.199, 449.639 | 449.048 |
+
+- Commit 8 reads 0.31% slower than commit 7, and commit 9 reads 0.09% faster than commit 8. That leaves commit 9
+  0.22% slower than commit 7 with 8.54 M (0.15%) fewer instructions, as the cycles above read.
+- One executable per tree is one placement of its code. buster's profiling guide ("Comparing two versions", #509)
+  puts a whole compile's difference below about 0.2% under what this comparison resolves. `place10.sh` compares
+  commit 7 and commit 9 over six placements of the checker's unit and three fresh copies each, with commit 7 twice as
+  the floor (`place10/`).
 
 ## Limitations
 
