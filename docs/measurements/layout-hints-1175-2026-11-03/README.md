@@ -157,8 +157,16 @@ moved into the visit's branch). The comparison was measured again, with the same
 
 The final head drops the coded walk's visit hint. With main's counters in that branch, the hint cost 18,938 taken
 branches: the merge took 45,063,783 and the final head 45,044,845. All of the difference is
-`check_input_expression_coded`'s, 3,584,773 to 3,565,835. The executable measured was `a6405c80`; `d9d9d32f` changes
-only the words of a comment, on the same lines.
+`check_input_expression_coded`'s, 3,584,773 to 3,565,835.
+
+The final head's executable was first measured as `a6405c80`, an earlier, unpublished version of the same commit
+(`logs/final-*`). `patches/a6405c80-to-d9d9d32f.diff` is the two commits' whole difference: two comment lines. The
+published `d9d9d32f` was then built and measured itself (`logs/head-d9d9d32f-*`):
+
+- **Code.** Its code is the same: `.text` (26,514,889 bytes), `.rodata` and `.data` are byte for byte the first
+  executable's. Among the allocated sections, only `.note.gnu.build-id` differs.
+- **`-fsyntax-only`.** Its counts are the same.
+- **`-c`.** It is within that mode's run-to-run spread: 1 taken branch and 9 instructions fewer.
 
 | sqlite3.c | | main `8c9c5bf0` | final | change |
 | --- | --- | ---: | ---: | ---: |
