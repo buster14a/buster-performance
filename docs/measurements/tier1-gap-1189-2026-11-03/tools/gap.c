@@ -1,12 +1,19 @@
 // gap.c: #1189's breakdown of Tier 1's dynamic instructions against clang -O2's, by instruction type and, for Tier 1's
 // code, by each record's origin (the kinds experiment's tags).
 //
-//   gap count DISASSEMBLY CALLGRIND BASE [KINDS] > TSV
+//   gap count DISASSEMBLY CALLGRIND OBJECT BASE [KINDS] > TSV
 //       DISASSEMBLY is `objdump -d --no-show-raw-insn BINARY`, CALLGRIND a `valgrind --tool=callgrind --dump-instr=yes`
-//       run of BINARY, BASE the address valgrind loaded BINARY at (0x108000 for a PIE), KINDS the experiment's
-//       "name<TAB>letters" lines. Each line of the output is: function, origin letter, type, dynamic count; plus
+//       run of BINARY, OBJECT the name callgrind gives BINARY and BASE what it adds to BINARY's addresses (`???` and
+//       0x108000 for Buster's executables, whose symbols valgrind doesn't read; their own path and 0 for clang's and
+//       tcc's), KINDS the experiment's "name<TAB>letters" lines. Each line of the output is: function, origin letter, type, dynamic count; plus
 //       "#calls" lines (function, dynamic calls into it), "#check" lines (the counts that landed on no instruction,
-//       functions whose tags didn't fit) and "#total" (all of BINARY's counted instructions).
+//       functions whose tags didn't fit) and "#total" (all of BINARY's counted instructions). An instruction without
+//       a tag has origin '-' (its function has no tag line, or its tags didn't fit), the padding after a function's
+//       records '_'.
+//
+//   gap table T1.tsv... -- CLANG.tsv...
+//       Sums each side's TSVs and prints the tables by cause, type, origin and function. The instructions without a
+//       tag are "unattributed", never the node's, with their functions listed by why they have none.
 //
 // Only instructions in BINARY's own code count: the C library's (memcpy, strlen, ...) are other objects in the run.
 #define _GNU_SOURCE
@@ -583,8 +590,8 @@ static const char* const cause_titles[] = {
 };
 enum { CAUSES = 9 };
 static const char origin_letters[] = "SLTUCReapfrjn";
-static const char* const origin_names[] = { "spill", "reload", "edge spill", "edge reload", "call save", "call restore", "edge move", "call sequence", "entry", "frame", "recomputed", "branch", "node" };
-enum { ORIGINS = 13 };
+static const char* const origin_names[] = { "spill", "reload", "edge spill", "edge reload", "call save", "call restore", "edge move", "call sequence", "entry", "frame", "recomputed", "branch", "node", "unattributed" };
+enum { ORIGINS = 14 };
 
 static uint32_t cause_of(const char* type)
 {
@@ -602,10 +609,25 @@ static uint32_t cause_of(const char* type)
     return cause;
 }
 
+// A letter outside the tags ('-', '_') is the last origin, "unattributed".
 static uint32_t origin_of(char kind)
 {
     const char* p = strchr(origin_letters, kind);
     return kind != 0 && p != 0 ? (uint32_t)(p - origin_letters) : ORIGINS - 1;
+}
+
+// The functions whose tags didn't fit, from Tier 1's "#check kinds" lines.
+static char* unfitted[256];
+static uint32_t unfitted_count;
+
+static bool is_unfitted(const char* function)
+{
+    bool found = false;
+    for (uint32_t i = 0; i < unfitted_count; i += 1)
+    {
+        found |= strcmp(unfitted[i], function) == 0;
+    }
+    return found;
 }
 
 static void read_side(Side* side, const char* path, Side* calls)
@@ -626,6 +648,10 @@ static void read_side(Side* side, const char* path, Side* calls)
         for (char* p = strtok(line, "\t"); p != 0 && n < 4; p = strtok(0, "\t"))
         {
             fields[n++] = p;
+        }
+        if (n == 4 && strcmp(fields[0], "#check") == 0 && strcmp(fields[1], "kinds") == 0 && !is_unfitted(fields[2]) && unfitted_count < 256)
+        {
+            unfitted[unfitted_count++] = strdup(fields[2]);
         }
         Side* target = n == 3 && strcmp(fields[0], "#calls") == 0 ? calls : n == 4 && fields[0][0] != '#' ? side : 0;
         if (target != 0)
@@ -699,6 +725,15 @@ static int by_inlined(const void* a, const void* b)
     const uint64_t u = x->tier1_calls > x->clang_calls ? x->tier1_calls - x->clang_calls : 0;
     const uint64_t v = y->tier1_calls > y->clang_calls ? y->tier1_calls - y->clang_calls : 0;
     return u < v ? 1 : u > v ? -1 : 0;
+}
+
+static int by_unattributed(const void* a, const void* b)
+{
+    const Total* x = a;
+    const Total* y = b;
+    const uint64_t u = x->origins[ORIGINS - 1];
+    const uint64_t v = y->origins[ORIGINS - 1];
+    return u < v ? 1 : u > v ? -1 : strcmp(x->function, y->function);
 }
 
 static double millions(uint64_t value)
@@ -799,6 +834,25 @@ static int table(int argc, char** argv)
     {
         printf("| %s | %.1f | %.1f%% |\n", origin_names[o], millions(origin_total[o]), 100.0 * (double)origin_total[o] / (double)sides[0].total);
     }
+    // The unattributed instructions' functions: the PLT's stubs together, then each other function by its count.
+    uint64_t plt = 0;
+    uint32_t plt_count = 0;
+    for (uint32_t i = 0; i < total_count; i += 1)
+    {
+        const bool stub = strstr(totals[i].function, "@plt") != 0 && totals[i].origins[ORIGINS - 1] != 0;
+        plt += stub ? totals[i].origins[ORIGINS - 1] : 0;
+        plt_count += stub;
+    }
+    qsort(totals, total_count, sizeof(Total), by_unattributed);
+    printf("\n| `--tier1`'s unattributed instructions | Count | Why they have no tag |\n| --- | ---: | --- |\n| %" PRIu32 " PLT stubs | %" PRIu64 " | the linker's code |\n", plt_count, plt);
+    for (uint32_t i = 0; i < total_count && totals[i].origins[ORIGINS - 1] != 0; i += 1)
+    {
+        const Total* t = &totals[i];
+        if (strstr(t->function, "@plt") == 0)
+        {
+            printf("| `%s` | %" PRIu64 " | %s |\n", t->function, t->origins[ORIGINS - 1], is_unfitted(t->function) ? "its tags didn't fit" : "no tag line");
+        }
+    }
     uint64_t call_totals[2] = { calls[0].total, calls[1].total };
     printf("\nDynamic calls into the program's functions: Tier 1 %.2f M, clang -O2 %.2f M\n", millions(call_totals[0]), millions(call_totals[1]));
     qsort(totals, total_count, sizeof(Total), by_tier1);
@@ -845,7 +899,7 @@ int main(int argc, char** argv)
     }
     if (argc < 6 || strcmp(argv[1], "count") != 0)
     {
-        fprintf(stderr, "usage: gap count DISASSEMBLY CALLGRIND BINARY BASE [KINDS]\n");
+        fprintf(stderr, "usage: gap count DISASSEMBLY CALLGRIND OBJECT BASE [KINDS]\n       gap table T1.tsv... -- CLANG.tsv...\n");
         return 2;
     }
     read_disassembly(argv[2]);

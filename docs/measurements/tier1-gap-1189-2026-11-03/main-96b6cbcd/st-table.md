@@ -2,15 +2,15 @@ Program code (the C library's left out): Tier 1 3743.8 M, clang -O2 1887.5 M, ga
 
 | Cause | `--tier1`, M | clang -O2, M | Gap, M | Share of the gap | `--tier1`'s by origin, M |
 | --- | ---: | ---: | ---: | ---: | --- |
-| register moves | 503.6 | 155.2 | 348.3 | 18.8% | edge move 130.1, call sequence 220.7, node 152.8 |
-| stack loads and stores | 592.1 | 175.2 | 416.9 | 22.5% | spill 25.8, reload 5.5, edge spill 141.8, edge reload 155.3, call save 118.5, call restore 118.5, call sequence 5.6, entry 6.3, node 14.0 |
-| other loads and stores | 648.9 | 424.4 | 224.5 | 12.1% | node 648.9 |
-| address arithmetic (lea) | 370.5 | 95.8 | 274.7 | 14.8% | recomputed 75.4, node 295.1 |
+| register moves | 503.6 | 155.2 | 348.3 | 18.8% | edge move 130.1, call sequence 220.7, node 151.2, unattributed 1.5 |
+| stack loads and stores | 592.1 | 175.2 | 416.9 | 22.5% | spill 25.8, reload 5.5, edge spill 141.8, edge reload 155.3, call save 118.5, call restore 118.5, call sequence 5.6, entry 6.3, node 6.3, unattributed 7.7 |
+| other loads and stores | 648.9 | 424.4 | 224.5 | 12.1% | node 646.7, unattributed 2.2 |
+| address arithmetic (lea) | 370.5 | 95.8 | 274.7 | 14.8% | recomputed 75.4, node 294.6 |
 | zero and sign extensions | 200.4 | 33.1 | 167.3 | 9.0% | call sequence 6.9, node 193.6 |
-| compares and branches | 796.0 | 521.3 | 274.7 | 14.8% | branch 421.6, node 374.1 |
-| calls, returns and frames | 354.6 | 217.1 | 137.5 | 7.4% | call sequence 77.7, frame 206.2, node 70.6 |
-| constants | 107.2 | 47.5 | 59.7 | 3.2% | recomputed 3.6, node 103.4 |
-| arithmetic and the rest | 170.5 | 217.8 | -47.2 | -2.5% | node 170.5 |
+| compares and branches | 796.0 | 521.3 | 274.7 | 14.8% | branch 421.6, node 365.9, unattributed 8.2 |
+| calls, returns and frames | 354.6 | 217.1 | 137.5 | 7.4% | call sequence 77.7, frame 206.2, node 68.8, unattributed 1.9 |
+| constants | 107.2 | 47.5 | 59.7 | 3.2% | recomputed 3.6, node 102.7 |
+| arithmetic and the rest | 170.5 | 217.8 | -47.2 | -2.5% | node 169.2, unattributed 1.3 |
 
 | Type | `--tier1`, M | clang -O2, M | Gap, M |
 | --- | ---: | ---: | ---: |
@@ -59,7 +59,18 @@ Program code (the C library's left out): Tier 1 3743.8 M, clang -O2 1887.5 M, ga
 | frame | 207.4 | 5.5% |
 | recomputed | 79.0 | 2.1% |
 | branch | 421.6 | 11.3% |
-| node | 2023.0 | 54.0% |
+| node | 1999.0 | 53.4% |
+| unattributed | 24.0 | 0.6% |
+
+| `--tier1`'s unattributed instructions | Count | Why they have no tag |
+| --- | ---: | --- |
+| 32 PLT stubs | 7326526 | the linker's code |
+| `sqlite3Multiply160` | 7968674 | no tag line |
+| `sqlite3Multiply128` | 5893002 | no tag line |
+| `main` | 2824339 | its tags didn't fit |
+| `sqlite3CompileOptions-0xf0` | 48 | no tag line |
+| `.init` | 7 | no tag line |
+| `.fini` | 4 | no tag line |
 
 Dynamic calls into the program's functions: Tier 1 76.25 M, clang -O2 25.62 M
 

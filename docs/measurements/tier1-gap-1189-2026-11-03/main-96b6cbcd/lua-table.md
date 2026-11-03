@@ -7,7 +7,7 @@ Program code (the C library's left out): Tier 1 7228.2 M, clang -O2 3768.0 M, ga
 | other loads and stores | 1041.0 | 717.5 | 323.4 | 9.3% | node 1041.0 |
 | address arithmetic (lea) | 783.6 | 152.9 | 630.8 | 18.2% | recomputed 316.0, node 467.6 |
 | zero and sign extensions | 470.5 | 37.9 | 432.6 | 12.5% | node 470.5 |
-| compares and branches | 1517.9 | 901.0 | 616.9 | 17.8% | branch 708.4, node 809.5 |
+| compares and branches | 1517.9 | 901.0 | 616.9 | 17.8% | branch 708.4, node 795.3, unattributed 14.2 |
 | calls, returns and frames | 526.3 | 474.0 | 52.4 | 1.5% | call sequence 106.0, frame 329.3, node 91.0 |
 | constants | 119.6 | 143.9 | -24.3 | -0.7% | node 119.4 |
 | arithmetic and the rest | 746.8 | 658.9 | 87.9 | 2.5% | node 746.8 |
@@ -59,7 +59,15 @@ Program code (the C library's left out): Tier 1 7228.2 M, clang -O2 3768.0 M, ga
 | frame | 329.3 | 4.6% |
 | recomputed | 316.0 | 4.4% |
 | branch | 708.4 | 9.8% |
-| node | 4186.1 | 57.9% |
+| node | 4171.8 | 57.7% |
+| unattributed | 14.2 | 0.2% |
+
+| `--tier1`'s unattributed instructions | Count | Why they have no tag |
+| --- | ---: | --- |
+| 36 PLT stubs | 14209916 | the linker's code |
+| `index2value-0xf0` | 240 | no tag line |
+| `.init` | 35 | no tag line |
+| `.fini` | 20 | no tag line |
 
 Dynamic calls into the program's functions: Tier 1 106.00 M, clang -O2 54.20 M
 
