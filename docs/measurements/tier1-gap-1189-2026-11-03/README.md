@@ -4,7 +4,7 @@ This is the evidence for [buster#1189](https://github.com/buster14a/buster/issue
 
 ## Host and instrument
 
-The measurements ran in a cloud container, **not the 9700X**: an Intel Xeon (model 173, AVX-512) under KVM, 4 CPUs, Ubuntu with clang 23.1.5, valgrind 3.22.0 and tcc 0.9.27. The VM exposes no hardware counters, so **nothing here is a cycle or time measurement**. The compile times in `passes/compile-times.txt` are one pinned CPU of this VM, and are ratios only.
+Most of these measurements ran in a cloud container, **not the 9700X**, all but `9700x/` (below): an Intel Xeon (model 173, AVX-512) under KVM, 4 CPUs, Ubuntu with clang 23.1.5, valgrind 3.22.0 and tcc 0.9.27. The VM exposes no hardware counters, so **nothing here is a cycle or time measurement**. The compile times in `passes/compile-times.txt` are one pinned CPU of this VM, and are ratios only.
 
 Instruction counts come from callgrind (`valgrind --tool=callgrind --dump-instr=yes`). It counts every user-space instruction exactly, and gives each instruction address its own count. The counts don't depend on the host. Against the 9700X record [`tier1-reciprocal-141-2026-11-01`](../tier1-reciprocal-141-2026-11-01):
 - c-testsuite 00040's instructions past startup are the record's `perf stat` figures exactly (`cts-00040/`);
@@ -88,7 +88,49 @@ Every build gives speedtest1's verification hash `1248168 a7fa3957840af6d608d53f
 | LICM, loops of at most 2 blocks | 3,930.2 M (+1.6%) | 7,744.8 M (+1.8%) |
 | SROA | 3,868.5 M (−0.03%) | 7,613.9 M (+0.05%) |
 
+## On the 9700X: #1189's step 4
+
+[buster#1230](https://github.com/buster14a/buster/pull/1230)'s `measure-tier1-programs` ran in its own Benchpress job, the 9700X job of
+[run 41637938160](https://github.com/buster14a/buster/actions/runs/41637938160) (job 125928093203), at its head `eeeafb6d`. That head
+is main `730eea0a` (this record's per-type depth slots, buster#1221, included) with the command added.
+
+Setup:
+- the job's `znver5` Release executable;
+- clang 23.1.4 (`7a941dfb`) and the host's tcc, pinned by hash;
+- the frozen `sqlite3.c`, speedtest1.c and Lua 5.4.8's release, by their hashes;
+- the cc3387f record's five scripts, from buster-performance `818cfbbc`;
+- the job's one CPU, under the shared lock the runner's hooks hold.
+
+Before any timing, every build gave speedtest1's hash `1248168 a7fa3957…`, and every script printed clang -O0's output. Then came one warm-up and 11 rounds of every build of every program in a rotating order. All 330 measured runs exited 0, with their counters counted.
+
+- `9700x/measure-tier1-programs.log`: the step's output, timestamps included.
+- `9700x/runs.tsv`: the runs, one line each, warm-ups included: phase, round, position, program, build, wall time in ns, user cycles, instructions, status and whether it was counted.
+
+The medians, Lua's being the sum of its five scripts' medians:
+
+| Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / clang -O2 | `--tier1` / clang -O0 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| speedtest1, ms | 258.2 | 207.0 | 271.0 | 129.3 | 269.7 | 1.60 | 0.76 |
+| speedtest1, user cycles, M | 1,336.1 | 1,051.1 | 1,396.5 | 625.7 | 1,397.5 | 1.68 | 0.75 |
+| speedtest1, instructions, M | 5,694.0 | 3,819.4 | 3,855.8 | 1,979.0 | 4,832.2 | 1.93 | 0.99 |
+| Lua's five scripts, ms | 335.2 | 260.8 | 358.7 | 167.4 | 393.6 | 1.56 | 0.73 |
+| Lua's five scripts, user cycles, M | 1,838.9 | 1,424.3 | 1,957.0 | 909.6 | 2,157.0 | 1.57 | 0.73 |
+| Lua's five scripts, instructions, M | 10,795.0 | 7,652.1 | 8,288.1 | 4,250.4 | 9,394.0 | 1.80 | 0.92 |
+
+Against the cc3387f record's corpora table (clang 23.1.1 there), `--tier1` gained:
+- speedtest1: 223.5 to 207.0 ms, 1,138 M to 1,051 M cycles and 4,413 M to 3,819 M instructions. Its ratio to -O2 fell from 1.70 to 1.60 in time and from 1.80 to 1.68 in cycles.
+- Lua: 286.1 to 260.8 ms, 1,559 M to 1,424 M cycles and 8,749 M to 7,652 M instructions. Its ratio fell from 1.71 to 1.56 in time and from 1.74 to 1.57 in cycles.
+
+What changed between the two: buster#1117 put `sqlite3VdbeExec` and `luaV_execute` into Tier 1, then came buster#1221's depth slots, and the clang release moved from 23.1.1 to 23.1.4.
+
+clang -O0's numbers also differ from that record's: speedtest1's -O0 build there ran 291.0 ms and 3,922 M instructions, against 271.0 ms and 3,856 M here. Ratios to -O0 are not comparable across the two records.
+
+The method's two differences from that record are in buster's `docs/commands/tier1.md`:
+- clang's objects link with clang rather than `cc`;
+- each run's counters are its own, from `perf_event_open`, rather than `perf stat` of one more run per build.
+
+Callgrind's counts above (`*/instructions.txt`) are a little higher than the 9700X's counters on the same code: speedtest1's `--tier1` gives 3,869.8 M under callgrind and 3,819.4 M here. They count whole processes in another environment (the loader and the C library's ifunc choices); the cause breakdown uses callgrind's counts alone.
+
 ## Not done here
 
-- The 9700X's cycles and times, for the same builds, and #1189's step 4.
 - `scripts/*.sh` name this session's scratch directory. Running them elsewhere means changing `S=` and the inputs' paths.
