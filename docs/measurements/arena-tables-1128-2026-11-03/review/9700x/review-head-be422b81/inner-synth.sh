@@ -1,0 +1,7 @@
+#!/bin/bash
+cd /home/david/buster-fast-bench/1128-claude/synth
+taskset -c 0-7 /home/david/buster-fast-bench/1128-claude/main-a4a2182a/build/compiler time-runs --runs 5 --warmups 1 --build main /home/david/buster-fast-bench/1128-claude/main-a4a2182a/build/compiler --build head /home/david/buster-fast-bench/1128-claude/head-be422b81/build/compiler --list --lanes 1 -o /home/david/buster-fast-bench/1128-claude/out/synth $(ls unit_*.c | sort -V) --list --lanes 8 -o /home/david/buster-fast-bench/1128-claude/out/synth $(ls unit_*.c | sort -V)
+cd /home/david/buster-fast-bench/1128-claude
+sqlite=(--predefines /home/david/buster-fast-bench/corpus-391e729af658/provenance/gnu17-pinned-predefines.txt --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem /home/david/buster-fast-bench/corpus-391e729af658/headers/usr/lib/clang/23/include -isystem /home/david/buster-fast-bench/corpus-391e729af658/headers/usr/local/include -isystem /home/david/buster-fast-bench/corpus-391e729af658/headers/usr/include /home/david/buster-fast-bench/corpus-391e729af658/sqlite/sqlite3.c)
+taskset -c 2 /home/david/buster-fast-bench/1128-claude/main-a4a2182a/build/compiler time-runs --runs 11 --warmups 1 --build main /home/david/buster-fast-bench/1128-claude/main-a4a2182a/build/compiler --build head /home/david/buster-fast-bench/1128-claude/head-be422b81/build/compiler --list -c -o /home/david/buster-fast-bench/1128-claude/out/sqlite3.o "${sqlite[@]}"
+sha256sum /home/david/buster-fast-bench/corpus-391e729af658/sqlite/sqlite3.c
