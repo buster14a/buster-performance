@@ -13,7 +13,7 @@ it.
 `logs/receipts.txt` has every identity. In short:
 
 - **Sources.**
-  - main: buster `96b6cbcd`.
+  - main: buster `96b6cbcd`; after the merge, also `8c9c5bf0` (below).
   - head: buster#1225's `a84d9823`.
   - first commit: `5182ca1b`, the same without `check_control_children`'s hint.
   - variants: `patches/` holds the variants' diffs against main (`git apply`).
@@ -145,6 +145,40 @@ follow another's.
 
 A third form, a sink slot past the nodes, was dropped without a build: lanes share `value_next`, so they would race on
 the slot.
+
+## After merging main: against `8c9c5bf0`
+
+buster#1225 then merged main `8c9c5bf0`, whose compiler changes include the coded walk's (its counters and clock
+moved into the visit's branch). The comparison was measured again, with the same method:
+
+- **main:** `8c9c5bf0`;
+- **merge:** `cdfef9a2`, the merge as it came;
+- **final:** `d9d9d32f`, the PR's head.
+
+The final head drops the coded walk's visit hint. With main's counters in that branch, the hint cost 18,938 taken
+branches: the merge took 45,063,783 and the final head 45,044,845. All of the difference is
+`check_input_expression_coded`'s, 3,584,773 to 3,565,835. The executable measured was `a6405c80`; `d9d9d32f` changes
+only the words of a comment, on the same lines.
+
+| sqlite3.c | | main `8c9c5bf0` | final | change |
+| --- | --- | ---: | ---: | ---: |
+| `-fsyntax-only` | taken branches (`taken.c`) | 59,986,187 | 45,044,845 | -24.9% |
+| | BOLT's taken branches | 58,558,159 | 43,624,553 | -25.5% |
+| | instructions | 883,968,951 | 871,504,997 | -1.41% |
+| `-c --lanes 1` | taken branches (`taken.c`) | 78,533,500 | 62,277,031 | -20.7% |
+| | BOLT's taken branches | 76,600,598 | 60,351,865 | -21.2% |
+| | instructions | 1,169,605,088 | 1,156,770,046 | -1.10% |
+
+`-c`'s objects of `sqlite3.c` and `main.c` are byte for byte main's. The logs are in `logs/main-8c9c5bf0-*`,
+`logs/merge-cdfef9a2-fsyntax` and `logs/final-*`, and the receipts at the end of `logs/receipts.txt`.
+
+**Sites.** `logs/sites-8c9c5bf0.txt` has each site's own lines. Most sites are unchanged from main `96b6cbcd`'s
+numbers, since main's changes didn't touch them.
+
+`check_input_expression_coded`'s own lines are the exception: 1,031,540 on main, 1,129,397 on the final head. Its
+visit's test takes 98 thousand more jumps, because the layout around it changed. But the compiled function, with what
+it inlines (`check_input_add_node`'s hinted tests among them), falls 18%: 4,356,918 to 3,565,835
+(`functions-taken.txt`).
 
 ## Limitations
 
