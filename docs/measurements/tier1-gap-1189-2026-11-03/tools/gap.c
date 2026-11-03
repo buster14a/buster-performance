@@ -1009,9 +1009,9 @@ static int table(int argc, char** argv)
            millions(missing_calls), millions(missing_instructions));
     if (remarks_given)
     {
-        printf("\nOf those calls, by clang's inlining remarks (-Rpass=inline): to callees it inlined at one call site or more %.2f M, to code without a symbol after a "
-               "function (no function to inline) %.2f M, to other callees %.2f M\n",
-               millions(remarked_calls), millions(unnamed_calls), millions(missing_calls - remarked_calls - unnamed_calls));
+        printf("\nOf those %" PRIu64 " calls, by clang's inlining remarks (-Rpass=inline): to callees it inlined at one call site or more %" PRIu64 ", to code without a "
+               "symbol after a function (no function to inline) %" PRIu64 ", to other callees %" PRIu64 "\n",
+               missing_calls, remarked_calls, unnamed_calls, missing_calls - remarked_calls - unnamed_calls);
     }
     printf("\n| Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M | clang's inlining remarks |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for (uint32_t i = 0; i < total_count && i < 15; i += 1)

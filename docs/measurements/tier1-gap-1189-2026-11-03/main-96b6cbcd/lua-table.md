@@ -101,7 +101,7 @@ Dynamic calls into the program's own code: Tier 1 91.79 M, clang -O2 54.20 M; in
 
 Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang, a count difference): 37.60 M. Their callees' instructions in Tier 1, each callee's scaled by the share of its calls clang doesn't make (an estimate from its average per call): 960.3 M
 
-Of those calls, by clang's inlining remarks (-Rpass=inline): to callees it inlined at one call site or more 37.60 M, to code without a symbol after a function (no function to inline) 0.00 M, to other callees 0.00 M
+Of those 37598228 calls, by clang's inlining remarks (-Rpass=inline): to callees it inlined at one call site or more 37597254, to code without a symbol after a function (no function to inline) 0, to other callees 974
 
 | Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M | clang's inlining remarks |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |

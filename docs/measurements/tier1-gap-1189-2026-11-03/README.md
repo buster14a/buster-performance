@@ -94,7 +94,9 @@ Every build gives speedtest1's verification hash `1248168 a7fa3957840af6d608d53f
 **Calls clang doesn't make, and inlining.** A callee's calls by Tier 1 less its calls by clang are a count difference. Clang may have inlined them, or removed them otherwise. The first versions called that difference inlining without evidence. The evidence now comes from clang's own inlining remarks (`-Rpass=inline`):
 - **The rebuild.** `scripts/inlining.sh` builds clang -O2's speedtest1 and Lua with those remarks. Both executables are the measured ones byte for byte, by `inputs.sha256`, so the remarks describe the code that ran.
 - **The remarks.** `main-96b6cbcd/inlined-st.tsv` and `inlined-lua.tsv` keep each remark's callee and caller: 8,239 and 1,320 of them.
-- **What they cover.** On speedtest1, 43.29 M of the 44.67 M calls go to callees clang inlined at one call site or more. 1.37 M go to the unit's atomic helpers, which are no function for clang to inline, and 0.01 M to other callees. On Lua, all 37.60 M go to callees clang inlined.
+- **What they cover.** The tables give the exact counts.
+  - **speedtest1:** 43,289,896 of the 44,670,863 calls go to callees clang inlined at one call site or more. 1,369,236 go to the unit's atomic helpers, which are no function for clang to inline, and 11,731 to other callees.
+  - **Lua:** 37,597,254 of the 37,598,228 go to callees clang inlined. The other 974 go to `singlestep` (760), `luaS_newlstr` (199) and the start-up code (15).
 - **The tables.** The callee tables give each callee's remarks. Most of their callees have no symbol left in clang's executables: all their calls were inlined or removed.
 - **What this doesn't show.** The match is by callee, not by call site: it doesn't show which call sites' dynamic calls were the inlined ones.
 
