@@ -219,7 +219,8 @@ Medians, milliseconds (`round-review.sh`):
 | `sqlite3.c -c`, CPU 2 | 109.729 | 110.094 | +0.33% | 20.0 → 16.2 |
 
 User cycles: Lua -0.25 to -1.95%, synth -0.64% (1 lane) and -1.67% (8),
-`sqlite3.c` +0.36% on the same instructions (+21,368 of 1,184 million).
+`sqlite3.c` +0.36% on nearly the same instructions (+21,368 of 1,184 million:
+1,184,343,205 main, 1,184,364,573 head).
 `sqlite3.c` took 492 more minor faults (4,844 → 5,336) and 6.0 MiB less peak RSS.
 
 System calls of the Lua link (`strace -c`):
@@ -258,8 +259,9 @@ a huge-page boundary, so the last huge page their tokens reach is base pages. Bu
 its wall time is within the runs' ranges of the head's (109.234 to 110.957 head,
 109.514 to 110.411 variant), its user cycles are the head's (+0.31% and +0.34%
 against main), and on Lua and synth by 1 lane it is slower than the head, so it
-wasn't kept. `sqlite3.c`'s +0.3 to 0.4% against main is the same in both on the
-same instructions.
+wasn't kept. `sqlite3.c`'s +0.3 to 0.4% against main is the same in both, on
+nearly main's instructions (1,184,343,186 main, 1,184,364,591 head and
+1,184,395,341 variant, +0.002% and +0.004%).
 
 ### Address-space limits (the laptop)
 
