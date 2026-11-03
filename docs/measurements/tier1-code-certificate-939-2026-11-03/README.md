@@ -146,10 +146,63 @@ The job's native correctness, at the same merge:
   `test-tier1-certificate-interval` and the straight-line allocation
   certificates: 0 failures.
 
+## Second run: #1212's head after review, `7f54d0b5`
+
+The review of #1212 added two checks to the bridge after `6d85124e`:
+- a conditional jump reads the condition only while the flags are its
+  comparison's (`5ec959e1`);
+- a narrow parameter is only its caller's bytes at entry, and its `movzx` is
+  the instruction that defines it (`7f54d0b5`).
+
+The frame-pointer, incoming-slot and rows-above-rsp checks (`35b4de33`) were
+already in the first run.
+
+The same job measured `7f54d0b50b81c344ad5a12226b8f1ef9a45712a8` (tree
+`ca51cb65dd05cfd0a2afa5f79b2ba0e8cd2b9cd0`), merged into main
+`a4a2182ad770bd22f25f843b934ba690bac9b1c8` as merge commit `b783c7e6600`. It
+ran in [workflow run 41655522070](https://github.com/buster14a/buster/actions/runs/41655522070),
+Benchpress job `125989784220`, with the same build, workload and command.
+`benchmark-7f54d0b5.txt`, `allocation-benchmark-7f54d0b5.txt` and
+`correctness-7f54d0b5.txt` hold its lines, as above.
+
+The functions are the same: 2,103 code-certified, 429 straight-line, 68
+uncertified by the same reasons, none refused, 370,795 IR instructions and
+261,385 records. Medians of 21 passes:
+
+| Variant | ns/instr | instr/instr | IPC | cycles/record | at `6d85124e` (ns/instr) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `emit` | 345.26 | 4,385.06 | 2.29 | 2,713.13 | 343.00 |
+| `decode` | 101.52 | 1,316.26 | 2.34 | 798.40 | 95.35 |
+| `check` | 73.78 | 1,909.61 | 4.67 | 580.15 | 73.39 |
+| `certify` | 173.71 | 3,226.41 | 3.35 | 1,366.12 | 166.88 |
+
+The instruction counts are the steadier measure here:
+- `emit` and `check` are unchanged.
+- `decode` executes 189 more instructions per IR instruction (+16.8%), and
+  `certify` as many. Between the two revisions the decoding gained the flag
+  tracking, which looks up each body and edge record's effects, and the
+  narrow parameters' extensions.
+
+The times move within this job's noise. The same job's allocation-certificate
+benchmark, whose code didn't change, reads `certify` 189.75 ns against the
+first run's 178.20 ns (+6.5%) and `allocate` 148.49 against 148.88. So the
+`certify` time's +4.1% here (166.88 to 173.71 ns, now 0.50 times `emit`) is
+not separated from that variation. The program bytes grow by 127,944
+(70,120,312), the narrow parameters' incoming values and locations.
+
+The job's native correctness, at the same merge, refused every corruption of
+the code-certificate fixture. That now includes:
+- a conditional jump after an edge's flag-writing move;
+- the narrow parameters' extensions corrupted in a register (2 of 2) and from
+  a slot (2 of 2).
+
+`test-tier1-pipeline` again certified 32 of 36 CFG functions' code and refused
+879 of 890 mutants.
+
 ## Limitations
 
-- **One run.** This is one process in one Benchpress job: 21 passes, medians
-  only. The benchmark prints no spread, and the clock and thermal state weren't
+- **One run per revision.** Each revision is one process in one Benchpress
+  job: 21 passes, medians only. The benchmark prints no spread, and the clock and thermal state weren't
   recorded.
 - **No vector path.** The decoding and the checker are scalar, so no
   after-scalar state applies.
