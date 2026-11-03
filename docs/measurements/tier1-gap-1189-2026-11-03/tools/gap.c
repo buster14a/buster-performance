@@ -182,7 +182,7 @@ static const char* classify(const char* text, bool frame_pointer)
         memory_last = mem && i + 1 == n;
     }
     const char* type = "other";
-    static const char* const nops[] = { "nop", "nopw", "nopl", "endbr64", "int3", "ud2", "xchg", 0 };
+    static const char* const nops[] = { "nop", "nopw", "nopl", "endbr64", "int3", "ud2", 0 };
     static const char* const alu[] = { "add", "sub", "and", "or", "xor", "shl", "shr", "sar", "rol", "ror", "imul", "mul", "neg", "not", "inc", "dec", "adc", "sbb", "bswap",
                                        "addl", "addq", "subl", "subq", "andl", "andq", "orl", "orq", "xorl", "xorq", "shll", "shlq", "shrl", "shrq", "sarl", "sarq", "imull",
                                        "imulq", "negl", "negq", "notl", "notq", "incl", "incq", "decl", "decq", "addb", "addw", "subb", "subw", "andb", "andw", "orb", "orw",
@@ -192,7 +192,13 @@ static const char* classify(const char* text, bool frame_pointer)
     static const char* const cmp[] = { "cmp", "cmpl", "cmpq", "cmpb", "cmpw", "test", "testl", "testq", "testb", "testw", 0 };
     static const char* const div[] = { "div", "idiv", "divl", "divq", "idivl", "idivq", 0 };
     static const char* const ext[] = { "cltq", "cqto", "cltd", "cwtl", "cbtw", "cqo", "cdqe", "cdq", 0 };
-    if (is_any(m, nops))
+    if (starts(m, "xchg"))
+    {
+        // An exchange of a register with itself is padding (`xchg %ax,%ax`); of two registers, a move; with memory, a
+        // locked read-modify-write.
+        type = n == 2 && strcmp(operands[0], operands[1]) == 0 ? "nop" : memory ? (stack ? "alu_rmw_stack" : "alu_rmw") : "move";
+    }
+    else if (is_any(m, nops))
     {
         type = "nop";
     }
@@ -1018,7 +1024,7 @@ static int table(int argc, char** argv)
     {
         const Total* t = &totals[i];
         printf("| `%s` | %.2f | %.2f | %.1f | %.1f | %.1f |", t->function, millions(t->tier1_calls), millions(t->clang_calls), millions(t->tier1), t->tier1_calls != 0 ? (double)t->tier1 / (double)t->tier1_calls : 0.0,
-               millions(t->origins[9] + t->origins[8]));
+               millions(t->origins[9] + t->origins[8] + t->origins[4] + t->origins[5]));
         if (remarks_given)
         {
             printf(" %" PRIu32 " |\n", remarks_of(t->function));
