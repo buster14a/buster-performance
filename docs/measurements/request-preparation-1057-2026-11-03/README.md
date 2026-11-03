@@ -15,8 +15,10 @@ medians of 5 to 41 runs):
   1.4 million instructions (a tiny file) to 1.2 billion (`sqlite3.c`'s `-c`),
   the difference doesn't grow with the input: they show no added work per
   token.
-- Time: the merge costs slightly more cycles despite running fewer
-  instructions. In the first holds, one executable per tree, its runs were
+- Time: the merge costs slightly more user cycles, while its retired
+  instructions fall for the tiny file, `changes.c` and Lua's units and rise
+  slightly for `sqlite3.c` (397 more by `-c`, 587 by `-fsyntax-only`). In the
+  first holds, one executable per tree, its runs were
   slower in most pairs on several rows (Lua's user cycles in 11 of 11), with
   medians within 1.22% of main's. Over six placements of the checker's code
   and three copies each, in three rounds ("Placements" below), its user
@@ -25,8 +27,10 @@ medians of 5 to 41 runs):
   for the tiny file's 1-ms `-c`, where main against itself moves 1.5% to 1.8%.
   Every range over the placements includes 0 except the tiny file's, whose
   floor's range doesn't either. That cost doesn't grow with the input:
-  `sqlite3.c`'s 526 million cycles show no more of it than Lua's. Its cause
-  isn't the instructions run; the record doesn't attribute it further.
+  `sqlite3.c`'s 526 million cycles show no more of it than Lua's. The record
+  doesn't attribute it: retired-instruction totals don't explain it, and they
+  can't rule out a change in instruction mix, dependencies or execution cost;
+  nor do placements of one unit sample the rest of the executable's layout.
 - Every `-c` object is byte for byte main's, Lua's 33 included.
 - The source benchmarks report the same counts and timed regions on both
   builds, and only the merge prints its configuration receipt. Their whole
@@ -196,10 +200,12 @@ within main against itself and its range over the placements includes 0), the
 merge's cycles exceed the floor in every round for Lua's `-c` and the tiny
 file, in two of three for Lua's `-fsyntax-only` and `sqlite3.c`. The excess
 is about 0.1 to 0.25% of the larger compiles and about 1.2 percentage points
-(about 25,000 cycles) of the tiny file's, against fewer instructions run in
-all those rows but `sqlite3.c`'s (397 more of 1.2 billion). The placements
-move only the checker's unit, and the rest of #1141's executable differs from
-main's too, so the record leaves the excess's cause open.
+(about 25,000 cycles) of the tiny file's. Retired instructions fall in Lua's
+and the tiny file's rows and rise in `sqlite3.c`'s (397 more of 1.2 billion),
+so their totals don't explain the excess, and they can't rule out a change in
+instruction mix, dependencies or execution cost. The placements move only the
+checker's unit, and the rest of #1141's executable differs from main's too.
+The record leaves the excess's cause open.
 
 ## Limitations
 
