@@ -178,3 +178,28 @@ four builds' placements, main twice, `--tier1 -c` of the frozen `sqlite3.c`, a r
 Over all 72 runs of each, the user cycles' medians are 2,374.2 M (main), 2,386.1 M (pr, +0.50%), 2,382.0 M (new,
 +0.33%) and 2,373.1 M (main again, −0.05%). The single-executable A/B's +0.77% for `6e1e6121` was part placement: over
 placements, the pull request cost +0.5% before this change and +0.3% after it.
+
+## What the remaining cost is (`local/probes/`)
+
+Two throwaway builds of `3b195d57` (their diffs in `scan-twice.diff` and `no-rbp.diff`, never committed) price the
+pull request's two compile-time costs on the owner's minipc. `stat3.sh` runs 3 rounds of `perf stat -r 5`, pinned to
+one CPU, of each build's `--tier1 -c` of the frozen `sqlite3.c` (`sqlite3.sha256`), the builds rotating (`stat-*.csv`).
+The instruction counts are exact, and the compiler's output doesn't depend on the host. The cycles are not usable there:
+the machine was building at the time, and main ran slower than the head.
+
+| Build | Instructions | Against `3b195d57` |
+| --- | ---: | ---: |
+| main `703ae9f5` | 5,812.84 M | −5.57 M |
+| `3b195d57` | 5,818.41 M | |
+| the scan for owed loads run twice at each node | 5,821.50 M | +3.09 M (+0.053%) |
+| `rbp` not callee-saved | 5,814.69 M | −3.72 M |
+
+- **The scan for owed loads** (`tier1_emit_owed`) costs 3.09 M instructions in all, 0.053% of the compile. The second
+  call's result goes to a volatile variable, so it isn't removed, and it runs with branches the first call has just
+  trained. So this prices the scan's instructions, not any branch misses of its own. A bound computed at each call,
+  so that nodes before the first that can need a load back skip the scan, would take two binary searches for each of
+  the 28,027 registers the calls save. That is most of what it would save, so it isn't worth doing.
+- **`rbp` as a sixth callee-saved register** costs 3.72 M instructions, in allocation with one more register.
+  `report-*.txt` holds what it buys in `sqlite3.c`: 309,182 records against 314,228, 11,265 spill stores against
+  12,900, 13,855 spill loads against 15,385, 15,079 call stores against 16,156 and 21,382 call loads against 22,810.
+- Fewer records save some of both back downstream, so the pull request's total is +5.57 M.
