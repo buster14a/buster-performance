@@ -15,9 +15,18 @@ medians of 5 to 41 runs):
   1.4 million instructions (a tiny file) to 1.2 billion (`sqlite3.c`'s `-c`),
   the difference doesn't grow with the input: they show no added work per
   token.
-- No time regression shows on these inputs: every wall-time median is within
-  1.22% of main's, and each build's range of runs overlaps the other's. That
-  doesn't rule out a cost smaller than the runs' spread.
+- Time: the merge costs slightly more cycles despite running fewer
+  instructions. In the first holds, one executable per tree, its runs were
+  slower in most pairs on several rows (Lua's user cycles in 11 of 11), with
+  medians within 1.22% of main's. Over six placements of the checker's code
+  and three copies each, in three rounds ("Placements" below), its user
+  cycles are 0.09% to 0.26% above main's for Lua's units and `sqlite3.c`,
+  where main against itself moves −0.10% to +0.07%, and 2.8% to 3.1% above
+  for the tiny file's 1-ms `-c`, where main against itself moves 1.5% to 1.8%.
+  Every range over the placements includes 0 except the tiny file's, whose
+  floor's range doesn't either. That cost doesn't grow with the input:
+  `sqlite3.c`'s 526 million cycles show no more of it than Lua's. Its cause
+  isn't the instructions run; the record doesn't attribute it further.
 - Every `-c` object is byte for byte main's, Lua's 33 included.
 - The source benchmarks report the same counts and timed regions on both
   builds, and only the merge prints its configuration receipt. Their whole
@@ -109,8 +118,12 @@ instructions' range over the runs in brackets.
 | `benchmark-lowering-source` `sqlite3.c` (third hold) | 5 | 1,024.968 → 1,023.769 (−0.12%) | 5,520.128 → 5,512.423 (−0.14%) | 14,479,142,381 [14,479,142,077–14,479,143,144] → 14,483,648,230 [14,483,648,003–14,483,654,450] (+4,505,849) |
 
 The wall times' ranges overlap in every row (the logs' `(min to max)`), and
-user cycles move by less than 1% either way: no time regression shows, which
-leaves open a cost below the runs' spread. In the single-file rows and
+user cycles move by less than 1% either way, but paired by run number the
+merge is slower in most pairs of several rows: Lua's `-c` in 10 of 11 (user
+cycles higher in 11 of 11), its `-fsyntax-only` in 9 (11), the tiny file's
+`-c` in 31 of 41 (17), and `benchmark-backend-source` in 5 of 5 (5). One
+executable per tree can't tell that from code placement, which "Placements"
+measures. In the single-file rows and
 `benchmark-backend-source`'s, the instruction counts vary by under 900 between
 a build's runs; in Lua's by up to 5,299, and in `benchmark-lowering-source`'s
 by 1,067 for main and 6,447 for the head. Each row's difference is larger
@@ -147,14 +160,58 @@ them. Only the merge prints the receipt:
 `configuration=7fe5e2819be8e031 target=znver5 ... language=gnu17 unwind=on
 debug=off overrides=path:vector,selection:reachable+all,unwind:off,debug:off`.
 
+## Placements
+
+`scripts/placements.sh`, the fifth step, measures the first holds' paired
+direction as `docs/profiling.md`'s "Builds over their code's placements and
+copies" does (#509). Each tree's checker unit (`main_unit_checker.c`, the
+unit #1141 changed) is linked at six placements, shifted by 0, 640, 1344,
+2048, 2752 and 3456 bytes (multiples of its `.text`'s 64-byte alignment; a
+first attempt with shifts of 688 bytes failed to build, `logs/*-attempt1.log`)
+by each tree's own `./build.sh shifts`, each build in a hold of the lock
+(`logs/shifts-build-*.log`; the executables' `sha256sum`s in the receipts).
+Three rounds of `ab` (each `time-runs` process in a hold of its own) then ran
+main's placements, the merge's and main's again (`main-again`, the
+comparison's own floor), three fresh copies each, 3 runs, 54 processes per
+build and command, on CPU 2 (`logs/placements.log`).
+
+User cycles against main, by round (the median's difference; in brackets the
+difference's range over the placements):
+
+| command | head | main-again |
+| --- | --- | --- |
+| Lua's 33 units `--lanes 1 -c` | +0.23% [−0.45, +0.74], +0.25% [−0.31, +0.55], +0.23% [−0.29, +0.54] | +0.03%, −0.08%, −0.01% |
+| Lua's 33 units `--lanes 1 -fsyntax-only` | +0.09% [−0.31, +0.74], +0.25% [−0.44, +0.82], +0.26% [−0.01, +0.67] | +0.05%, +0.05%, +0.06% |
+| tiny `-c` | +2.83% [+2.13, +4.00], +2.78% [+1.28, +4.33], +3.06% [+2.23, +4.24] | +1.69% [+0.32, +2.50], +1.54% [+0.05, +2.60], +1.76% [+0.98, +2.31] |
+| `sqlite3.c` `-c` | +0.14% [−0.36, +0.36], +0.16% [−0.36, +0.44], +0.09% [−0.57, +0.44] | +0.07%, +0.05%, −0.10% |
+
+Wall time against main: Lua's `-c` +0.22%, +0.16% and +0.17% (main-again
+−0.02%, −0.18%, −0.01%), Lua's `-fsyntax-only` +0.14%, +0.27% and +0.26%
+(+0.04%, −0.05%, +0.09%), `sqlite3.c`'s `-c` +0.04%, +0.13% and −0.09%
+(−0.06%, +0.02%, −0.11%), and the tiny file's +2.20%, +0.89% and +0.50%
+(+0.19%, +0.12%, +0.47%), whose placements spread 7% to 19% in wall time.
+
+By `docs/profiling.md`'s criterion (within the floor when the difference is
+within main against itself and its range over the placements includes 0), the
+merge's cycles exceed the floor in every round for Lua's `-c` and the tiny
+file, in two of three for Lua's `-fsyntax-only` and `sqlite3.c`. The excess
+is about 0.1 to 0.25% of the larger compiles and about 1.2 percentage points
+(about 25,000 cycles) of the tiny file's, against fewer instructions run in
+all those rows but `sqlite3.c`'s (397 more of 1.2 billion). The placements
+move only the checker's unit, and the rest of #1141's executable differs from
+main's too, so the record leaves the excess's cause open.
+
 ## Limitations
 
 - One host, one CPU (2), one session's run; the 9700X was shared through its
   lock with CI and other sessions between the holds, never during them.
 - The corpus is two programs: `sqlite3.c`, one large unit, and Lua's 33
   units. Other programs' inputs (more headers, other options) may differ.
-- Medians of 5 to 41 runs bound what the wall times can show: a cost smaller
-  than a row's spread would not show.
+- Medians of 5 to 41 runs bound what the first holds' wall times can show; the
+  placements' 54 processes per build and command, in three rounds, resolve
+  about 0.1% of user cycles on the larger compiles.
+- The placements shift one unit; other differences between the two
+  executables' layouts aren't sampled.
 - `time-runs` times whole processes, so the instruction counts include process
   start and exit, which both builds share.
 - The record compares #1141's merge with its first parent only: it doesn't
