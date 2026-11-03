@@ -2,7 +2,7 @@
 # progs.sh COMPILER OUTDIR [extra buster options...]: speedtest1 and Lua by COMPILER's --tier1 (with the extra options)
 # into OUTDIR as st-t1 and lua-t1, and their reports.
 set -u
-S=/tmp/claude-0/-home-user-buster/acfdbf9f-332f-5668-85be-7d9e72cff003/scratchpad
+S=${S:?S names the scratch directory, laid out as the README says}
 B=$1; out=$2; shift 2
 Q=$S/corpus/sqlite; SRC=$S/inputs/st; LUA=$S/inputs/lua/lua-5.4.8/src
 FLAGS="-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE"

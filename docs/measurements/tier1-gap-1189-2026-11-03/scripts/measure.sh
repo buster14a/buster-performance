@@ -3,7 +3,7 @@
 # clang -O0's), then each run's instructions under callgrind (the whole process's, as `Collected`), a line each in
 # DIR/instructions.txt and the sums.
 set -u
-S=/tmp/claude-0/-home-user-buster/acfdbf9f-332f-5668-85be-7d9e72cff003/scratchpad
+S=${S:?S names the scratch directory, laid out as the README says}
 d=$(readlink -f $1)
 cd $d && mkdir -p cg
 $S/run.sh st st-t1 verify.txt --verify; echo "verify $? $(grep 'Verification Hash' verify.txt)" > check.txt

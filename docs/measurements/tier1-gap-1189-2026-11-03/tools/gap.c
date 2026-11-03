@@ -9,7 +9,9 @@
 //       "#calls" lines (function, dynamic calls into it), "#check" lines (the counts that landed on no instruction,
 //       functions whose tags didn't fit) and "#total" (all of BINARY's counted instructions). An instruction without
 //       a tag has origin '-' (its function has no tag line, or its tags didn't fit), the padding after a function's
-//       records '_'.
+//       records '_'. Code without a symbol after a function's records, which objdump counts as the function's, is a
+//       function of its own, "(unnamed code after NAME)". An rbp operand is the stack's only in a function that makes
+//       rbp its frame pointer.
 //
 //   gap table T1.tsv... -- CLANG.tsv...
 //       Sums each side's TSVs and prints the tables by cause, type, origin and function. The instructions without a
@@ -45,6 +47,7 @@ struct Function
     uint32_t first;
     uint32_t end;
     uint64_t calls;
+    bool unnamed;
 };
 
 static Instruction* instructions;
@@ -107,9 +110,11 @@ static bool is_memory(const char* operand)
     return operand[0] != '%' && operand[0] != '$' && (strchr(operand, '(') != 0 || isxdigit((unsigned char)operand[0]));
 }
 
-static bool is_stack(const char* operand)
+// rsp's operands are the stack's; rbp's only in a function that makes rbp its frame pointer (`mov %rsp,%rbp`), as
+// optimized code without one uses rbp as any other register.
+static bool is_stack(const char* operand, bool frame_pointer)
 {
-    return strstr(operand, "(%rsp") != 0 || strstr(operand, "(%rbp") != 0;
+    return strstr(operand, "(%rsp") != 0 || (frame_pointer && strstr(operand, "(%rbp") != 0);
 }
 
 static bool is_any(const char* mnemonic, const char* const* list)
@@ -123,7 +128,7 @@ static bool is_any(const char* mnemonic, const char* const* list)
 }
 
 // The instruction's type, from objdump's AT&T text: "mnemonic operands".
-static const char* classify(const char* text)
+static const char* classify(const char* text, bool frame_pointer)
 {
     char buffer[512];
     snprintf(buffer, sizeof(buffer), "%s", text);
@@ -171,7 +176,7 @@ static const char* classify(const char* text)
     {
         const bool mem = is_memory(operands[i]);
         memory |= mem;
-        stack |= mem && is_stack(operands[i]);
+        stack |= mem && is_stack(operands[i], frame_pointer);
         memory_last = mem && i + 1 == n;
     }
     const char* type = "other";
@@ -239,7 +244,7 @@ static const char* classify(const char* text)
     }
     else if (starts(m, "lea"))
     {
-        type = n >= 1 && is_stack(operands[0]) ? "lea_stack" : "lea";
+        type = n >= 1 && is_stack(operands[0], frame_pointer) ? "lea_stack" : "lea";
     }
     else if (starts(m, "movz") || (starts(m, "movs") && !starts(m, "movsd") && !starts(m, "movss") && strcmp(m, "movsb") != 0 && strcmp(m, "movsq") != 0 && strcmp(m, "movsl") != 0))
     {
@@ -336,7 +341,7 @@ static void read_disassembly(const char* path)
                     instructions = realloc(instructions, instruction_capacity * sizeof(Instruction));
                 }
                 Function* f = &functions[function_count - 1];
-                instructions[instruction_count] = (Instruction){ .address = address, .function = function_count - 1, .ordinal = f->end - f->first, .kind = '-', .type = classify(text), .text = getenv("GAP_INSTRUCTIONS") != 0 ? strdup(text) : 0 };
+                instructions[instruction_count] = (Instruction){ .address = address, .function = function_count - 1, .ordinal = f->end - f->first, .kind = '-', .type = 0, .text = strdup(text) };
                 instruction_count += 1;
                 f->end = instruction_count;
             }
@@ -344,6 +349,20 @@ static void read_disassembly(const char* path)
     }
     free(line);
     fclose(file);
+    // Each instruction's type, once its function is known to make rbp its frame pointer or not.
+    for (uint32_t f = 0; f < function_count; f += 1)
+    {
+        bool frame_pointer = false;
+        for (uint32_t i = functions[f].first; i < functions[f].end; i += 1)
+        {
+            const char* t = instructions[i].text;
+            frame_pointer |= starts(t, "mov ") && strcmp(t + strspn(t + 3, " ") + 3, "%rsp,%rbp") == 0;
+        }
+        for (uint32_t i = functions[f].first; i < functions[f].end; i += 1)
+        {
+            instructions[i].type = classify(instructions[i].text, frame_pointer);
+        }
+    }
 }
 
 // One compressed position field: "+n", "-n", "*", or absolute (hex with 0x, else decimal).
@@ -531,17 +550,42 @@ static void read_kinds(const char* path)
             {
                 padding &= strcmp(instructions[i].type, "nop") == 0;
             }
-            if (fits && padding)
+            // Or its records end it (a ret or a jump), and code without a symbol follows them, which objdump puts in
+            // the function: that code becomes a function of its own, "(unnamed code after NAME)", without tags.
+            const char* last = fits && length != 0 ? instructions[function->first + length - 1].type : "";
+            const bool prefix = fits && !padding && (strcmp(last, "ret") == 0 || strcmp(last, "jmp") == 0 || strcmp(last, "jmp_indirect") == 0);
+            if (fits && (padding || prefix))
             {
                 for (uint32_t i = 0; i < length; i += 1)
                 {
                     instructions[function->first + i].kind = kinds[i];
                 }
-                for (uint32_t i = function->first + length; i < function->end; i += 1)
+                for (uint32_t i = function->first + length; padding && i < function->end; i += 1)
                 {
                     instructions[i].kind = '_';
                 }
                 fitted += 1;
+            }
+            if (prefix)
+            {
+                const uint32_t split = function->first + length;
+                const uint32_t end = function->end;
+                printf("#check\tkinds\t%s\tprefix %" PRIu32 " of %" PRIu32 " instructions\n", line, length, end - function->first);
+                function->end = split;
+                if (function_count == function_capacity)
+                {
+                    function_capacity *= 2;
+                    functions = realloc(functions, function_capacity * sizeof(Function));
+                }
+                char name[4200];
+                snprintf(name, sizeof(name), "(unnamed code after %s)", line);
+                functions[function_count] = (Function){ .name = strdup(name), .first = split, .end = end, .unnamed = true };
+                for (uint32_t i = split; i < end; i += 1)
+                {
+                    instructions[i].function = function_count;
+                    instructions[i].ordinal = i - split;
+                }
+                function_count += 1;
             }
         }
         if (fitted != 1)
@@ -649,7 +693,7 @@ static void read_side(Side* side, const char* path, Side* calls)
         {
             fields[n++] = p;
         }
-        if (n == 4 && strcmp(fields[0], "#check") == 0 && strcmp(fields[1], "kinds") == 0 && !is_unfitted(fields[2]) && unfitted_count < 256)
+        if (n == 4 && strcmp(fields[0], "#check") == 0 && strcmp(fields[1], "kinds") == 0 && starts(fields[3], "fitted ") && !is_unfitted(fields[2]) && unfitted_count < 256)
         {
             unfitted[unfitted_count++] = strdup(fields[2]);
         }
@@ -914,7 +958,12 @@ int main(int argc, char** argv)
     for (uint32_t f = 0; f < function_count; f += 1)
     {
         const Function* function = &functions[f];
+        // Calls go to a function's first instruction; unnamed code's are its own functions' entries.
         uint64_t calls = function->first < function->end ? instructions[function->first].calls_in : 0;
+        for (uint32_t i = function->first + 1; function->unnamed && i < function->end; i += 1)
+        {
+            calls += instructions[i].calls_in;
+        }
         if (calls != 0)
         {
             printf("#calls\t%s\t%" PRIu64 "\n", function->name, calls);

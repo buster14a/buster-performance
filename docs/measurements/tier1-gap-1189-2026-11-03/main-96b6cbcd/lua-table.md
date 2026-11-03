@@ -3,8 +3,8 @@ Program code (the C library's left out): Tier 1 7228.2 M, clang -O2 3768.0 M, ga
 | Cause | `--tier1`, M | clang -O2, M | Gap, M | Share of the gap | `--tier1`'s by origin, M |
 | --- | ---: | ---: | ---: | ---: | --- |
 | register moves | 969.9 | 522.2 | 447.7 | 12.9% | edge move 269.8, call sequence 259.9, node 440.2 |
-| stack loads and stores | 1052.5 | 159.7 | 892.8 | 25.8% | spill 31.7, reload 2.2, edge spill 346.8, edge reload 349.7, call save 161.2, call restore 161.0 |
-| other loads and stores | 1041.0 | 717.5 | 323.4 | 9.3% | node 1041.0 |
+| stack loads and stores | 1052.5 | 105.6 | 946.9 | 27.4% | spill 31.7, reload 2.2, edge spill 346.8, edge reload 349.7, call save 161.2, call restore 161.0 |
+| other loads and stores | 1041.0 | 771.6 | 269.3 | 7.8% | node 1041.0 |
 | address arithmetic (lea) | 783.6 | 152.9 | 630.8 | 18.2% | recomputed 316.0, node 467.6 |
 | zero and sign extensions | 470.5 | 37.9 | 432.6 | 12.5% | node 470.5 |
 | compares and branches | 1517.9 | 901.0 | 616.9 | 17.8% | branch 708.4, node 795.3, unattributed 14.2 |
@@ -16,17 +16,17 @@ Program code (the C library's left out): Tier 1 7228.2 M, clang -O2 3768.0 M, ga
 | --- | ---: | ---: | ---: |
 | move (moves) | 810.3 | 519.8 | 290.5 |
 | self_move (moves) | 159.6 | 2.4 | 157.2 |
-| store_stack (stack) | 539.6 | 96.5 | 443.1 |
-| load_stack (stack) | 512.9 | 47.7 | 465.2 |
-| cmp_stack (stack) | 0.0 | 3.9 | -3.9 |
+| store_stack (stack) | 539.6 | 54.6 | 485.0 |
+| load_stack (stack) | 512.9 | 36.5 | 476.4 |
+| cmp_stack (stack) | 0.0 | 3.0 | -3.0 |
 | alu_load_stack (stack) | 0.0 | 11.1 | -11.1 |
-| load (memory) | 747.6 | 432.1 | 315.5 |
-| store (memory) | 282.4 | 149.6 | 132.8 |
-| cmp_load (memory) | 0.0 | 77.2 | -77.2 |
+| load (memory) | 747.6 | 443.3 | 304.4 |
+| store (memory) | 282.4 | 191.5 | 90.9 |
+| cmp_load (memory) | 0.0 | 78.1 | -78.1 |
 | alu_load (memory) | 10.9 | 37.5 | -26.5 |
-| alu_rmw (memory) | 0.0 | 21.1 | -21.1 |
-| lea (address) | 447.7 | 148.4 | 299.3 |
-| lea_stack (address) | 335.9 | 4.4 | 331.5 |
+| alu_rmw (memory) | 0.0 | 21.2 | -21.2 |
+| lea (address) | 447.7 | 148.8 | 298.9 |
+| lea_stack (address) | 335.9 | 4.0 | 331.9 |
 | extend (extend) | 470.5 | 37.9 | 432.6 |
 | cmp (branch) | 585.5 | 305.3 | 280.2 |
 | jcc (branch) | 439.1 | 395.7 | 43.4 |
@@ -73,8 +73,8 @@ Dynamic calls into the program's functions: Tier 1 106.00 M, clang -O2 54.20 M
 
 | Function | `--tier1`, M | clang -O2, M | Gap, M | calls, `--tier1` / -O2 | moves | stack | memory | address | extend | branch | call | `--tier1`: spills+reloads, call saves, edge moves |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| `luaV_execute` | 4298.2 | 2088.4 | 2209.7 | 1.36 M / 1.36 M | 258.3 | 635.4 | 207.9 | 503.8 | 278.8 | 315.0 | 5.0 | 707.0, 33.9, 223.7 |
-| `match` | 295.7 | 247.7 | 48.0 | 3.41 M / 3.41 M | -0.0 | -14.2 | 19.2 | 11.2 | 23.4 | 24.3 | -12.7 | 0.0, 12.8, 8.4 |
+| `luaV_execute` | 4298.2 | 2088.4 | 2209.7 | 1.36 M / 1.36 M | 258.3 | 680.9 | 162.4 | 503.8 | 278.8 | 315.0 | 5.0 | 707.0, 33.9, 223.7 |
+| `match` | 295.7 | 247.7 | 48.0 | 3.41 M / 3.41 M | -0.0 | -5.8 | 10.7 | 11.2 | 23.4 | 24.3 | -12.7 | 0.0, 12.8, 8.4 |
 | `luaD_precall` | 256.0 | 192.1 | 63.9 | 3.98 M / 3.98 M | 28.7 | 7.3 | -18.3 | 11.0 | 14.7 | 17.5 | -4.2 | 0.0, 7.3, 3.7 |
 | `match_class` | 114.3 | 82.7 | 31.6 | 2.43 M / 2.43 M | 7.3 | 24.3 | -4.9 | 4.9 | 7.3 | 0.0 | -7.3 | 0.0, 24.3, 4.9 |
 | `luaV_mod` | 106.6 | 0.0 | 106.6 | 4.01 M / 0.00 M | 15.7 | 8.0 | 0.0 | 4.0 | 15.7 | 43.1 | 12.0 | 0.0, 8.0, 0.0 |

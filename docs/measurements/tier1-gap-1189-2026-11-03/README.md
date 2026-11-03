@@ -41,17 +41,18 @@ Every build gives speedtest1's verification hash `1248168 a7fa3957840af6d608d53f
    - `j`: the CFG consumer's branches and jumps;
    - `n`: the node's selected code.
 
-   With `BUSTER_TIER1_KINDS=FILE`, each function Tier 1 compiles gets a line of tags in FILE (`main-96b6cbcd/*.kinds`). That is 2,707 lines for speedtest1 and 1,088 for Lua, each build report's `compiled`. The tagged executables are main's byte for byte. Every line's tags match its function's instructions in `objdump` except speedtest1's `main`'s (`#check kinds main fitted 0 functions` in `st-t1.tsv`).
+   With `BUSTER_TIER1_KINDS=FILE`, each function Tier 1 compiles gets a line of tags in FILE (`main-96b6cbcd/*.kinds`). That is 2,707 lines for speedtest1 and 1,088 for Lua, each build report's `compiled`. The tagged executables are main's byte for byte. Every line's tags match its function's instructions in `objdump`:
+   - **exactly,** but for padding after the last record, for all but speedtest1's `main`;
+   - **`main`, as a prefix:** its 5,476 tags are its first 5,476 instructions, which end in its `ret` (`#check kinds main prefix 5476 of 5568 instructions` in `st-t1.tsv`). The 92 after them are the unit's helpers without a symbol, which `objdump` counts as `main`'s. `gap` makes them a function of their own, `(unnamed code after main)`. They are `c_check_program_helpers.c`'s atomic loads and stores (`mov`, then `mfence` for a store, then `ret`), called 1,369,236 times; `main` itself runs 6,808 instructions.
 
    An instruction without a tag is **unattributed**: its own origin in the tables, never the node's. It is 24.0 M of speedtest1's 3,743.8 M of program code (0.6%), and 14.2 M of Lua's 7,228.2 M (0.2%). The tables list its functions:
    - **the PLT's stubs:** 7.3 M on speedtest1, and all of Lua's 14.2 M;
    - **`sqlite3Multiply128` and `sqlite3Multiply160`, 13.9 M:** the two functions Tier 1 refuses, each at selection on a 128-bit constant, so Tier 0 compiles them. `main-96b6cbcd/refusals-st.txt` is `--tier1-refusals` by the same compiler. Lua's build has no refusals;
-   - **speedtest1's `main`, whose tags didn't fit:** 2.8 M;
+   - **the unit's helpers after `main`:** 2.8 M;
    - **the C runtime's start-up code:** under 300 instructions. That is `_start`, which `objdump` names by an offset from the next symbol, plus `.init` and `.fini`.
-
-   The record's first version (`caa66550`, `02f5d050`) counted these instructions as the node's. Only the origin columns change; the causes and their shares don't.
 4. **Joining.** `tools/gap.c` (`cc -O2 -o gap gap.c`):
    - `gap count DISASSEMBLY CALLGRIND OBJECT BASE [KINDS]` joins callgrind's per-address counts, `objdump -d --no-show-raw-insn` and the tags into a TSV of function, origin, instruction type and count. Only the program's own code counts; the C library and the loader are other objects. Buster's executables, whose symbols valgrind doesn't read, are object `???` at base `0x108000`; clang's and tcc's are their own path at base 0. `#check unmatched` gives the counts that landed on no instruction: at most 1.0 M of a run.
+   - **Stack operands.** An operand based on `rsp` is the stack's. One based on `rbp` is the stack's only in a function that makes `rbp` its frame pointer (`mov %rsp,%rbp`); optimized code without a frame pointer uses `rbp` as any other register. Here no function of either side's makes `rbp` a frame pointer: Tier 1's code never addresses through `rbp`, and clang -O2's does in 205 of speedtest1's functions and 28 of Lua's, as a data pointer (33 instructions of Lua's `luaV_execute` among them).
    - `gap table T1.tsv... -- CLANG.tsv...` sums the TSVs and prints the tables (`main-96b6cbcd/st-table.md`, `lua-table.md`). A type belongs to one cause, so each program's causes partition its gap. The instructions without a tag are the `unattributed` origin. Their own table gives the PLT's stubs together, then each other function, as "no tag line" or "its tags didn't fit".
 5. **Passes.** `tools/passes-experiment.diff` is the head with two passes added to `check_tier1_compile`:
    - `BUSTER_TIER1_SROA=1`: `ir_optimize_sroa` before promotion;
@@ -75,15 +76,21 @@ Every build gives speedtest1's verification hash `1248168 a7fa3957840af6d608d53f
 
 | Cause | speedtest1, gap 1,856.3 M | Lua, gap 3,460.2 M |
 | --- | ---: | ---: |
-| stack loads and stores | 416.9 M (22.5%) | 892.8 M (25.8%) |
+| stack loads and stores | 433.6 M (23.4%) | 946.9 M (27.4%) |
 | register moves | 348.3 M (18.8%) | 447.7 M (12.9%) |
 | address arithmetic | 274.7 M (14.8%) | 630.8 M (18.2%) |
 | compares and branches | 274.7 M (14.8%) | 616.9 M (17.8%) |
-| other loads and stores | 224.5 M (12.1%) | 323.4 M (9.3%) |
+| other loads and stores | 207.7 M (11.2%) | 269.3 M (7.8%) |
 | zero and sign extensions | 167.3 M (9.0%) | 432.6 M (12.5%) |
 | calls, returns and frames | 137.5 M (7.4%) | 52.4 M (1.5%) |
 | constants | 59.7 M (3.2%) | −24.3 M (−0.7%) |
 | arithmetic and the rest | −47.2 M (−2.5%) | 87.9 M (2.5%) |
+
+**Corrections.** The record's first versions (`caa66550`, `02f5d050`) had two errors, which buster-performance#236's review found:
+- **`rbp`'s operands were all the stack's.** That put clang -O2's loads and stores through `rbp` among the stack's: 16.7 M of speedtest1's and 54.1 M of Lua's. The stack's share of the gap was 22.5% and 25.8%, other loads' and stores' 12.1% and 9.3%. No other cause changes, and none crosses 5%.
+- **The untagged instructions were the node's.** Only the origin columns change.
+
+All twelve TSVs and both tables are regenerated from the original inputs (`scripts/gap.sh`, below); Tier 1's TSVs differ only by `main`'s helpers.
 
 **Passes, at the head before its rebase, `--tier1`'s whole-process instructions:**
 
@@ -139,6 +146,11 @@ The method's two differences from that record are in buster's `docs/commands/tie
 
 Callgrind's counts above (`*/instructions.txt`) are a little higher than the 9700X's counters on the same code: speedtest1's `--tier1` gives 3,869.8 M under callgrind and 3,819.4 M here. They count whole processes in another environment (the loader and the C library's ifunc choices); the cause breakdown uses callgrind's counts alone.
 
-## Not done here
+## Reproducing
 
-- `scripts/*.sh` name this session's scratch directory. Running them elsewhere means changing `S=` and the inputs' paths.
+- **The tables, from the original inputs.** `main-96b6cbcd/callgrind.tar.zst` holds the twelve callgrind runs that made `main-96b6cbcd/`'s TSVs: speedtest1 and the five Lua scripts, by `--tier1` and clang -O2. `main-96b6cbcd/inputs.sha256` gives the SHA-256 of the four executables they ran, and of their GNU objdump 2.42 disassemblies. `scripts/gap.sh BUILDS OUT`, with those executables in BUILDS, regenerates every TSV and table and compares each with the record's; here all fourteen are the record's. The executables aren't retained, since they would carry Lua's and SQLite's code; a rebuild by step 1 is checked against their hashes.
+- **The builds and runs.** `scripts/progs.sh`, `run.sh` and `measure.sh` take a scratch directory as `S`, which holds them and:
+  - `corpus/sqlite/sqlite3.c`;
+  - `inputs/st/` with `speedtest1.c` and `speedtest1-unity.c`;
+  - `inputs/lua/` with `lua-5.4.8/` and the five scripts;
+  - `ref/SCRIPT-clang0.out`, clang -O0's output of each script.
