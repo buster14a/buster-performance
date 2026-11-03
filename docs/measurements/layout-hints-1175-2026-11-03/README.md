@@ -41,13 +41,41 @@ These are the steps for each executable (`scripts/measure.sh`):
    edge's count (`profile.fdata`).
 3. **Totals.** `llvm-bolt -strict -data=profile.fdata -dyno-stats` gives the totals of the original executable's layout
    (`dyno.txt`).
-4. **Attribution.** `scripts/taken.c` joins `profile.fdata` with `llvm-objdump`'s instruction boundaries. An edge whose
-   target isn't the next instruction is a taken branch (`totals.txt`, `edges.txt`). `llvm-symbolizer --inlines`
-   attributes each one to its branch's innermost source line (`lines.txt`: taken, then the conditional branches'
-   fall-throughs) and to its compiled function (`functions-taken.txt`).
+4. **Attribution.** `scripts/attribute.sh` runs `scripts/taken.c`, which joins `profile.fdata` with `llvm-objdump`'s
+   instruction boundaries. An edge whose target isn't the next instruction is a taken branch, and a jump to another
+   function is a tail call's (`totals.txt`, `edges.txt`). `llvm-symbolizer --inlines` attributes each one to its
+   branch's innermost source line (`lines.txt`: taken, then the conditional branches' fall-throughs) and to its compiled
+   function (`functions-taken.txt`).
 5. **Sites.** `scripts/site.sh` adds a source function's lines up, wherever they were inlined (`logs/sites.txt`).
 
 The counts exclude calls, returns and glibc's code, which `ex_ret_brn_tkn` includes.
+
+**Two definitions of the total, reconciled.** `taken.c`'s total (`totals.txt`) counts four kinds of taken branch: taken
+conditionals, unconditional jumps, jump-table jumps and tail calls' jumps. BOLT's `taken branches` (`dyno.txt`) counts
+only the first two. It reports jump-table jumps as `taken jump table branches` and counts tail calls among its calls.
+For main's `-fsyntax-only`:
+
+| | `taken.c` | BOLT |
+| --- | ---: | ---: |
+| taken conditionals | 49,065,277 | 49,065,280 |
+| unconditional jumps | 10,950,885 | 10,950,885 |
+| jump-table jumps | 1,241,108 | 1,241,108 |
+| tail calls' jumps | 202,927 | (a call) |
+| total | 61,460,197 | 60,016,165 |
+
+Head's matches the same way (36,155,574 against 36,155,577 taken conditionals; the other kinds exactly). The 3 taken
+conditionals are among the records `taken.c` can't place (`unmatched` in `totals.txt`):
+
+- the C runtime's start-up and tear-down functions (`_init`, `register_tm_clones` and the like), whose symbols have no
+  size: 6 events;
+- calls through the PLT to glibc, whose targets have no symbol: all the rest, 248,513 events on `-fsyntax-only` and
+  389,230 on `-c`. These are calls, not branches, and BOLT counts the same 248,513 as `PLT calls`.
+
+A first version of `taken.c` named a function's copies in the symbol table's order. BOLT numbers a function's local
+copies by address and leaves a global symbol's name plain, so 147,684 events of five functions were dropped as
+unmatched: `c_tokenize_scalar_range`, `arena_push`, `parse_translation_unit`, `pp_parse_options` and `c_tokenize`. Those
+are the lexer's, the arena's, the parser's and the driver's, so no checker site moved. The fix raised main's and head's
+totals by the same 35,653; the logs here are the fixed version's.
 
 **Why `-fno-pie`.** BOLT can't follow `check_input_run`'s PIC jump tables in the PIE code buster's build compiles: two
 are based on a register loaded outside the block (`failed to post-process indirect branches`). Without `-strict`,
@@ -81,10 +109,11 @@ path (function `a`); a hint on that first test makes it fall through (`b`, `c`).
 
 | sqlite3.c | | main | head | change |
 | --- | --- | ---: | ---: | ---: |
-| `-fsyntax-only` | taken branches (`totals.txt`) | 61,424,544 | 46,463,365 | -24.4% |
+| `-fsyntax-only` | taken branches (`taken.c`, `totals.txt`) | 61,460,197 | 46,499,018 | -24.3% |
 | | BOLT's taken branches (`dyno.txt`) | 60,016,165 | 45,062,722 | -24.9% |
 | | instructions (`dyno.txt`) | 888,462,803 | 876,767,990 | -1.32% |
-| `-c --lanes 1` | BOLT's taken branches | 78,058,629 | 61,796,597 | -20.8% |
+| `-c --lanes 1` | taken branches (`taken.c`) | 80,007,535 | 63,737,767 | -20.3% |
+| | BOLT's taken branches | 78,058,629 | 61,796,597 | -20.8% |
 | | instructions | 1,174,397,133 | 1,162,192,207 | -1.04% |
 
 - **Objects.** `-c`'s objects of `sqlite3.c` and of buster's `main.c` are byte for byte main's (`logs/receipts.txt`).
@@ -146,7 +175,7 @@ sha256 sums are in `logs/receipts.txt`.
 ## Files
 
 - **`scripts/`:**
-  - `taken.c`, `measure.sh`, `site.sh` and `branches.sh` (the coverage counts' extraction);
+  - `taken.c`, `measure.sh`, `attribute.sh`, `site.sh` and `branches.sh` (the coverage counts' extraction);
   - `build.sh` and the three clang wrappers;
   - `probe-expect.c`.
 - **`patches/`:** the variants' diffs against main.

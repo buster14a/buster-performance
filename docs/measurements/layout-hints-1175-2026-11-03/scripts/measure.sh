@@ -23,16 +23,4 @@ else
 fi
 "$B/llvm-bolt" "$binary" -strict -data="$out/profile.fdata" -dyno-stats -o /dev/null > "$out/dyno.log" 2>&1
 sed -n '/program-wide dynostats/,/all conditional branches/p' "$out/dyno.log" > "$out/dyno.txt"
-nm -p --defined-only -S "$binary" > "$out/nm.txt"
-awk '$1 == 1 { print $2 } $4 == 1 { print $5 }' "$out/profile.fdata" | sed 's|/[0-9]*$||' | sort -u | paste -sd, - > "$out/functions.txt"
-"$B/llvm-objdump" -d --no-show-raw-insn --disassemble-symbols="$(cat "$out/functions.txt")" "$binary" > "$out/objdump.txt" 2> /dev/null
-"$here/taken" "$out/nm.txt" "$out/profile.fdata" "$out/objdump.txt" > "$out/edges.txt" 2> "$out/totals.txt"
-cut -d' ' -f1 "$out/edges.txt" | sort -u | sed 's/^/0x/' > "$out/addresses.txt"
-"$B/llvm-symbolizer" --obj="$binary" --inlines --relativenames < "$out/addresses.txt" |
-    awk 'BEGIN { RS = ""; FS = "\n" } { sub(/:[0-9]+$/, "", $2); print $2 }' > "$out/innermost.txt"
-paste -d' ' "$out/addresses.txt" "$out/innermost.txt" | sed 's/^0x//' > "$out/address-lines.txt"
-awk 'NR == FNR { line[$1] = $2; next } $3 == "ft" { ft[line[$1]] += $2; next } { taken[line[$1]] += $2 }
-     END { for (l in taken) print taken[l], ft[l] + 0, l }' "$out/address-lines.txt" "$out/edges.txt" | sort -rn > "$out/lines.txt"
-awk '$3 != "ft" { taken[$4] += $2 } END { for (f in taken) print taken[f], f }' "$out/edges.txt" | sort -rn > "$out/functions-taken.txt"
-cat "$out/totals.txt"
-grep -E 'taken branches|executed instructions' "$out/dyno.txt" | head -2
+"$here/attribute.sh" "$binary" "$2"

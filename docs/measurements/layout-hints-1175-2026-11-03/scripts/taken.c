@@ -3,8 +3,11 @@
 //   NM.txt:      nm -p --defined-only -S BINARY      (symbol table order, for BOLT's name/N suffixes)
 //   FDATA:       the instrumented binary's profile    (1 F OFF 1 G OFF MISPREDS COUNT)
 //   OBJDUMP.txt: llvm-objdump -d --no-show-raw-insn --disassemble-symbols=... BINARY
-// An intra-function edge whose target isn't the next instruction is a taken branch. Prints "ADDRESS COUNT KIND FUNCTION"
-// per taken edge (KIND: jcc, jmp, ind), and the totals on stderr.
+// An intra-function edge whose target isn't the next instruction is a taken branch, and a jump to another function is a
+// tail call's. Prints "ADDRESS COUNT KIND FUNCTION" per taken edge (KIND: jcc, jmp, ind, tail) and per conditional
+// branch's fall-through (ft), and the totals on stderr. The records it can't place are counted as unmatched: on these
+// runs, only calls through the PLT (glibc's functions), whose targets have no symbol.
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,7 +18,7 @@ typedef struct
     char* name;
     uint64_t address;
     uint64_t size;
-    size_t order;
+    bool global;
 } Symbol;
 
 typedef struct
@@ -34,9 +37,13 @@ static int compare_symbol_name(const void* a, const void* b)
     const Symbol* x = a;
     const Symbol* y = b;
     int result = strcmp(x->name, y->name);
-    if (result == 0)
+    if (result == 0 && x->global != y->global)
     {
-        result = x->order < y->order ? -1 : (x->order > y->order ? 1 : 0);
+        result = x->global ? -1 : 1;
+    }
+    else if (result == 0)
+    {
+        result = x->address < y->address ? -1 : (x->address > y->address ? 1 : 0);
     }
     return result;
 }
@@ -61,7 +68,7 @@ static void read_symbols(const char* path)
                 capacity *= 2;
                 symbols = realloc(symbols, capacity * sizeof(Symbol));
             }
-            symbols[symbol_count] = (Symbol){ .name = strdup(name), .address = strtoull(a, NULL, 16), .size = strtoull(b, NULL, 16), .order = symbol_count };
+            symbols[symbol_count] = (Symbol){ .name = strdup(name), .address = strtoull(a, NULL, 16), .size = strtoull(b, NULL, 16), .global = c[0] != 't' };
             symbol_count += 1;
         }
     }
@@ -69,11 +76,12 @@ static void read_symbols(const char* path)
     {
         fclose(file);
     }
-    // By name, and the occurrences of a name in the symbol table's order.
+    // By name, a global (or weak) symbol before the local ones, and the local ones by address.
     qsort(symbols, symbol_count, sizeof(Symbol), compare_symbol_name);
 }
 
-// BOLT's name: "name" or "name/K", the K-th local symbol of that name in the symbol table.
+// BOLT's name: "name/K" for the K-th local symbol of that name by address (BOLT numbers every local function so), else
+// "name" for the global or weak symbol of that name, or the only local one where there is none.
 static const Symbol* find_symbol(const char* bolt_name)
 {
     char base[4096];
@@ -102,8 +110,14 @@ static const Symbol* find_symbol(const char* bolt_name)
         }
     }
     const Symbol* result = NULL;
-    size_t index = low + (size_t)(k - 1);
-    if (index < symbol_count && strcmp(symbols[index].name, base) == 0)
+    const bool numbered = slash != NULL && slash[1] >= '0' && slash[1] <= '9';
+    size_t index = low;
+    if (numbered)
+    {
+        // Past the name's global symbol, if it has one, to its K-th local one.
+        index += (size_t)(low < symbol_count && strcmp(symbols[low].name, base) == 0 && symbols[low].global) + (size_t)(k - 1);
+    }
+    if (index < symbol_count && strcmp(symbols[index].name, base) == 0 && (!numbered || !symbols[index].global))
     {
         result = &symbols[index];
     }
@@ -207,6 +221,7 @@ int main(int argc, char** argv)
         char line[8192];
         uint64_t taken[4] = { 0 };
         uint64_t fallthrough = 0;
+        uint64_t tail_calls = 0;
         uint64_t calls = 0;
         uint64_t unmatched = 0;
         uint64_t unmatched_records = 0;
@@ -254,9 +269,9 @@ int main(int argc, char** argv)
             const uint64_t next = (size_t)index + 1 < instruction_count ? instructions[index + 1].address : from_symbol->address + from_symbol->size;
             if (from_symbol != to_symbol)
             {
-                // A tail call's jmp to another function's start, taken.
-                taken[instruction->kind == 3 ? 3 : 2] += count;
-                printf("%llx %llu %s %s\n", (unsigned long long)from, count, instruction->kind == 3 ? "ind" : "jmp", from_symbol->name);
+                // A tail call's jump to another function, taken; BOLT's dyno stats count it among the calls.
+                tail_calls += count;
+                printf("%llx %llu %s %s\n", (unsigned long long)from, count, "tail", from_symbol->name);
             }
             else if (to == next && instruction->kind != 2 && instruction->kind != 3)
             {
@@ -278,10 +293,10 @@ int main(int argc, char** argv)
         {
             fclose(file);
         }
-        fprintf(stderr, "taken conditional %llu\ntaken unconditional %llu\ntaken indirect %llu\ntaken other %llu\ntaken total %llu\nfallthrough %llu\ncalls %llu\nunmatched %llu (%llu records)\n",
-                (unsigned long long)taken[1], (unsigned long long)taken[2], (unsigned long long)taken[3], (unsigned long long)taken[0],
-                (unsigned long long)(taken[0] + taken[1] + taken[2] + taken[3]), (unsigned long long)fallthrough, (unsigned long long)calls,
-                (unsigned long long)unmatched, (unsigned long long)unmatched_records);
+        fprintf(stderr, "taken conditional %llu\ntaken unconditional %llu\ntaken indirect %llu\ntaken tail calls %llu\ntaken other %llu\ntaken total %llu\nfallthrough %llu\ncalls %llu\nunmatched %llu (%llu records)\n",
+                (unsigned long long)taken[1], (unsigned long long)taken[2], (unsigned long long)taken[3], (unsigned long long)tail_calls,
+                (unsigned long long)taken[0], (unsigned long long)(taken[0] + taken[1] + taken[2] + taken[3] + tail_calls), (unsigned long long)fallthrough,
+                (unsigned long long)calls, (unsigned long long)unmatched, (unsigned long long)unmatched_records);
     }
     return status;
 }
