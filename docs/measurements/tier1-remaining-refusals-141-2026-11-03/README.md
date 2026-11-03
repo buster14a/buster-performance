@@ -137,7 +137,8 @@ rotates by round. Then a `perf record` (cycles at 20 kHz, 5 compiles) of the fir
 - `vpat` moves selection's vector candidates out of the twice-inlined candidates body. It saved 0.37 M instructions and
   cost 0.5% to 0.6% more cycles, so it was not taken.
 - Commit 8 (`vscan`) removes 3.38 M instructions with 0.36% more cycles. Commit 9 (`ldscan`) removes 5.15 M with 0.10%
-  fewer cycles. Together they take Tier 1's vector commit from +10.32 M to +1.78 M over `1794ac13`.
+  fewer cycles. With both, the head takes 5,842.79 M instructions: 8.54 M fewer than `c27be772` and 1.78 M more than
+  `1794ac13`. Commit 9's part recovers the long double commit's cost, not the vector commit's.
 - Cycles move with code placement as well as with work. `vpat` and `vscan` each removed instructions yet ran more
   cycles. Wall time decides (`ab9/`, below).
 
