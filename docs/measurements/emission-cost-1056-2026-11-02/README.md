@@ -56,8 +56,10 @@ Both builds compile both workloads into the same bytes: `sqlite3.o` is SHA-256
 | | head | 163.412 M (+0.074%) | 72.548 M (+0.231%) | 30.681 ms (+0.036%) | 28,512 KiB (+0.126%) | 12,563 |
 | | base again | 163.291 M (±0.000%) | 72.430 M (+0.069%) | 30.716 ms (+0.153%) | 28,476 KiB | 12,563 |
 
-`sqlite3.c`'s instructions are the same in every process of a build: 1,271,554,821 by base and 1,280,831,186 by head,
-9,276,365 more (+0.730%). musl's vary by a few thousand (base 163.282 to 163.294 M, head 163.403 to 163.414 M).
+`sqlite3.c`'s instructions vary by at most 307 within a build: base 1,271,554,808 to 1,271,555,047 (median
+1,271,554,948), base again 1,271,554,809 to 1,271,555,116, head 1,280,831,179 to 1,280,831,415 (median 1,280,831,315).
+Head's median is 9,276,367 more (+0.730%), and every head process executes more than every base one. musl's vary by a
+few thousand (base 163.282 to 163.294 M, head 163.403 to 163.414 M).
 
 ### By round, against base ([logs/timing.log](logs/timing.log), `time-runs`' comparison)
 
@@ -78,14 +80,17 @@ difference is within base's against itself.
 | --- | ---: | ---: | ---: |
 | `tier0` | 4.793 ms (4.789 to 4.808) | 5.030 ms (5.007 to 5.081) | +0.237 ms |
 | `unwind` | 0.190 ms (0.189 to 0.193) | 0.451 ms (0.449 to 0.456) | +0.261 ms |
-| every other stage | | | within its runs' range |
+| `backend-setup` | 0.009 ms (0.009 to 0.011) | 0.007 ms (0.007 to 0.007) | −0.002 ms |
+| every other stage | | | ranges overlapping between the builds |
 
-Neither stage's ranges overlap between the builds, and the two differences add up to +0.498 ms. `measure-compile`'s own
+Neither stage's ranges overlap between the builds, and their two differences add up to +0.498 ms; `backend-setup`'s
+−0.002 ms is the only other stage whose ranges don't overlap. `measure-compile`'s own
 comparison of the default compiles agrees: head 0.497 ms slower with base as the reference, base 0.691 ms faster with
 head as the reference. `tier0`'s lap (`c_check_program_emit.c`) now includes `emitted_from_tier0`, which builds each
 function's frame events from `unwind_tier0_frame_tails`' boundaries. `unwind`'s includes `check_program_emit_frame`,
 which resolves them through the final layout, checks them and finds the fixed shape, where base wrote the descriptor
-at once.
+at once. The stage clock says where the time changed; it doesn't apportion the change among the functions in a stage,
+which the throttled profile below can't either.
 
 ### Storage
 
