@@ -1,0 +1,115 @@
+--- src/buster/compiler/lane.c (d235a79e)
++++ src/buster/compiler/lane.c (keep pages, BUSTER_ARENA_KEEP)
+@@ -135,6 +135,10 @@
+     // capacity when a bounded view/test temporarily narrows it.
+     uint64_t mapping_bytes;
+     uint64_t committed;
++    // EXPERIMENT: the writable prefix's end (at least committed) and where a pooled arena's stale bytes end (at most
++    // writable); commits below `dirty` clear what they hand out.
++    uint64_t writable;
++    uint64_t dirty;
+     // Set when a failed commit left pages past `committed` whose protection could not be verified or restored: the
+     // arena is never pooled (its writable extent is unknown); capacity is clamped below them, so no push reaches
+     // them, and release unmaps the whole reservation.
+@@ -191,6 +195,7 @@
+     bool limits;
+     bool keeps_commits;
+     uint64_t address_share;
++    uint64_t keep_bytes;
+     // The releases so far, and the one that put each arena here.
+     uint64_t clock;
+     uint64_t released[BUSTER_ARENA_POOL_SLOTS];
+@@ -318,6 +323,8 @@
+     {
+         pool->address_share = arena_address_share();
+         pool->keeps_commits = arena_commit_unbounded();
++        const char* keep = getenv("BUSTER_ARENA_KEEP");
++        pool->keep_bytes = keep != 0 ? strtoull(keep, 0, 0) : 0;
+         pool->limits = true;
+     }
+ }
+@@ -434,6 +441,7 @@
+             result.small = small;
+             result.mapping_bytes = mapping_bytes;
+             result.committed = offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
++            result.writable = result.committed;
+             result.requested_capacity = requested;
+             result.reserved = capacity;
+         }
+@@ -493,14 +501,25 @@
+         const uint64_t begin = arena->mapping_offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+         // What stays writable for the arena's next user: its committed prefix, or none where commit charge is bounded.
+         uint64_t committed = begin;
++        uint64_t writable = begin;
++        uint64_t dirty = 0;
++        bool keep = false;
+         if (pool != 0)
+         {
+             arena_pool_limits(pool);
+-            committed = pool->keeps_commits ? arena->committed : begin;
++            writable = pool->keeps_commits ? arena->writable : begin;
++            committed = writable;
++            const uint64_t peak_end = (arena->mapping_offset + arena->peak + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
++            const uint64_t written = peak_end < arena->writable ? peak_end : arena->writable;
++            const uint64_t stale = arena->dirty > arena->committed ? arena->dirty : 0;
++            dirty = written > stale ? written : stale;
++            keep = pool->keeps_commits && pool->keep_bytes != 0 && !arena->unaccounted && dirty - begin <= pool->keep_bytes;
++            committed = keep ? begin : committed;
++            dirty = keep ? dirty : 0;
+         }
+         const bool protected = pool != 0 && !arena->unaccounted &&
+-                               (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
+-        const bool pooled = protected && madvise(mapping, bytes, MADV_DONTNEED) == 0;
++                               (arena->writable == writable || mprotect(mapping + begin, arena->writable - begin, PROT_NONE) == 0);
++        const bool pooled = protected && (keep || madvise(mapping, bytes, MADV_DONTNEED) == 0);
+         if (pooled)
+         {
+             // A free slot, or else the one whose arena was released longest ago, which is unmapped.
+@@ -529,6 +548,8 @@
+                 .huge = arena->huge,
+                 .mapping_bytes = bytes,
+                 .committed = committed,
++                .writable = writable,
++                .dirty = dirty,
+                 .requested_capacity = arena->requested_capacity,
+                 .reserved = arena->reserved,
+             };
+@@ -591,8 +612,20 @@
+ {
+     const uint64_t offset = arena->mapping_offset;
+     const uint64_t needed = (offset + end + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+-    const uint64_t committed = arena->committed;
+     bool result = true;
++    if (arena->mapping_bytes != 0 && needed > arena->committed && arena->writable > arena->committed)
++    {
++        uint8_t* mapping = arena->base - offset;
++        uint64_t ready = (needed + (16ull << 10) - 1) & ~((16ull << 10) - 1);
++        ready = ready < arena->writable ? ready : arena->writable;
++        const uint64_t clear = ready < arena->dirty ? ready : arena->dirty;
++        if (clear > arena->committed)
++        {
++            memset(mapping + arena->committed, 0, clear - arena->committed);
++        }
++        arena->committed = ready;
++    }
++    const uint64_t committed = arena->committed;
+     if (arena->mapping_bytes != 0 && needed > committed)
+     {
+         const uint64_t used = committed > offset ? committed - offset : 0;
+@@ -631,6 +664,7 @@
+                 }
+             }
+             arena->committed = target;
++            arena->writable = target;
+             // The pages past the base pages, advised huge as the first commit reaches them, before a push returns any
+             // of their bytes (arena_reserve_policy).
+             const uint64_t small_end = offset + arena->small;
+@@ -707,7 +741,7 @@
+     {
+         const uintptr_t base = (uintptr_t)arena->base;
+         const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+-        const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
++        const uint64_t written = arena->writable > arena->mapping_offset ? arena->writable - arena->mapping_offset : 0;
+         const uintptr_t end = (base + (arena->peak < written ? arena->peak : written) + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+         if (end > begin)
+         {
