@@ -223,3 +223,26 @@ What was checked is whether they change Tier 1's output, on the owner's minipc. 
   are the head's too. `sqlite3.o` and `speedtest1.o` differ, both 32 bytes of `.text` smaller at the head
   (1,266,273 → 1,266,241 and 1,366,220 → 1,366,188); since the head's are `8b07e868`'s, the difference comes in with
   main's merge, not this pull request's later commits.
+
+## After main's #1204 (`f6d0e4ed`)
+
+The pull request then merged main `62c529c7` (`f6d0e4ed`), which brought #1204's long double, 128-bit integers, rarer
+aggregate shapes and vectors to Tier 1. That merge changes Tier 1's output: by `same.sh`, 17 of Lua's 34 objects,
+`sqlite3.o` and `speedtest1.o` differ from `8b07e868`'s (`same-8b07-merge.log`), and so the Lua counts above are no
+longer the head's byte for byte. Lua's counts were taken again on the minipc, by `measure.sh`, `compare.sh` and
+`classify.sh`, for main `62c529c7` and the merge (`local/lua-counts/main-62c529c7`, `local/lua-counts/head-f6d0e4ed`;
+`same-62c5-merge.log` has the two trees' objects, 2 of 36 identical):
+
+| | main `62c529c7` | head `f6d0e4ed` |
+| --- | ---: | ---: |
+| `.text` (clang -O0's: 273,461) | 283,952 | 255,393 |
+| Instructions | 82,381 | 74,747 |
+| `mov r32, same` | 4,658 | 176 |
+| Reload-then-store pairs | 133 | 11 |
+| `call_stores` / `call_loads` | 5,956 / 5,956 | 3,165 / 5,207 |
+| Records | 74,450 | 66,400 |
+| Tier 1's 1,104 compiled functions, bytes against clang -O0's 265,499 | 276,021 (1.040×) | 247,046 (0.930×) |
+
+The call stores and loads are `6e1e6121`'s exactly; main's #1204 made both trees' code smaller around them. Tier 1
+compiles all 1,104 functions at both. `lua-run.sh`'s scripts give clang -O0's build's output at the merge. Nothing
+was timed again.
