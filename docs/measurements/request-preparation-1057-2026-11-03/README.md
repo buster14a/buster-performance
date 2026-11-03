@@ -13,8 +13,9 @@ medians of 5 to 41 runs):
   `sqlite3.c`) differ by 1,604 fewer to 587 more; Lua 5.4.8's 33 units in one
   command by about 20,000 fewer, about 600 per unit. On these inputs, from
   1.4 million instructions (a tiny file) to 1.2 billion (`sqlite3.c`'s `-c`),
-  the difference doesn't grow with the input: they show no added work per
-  token.
+  the net difference doesn't grow with the input's size, within this sample
+  and method. Net whole-process counts don't isolate any per-token work from
+  work offset elsewhere.
 - Time: the merge costs slightly more user cycles, while its retired
   instructions fall for the tiny file, `changes.c` and Lua's units and rise
   slightly for `sqlite3.c` (397 more by `-c`, 587 by `-fsyntax-only`). In the
@@ -36,9 +37,10 @@ medians of 5 to 41 runs):
   builds, and only the merge prints its configuration receipt. Their whole
   processes do differ: `benchmark-backend-source`'s runs 609,260 fewer
   instructions (0.006%), and `benchmark-lowering-source`'s 4,505,849 more
-  (0.031%) in no more wall time, for the selection and target-feature check
-  that its preparation now runs once per file, as `-c` does, outside the
-  timed region.
+  (0.031%) in no more wall time. A plausible contributor is the selection and
+  target-feature check that its preparation now runs once per file, as `-c`
+  does, outside the timed region; the record has no control isolating it, so
+  that attribution is a hypothesis.
 
 ## Source revisions and trees
 
@@ -151,11 +153,13 @@ sizing 11.45, encode 14.14, validate 31.36, validate-scalar 135.20, choose
 debug=off overrides=path:vector,selection:reachable,unwind:off,debug:off`.
 
 `benchmark-lowering-source` (`logs/lowering-source-2.log`, the third hold) runs
-4.5 million more instructions per process (0.031%), and no more time. #1141 made
-its preparation `-c`'s, which now selects the file's referenced definitions and
-checks their target features once (`CheckSourceRequest.select`), before the
-benchmark's own runs, which each select for themselves. That work is outside
-the benchmark's timed region, which it doesn't change: its report
+4.5 million more instructions per process (0.031%), and no more time. A
+plausible contributor: #1141 made its preparation `-c`'s, which now selects the
+file's referenced definitions and checks their target features once
+(`CheckSourceRequest.select`), before the benchmark's own runs, which each
+select for themselves. The record compares whole processes only, with no
+control isolating that check from other changed work or offsets, so the
+attribution is a hypothesis. The benchmark's timed region doesn't change: its report
 (`logs/output-lowering-source-2-*.log`) gives both builds the same 2,608
 functions defined, 2,602 lowered and 6 skipped, 2,066 objects defined and
 2,036 lowered, and timed lowerings of 20.85 ms and 20.76 ms (main) and
