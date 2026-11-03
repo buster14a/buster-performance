@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # measure.sh DIR: DIR's st-t1 and lua-t1 checked (speedtest1's verification hash, each Lua script's output against
 # clang -O0's), then each run's instructions under callgrind (the whole process's, as `Collected`), a line each in
-# DIR/instructions.txt and the sums. A run that fails, or a script whose output isn't clang -O0's, makes the exit status
-# 1, after everything is printed.
+# DIR/instructions.txt and the sums. A run that fails, a verification hash other than HASH's (the record's by default)
+# or a script whose output isn't clang -O0's makes the exit status 1, after everything is printed.
 set -u
 S=${S:?S names the scratch directory, laid out as the README says}
+HASH=${HASH:-1248168 a7fa3957840af6d608d53fcdd57a125b35385b9d1e813739}
 d=$(readlink -f $1)
 cd $d && mkdir -p cg
 status=0
 $S/run.sh st st-t1 verify.txt --verify
 rc=$?
 echo "verify $rc $(grep 'Verification Hash' verify.txt)" > check.txt
-[ $rc = 0 ] && grep -q 'Verification Hash' verify.txt || status=1
+[ $rc = 0 ] && grep -qx "Verification Hash: $HASH" verify.txt || status=1
 for s in calls tables strings arithmetic closures; do
     $S/run.sh lua lua-t1 $s.out $s.lua
     rc=$?
