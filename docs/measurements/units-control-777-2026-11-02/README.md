@@ -6,8 +6,11 @@ synth's and musl's commands of #763's record stay as fast, with their peaks. #83
 ([afdfdd40](https://github.com/buster14a/buster-performance/tree/afdfdd4051b834e5a880766a87bf7f464be3b437/docs/measurements/units-functions-777-cache-776-2026-10-29))
 compared the one command with two processes that its scripts waited for without checking their statuses or outputs.
 This record has that control verified, attributes what the one command spends against its processes, and measures
-the change that came of it: a units lane frees its memory as soon as it has no unit left to take, and with `-c` the
-lane that stops last leaves its memory to the process's exit.
+the change that came of it: a units lane frees its memory as soon as it has no unit left to take, and in a command
+without a link the lane that stops last leaves its memory to the process's exit. Heads 1 and 2 unmapped the lanes'
+arenas directly rather than through their pools (found by [buster#1186](https://github.com/buster14a/buster/pull/1186)'s
+review); head 3 restores the pool's order, and head 4, the pull request's head, is head 3 measured after main took
+[buster#1158](https://github.com/buster14a/buster/pull/1158)'s pool (buster#1128), which that release goes through.
 
 ## Sources and trees
 
@@ -20,14 +23,25 @@ the commit, checked on the laptop (`receipts/manifests-checked.txt`).
   no units, before they help the others' emissions; in a command that releases no memory (main's), the lane that stops
   taking units last leaves its memory to the exit.
 - **head 2:** `1177419c6cb96e9b95babcb96b393874cf37b60a`, on head 1: before a link, the last lane releases its memory
-  too. Its `-c` is head 1's. Both are on buster's branch `claude/solve-777-02d567`.
+  too. Its `-c` is head 1's. Both are on buster's branch `claude/solve-777-02d567`. Heads 1 and 2 clear the lane's
+  `arena_pool` before `check_units_lane_release`, so each of its arenas is unmapped directly, its pages freed under the
+  address space's lock for writing, rather than returned to the pool by `MADV_DONTNEED` under the lock for reading and
+  then unmapped empty, as candidate B (below) does.
+- **main 2:** `ee6942542033f75ec1100a98fe82e4b7761cde97`, before buster#1158.
+- **head 3:** `5ca7ae10eda441a46f6e857bd4410e595b5e8523`: head 2 with the release into the pool first (`bfd7d59a`,
+  candidate B's order; the leftover units' release on lane 0 too), merged with main 2.
+- **main 3:** `b70deb476d3a16463f398d0214853680b920d350`, with buster#1158 (`10d3d130`: pooled arenas keep their commits,
+  and a reservation takes the closest fit).
+- **head 4:** `8dad76a2d321e86d18ce2c1741775500a990c13d`: head 3 with one comment's wording (`ec0204ed`), merged with
+  main 3; buster#1186's head when measured.
 - **Experiments**, local commits on main that were not pushed; `experiment/*.diff` is each one's diff against main:
   `c190a293` (a trace of each unit's stages and each lane's times, `BUSTER_777_TRACE=1`), `1ef2b35a` (candidate A:
   the early release alone), `a4fdd67a` (candidate B: head 1 before its tidying) and `08ede275` (candidate C: no lane
   releases its memory in a command that releases none).
 
 Each was built with `BUSTER_DEBUG_INFO=0 ./build.sh`. The executables' SHA-256 are in the logs: main `9230ca8d…`,
-head 1 `2138c848…`, head 2 `036e758a…`, the trace `36cec227…`, A `8ba8b5d8…`, B `de01895f…`, C `8f20566c…`.
+head 1 `2138c848…`, head 2 `036e758a…`, the trace `36cec227…`, A `8ba8b5d8…`, B `de01895f…`, C `8f20566c…`, main 2
+`ccace932…`, head 3 `d8ec3eb4…`, main 3 `e7ca53ce…`, head 4 `13aa58a3…`.
 
 ## Host and inputs
 
@@ -70,11 +84,15 @@ user cycles and instructions, and its exit status, which must be the warm-up's: 
 | `scripts/final.sh` | head 1: its tests; the control in two rounds of 31 runs, with `cc`'s and mold's links; `--time-stages`; synth's (7 runs) and Lua's links (15) and musl's `-c` (7) by 8 lanes and one; a command of one file by `perf stat -r 11` on CPU 2, three rounds |
 | `scripts/lanes.sh` | `test-lanes` by main and head 1, twice each |
 | `scripts/final2.sh` | head 2: its units tests; the control in two rounds of 31 runs; synth's and Lua's links by 8 lanes and one |
-| `scripts/musl.sh`, `scripts/musl8.sh` | musl's `-c` by head 2 and main (11 runs, 8 lanes and one), and by main, A, head 2 and C (11 runs, 8 lanes) |
+| `scripts/musl.sh`, `scripts/musl8.sh` | musl's `-c` by head 2 and main (11 runs, 8 lanes and one), and by main, A, head 2 and C (11 runs, 8 lanes); musl.sh again by main 3 and head 4 |
+| `scripts/extra.sh` | the tests of head 1 that `final2.sh` doesn't run: `test-check-lanes`, `test-checker-driver --executable`, `test-check-debug --cross-check` |
+| `scripts/review.sh` | head 3 against main 2: `final2.sh`, `extra.sh`, `lanes.sh`, then `musl8.sh`; stopped during `lanes.sh` (below) |
+| `scripts/review2.sh` | head 4 against main 3: `final2.sh`, `extra.sh`, `lanes.sh` and `musl.sh` |
 
-`chain*.sh` ran each script after the one before it. `scripts/strip_lock.py` made `logs/` from the host's logs: it
+`chain*.sh` ran each script after the one before it. For heads 3 and 4 the scripts' `EXCLUSIVE_LINK` names
+buster#1186 rather than buster#777; nothing else in them changed. `scripts/strip_lock.py` made `logs/` from the host's logs: it
 dropped `exclusive.sh`'s waiting messages, which name other jobs, with the lines of their holders' commands, and
-nothing else (each dropped line was read).
+nothing else (each dropped line was read; for heads 3 and 4 it keeps the shell's `Terminated` lines too).
 
 ## Results
 
@@ -186,16 +204,81 @@ the call graph has 0 cycles.
 | musl `-c`, 8 lanes (11 runs) | 674.418 (252,040) | 678.484 (255,468) |
 | musl `-c`, 1 lane (11 runs) | 1,043.837 (147,896) | 1,041.565 (149,632) |
 
+### Head 3, before buster#1158 (`logs/review-5ca7ae10.log`, `logs/final2-tree-5ca7ae10/`, `logs/extra-tree-5ca7ae10/`)
+
+Tests at head 3, all with 0 failures: `test-check-units` 4,605 checks, `--corpus` 448, `test-check-lanes` 6,678,
+`test-checker-driver --executable` 49,990 (and 53 of CC compatibility), `test-check-debug --cross-check` 3,005;
+`test-driver-multicore` passed; the call graph has 0 cycles; `test-lanes` passed once by main 2 and once by head 3,
+their sessions 0 wrong.
+
+| | main 2 | head 3 | two processes | with mold's link | with `cc`'s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `-c`, round 1 | 112.827 (471,484) | 112.218 (419,284) | 112.482 (366,692) | | |
+| `-c`, round 2 | 112.901 | 111.816 | 112.276 | | |
+| linked, round 1 | 117.887 (479,984) | 117.067 (423,604) | | 120.651 | 129.673 |
+| linked, round 2 | 117.786 | 117.299 | | 120.704 | 129.514 |
+
+| ms (peak KiB) | main 2 | head 3 |
+| --- | ---: | ---: |
+| synth linked, 8 lanes | 614.704 (531,720) | 612.289 (526,112) |
+| synth linked, 1 lane | 1,717.936 (328,236) | 1,711.805 (328,148) |
+| Lua linked, 8 lanes | 42.538 (205,140) | 41.524 (204,480) |
+| Lua linked, 1 lane | 81.966 (61,944) | 81.265 (62,028) |
+
+The run was stopped after `test-lanes`' first round, when main took buster#1158, whose pool this release goes
+through; its musl measurement never ran ("Limitations").
+
+### Head 4, after buster#1158 (`logs/review2-8dad76a2.log`, `logs/final2-tree-8dad76a2/`, `logs/extra-tree-8dad76a2/`, `logs/musl-tree-8dad76a2/`)
+
+Tests at head 4, all with 0 failures: `test-check-units` 5,340 checks, `--corpus` 448, `test-check-lanes` 6,678,
+`test-checker-driver --executable` 50,038 (and 53 of CC compatibility), `test-check-debug --cross-check` 3,005;
+`test-driver-multicore` passed (64 cohorts, teams 1 to 8); the call graph has 0 cycles; `test-lanes` passed twice by
+main 3 and twice by head 4, their sessions 0 wrong. Every object is its unit's alone by main 3, and the linked
+executables of main 3 and head 4 are the same bytes.
+
+| | main 3 | head 4 | two processes | with mold's link | with `cc`'s |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `-c`, round 1 | 111.632 (435,176) | 110.622 (381,464) | 111.481 (336,504) | | |
+| `-c`, round 2 | 111.325 | 111.294 | 111.219 | | |
+| linked, round 1 | 116.093 (443,688) | 116.077 (385,544) | | 119.104 | 128.398 |
+| linked, round 2 | 117.046 | 116.030 | | 119.449 | 128.945 |
+
+| ms (peak KiB) | main 3 | head 4 |
+| --- | ---: | ---: |
+| synth linked, 8 lanes (7 runs) | 471.622 (533,240) | 467.746 (532,624) |
+| synth linked, 1 lane (7 runs) | 1,661.286 (325,960) | 1,656.726 (327,620) |
+| Lua linked, 8 lanes (15 runs) | 34.144 (205,100) | 33.061 (207,956) |
+| Lua linked, 1 lane (15 runs) | 76.422 (59,944) | 75.584 (61,644) |
+| musl `-c`, 8 lanes (11 runs) | 216.345 (252,036) | 215.214 (253,968) |
+| musl `-c`, 1 lane (11 runs) | 865.034 (142,080) | 862.626 (143,816) |
+
+Main 3's commands of many units are much faster than main's at `3ce71ec3` (musl's `-c` by 8 lanes 216 ms against 674 to
+677, synth's link 472 against 626, Lua's 34 against 42). Main changed between them, buster#1158 among it; this
+record doesn't attribute the difference.
+
 ### Against the issue
 
-Over the four rounds of the control, with `-c` the one command took 113.35 to 114.11 ms by the heads (whose `-c` is
-the same code), against 113.82 to 114.20 for the two processes (from 0.66% faster to 0.25% slower, round by round)
-and 114.23 to 114.70 by main (0.32% to 1.02% slower than the heads in each round, and 0.03% to 0.77% slower than the
-processes). Linked, head 2 took 119.01 and 119.20 ms, 2.6% to 2.7% less than the processes with mold's link and 9%
-less than with `cc`'s. Lua's, synth's and musl's commands run as main's, within their ranges, with peaks 0.8 to 3.4 MB
-above main's.
+At head 4, after buster#1158, with `-c` the one command took 110.62 and 111.29 ms against 111.48 and 111.22 for the
+two processes (0.77% faster and 0.07% slower) and 111.63 and 111.33 by main 3 (which was 0.10% to 0.14% slower than the
+processes), peaking at 381 MB against main 3's 435 (the processes: 337, the larger one). Linked, it took 116.08 and
+116.03 ms, 2.5% and 2.9% less than the processes with mold's link and 9.6% and 10.0% less than with `cc`'s, peaking at
+386 MB against main 3's 444. Lua's, synth's and musl's commands run as main 3's, by 8 lanes and by one, with peaks
+0.6 MB below to 2.9 MB above main 3's. Before buster#1158 the heads measured alike: over heads 1 to 3's six rounds,
+`-c` from 0.66% faster to 0.25% slower than the processes, and linked 2.6% to 3.3% faster than with mold's link.
 
 ## Limitations
+
+- Heads 1 to 3, mains 1 and 2 and the candidates predate buster#1158, whose pool the lanes' release goes through;
+  head 4 and main 3 include it. Heads 1 and 2 also unmapped the lanes' arenas directly (above). The figures that
+  buster's guide gives for the change are head 4's.
+- `review.sh` (head 3) was stopped when main took buster#1158. Stopping it killed the `flock` of two of its queued
+  commands, whose `exclusive.sh` then ran them without the host's lock, for under a minute between 23:40:20 and
+  23:41:10 UTC on 2026-11-02:
+  the second round of `test-lanes` by main 2 (it passed) and the start of a musl `time-runs`. They ran beside CI's job
+  of [buster#1181](https://github.com/buster14a/buster/pull/1181) (run 41539620036) during its build step, before its
+  tests and measurements. Their output isn't used here: `logs/review-5ca7ae10.log` ends with them.
+- Head 4's linked runs and main 3's had a few outliers up to 152 ms in both rounds; their medians are 0.02 and 1.0 ms
+  apart.
 
 - The governors were not all `performance`. The control's `-c` differences between the heads and the two processes are
   within the runs' ranges; four rounds of 31 runs give their spread.
