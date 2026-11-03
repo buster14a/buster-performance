@@ -1,8 +1,9 @@
-# The reader's attributes as a wide sparse column (buster#1167), 2026-11-03
+# The reader's attributes as a wide sparse column, and its declaration bits (buster#1167), 2026-11-03
 
 Buster's branch `claude/solve-628-529-1167` makes `CheckInput.attributes`, a pointer a token, a wide column of the
 reader's sparse pool (`src/buster/compiler/c_check_sparse.c`'s `CheckSparseWide`), and turns its four whole-column
-scans into scans of its directory. This record holds the 9700X measurements of `-c` of the frozen `sqlite3.c`, main
+scans into scans of its directory; then it packs seven of the reader's byte columns into one byte a token
+(`CheckInput.declaration_bits`). This record holds the 9700X measurements of `-c` of the frozen `sqlite3.c`, main
 against the change, main's profile, and a map of what `-c` holds at its peak (on the laptop), from which the change and
 #628's next steps were chosen.
 
@@ -11,14 +12,16 @@ against the change, main's profile, and a map of what `-c` holds at its peak (on
 | tree | Buster commit | what |
 | --- | --- | --- |
 | `main-b70deb47` | [`b70deb476d3a16463f398d0214853680b920d350`](https://github.com/buster14a/buster/tree/b70deb476d3a16463f398d0214853680b920d350) | main when the work started |
-| `head-ebd8cf4e` | [`ebd8cf4ed0a79694c15e60298fd89c757c465072`](https://github.com/buster14a/buster/tree/ebd8cf4ed0a79694c15e60298fd89c757c465072) | the change on `b70deb47` |
+| `head-ebd8cf4e` | [`ebd8cf4ed0a79694c15e60298fd89c757c465072`](https://github.com/buster14a/buster/tree/ebd8cf4ed0a79694c15e60298fd89c757c465072) | the attributes' change on `b70deb47` (round 4) |
+| `main-703ae9f5` | [`703ae9f581b00c2cbb4061e907d0951b11ea9637`](https://github.com/buster14a/buster/tree/703ae9f581b00c2cbb4061e907d0951b11ea9637) | main when the branch was last merged with it |
+| `head-49f066ba` | [`49f066baf6763825d05e7a9b153e1410e61abaef`](https://github.com/buster14a/buster/tree/49f066baf6763825d05e7a9b153e1410e61abaef) | the branch, both changes, merged with `703ae9f5` (round 5) |
 
 Each tree is `git archive` of its commit, with a `COMMIT` file, built by its own `./build.sh` (Clang 23.1.1,
 `-march=native`, which is znver5 there, with debug info). The branch's next commit, `94c8167b`, changes the wide
 group's two masked loads to their unaligned form, which the baseline host's intrinsics have; the measured executable
 has the aligned form, on addresses that are aligned either way.
 
-`receipts.txt` has the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, both executables'
+`receipts.txt` (round 4's) and `round5/receipts.txt` have the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, both executables'
 SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
 `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, with the `compile_time` step's options:
 
@@ -29,7 +32,7 @@ SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
 ## Method
 
 On the Ryzen 7 9700X (`benchpress`), pinned to CPU 2, under the host's lock (`exclusive.sh`), one hold per script
-(`scripts/`, run by `round4.sh`):
+(`scripts/`, run by `round4.sh` and `round5.sh`):
 
 - `build.sh TREE`: the tree's `./build.sh`.
 - `objects.sh BASE HEAD OUT`: `-c` by each tree, by default, `--scalar`, `--lanes 8` (unpinned) and `-g`, each object
@@ -40,7 +43,7 @@ On the Ryzen 7 9700X (`benchpress`), pinned to CPU 2, under the host's lock (`ex
   reference (`round4/measure-A.txt`, `measure-B.txt`).
 - `prof.sh TREE`: main's profile, `perf stat -r 5` and `perf record -F 20000` of 5 compiles (`profile-main/`).
 
-`round4/summary.txt` keeps the scripts' own output lines; the host lock's messages, which name other sessions'
+`round4/summary.txt` and `round5/summary.txt` keep the scripts' own output lines; the host lock's messages, which name other sessions'
 commands, are left out.
 
 The peak map (`peak-map/`) ran on the laptop (Ryzen 9 7940HS, Linux 7.3), on main `b70deb47` with
@@ -72,6 +75,21 @@ mapped (the zero page) too; the mappings' `Rss` lines are the kernel's own accou
 | `check-input` (`measure-compile`'s stages) | 45.731 ms | 44.957 ms |
 
 Every round has B 0.64 to 1.42 ms faster. Every object is the same bytes, by all four variants.
+
+`round5/`, `main-703ae9f5` (A) against `head-49f066ba` (B), the whole branch, the same way:
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 111.590 ms | 109.250 ms |
+| user cycles | 530.39 M | 520.66 M |
+| user instructions | 1,204.84 M | 1,204.06 M |
+| kernel cycles | 88.03 M | 85.50 M |
+| page faults | 4,973 | 4,970 |
+| peak RSS (`measure-compile`'s `wait4`) | 295,172 KiB | 287,028 KiB |
+| `check-input` (`measure-compile`'s stages) | 44.374 ms | 43.145 ms |
+
+Every round has B 1.76 to 2.80 ms faster, and every object is the same bytes, by all four variants. Main's peak rose from
+`b70deb47`'s 291,208 KiB to `703ae9f5`'s 295,172 KiB, by main's own changes between them.
 
 `profile-main/symbol.txt`: `clear_page_erms` 11.95% of `-c`'s samples, `check_input_run` 7.22% (most of it the
 expressions' coded walk, `c_check_expression_input.c`, inlined), `check_input_resolve_range` 4.74%,
