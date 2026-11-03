@@ -1,0 +1,162 @@
+# The reader's attributes as a wide sparse column, and its declaration bits (buster#1167), 2026-11-03
+
+Buster's branch `claude/solve-628-529-1167` makes `CheckInput.attributes`, a pointer a token, a wide column of the
+reader's sparse pool (`src/buster/compiler/c_check_sparse.c`'s `CheckSparseWide`), and turns its four whole-column
+scans into scans of its directory; then it packs seven of the reader's byte columns into one byte a token
+(`CheckInput.declaration_bits`). This record holds the 9700X measurements of `-c` of the frozen `sqlite3.c`, main
+against the change, main's profile, and a map of what `-c` holds at its peak (on the laptop), from which the change and
+#628's next steps were chosen.
+
+## Sources
+
+| tree | Buster commit | what |
+| --- | --- | --- |
+| `main-b70deb47` | [`b70deb476d3a16463f398d0214853680b920d350`](https://github.com/buster14a/buster/tree/b70deb476d3a16463f398d0214853680b920d350) | main when the work started |
+| `head-ebd8cf4e` | [`ebd8cf4ed0a79694c15e60298fd89c757c465072`](https://github.com/buster14a/buster/tree/ebd8cf4ed0a79694c15e60298fd89c757c465072) | the attributes' change on `b70deb47` (round 4) |
+| `main-703ae9f5` | [`703ae9f581b00c2cbb4061e907d0951b11ea9637`](https://github.com/buster14a/buster/tree/703ae9f581b00c2cbb4061e907d0951b11ea9637) | main when the branch was last merged with it |
+| `head-49f066ba` | [`49f066baf6763825d05e7a9b153e1410e61abaef`](https://github.com/buster14a/buster/tree/49f066baf6763825d05e7a9b153e1410e61abaef) | the branch, both changes, merged with `703ae9f5` (round 5) |
+| `main-a4a2182a` | [`a4a2182ad770bd22f25f843b934ba690bac9b1c8`](https://github.com/buster14a/buster/tree/a4a2182ad770bd22f25f843b934ba690bac9b1c8) | main when the branch was merged with it after the review |
+| `head-5550ad48` | [`5550ad4893a58867a46fe6fdd33ffca59db5aaf3`](https://github.com/buster14a/buster/tree/5550ad4893a58867a46fe6fdd33ffca59db5aaf3) | the branch with the review's fixes, merged with `a4a2182a` (round 7) |
+| `main-e98426b2` | [`e98426b2a230e0bc9083b5be9d520d7c8e0f172b`](https://github.com/buster14a/buster/tree/e98426b2a230e0bc9083b5be9d520d7c8e0f172b) | main once #1126 and #1204 merged |
+| `head-7676f9cb` | [`7676f9cbe4e181aa0d474967089bae319827a74a`](https://github.com/buster14a/buster/tree/7676f9cbe4e181aa0d474967089bae319827a74a) | the branch merged with `e98426b2`, #1126's uses of the columns converted (round 8) |
+
+Each tree is `git archive` of its commit, with a `COMMIT` file, built by its own `./build.sh` (Clang 23.1.1,
+`-march=native`, which is znver5 there, with debug info). The branch's next commit, `94c8167b`, changes the wide
+group's two masked loads to their unaligned form, which the baseline host's intrinsics have; the measured executable
+has the aligned form, on addresses that are aligned either way.
+
+`receipts.txt` (round 4's), `round5/receipts.txt`, `round7/receipts.txt` and `round8/receipts.txt` have the host (`uname`), the CPU, CPU 2's governor and EPP, clang's and perf's versions, both executables'
+SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
+`0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, with the `compile_time` step's options:
+
+```sh
+-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE -I$sqlite $sqlite/sqlite3.c
+```
+
+## Method
+
+On the Ryzen 7 9700X (`benchpress`), pinned to CPU 2, under the host's lock (`exclusive.sh`), one hold per script
+(`scripts/`, run by `round4.sh`, `round5.sh`, `round7.sh` and `round8.sh`):
+
+- `build.sh TREE`: the tree's `./build.sh`.
+- `objects.sh BASE HEAD OUT`: `-c` by each tree, by default, `--scalar`, `--lanes 8` (unpinned) and `-g`, each object
+  compared with `cmp`, and the default's `--time-stages` (`round4/*.stages`).
+- `ab.sh A B OUT`: 8 rounds, the order alternating by round, of a warm-up and `perf stat -r 3` of each, events
+  `task-clock,cycles:u,instructions:u,cycles:k,instructions:k,page-faults` (`round4/stat-A-N.csv`, `stat-B-N.csv`),
+  the last object of each `perf stat -r 3` compared with A's first (`ab-inner.sh`), not the warm-ups' or the first two
+  of each three; then `measure-compile --runs 11` by each with the other as its reference (`round4/measure-A.txt`,
+  `measure-B.txt`).
+- `objects-checked.sh` and `ab-checked.sh` (round 8): the same, checked. The output directory must be new; a failed
+  compile, comparison or `measure-compile` ends the hold with its status, which the script returns, and the summary
+  runs only after a hold that succeeded with every expected file. `ab-checked.sh` times each of a round's 3 executions
+  by its own `perf stat` (`round8/stat-A-R-N.csv`), and compares every execution's object, the warm-ups' too, with A's
+  first, printing a line for each (`round8/summary.txt`). `scripts/failure-tests.txt` has them run on a compiler that
+  exits 3 and one whose objects have a byte more, and on an output directory that exists: each fails, with that status.
+- `prof.sh TREE`: main's profile, `perf stat -r 5` and `perf record -F 20000` of 5 compiles (`profile-main/`).
+
+`round4/summary.txt`, `round5/summary.txt`, `round7/summary.txt` and `round8/summary.txt` keep the scripts' own output lines; the host lock's messages, which name other sessions'
+commands, are left out.
+
+The peak map (`peak-map/`) ran on the laptop (Ryzen 9 7940HS, Linux 7.3), on main `b70deb47` with
+`scripts/peak-map.patch`, pinned to one CPU, so on one lane:
+- every arena push of 32 KiB or more is logged with its call stack (`backtrace`);
+- `peak_dump` reads `/proc/self/status`, the mappings' `Rss` and `AnonHugePages` from `/proc/self/smaps`, and, for
+  each logged push, its present pages from `/proc/self/pagemap`, a page going to the latest push that covers it;
+- `BUSTER_PEAK_MAP=FILE` writes a dump at the reader's end, and each stage mark's `VmRSS` and `VmHWM`;
+  `BUSTER_PEAK_FULL=N` a full dump at stage mark N as well (7 is `check-declarations`' end);
+- the reader's end also counts each of the reader's rare columns' entries;
+- `BUSTER_RARE_BASE=1` puts the rare columns' arena in base pages, the probe in `rare-pages-probe.txt`.
+
+`scripts/peak-sites.py` ranks a dump's pushes by their present KiB (`reader-end-sites.txt`,
+`check-declarations-sites.txt`). A push's present pages are what its range maps, which counts a page that only a read
+mapped (the zero page) too; the mappings' `Rss` lines are the kernel's own account.
+
+## Results
+
+`round4/`, `main-b70deb47` (A) against `head-ebd8cf4e` (B), medians of the 8 rounds and of `measure-compile`'s 11 runs:
+
+| measure | main | wide `attributes` |
+| --- | ---: | ---: |
+| task clock | 114.255 ms | 113.300 ms |
+| user cycles | 545.99 M | 541.28 M |
+| user instructions | 1,276.40 M | 1,275.76 M |
+| kernel cycles | 87.29 M | 87.17 M |
+| page faults | 4,970 | 4,969 |
+| peak RSS (`measure-compile`'s `wait4`) | 291,208 KiB | 287,104 KiB |
+| `check-input` (`measure-compile`'s stages) | 45.731 ms | 44.957 ms |
+
+Every round has B 0.64 to 1.42 ms faster. `objects.sh`'s objects are the same bytes, by all four variants, and so is
+the last object of each timed three.
+
+`round5/`, `main-703ae9f5` (A) against `head-49f066ba` (B), the whole branch, the same way:
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 111.590 ms | 109.250 ms |
+| user cycles | 530.39 M | 520.66 M |
+| user instructions | 1,204.84 M | 1,204.06 M |
+| kernel cycles | 88.03 M | 85.50 M |
+| page faults | 4,973 | 4,970 |
+| peak RSS (`measure-compile`'s `wait4`) | 295,172 KiB | 287,028 KiB |
+| `check-input` (`measure-compile`'s stages) | 44.374 ms | 43.145 ms |
+
+Every round has B 1.76 to 2.80 ms faster. `objects.sh`'s objects are the same bytes, by all four variants, and so is
+the last object of each timed three. Main's peak rose from
+`b70deb47`'s 291,208 KiB to `703ae9f5`'s 295,172 KiB, by main's own changes between them.
+
+`round7/`, `main-a4a2182a` (A) against `head-5550ad48` (B), the branch with the review's fixes (the emission's scan,
+the helpers), the same way:
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 110.870 ms | 108.830 ms |
+| user cycles | 527.75 M | 518.40 M |
+| user instructions | 1,200.13 M | 1,199.12 M |
+| kernel cycles | 87.28 M | 84.88 M |
+| page faults | 4,974 | 4,973 |
+| peak RSS (`measure-compile`'s `wait4`) | 295,152 KiB | 287,136 KiB |
+| `check-input` (`measure-compile`'s stages) | 43.761 ms | 42.134 ms |
+
+Every round has B 1.92 to 2.51 ms faster. `objects.sh`'s objects are the same bytes, by all four variants, and so is
+the last object of each timed three.
+
+`round8/`, `main-e98426b2` (A) against `head-7676f9cb` (B), the branch merged with main once #1126 and #1204 merged, by
+the checked scripts; medians of the 24 timed runs and of `measure-compile`'s 11:
+
+| measure | main | both changes |
+| --- | ---: | ---: |
+| task clock | 111.050 ms | 109.205 ms |
+| user cycles | 529.16 M | 520.59 M |
+| user instructions | 1,202.94 M | 1,202.50 M |
+| kernel cycles | 86.61 M | 85.20 M |
+| page faults | 4,981 | 4,977 |
+| peak RSS (`measure-compile`'s `wait4`) | 295,468 KiB | 287,256 KiB |
+| `check-input` (`measure-compile`'s stages) | 44.004 ms | 42.949 ms |
+
+Every round's mean of 3 has B 1.45 to 2.05 ms faster. All 64 executions' objects, warm-ups' and timed, are the same
+bytes as A's first, and `objects-checked.sh`'s are the same bytes, by all four variants.
+
+Rounds 4, 5 and 7 ran `ab.sh` and `objects.sh`, which carry on past a failed hold or command. `retained-files.txt` lists
+their directories' files on the host with their times: every `ab` directory's files postdate its `inner.sh`, which `ab.sh`
+writes before it takes the lock, all 16 CSVs and both `measure-compile` logs there; every `obj` directory's are within
+2 s. None of their summaries read a file an earlier run left.
+
+`profile-main/symbol.txt`: `clear_page_erms` 11.95% of `-c`'s samples, `check_input_run` 7.22% (most of it the
+expressions' coded walk, `c_check_expression_input.c`, inlined), `check_input_resolve_range` 4.74%,
+`check_input_asm_labels` 0.81%.
+
+The peak map on main (`peak-map/stages.txt`, KiB): `VmRSS` is 290,920 at the reader's end and 260,540 once its arena of
+rare columns is released; `check-expressions` takes it to 295,468, and `check-declarations`' end sets the peak, 297,580.
+There (`check-declarations-sites.txt`), `attributes` holds 5,596 KiB, and each of eleven of the twelve byte columns
+700. The reader's rare columns (`rare-columns.txt`) hold almost nothing at its end, six of the sixteen no entry and
+`warning_suppressed` the most, 3,637, but their writes take about 30 MB of huge pages, which the release gives back
+before the peak. In base pages (`rare-pages-probe.txt`) `check-input` takes 9,978 faults rather than 3,179.
+
+## Limitations
+
+- One build of each tree: one code placement, without a `time-runs` sweep. The 4.7 M fewer user cycles are about
+  `check_input_asm_labels`' 0.81% of main's, whose scan of the column goes with the other three, but a placement can
+  move `sqlite3.c`'s `-c` by as much.
+- `measure-compile`'s user and system split comes from `getrusage` deltas, which it marks as low-confidence.
+- The peak map is the laptop's, on main, with logging that adds a call and, for large pushes, a `backtrace`; its huge
+  pages' alignment differs from the 9700X's, where the change's peak is 4.1 MB lower rather than the laptop's 5.5 MB.

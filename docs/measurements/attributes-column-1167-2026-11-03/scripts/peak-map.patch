@@ -1,0 +1,184 @@
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -654,8 +654,31 @@
+     return result;
+ }
+ 
++#include <execinfo.h>
++typedef struct { uintptr_t begin; uint64_t bytes; void* frames[6]; int depth; } PeakPush;
++__attribute__((weak)) PeakPush peak_pushes[65536];
++__attribute__((weak)) uint32_t peak_push_count;
++__attribute__((noinline)) static void peak_log(uintptr_t begin, uint64_t bytes)
++{
++    uint32_t slot = bytes >= 32768 ? __atomic_fetch_add(&peak_push_count, 1, __ATOMIC_RELAXED) : 65536;
++    if (slot < 65536)
++    {
++        PeakPush* p = peak_pushes + slot;
++        p->begin = begin;
++        p->bytes = bytes;
++        void* frames[8];
++        int depth = backtrace(frames, 8);
++        p->depth = depth > 2 ? (depth - 2 < 6 ? depth - 2 : 6) : 0;
++        for (int i = 0; i < p->depth; i += 1) p->frames[i] = frames[i + 2];
++    }
++}
++__attribute__((noinline)) static void* arena_push_logged(Arena* arena, uint64_t size, uint64_t alignment);
+ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
++    return arena_push_logged(arena, size, alignment);
++}
++__attribute__((noinline)) static void* arena_push_logged(Arena* arena, uint64_t size, uint64_t alignment)
++{
+     void* result = 0;
+     const uintptr_t base = (uintptr_t)arena->base;
+     const uintptr_t position = base + arena->length;
+@@ -670,6 +693,7 @@
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            peak_log(aligned, size);
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -8226,7 +8226,7 @@
+ static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool shared)
+ {
+     const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+-    const uint64_t small = shared ? pages : small_bytes;
++    const uint64_t small = shared || getenv("BUSTER_RARE_BASE") != NULL ? pages : small_bytes;
+     return arena_reserve_small(bytes, small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES);
+ }
+ 
+@@ -8234,6 +8234,61 @@
+ // deferred reader's tests and the corpus's comparisons read; a compile, which reads its unit in source order, doesn't.
+ static void check_input_warning_policy(CheckInput* input, const PPOptions* options);
+ 
++
++#include <fcntl.h>
++__attribute__((weak)) void peak_dump(const char* where);
++__attribute__((weak)) void peak_dump(const char* where)
++{
++    if (getenv("BUSTER_PEAK_MAP") == NULL) return;
++    FILE* out = fopen(getenv("BUSTER_PEAK_MAP"), "a");
++    if (out == NULL) return;
++    char line[512];
++    FILE* status = fopen("/proc/self/status", "r");
++    while (status != NULL && fgets(line, sizeof(line), status)) if (strncmp(line, "VmHWM", 5) == 0 || strncmp(line, "VmRSS", 5) == 0) fprintf(out, "%s %s", where, line);
++    if (status) fclose(status);
++    if (strncmp(where, "rss:", 4) == 0) { fclose(out); return; }
++    FILE* smaps = fopen("/proc/self/smaps", "r");
++    char range[128] = { 0 };
++    while (smaps != NULL && fgets(line, sizeof(line), smaps))
++    {
++        unsigned long a, b;
++        if (sscanf(line, "%lx-%lx", &a, &b) == 2 && strchr(line, ':') != NULL && line[0] != ' ' && !strncmp(line + strcspn(line, " "), " ", 1)) { snprintf(range, sizeof(range), "%lx-%lx", a, b); }
++        unsigned long kb;
++        if (sscanf(line, "Rss: %lu kB", &kb) == 1 && kb >= 512) fprintf(out, "map %s rss %lu\n", range, kb);
++        if (sscanf(line, "AnonHugePages: %lu kB", &kb) == 1 && kb >= 2048) fprintf(out, "map %s huge %lu\n", range, kb);
++    }
++    if (smaps) fclose(smaps);
++    int pm = open("/proc/self/pagemap", O_RDONLY);
++    // latest push wins each page: walk from the last to the first, skipping pages already claimed.
++    static uintptr_t claimed_begin[65536];
++    static uintptr_t claimed_end[65536];
++    uint32_t claimed = 0;
++    for (int64_t i = (int64_t)(peak_push_count < 65536 ? peak_push_count : 65536) - 1; i >= 0; i -= 1)
++    {
++        const PeakPush* p = peak_pushes + i;
++        uintptr_t first = p->begin & ~(uintptr_t)4095;
++        uintptr_t last = (p->begin + p->bytes + 4095) & ~(uintptr_t)4095;
++        uint64_t present = 0, pages = 0;
++        for (uintptr_t page = first; page < last; page += 4096)
++        {
++            bool taken = false;
++            for (uint32_t c = 0; c < claimed && !taken; c += 1) taken = page >= claimed_begin[c] && page < claimed_end[c];
++            if (taken) continue;
++            pages += 1;
++            uint64_t entry = 0;
++            if (pread(pm, &entry, 8, (off_t)(page / 4096 * 8)) == 8 && (entry >> 63) != 0) present += 1;
++        }
++        if (claimed < 65536) { claimed_begin[claimed] = first; claimed_end[claimed] = last; claimed += 1; }
++        if (present == 0) continue;
++        fprintf(out, "push %ld %lx bytes %lu own_pages %lu present_kb %lu frames", (long)i, (unsigned long)p->begin, (unsigned long)p->bytes, (unsigned long)pages, (unsigned long)present * 4);
++        for (int f = 0; f < p->depth; f += 1) fprintf(out, " %p", p->frames[f]);
++        fprintf(out, "\n");
++    }
++    close(pm);
++    fprintf(out, "end %s\n", where);
++    fclose(out);
++}
++
+ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
+                             CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
+@@ -8974,8 +9029,46 @@
+         input->constant_warnings = NULL;
+         input->constant_warning_ignored = NULL;
+     }
++    if (getenv("BUSTER_PEAK_MAP") != NULL)
++    {
++        FILE* out = fopen(getenv("BUSTER_PEAK_MAP"), "a");
++        struct { const char* name; const uint8_t* column; uint32_t size; } rare[] = {
++            { "specifier_jobs", (const uint8_t*)reader.specifier_jobs, 8 },
++            { "specifier_finishes", (const uint8_t*)reader.specifier_finishes, 8 },
++            { "attribute_bases", (const uint8_t*)reader.attribute_bases, 8 },
++            { "declaration_bases", (const uint8_t*)reader.declaration_bases, 4 },
++            { "declaration_storage", (const uint8_t*)reader.declaration_storage, 4 },
++            { "declaration_flags", (const uint8_t*)reader.declaration_flags, 1 },
++            { "declaration_abis", (const uint8_t*)reader.declaration_abis, 1 },
++            { "static_initializers", (const uint8_t*)reader.static_initializers, 1 },
++            { "incomplete_array_types", (const uint8_t*)reader.incomplete_array_types, 4 },
++            { "designator_valid", (const uint8_t*)reader.designator_valid, 1 },
++            { "selection_type_ends", (const uint8_t*)reader.selection_type_ends, 4 },
++            { "builtins", (const uint8_t*)reader.builtins, 2 },
++            { "builtin_type_ends", (const uint8_t*)reader.builtin_type_ends, 4 },
++            { "vararg_types", (const uint8_t*)reader.vararg_types, 4 },
++            { "vla_scope_ends", (const uint8_t*)reader.vla_scope_ends, 4 },
++            { "warning_suppressed", (const uint8_t*)reader.warning_suppressed, 1 },
++        };
++        for (uint32_t c = 0; out != NULL && c < sizeof(rare) / sizeof(rare[0]); c += 1)
++        {
++            uint64_t zero = 0, none = 0, other = 0, groups = 0, last = UINT64_MAX;
++            for (uint32_t t = 0; rare[c].column != NULL && t <= count; t += 1)
++            {
++                uint64_t v = 0;
++                memcpy(&v, rare[c].column + (uint64_t)t * rare[c].size, rare[c].size);
++                const uint64_t all = rare[c].size == 8 ? UINT64_MAX : (UINT64_C(1) << (8 * rare[c].size)) - 1;
++                if (v == 0) zero += 1; else if (v == all) none += 1; else other += 1;
++                if (v != 0 && v != all) { groups += (t >> 4) != last; last = t >> 4; }
++            }
++            fprintf(out, "rare %-24s size %u zero %8lu ones %8lu other %8lu groups16 %6lu of %u\n", rare[c].name, rare[c].size, zero, none, other, groups, count);
++        }
++        if (out != NULL) fclose(out);
++    }
++    peak_dump("reader-end");
+     arena_pop_to(scratch, mark);
+     arena_release(&sparse);
++    peak_dump("rss:after-reader-release");
+     return valid;
+ }
+ 
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -227,11 +227,19 @@
+ }
+ 
+ // A lap that also charges the resource use since the last mark to `stage`; nothing without a clock.
++void peak_dump(const char* where);
+ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ {
+     check_clock_lap(stage_clock, stage);
+     if (stage_clock != NULL)
+     {
++        char where[64];
++        const char* full = getenv("BUSTER_PEAK_FULL");
++        snprintf(where, sizeof(where), "%sstage-%d", full != NULL && atoi(full) == (int)stage ? "" : "rss:", (int)stage);
++        peak_dump(where);
++    }
++    if (stage_clock != NULL)
++    {
+         uint64_t system_us = 0;
+         uint64_t minor_faults = 0;
+         uint64_t peak_kb = 0;
