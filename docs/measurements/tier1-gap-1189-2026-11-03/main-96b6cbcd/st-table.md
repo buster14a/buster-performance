@@ -72,7 +72,7 @@ Program code (the C library's left out): Tier 1 3743.8 M, clang -O2 1887.5 M, ga
 | `.init` | 7 | no tag line |
 | `.fini` | 4 | no tag line |
 
-Dynamic calls into the program's functions: Tier 1 77.62 M, clang -O2 25.62 M
+Dynamic calls into the program's own code: Tier 1 70.29 M, clang -O2 25.62 M; into its PLT stubs, the C library's calls: Tier 1 7.33 M, clang -O2 0.00 M
 
 | Function | `--tier1`, M | clang -O2, M | Gap, M | calls, `--tier1` / -O2 | moves | stack | memory | address | extend | branch | call | `--tier1`: spills+reloads, call saves, edge moves |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -102,13 +102,11 @@ Dynamic calls into the program's functions: Tier 1 77.62 M, clang -O2 25.62 M
 | `sqlite3DbMallocRawNN` | 22.9 | 15.8 | 7.1 | 1.30 M / 1.25 M | 0.0 | 0.0 | 1.5 | 2.5 | 0.0 | 0.2 | 2.9 | 0.0, 0.0, 0.0 |
 | `walFindFrame` | 21.3 | 9.7 | 11.6 | 0.09 M / 0.09 M | 3.0 | 6.4 | 0.1 | 0.4 | 0.7 | 1.4 | 0.6 | 2.4, 4.7, 0.4 |
 
-Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): 52.00 M, whose callees' bodies run 1128.8 M of Tier 1's instructions
+Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): 44.67 M, whose callees' bodies run 1121.4 M of Tier 1's instructions
 
 | Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `memcpy@plt` | 3.94 | 0.00 | 3.9 | 1.0 | 0.0 |
 | `yy_find_shift_action` | 1.93 | 0.00 | 43.9 | 22.8 | 0.0 |
-| `memset@plt` | 1.44 | 0.00 | 1.4 | 1.0 | 0.0 |
 | `sqlite3BtreeCursorHasMoved` | 1.44 | 0.00 | 8.6 | 6.0 | 0.0 |
 | `(unnamed code after main)` | 1.37 | 0.00 | 2.8 | 2.1 | 0.0 |
 | `yy_find_reduce_action` | 1.23 | 0.00 | 12.3 | 10.0 | 0.0 |
@@ -116,8 +114,10 @@ Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang
 | `sqlite3VdbeOneByteSerialTypeLen` | 1.06 | 0.00 | 4.2 | 4.0 | 0.0 |
 | `sqlite3Parser` | 0.70 | 0.00 | 91.0 | 129.7 | 8.4 |
 | `yy_shift` | 0.70 | 0.00 | 27.7 | 39.5 | 7.0 |
-| `memcmp@plt` | 0.68 | 0.00 | 0.7 | 1.0 | 0.0 |
 | `sqlite3VdbeAddOp3` | 0.64 | 0.02 | 16.2 | 25.1 | 1.3 |
 | `sqlite3AddInt64` | 0.61 | 0.00 | 10.4 | 17.0 | 0.0 |
 | `btreeParseCell` | 0.61 | 0.00 | 13.3 | 22.0 | 1.2 |
 | `sqlite3BtreePayloadSize` | 0.58 | 0.00 | 4.0 | 7.0 | 1.2 |
+| `fetchPayload` | 0.58 | 0.00 | 5.8 | 10.0 | 0.0 |
+| `sqlite3BtreePayloadFetch` | 0.58 | 0.00 | 2.3 | 4.0 | 1.2 |
+| `sqlite3Get4byte` | 0.50 | 0.00 | 5.5 | 11.0 | 0.0 |

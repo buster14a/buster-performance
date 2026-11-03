@@ -69,7 +69,7 @@ Program code (the C library's left out): Tier 1 7228.2 M, clang -O2 3768.0 M, ga
 | `.init` | 35 | no tag line |
 | `.fini` | 20 | no tag line |
 
-Dynamic calls into the program's functions: Tier 1 106.00 M, clang -O2 54.20 M
+Dynamic calls into the program's own code: Tier 1 91.79 M, clang -O2 54.20 M; into its PLT stubs, the C library's calls: Tier 1 14.21 M, clang -O2 0.00 M
 
 | Function | `--tier1`, M | clang -O2, M | Gap, M | calls, `--tier1` / -O2 | moves | stack | memory | address | extend | branch | call | `--tier1`: spills+reloads, call saves, edge moves |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -99,22 +99,22 @@ Dynamic calls into the program's functions: Tier 1 106.00 M, clang -O2 54.20 M
 | `classend` | 37.4 | 0.0 | 37.4 | 2.25 M / 0.00 M | 0.8 | 0.0 | 3.7 | 3.7 | 5.2 | 12.7 | 11.2 | 0.0, 0.0, 0.0 |
 | `luaD_pretailcall` | 34.4 | 33.2 | 1.2 | 0.60 M / 0.60 M | -1.4 | 0.0 | 0.2 | 2.6 | 1.8 | 1.2 | -0.4 | 0.0, 0.0, 0.8 |
 
-Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): 51.81 M, whose callees' bodies run 974.5 M of Tier 1's instructions
+Calls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): 37.60 M, whose callees' bodies run 960.3 M of Tier 1's instructions
 
 | Callee | `--tier1` calls, M | -O2 calls, M | `--tier1` instructions, M | per call | frame + call saves + entry, M |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | `index2value` | 9.30 | 0.00 | 101.2 | 10.9 | 0.0 |
-| `__ctype_b_loc@plt` | 5.65 | 0.00 | 5.6 | 1.0 | 0.0 |
 | `prepCallInfo` | 4.38 | 0.00 | 87.6 | 20.0 | 17.5 |
 | `luaV_mod` | 4.01 | 0.00 | 106.6 | 26.6 | 8.0 |
 | `luaV_idiv` | 3.49 | 0.00 | 80.2 | 23.0 | 7.0 |
-| `tolower@plt` | 2.43 | 0.00 | 2.4 | 1.0 | 0.0 |
 | `classend` | 2.25 | 0.00 | 37.4 | 16.6 | 9.0 |
-| `free@plt` | 1.68 | 0.00 | 1.7 | 1.0 | 0.0 |
 | `ccall` | 1.32 | 0.00 | 55.1 | 41.6 | 5.3 |
 | `reprepstate` | 1.13 | 0.00 | 3.4 | 3.0 | 0.0 |
 | `moveresults` | 1.12 | 0.00 | 32.8 | 29.3 | 4.5 |
 | `start_capture` | 0.93 | 0.00 | 25.6 | 27.5 | 3.7 |
-| `memcpy@plt` | 0.89 | 0.00 | 0.9 | 1.0 | 0.0 |
-| `realloc@plt` | 0.88 | 0.00 | 0.9 | 1.0 | 0.0 |
-| `toupper@plt` | 0.80 | 0.00 | 0.8 | 1.0 | 0.0 |
+| `luaH_realasize` | 0.82 | 0.02 | 7.4 | 9.0 | 0.0 |
+| `setnodevector` | 0.80 | 0.00 | 39.7 | 49.6 | 4.8 |
+| `freehash` | 0.80 | 0.00 | 9.6 | 12.0 | 1.6 |
+| `end_capture` | 0.59 | 0.00 | 17.6 | 30.1 | 1.2 |
+| `capture_to_close` | 0.59 | 0.00 | 7.6 | 13.0 | 1.2 |
+| `get_onecapture` | 0.52 | 0.00 | 12.6 | 24.0 | 2.1 |

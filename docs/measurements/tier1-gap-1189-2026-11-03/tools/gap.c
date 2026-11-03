@@ -762,12 +762,22 @@ static int by_tier1(const void* a, const void* b)
     return x->tier1 < y->tier1 ? 1 : x->tier1 > y->tier1 ? -1 : 0;
 }
 
+// A PLT stub is the C library's call, which clang's executables make without one: it is no call clang inlined.
+static bool is_plt(const char* function)
+{
+    return strstr(function, "@plt") != 0;
+}
+
+// Tier 1's calls into a callee less clang's: the calls clang doesn't make, which it inlined.
+static uint64_t inlined_calls_of(const Total* t)
+{
+    return !is_plt(t->function) && t->tier1_calls > t->clang_calls ? t->tier1_calls - t->clang_calls : 0;
+}
+
 static int by_inlined(const void* a, const void* b)
 {
-    const Total* x = a;
-    const Total* y = b;
-    const uint64_t u = x->tier1_calls > x->clang_calls ? x->tier1_calls - x->clang_calls : 0;
-    const uint64_t v = y->tier1_calls > y->clang_calls ? y->tier1_calls - y->clang_calls : 0;
+    const uint64_t u = inlined_calls_of(a);
+    const uint64_t v = inlined_calls_of(b);
     return u < v ? 1 : u > v ? -1 : 0;
 }
 
@@ -883,7 +893,7 @@ static int table(int argc, char** argv)
     uint32_t plt_count = 0;
     for (uint32_t i = 0; i < total_count; i += 1)
     {
-        const bool stub = strstr(totals[i].function, "@plt") != 0 && totals[i].origins[ORIGINS - 1] != 0;
+        const bool stub = is_plt(totals[i].function) && totals[i].origins[ORIGINS - 1] != 0;
         plt += stub ? totals[i].origins[ORIGINS - 1] : 0;
         plt_count += stub;
     }
@@ -892,13 +902,23 @@ static int table(int argc, char** argv)
     for (uint32_t i = 0; i < total_count && totals[i].origins[ORIGINS - 1] != 0; i += 1)
     {
         const Total* t = &totals[i];
-        if (strstr(t->function, "@plt") == 0)
+        if (!is_plt(t->function))
         {
             printf("| `%s` | %" PRIu64 " | %s |\n", t->function, t->origins[ORIGINS - 1], is_unfitted(t->function) ? "its tags didn't fit" : "no tag line");
         }
     }
-    uint64_t call_totals[2] = { calls[0].total, calls[1].total };
-    printf("\nDynamic calls into the program's functions: Tier 1 %.2f M, clang -O2 %.2f M\n", millions(call_totals[0]), millions(call_totals[1]));
+    // The program's own code's calls, its PLT stubs' apart.
+    uint64_t call_totals[2] = { 0, 0 };
+    uint64_t plt_calls[2] = { 0, 0 };
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        for (uint32_t r = 0; r < calls[s].count; r += 1)
+        {
+            *(is_plt(calls[s].rows[r].function) ? &plt_calls[s] : &call_totals[s]) += calls[s].rows[r].count;
+        }
+    }
+    printf("\nDynamic calls into the program's own code: Tier 1 %.2f M, clang -O2 %.2f M; into its PLT stubs, the C library's calls: Tier 1 %.2f M, clang -O2 %.2f M\n",
+           millions(call_totals[0]), millions(call_totals[1]), millions(plt_calls[0]), millions(plt_calls[1]));
     qsort(totals, total_count, sizeof(Total), by_tier1);
     printf("\n| Function | `--tier1`, M | clang -O2, M | Gap, M | calls, `--tier1` / -O2 | moves | stack | memory | address | extend | branch | call | `--tier1`: spills+reloads, call saves, edge moves |\n| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |\n");
     for (uint32_t i = 0; i < total_count && i < 25; i += 1)
@@ -917,11 +937,9 @@ static int table(int argc, char** argv)
     for (uint32_t i = 0; i < total_count; i += 1)
     {
         const Total* t = &totals[i];
-        if (t->tier1_calls > t->clang_calls && t->tier1_calls != 0)
-        {
-            inlined_calls += t->tier1_calls - t->clang_calls;
-            inlined_instructions += (uint64_t)((double)t->tier1 * (double)(t->tier1_calls - t->clang_calls) / (double)t->tier1_calls);
-        }
+        const uint64_t inlined = inlined_calls_of(t);
+        inlined_calls += inlined;
+        inlined_instructions += inlined != 0 ? (uint64_t)((double)t->tier1 * (double)inlined / (double)t->tier1_calls) : 0;
     }
     printf("\nCalls clang -O2 doesn't make (a callee's calls by Tier 1 less its calls by clang): %.2f M, whose callees' bodies run %.1f M of Tier 1's instructions\n\n",
            millions(inlined_calls), millions(inlined_instructions));

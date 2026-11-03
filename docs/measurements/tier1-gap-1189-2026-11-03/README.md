@@ -86,9 +86,10 @@ Every build gives speedtest1's verification hash `1248168 a7fa3957840af6d608d53f
 | constants | 59.7 M (3.2%) | −24.3 M (−0.7%) |
 | arithmetic and the rest | −47.2 M (−2.5%) | 87.9 M (2.5%) |
 
-**Corrections.** The record's first versions (`caa66550`, `02f5d050`) had two errors, which buster-performance#236's review found:
+**Corrections.** The record's first versions (`caa66550`, `02f5d050`) had three errors, which buster-performance#236's and buster#1230's reviews found:
 - **`rbp`'s operands were all the stack's.** That put clang -O2's loads and stores through `rbp` among the stack's: 16.7 M of speedtest1's and 54.1 M of Lua's. The stack's share of the gap was 22.5% and 25.8%, other loads' and stores' 12.1% and 9.3%. No other cause changes, and none crosses 5%.
 - **The untagged instructions were the node's.** Only the origin columns change.
+- **The calls counted Tier 1's PLT stubs as the program's.** Buster's executables call the C library through PLT stubs, clang's without them, so 7.33 M of speedtest1's calls and 14.21 M of Lua's were the C library's calls on Tier 1's side alone. The tables now give them apart. Without them, `--tier1` makes 70.29 M calls into speedtest1's own code against clang's 25.62 M, and 91.79 M into Lua's against 54.20 M (were 77.62 M and 106.00 M). Of speedtest1's, 1.37 M go to the unit's atomic helpers and 68.92 M to its functions. The calls clang doesn't make are 44.67 M and 37.60 M (were 52.00 M and 51.81 M), and their callees run 1,121.4 M and 960.3 M of Tier 1's instructions.
 
 All twelve TSVs and both tables are regenerated from the original inputs (`scripts/gap.sh`, below); Tier 1's TSVs differ only by `main`'s helpers.
 
