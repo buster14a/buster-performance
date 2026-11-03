@@ -19,6 +19,8 @@ inside the hold.
 | --- | --- | --- |
 | main | buster `3ce71ec312efb45fbcab4d66775e069e30d7e513` | the branch's base |
 | head | buster `e7416f30c76dbc95681d6982b51f79a2808d551a` | the qualified head |
+| main-a4a2182a | buster `a4a2182ad770bd22f25f843b934ba690bac9b1c8` | main after 290 more commits |
+| head-132ffd0f | buster `132ffd0f66cf68a60c7575f3d5b97d2b4349150c` | the PR's head with that main merged |
 | head-wip1 | tree `2443b0684fd62b7bd6b4ee134dd83c08df14b45f` | exploratory: `fb1ba1e2`'s code before its report and test changes |
 | fb1ba1e2 | buster `fb1ba1e23a868dc3ec9ce8b7ca9af3b819a6b390` | exploratory: the PR's first head |
 | var1, var2, var5, var6 | `fb1ba1e2` plus [`variants/`](variants/) | exploratory: a growing team's part order and count |
@@ -76,6 +78,8 @@ ways:
 The scripts in [`scripts/`](scripts/) ran it all:
 
 - `measure5.sh head-e7416f30` is the final qualification.
+- `measure6.sh head-132ffd0f main-a4a2182a` reruns it on the integrated tree, building main too.
+- `measure7.sh head-132ffd0f main-a4a2182a` times two controls over six placements of each build.
 - `measure1.sh` is the first exploratory queue.
 - `measure2.sh` is the `fb1ba1e2` qualification, stopped after three runs when the review changed
   the code.
@@ -85,14 +89,19 @@ The scripts in [`scripts/`](scripts/) ran it all:
 `result` and `pair`; `memory:`, `run`, `list`, the summaries and `time-runs:`. `exclusive.sh`'s
 lines while waiting for other holders were dropped. Objects are replaced by their digests.
 
-**Layout.** `raw/final/` holds `head`'s qualification and `raw/exploratory/` the earlier runs:
+**Progress files.** Their `status=` values are always 0: each script expanded `$(date)` before `$?`. The
+gates are elsewhere: each group's result lines (`growth_stats`), each `time-runs` log's last line (all 15
+read `done, 0 failed processes`), and for the builds, the receipts' digests.
+
+**Layout.** `raw/final/` holds `head`'s qualification, `raw/requalified/` the integrated tree's,
+`raw/placements/` its controls over placements and `raw/exploratory/` the earlier runs:
 
 - each group's log and its `time-runs` logs;
 - the receipts and the object digests;
 - the queues' progress files.
 
-Each group's cohort directories are in `raw/cohorts-final.tar.xz` and `raw/cohorts-exploratory.tar.xz`
-(370 and 407 cohorts, primers included). Each cohort keeps every compile's `--time-stages` output,
+Each group's cohort directories are in `raw/cohorts-final.tar.xz`, `raw/cohorts-requalified.tar.xz` and
+`raw/cohorts-exploratory.tar.xz` (370, 370 and 407 cohorts, primers included). Each cohort keeps every compile's `--time-stages` output,
 its usage record and `perf stat` counters, and the cohort's `argv.txt`. To reproduce
 `summary-final.tsv` byte for byte:
 
@@ -104,7 +113,8 @@ clang -O1 -o growth_stats ../../growth_stats.c
     w1-main-3ce71ec3-r1.log w1-head-e7416f30-r1.log
 ```
 
-`summary-exploratory.tsv` is the same over `raw/exploratory`'s eleven group logs.
+`summary-requalified.tsv` is the same over `raw/requalified`'s ten group logs, in the same order, and
+`summary-exploratory.tsv` over `raw/exploratory`'s eleven.
 
 ## Results: `head` (`e7416f30`) against `main`
 
@@ -144,6 +154,68 @@ Whole-cohort wall time, median of 12 (ms), from [`summary-final.tsv`](summary-fi
 | 7 tokens: full grant | +0.20% (−0.15% to +0.89%) | +0.20% |
 | None | −0.38% (−0.59% to +0.10%) | −0.03% |
 
+## Requalified on the integrated tree: `132ffd0f` against main `a4a2182a`
+
+The PR's head after merging main `a4a2182a`, which also has `0a87cb5e`'s loop locals, rerun by
+`measure6.sh` with `measure5.sh`'s method ([`raw/requalified/`](raw/requalified/)). Whole-cohort wall time,
+median of 12 (ms), from [`summary-requalified.tsv`](summary-requalified.tsv):
+
+| Workload | Build | Jobserver | Cap one | Free eight |
+| --- | --- | ---: | ---: | ---: |
+| Two SQLite + six tiny, round 1 | main | 138.138 | 136.267 | 130.194 |
+| | head | **128.668** | 136.143 | 130.266 |
+| Two SQLite + six tiny, round 2 | main | 139.665 | 135.952 | 129.558 |
+| | head | **128.661** | 135.826 | 131.369 |
+| Eight SQLite, round 1 | main | 282.925 | 284.608 | 300.919 |
+| | head | 282.696 | 283.755 | 302.756 |
+| Eight SQLite, round 2 | main | 282.742 | 283.966 | 302.206 |
+| | head | 282.992 | 284.230 | 301.947 |
+| Eight tiny | main | 6.631 | 6.033 | 6.508 |
+| | head | 6.572 | 6.161 | 6.635 |
+
+- **Uneven.** The jobserver policy takes 6.9% and 7.9% less wall time than main's, and is the
+  fastest of the three: 1.2–2.1% under free eight and 5.3–5.5% under cap one. In all 24 cohorts the
+  file started on one lane grew to 7 (`granted=1 active=7 grown=6`); in 22, all 7 lanes took a part,
+  in 2, six did.
+- **Eight SQLite.** The jobserver moves −0.1% and +0.1%. Main's own cohorts take 6% less than
+  `3ce71ec3`'s (283 against 301 ms), and the jobserver now ties cap one. A few files grow at the
+  tail (to 2 lanes, once to 6).
+- **The other policies**, whose paths the change leaves alone, move −0.3% to +1.4% on the SQLite
+  workloads.
+- **Eight tiny.** Ranges overlap.
+- **Objects.** The 2,961 objects are two digests.
+
+`time-runs`, SQLite `-c`, 22 runs of each build over two copies, head against main:
+
+| Jobserver | Wall | User cycles |
+| --- | ---: | ---: |
+| No token: starts on one lane, never grows | +0.57% (copies +0.52% to +0.62%) | +0.90% (+0.58% to +1.05%) |
+| 3 tokens: 4 of 8 granted, never grows | −0.35% (−1.81% to −0.17%) | −0.19% (−1.06% to −0.03%) |
+| 7 tokens: full grant | +0.17% (−0.63% to +0.79%) | +0.01% (−0.32% to +0.41%) |
+| None | −0.23% (−0.30% to −0.21%) | +0.24% (−0.21% to +0.42%) |
+
+**Over placements.** One executable per build measures one placement of its code, so `measure7.sh`
+reran the first and the last rows over six placements of each build (`./build.sh shifts`, the
+checker's unit 0 to 3,456 bytes later, in steps that are multiples of its 64-byte alignment) and two
+fresh copies of each, 60 runs per build, with main's placements a second time as the comparison's
+floor ([`raw/placements/`](raw/placements/)). An earlier attempt with shifts that aren't multiples of
+64 built two placements and timed nothing.
+
+| Jobserver | Build | Wall (over placements) | User cycles (over placements) |
+| --- | --- | ---: | ---: |
+| No token: never grows | head | +0.63% (−0.13% to +1.59%) | +0.73% (+0.47% to +1.14%) |
+| | main again | −0.08% (−1.20% to +1.24%) | −0.12% (−0.46% to +0.40%) |
+| None | head | −0.01% (−0.66% to +0.31%) | +0.31% (−0.45% to +0.83%) |
+| | main again | −0.02% (−0.64% to +1.17%) | −0.13% (−0.91% to +0.60%) |
+
+A compile whose team starts on one lane and never grows, timed alone, takes about 0.7% more user
+cycles than main's one-lane emission at every placement. It executes 0.02% more instructions: the same
+work at a lower rate. Its wall time, +0.6%, stays within main's own spread. `e7416f30`'s single
+placement read −0.03% cycles, and `var5`'s +0.68% (Exploratory). In the cohorts it doesn't show:
+in eight SQLite, where 89 and 93 of 96 compiles started on one lane and never grew, the jobserver
+policy took 0.1–0.2% fewer user cycles than main's. Without a jobserver, the head is within main's
+own spread.
+
 ## Exploratory
 
 These runs came before the qualified head, and their summaries are in
@@ -168,8 +240,9 @@ These runs came before the qualified head, and their summaries are in
 
 ## Limitations
 
-- Each build has one code placement. `time-runs` compares two copies of each executable, not other
-  placements.
+- The cohorts and `measure5.sh`'s and `measure6.sh`'s `time-runs` controls measure one code placement
+  per build, and `time-runs` there compares two copies of each executable. Only `measure7.sh`'s
+  controls are compared over placements.
 - Physical DRAM traffic was not measured: the 9700X's DF counters await validation
   ([buster-performance#49](https://github.com/buster14a/buster-performance/issues/49)).
 - The tail cost shows only where a file is short of lanes as others finish. These three workloads
