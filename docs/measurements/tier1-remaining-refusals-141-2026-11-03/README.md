@@ -7,7 +7,9 @@ Evidence for [buster#1204](https://github.com/buster14a/buster/pull/1204), which
 - the calling convention's rarer aggregate shapes and the aggregates it ignores;
 - the IR's vectors;
 - two follow-up commits that cut what the long double and vector support costs code that uses neither. They took
-  instructions away but ran slower over code placements (below), and buster#1204 reverts them (`9a26fd50`).
+  instructions away but ran slower over code placements (below), and buster#1204 reverts them (`9a26fd50`);
+- the review's fixes after the revert (commits 12 to 14), and the head against its main;
+- #142's campaign at the head.
 
 Everything below ran on the Ryzen 7 9700X (benchpress). Each build and each measurement held
 `~/buster-fast-bench/exclusive.sh` once (owner `claude-141-wide`), and every timed process was pinned to CPU 2.
@@ -41,12 +43,18 @@ file of the series. The follow-up commits were measured on the rebased trees.
 | `head-vpat` | `c27be772` + `patches/vpat.patch` | experiment: selection's vector candidates out of line (not taken) |
 | `head-vscan` | `97806049` | commit 8: one scan for vectors per function |
 | `head-ldscan` | `9862b563` | commit 9: one scan for long doubles per function |
+| `head-9a26fd50` | `9a26fd50` | commit 11, the revert of commits 8 and 9, with main `05447ed8` merged |
+| `head-3a2ce1b5` | `3a2ce1b5` | commit 12: the scans by the requested path, with a static per-thread count of vector-path scans |
+| `head-12x` | `3a2ce1b5` + `patches/12x.patch` | commit 12 with `c4f27c91`'s `ir.c`: commit 13's count, shared by main.c's units |
+| `main-730eea0a` | `730eea0a` | main at the head's last merge |
+| `head-c5f4863a` | `c5f4863a` | the head: commit 14, with main `730eea0a` merged |
 
 - `patches/series-9f3610a9..15929849.patch` is the series as measured. `patches/series-703ae9f5..9862b563.patch` is the
   rebased series with commits 8 and 9. The trees `head-vscan` and `head-ldscan` were copied from the working tree before
   their commits; their changed files hash to `97806049`'s and `9862b563`'s.
-- Each tree was built by `BUSTER_DEBUG_INFO=0 ./build.sh` (`build.sh`; logs in `logs-build/`), the repository's
-  build before the CMake cutover (buster#1191).
+- Each tree was built by `BUSTER_DEBUG_INFO=0 ./build.sh` (`build.sh`; logs in `logs-build/`). Up to `head-ldscan`,
+  that is the repository's build before the CMake cutover (buster#1191). From `head-9a26fd50` on, it is the
+  CMake/Ninja front end, publishing `build/cmake/native-g0/Release/compiler`.
 - Host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1, perf 7.2.9.
 - `common.sh` has the paths, the options and the lock's metadata.
 - Inputs:
@@ -203,6 +211,31 @@ that rotates by round (`ab9/compile-tier1-ab.log`). The rounds' medians (ms):
   test of the x87 stack's depth (`e7312716`), which doesn't depend on them.
 - `place10-failed/` is the first attempt. It asked for shifts in steps of 688 bytes, which the unit's 64-byte
   alignment refuses (`shifts-head-c27be772.log`), so its comparison ran no process.
+
+## The review's fixes, and the head against main (`queue11.sh`, `queue12.sh`, `queue14.sh`)
+
+The same methods as above: `bisect.sh` (`perf stat`, the mean of 3 holds of 11 runs) and `ab`, 5 rounds of 21 runs,
+the median of the rounds' medians. The scripts' build lines are in `queue*-run.log`.
+
+| Directories | Base | Head | Instructions | Cycles | Wall (`ab`) |
+| --- | --- | --- | --- | --- | --- |
+| `bisect11/`, `ab11/` | commit 11 (`9a26fd50`) | commit 12 (`3a2ce1b5`) | 5,852.95 M → 5,853.90 M (+0.95 M, +0.016%) | 2,382.74 M → 2,385.43 M (+0.11%) | 448.76 → 448.95 ms (+0.04%) |
+| `bisect12/` | `3a2ce1b5` | `head-12x` | 5,853.898 M → 5,853.906 M (+7,556) | 2,384.14 M → 2,384.86 M (+0.03%) | not run |
+| `bisect14/`, `ab14/` | main `730eea0a` | head `c5f4863a` | 5,821.32 M → 5,850.85 M (+29.53 M, +0.51%) | 2,393.36 M → 2,396.31 M (+0.12%) | running |
+
+- Commit 12 adds a test of the plan's or the request's path to each vector scan, and a count in each scan's vector
+  branch. Its round medians overlap commit 11's: 448.27 to 449.17 ms against 448.80 to 449.36 ms.
+- Commit 13 moves the count from a static per-unit variable to one that main.c's units share (buster's
+  `./build.sh check-call-graph` reported the static one as split state). It costs 7,556 instructions per compile.
+- The head against its main: +29.53 M instructions, within 0.22 M of the sum of the commits' own costs as measured on
+  earlier bases (−0.33 M, +15.25 M, +1.76 M, +11.67 M, +0.95 M and +0.01 M: 29.31 M; commit 14 wasn't measured alone).
+  `ab14/` is still running; its wall time will be added here.
+
+## #142's campaign at the head (`campaign.sh`, `diff-head-c5f4863a/`, `diff-scalar-head-c5f4863a/`)
+
+Queued after `ab14/` (`queue14.sh`): seeds 3400 to 3438 by the vector path and again with `--scalar`, the same
+seeds as #1117's record ([`tier1-burs-lifetimes-141-2026-11-02`](https://github.com/buster14a/buster-performance/pull/218)),
+so that each program's steps can be compared. Its results will be added here.
 
 ## Limitations
 
