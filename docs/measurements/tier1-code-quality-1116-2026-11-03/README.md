@@ -149,3 +149,32 @@ Records go from 359,685 to 320,806, and `call_stores` from 28,446 to 15,247.
   and runs the other 2.
 
 The generated programs and each step's output stay on the host.
+
+## The call-save bookkeeping's cost over placements (`9700x/placements/`)
+
+The A/B above times one executable per tree, and a placement of the code moves a compile by more than this change does
+(`docs/profiling.md`, "Builds over their code's placements and copies"). So the bookkeeping's cost was measured again,
+after a change that makes it cheaper, as the profiling guide says:
+
+- main: buster `703ae9f5`, main when this ran;
+- pr: buster `8b07e868`, the pull request with `703ae9f5` merged in;
+- new: buster `3b195d57`, the pull request's next commit. It looks a definition's interval up once instead of twice while
+  loads are owed, keeps the 16 call-save rows in one vector, compared and blended whole, and walks only the owed
+  registers' set bits. It emits the same code: Lua's 34 objects have `6e1e6121`'s hashes.
+
+`shifts.sh` built each tree by `./build.sh shifts` with `main_unit_backend.c`'s code at six shifts over a page (0 to 3,456
+bytes; its `.text` is aligned to 64), one hold each (`logs-build/shifts-*.log`; the 18 executables' hashes, all
+different, in `placements/shifts.sha256`). `placements.sh` ran `ab --rounds 3` of `time-runs --runs 2 --copies 2` over the
+four builds' placements, main twice, `--tier1 -c` of the frozen `sqlite3.c`, a round one hold, CPU 2
+(`placements/ab.log`, which keeps only the lines `ab` and `time-runs` write).
+
+| Build | Instructions | User cycles, rounds 1 / 2 / 3, against main | Range over placements |
+| --- | ---: | --- | --- |
+| main | 5,822.96 M | 2,375.4 / 2,374.7 / 2,373.4 M | |
+| pr | 5,832.81 M (+0.169%) | +0.48% / +0.51% / +0.51% | +0.26% to +1.07% |
+| new | 5,828.57 M (+0.096%) | +0.30% / +0.30% / +0.36% | +0.13% to +0.64% |
+| main again | 5,822.96 M | −0.02% / −0.07% / −0.02% | −0.28% to +0.30% |
+
+Over all 72 runs of each, the user cycles' medians are 2,374.2 M (main), 2,386.1 M (pr, +0.50%), 2,382.0 M (new,
++0.33%) and 2,373.1 M (main again, −0.05%). The single-executable A/B's +0.77% for `6e1e6121` was part placement: over
+placements, the pull request cost +0.5% before this change and +0.3% after it.
