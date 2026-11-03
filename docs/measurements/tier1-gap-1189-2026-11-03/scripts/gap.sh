@@ -2,7 +2,7 @@
 # gap.sh BUILDS OUT: main-96b6cbcd's TSVs and tables from the record's inputs, into OUT, by tools/gap.c. BUILDS holds
 # the four executables st-t1, lua-t1, st-clang2 and lua-clang2, whose SHA-256s main-96b6cbcd/inputs.sha256 gives with
 # their disassemblies' (GNU objdump 2.42's); main-96b6cbcd/callgrind.tar.zst holds their callgrind runs. Each output is
-# compared with the record's. The tables take clang's inlining remarks from main-96b6cbcd/inlined-*.tsv
+# compared with the record's; any input or output that differs makes the exit status 1. The tables take clang's inlining remarks from main-96b6cbcd/inlined-*.tsv
 # (scripts/inlining.sh).
 set -eu
 R=$(cd "$(dirname "$0")/.." && pwd)
@@ -16,7 +16,8 @@ for b in st-t1 lua-t1 st-clang2 lua-clang2; do
     cp "$B/$b" .
     objdump -d --no-show-raw-insn $b > $b.dis
 done
-sha256sum -c "$M/inputs.sha256" || echo "gap.sh: an input differs from the record's (another build, or another objdump's text)"
+status=0
+sha256sum -c "$M/inputs.sha256" || { echo "gap.sh: an input differs from the record's (another build, or another objdump's text)"; status=1; }
 zstd -dc "$M/callgrind.tar.zst" | tar -xf -
 # clang's executables are named in callgrind's output by the path they ran at, the first word of its "cmd:" line;
 # Buster's, whose symbols valgrind doesn't read, are "???" at 0x108000.
@@ -31,5 +32,11 @@ done
 ./gap table st-t1.tsv -- st-clang2.tsv --inlined "$M/inlined-st.tsv" > st-table.md
 ./gap table $(for s in $scripts; do echo $s-t1.tsv; done) -- $(for s in $scripts; do echo $s-clang2.tsv; done) --inlined "$M/inlined-lua.tsv" > lua-table.md
 for f in st-t1.tsv st-clang2.tsv $(for s in $scripts; do echo $s-t1.tsv $s-clang2.tsv; done) st-table.md lua-table.md; do
-    cmp -s $f "$M/$f" && echo "$f: the record's" || echo "$f: DIFFERS from the record's"
+    if cmp -s $f "$M/$f"; then
+        echo "$f: the record's"
+    else
+        echo "$f: DIFFERS from the record's"
+        status=1
+    fi
 done
+exit $status
