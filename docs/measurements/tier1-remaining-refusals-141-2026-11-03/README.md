@@ -9,7 +9,9 @@ Evidence for [buster#1204](https://github.com/buster14a/buster/pull/1204), which
 - two follow-up commits that cut what the long double and vector support costs code that uses neither. They took
   instructions away but ran slower over code placements (below), and buster#1204 reverts them (`9a26fd50`);
 - the review's fixes after the revert (commits 12 to 14), and the head against its main;
-- #142's campaign at the head.
+- #142's campaign at the head, by both of Tier 1's paths;
+- the last review commits (15 to 19), measured against the head after the campaign, and every campaign program compiled
+  again by the merged tree.
 
 Everything below ran on the Ryzen 7 9700X (benchpress). Each build and each measurement held
 `~/buster-fast-bench/exclusive.sh` once (owner `claude-141-wide`), and every timed process was pinned to CPU 2.
@@ -48,6 +50,8 @@ file of the series. The follow-up commits were measured on the rebased trees.
 | `head-12x` | `3a2ce1b5` + `patches/12x.patch` | commit 12 with `c4f27c91`'s `ir.c`: commit 13's count, shared by main.c's units |
 | `main-730eea0a` | `730eea0a` | main at the head's last merge |
 | `head-c5f4863a` | `c5f4863a` | the head: commit 14, with main `730eea0a` merged |
+| `head-b6d9570c` | `b6d9570c` | commit 15: the wide split counts its output in 64 bits |
+| `head-1b073842` | `1b073842` | commit 19: commits 15 to 19, the review's last fixes; buster#1204 merged its tree plus a test-only commit 20 (`7fcc5e6a`) |
 
 - `patches/series-9f3610a9..15929849.patch` is the series as measured. `patches/series-703ae9f5..9862b563.patch` is the
   rebased series with commits 8 and 9. The trees `head-vscan` and `head-ldscan` were copied from the working tree before
@@ -234,9 +238,57 @@ the median of the rounds' medians. The scripts' build lines are in `queue*-run.l
 
 ## #142's campaign at the head (`campaign.sh`, `diff-head-c5f4863a/`, `diff-scalar-head-c5f4863a/`)
 
-Queued after `ab14/` (`queue14.sh`): seeds 3400 to 3438 by the vector path and again with `--scalar`, the same
-seeds as #1117's record ([`tier1-burs-lifetimes-141-2026-11-02`](https://github.com/buster14a/buster-performance/pull/218)),
-so that each program's steps can be compared. Its results will be added here.
+Queued after `ab14/` (`queue14.sh`): seeds 3400 to 3439 of Csmith `0cdc710` and YARPGen `1adb290`, two seeds a chunk,
+80 programs, by Tier 0 and `--tier1`, and again with `--tier1 --scalar`, against clang -O0 and -O2 (30 s a run). These
+are the seeds of #1117's record ([`tier1-burs-lifetimes-141-2026-11-02`](https://github.com/buster14a/buster-performance/pull/218)),
+so each program's steps compare. Each pass's `campaign.tsv` has a line per program; `chunk-*.log` are the harness's own.
+
+| Pass | Passed | Failed in clang's steps | Failed in Buster's |
+| --- | ---: | ---: | ---: |
+| `--tier1` (`diff-head-c5f4863a/`) | 60 | 20 | 0 |
+| `--tier1 --scalar` (`diff-scalar-head-c5f4863a/`) | 60 | 20 | 0 |
+
+- The two passes' 80 lines (status and failure signature) are identical.
+- The 20 failures are clang -O0's own:
+  - 14 compiles that fail (`sig=clang-o0-compile:exit`): YARPGen's arrays past the small code model, which Buster refuses
+    at both tiers too, but for `yarpgen-3437`, which Buster now compiles and runs at both tiers (`buster-tier0-run=ok`,
+    `buster-tier1-run=ok`), where #1117's linker refused its 3.6 GB array;
+  - 2 compiles past the output limit, which Buster compiles and runs at both tiers (`sig=clang-o0-compile:output-limit`);
+  - 4 runs past 30 s (`sig=clang-o0-run:timeout`), where Buster's runs pass 30 s too.
+- 79 of the 80 lines equal #1117's record's (`diff-h-153497c4/campaign.tsv` there, status and every step); the 80th
+  is `yarpgen-3437`, above.
+
+## The last review commits against the head (`queue15.sh`, `queue16.sh`)
+
+Measured after the campaign, by the same methods (`bisect.sh`; `ab`, 5 rounds of 21 runs):
+
+| Directories | Base | Head | Instructions | Cycles | Wall (`ab`) | `sqlite3.o` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `bisect15/` | `c5f4863a` | commit 15 (`b6d9570c`) | 5,850.855 M → 5,850.862 M (+7,572) | 2,398.03 M → 2,412.31 M (+0.60%) | not run | identical |
+| `bisect16/` | main `730eea0a` | commit 19 (`1b073842`) | 5,821.32 M → 5,851.11 M (+29.79 M, +0.51%) | 2,393.74 M → 2,406.31 M (+0.52%) | | |
+| `bisect16/` | `c5f4863a` | commit 19 (`1b073842`) | 5,850.85 M → 5,851.11 M (+0.26 M, +0.004%) | 2,398.11 M → 2,406.31 M (+0.34%) | | identical |
+| `ab16/` | main `730eea0a` | commit 19 (`1b073842`) | 5,821.32 M → 5,851.11 M (+0.51%) | 2,393.19 M → 2,406.10 M (+0.54%) | 450.33 → 452.76 ms (+0.54%) | |
+
+- Commit 15 and commit 19 write the same `sqlite3.o` as `c5f4863a`. So their instructions (+7,572 and +0.26 M) are what
+  their code costs code without 128-bit, long double or vector values. Their cycle changes (+0.60% and +0.34%), which
+  run against the instructions, read as code placement (the limitations below).
+- The merged tree against its main is +0.51% in instructions, as `ab14/` read `c5f4863a`, and +0.54% in cycles and
+  wall time. The head is slower in every round: round medians of 452.46 to 453.17 ms against 449.91 to 450.89 ms.
+
+## The campaign's programs compiled again by the merged tree (`equal15.py`, `equal16/`)
+
+`queue16.sh` compiled each program of both campaign passes again by `c5f4863a` and by `1b073842`, Tier 1's path as
+the pass ran it (`equal15.py`), and compared each executable with the campaign's `buster-tier1.exe` byte for byte:
+
+- all 100 compiles of each pass (the 80 programs and each chunk's preflight) give the same executable from
+  `1b073842` as from `c5f4863a`;
+- all 87 executables the campaign kept are those `1b073842` writes; the other 13 compiles fail at every compiler (the
+  YARPGen programs above);
+- where a compile fails, its stderr differs between runs of the same compiler (10 of the 13, temporary paths in the
+  messages), so `equal16/`'s stderr columns compare nothing.
+
+So the campaign's result holds for the merged tree, which writes the campaign's programs byte for byte as the measured
+head did.
 
 ## Limitations
 
