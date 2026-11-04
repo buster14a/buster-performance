@@ -1,0 +1,307 @@
+# Tier 1's remaining refusals (buster#141), 2026-11-03
+
+Evidence for [buster#1204](https://github.com/buster14a/buster/pull/1204), which removes the Tier 1 refusals claimed on
+[buster#141](https://github.com/buster14a/buster/issues/141). It covers:
+- 128-bit integers;
+- long double on the x87;
+- the calling convention's rarer aggregate shapes and the aggregates it ignores;
+- the IR's vectors;
+- two follow-up commits that cut what the long double and vector support costs code that uses neither. They took
+  instructions away but ran slower over code placements (below), and buster#1204 reverts them (`9a26fd50`);
+- the review's fixes after the revert (commits 12 to 14), and the head against its main;
+- #142's campaign at the head, by both of Tier 1's paths;
+- the last review commits (15 to 19), measured against the head after the campaign, and every campaign program compiled
+  again by the merged tree.
+
+Everything below ran on the Ryzen 7 9700X (benchpress). Each build and each measurement held
+`~/buster-fast-bench/exclusive.sh` once (owner `claude-141-wide`), and every timed process was pinned to CPU 2.
+
+The files are in `9700x/`:
+- Lock-wait lines are removed from the logs.
+- The trees, executables, objects, databases and perf data are left out.
+- `9700x/patches/` holds every measured tree's source as patches (below).
+
+The test-suite results in the cloud container are in buster#1204's description, not here.
+
+## Revisions, trees and setup
+
+The series was measured as committed on main `9f3610a9`, before the rebase onto main `703ae9f5`. The rebase changed no
+file of the series. The follow-up commits were measured on the rebased trees.
+
+| Tree | Revision | What it is |
+| --- | --- | --- |
+| `base-9f3610a9` | `9f3610a9` | main before the series (buster#1190's head) |
+| `head-efb954e9` | `efb954e9` | 128-bit integers (rebased: `f8bff99e`) |
+| `head-51e969b9` | `51e969b9` | long double (rebased: `93121b23`) |
+| `head-0c76601d` | `0c76601d` | x87 aggregates (rebased: `a8d78db3`) |
+| `head-f27c103c` | `f27c103c` | the rarer shapes' first version, before the whole-vector-part fix (`patches/f27c103c.patch`) |
+| `head-6cea6c24`, `head-73ad6e13` | `6cea6c24`, `73ad6e13` | ignored aggregates' first versions, per-call reads of argument locations (patches) |
+| `head-734aff5b` | `734aff5b` | ignored aggregates as committed, on `fb8e4d4a`, the rarer shapes as committed (rebased: `a934e808`, `6dad4b23`) |
+| `head-9004e177` | `9004e177` | the IR's vectors (SSA promotion, SCCP, DCE, CFG cleanup; rebased: `1794ac13`) |
+| `head-b4401c64` | `b4401c64` | the IR's vectors with SCCP gated by a per-prepare scan (iteration, patch) |
+| `head-7571f289`, `head-a917e5e2`, `head-ba5bfd5c` | as named | Tier 1's vectors, iterations (patches; `7571f289` is on `ddf8977a`, an iteration of the IR commit) |
+| `head-15929849` | `15929849` | Tier 1's vectors as committed (rebased: `c27be772`) |
+| `head-1794ac13`, `head-c27be772` | `1794ac13`, `c27be772` | the rebased IR and Tier 1 vector commits, on main `703ae9f5` |
+| `head-vpat` | `c27be772` + `patches/vpat.patch` | experiment: selection's vector candidates out of line (not taken) |
+| `head-vscan` | `97806049` | commit 8: one scan for vectors per function |
+| `head-ldscan` | `9862b563` | commit 9: one scan for long doubles per function |
+| `head-9a26fd50` | `9a26fd50` | commit 11, the revert of commits 8 and 9, with main `05447ed8` merged |
+| `head-3a2ce1b5` | `3a2ce1b5` | commit 12: the scans by the requested path, with a static per-thread count of vector-path scans |
+| `head-12x` | `3a2ce1b5` + `patches/12x.patch` | commit 12 with `c4f27c91`'s `ir.c`: commit 13's count, shared by main.c's units |
+| `main-730eea0a` | `730eea0a` | main at the head's last merge |
+| `head-c5f4863a` | `c5f4863a` | the head: commit 14, with main `730eea0a` merged |
+| `head-b6d9570c` | `b6d9570c` | commit 15: the wide split counts its output in 64 bits |
+| `head-1b073842` | `1b073842` | commit 19: commits 15 to 19, the review's last fixes; buster#1204 merged its tree plus a test-only commit 20 (`7fcc5e6a`) |
+
+- `patches/series-9f3610a9..15929849.patch` is the series as measured. `patches/series-703ae9f5..9862b563.patch` is the
+  rebased series with commits 8 and 9. The trees `head-vscan` and `head-ldscan` were copied from the working tree before
+  their commits; their changed files hash to `97806049`'s and `9862b563`'s.
+- Each tree was built by `BUSTER_DEBUG_INFO=0 ./build.sh` (`build.sh`; logs in `logs-build/`). Up to `head-ldscan`,
+  that is the repository's build before the CMake cutover (buster#1191). From `head-9a26fd50` on, it is the
+  CMake/Ninja front end, publishing `build/cmake/native-g0/Release/compiler`.
+- Host: AMD Ryzen 7 9700X, Linux 6.18.50-2-lts, clang 23.1.1, perf 7.2.9.
+- `common.sh` has the paths, the options and the lock's metadata.
+- Inputs:
+  - the frozen `sqlite3.c` 3.53.2 (`~/buster-fast-bench/preprocessor-corpora-astra-01a158dd/sqlite/sqlite3.c`, SHA-256
+    `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`), with
+    `-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`. It has no
+    long double, vector, x87 aggregate or rare aggregate shape, and two 128-bit products;
+  - speedtest1 with that `sqlite3.c` (#136's unity harness, `speedtest1-unity.c`, SHA-256
+    `eadb487f20f2bb4b383ad25078b0677a97d04f06204325cd9ab34665efbac1d5`), run as
+    `--shrink-memory --reprepare --stats --journal wal --size 5 --heap 40000000 64 --testset mix1`.
+
+## Each step against its parent (`measure.sh`)
+
+`measure.sh BASE HEAD` (outputs in `measure-HEAD/`):
+1. Each tree's `--tier1 --tier1-report --tier1-refusals -c` of `sqlite3.c`, and the head's with `--tier1-strict`
+   (`reports/`).
+2. `ab` of `--tier1 -c sqlite3.c`, 5 rounds of 21 runs (`compile-tier1-ab.log`). The table gives the median of the
+   rounds' medians.
+3. `perf stat -e instructions:u,cycles:u`, 11 runs a hold, 3 holds per tree (`compile-stat-*.csv`). The table gives
+   the mean of the holds.
+4. A `perf record` of the head (`perf-report-*.txt`, cycles at 20 kHz, one compile).
+5. speedtest1 built by the base's and the head's `--tier1` (`st-t1base`, `st-t1`) and by the head's Tier 0 (`st-t0`).
+   Each runs `--verify`, then 11 rounds of the three in a rotating order, each from a fresh database on tmpfs (`st/`).
+6. The head's `test-tier1-wide` (and from `15929849`, `test-tier1-masks`), natively.
+
+| Step | Tier 1 functions | Instructions | Cycles | Wall (ms) |
+| --- | --- | --- | --- | --- |
+| `9f3610a9` → `efb954e9` | 2,666 → 2,668 | 5,895.42 M → 5,895.09 M | 2,386.88 M → 2,393.68 M | 449.12 → 450.16 |
+| `efb954e9` → `51e969b9` | 2,668 | 5,895.09 M → 5,910.34 M | 2,392.15 M → 2,390.65 M | 449.76 → 449.61 |
+| `51e969b9` → `734aff5b` | 2,668 | 5,910.34 M → 5,912.10 M | 2,390.32 M → 2,393.84 M | 449.55 → 450.28 |
+| `734aff5b` → `15929849` | 2,668 | 5,912.10 M → 5,923.77 M | 2,393.68 M → 2,404.20 M | 450.25 → 452.12 |
+
+- At `9f3610a9` Tier 1 refuses `sqlite3Multiply128` and `sqlite3Multiply160`; from `efb954e9` on it compiles all 2,668
+  functions, and `--tier1-strict` exits 0.
+- From `efb954e9` on, each step's `--tier1` object is byte-identical to its parent's (`cmp` of
+  `/tmp/claude-141-wide/report-*.o`). So the later rows measure only what the new support costs code without it.
+- speedtest1's medians (µs, `st/times.txt`):
+
+  | Step | Base's Tier 1 | Head's Tier 1 | Head's Tier 0 |
+  | --- | ---: | ---: | ---: |
+  | `efb954e9` | 207,068 | 208,370 | 256,178 |
+  | `51e969b9` | 208,846 | 208,183 | 257,381 |
+  | `734aff5b` | 208,133 | 208,156 | 264,201 |
+  | `15929849` | 207,664 | 208,418 | 255,547 |
+
+  - At the last two steps the base's and the head's Tier 1 executables are byte-identical (`cmp`), yet their medians
+    differ by up to 0.36%. That is the noise floor of this comparison.
+  - Every build's `--verify` prints `Verification Hash: 1248168 a7fa3957840af6d608d53fcdd57a125b35385b9d1e813739`.
+- The iterations, measured the same way:
+
+  | Head (base) | Instructions | Wall (ms) |
+  | --- | --- | --- |
+  | `6cea6c24` (`51e969b9`) | 5,910.34 M → 5,914.89 M | 449.74 → 451.50 |
+  | `7571f289` (`73ad6e13`) | 5,912.04 M → 5,926.50 M | 451.10 → 451.47 |
+  | `a917e5e2` (`734aff5b`) | 5,912.10 M → 5,930.55 M | 450.26 → 452.26 |
+  | `ba5bfd5c` (`734aff5b`) | 5,912.10 M → 5,926.61 M | 450.19 → 451.62 |
+
+  - `6cea6c24` read every call's argument locations. `734aff5b` replaced that with one vectorized scan per function.
+    The three aggregate commits' cost against `51e969b9` went from +4.55 M (`6cea6c24`'s stack) to +1.76 M
+    (`734aff5b`'s).
+  - `a917e5e2` gated SCCP by a scan per prepare. `ba5bfd5c` and `15929849` restructured selection behind one
+    `vector_node` test.
+
+## `perf stat` alone (`bisect.sh`)
+
+`bisect.sh TREE...`: `perf stat` of each tree's `--tier1 -c sqlite3.c`, 11 runs a hold, 3 rounds in an order that
+rotates by round. Then a `perf record` (cycles at 20 kHz, 5 compiles) of the first and the last tree. Means of the holds:
+
+| Directory | Tree | Instructions | Cycles |
+| --- | --- | --- | --- |
+| `bisect/` (first run) | `51e969b9` | 5,910.34 M | 2,390.84 M |
+| | `0c76601d` | 5,911.52 M | 2,402.66 M |
+| | `f27c103c` | 5,912.49 M | 2,418.19 M |
+| | `6cea6c24` | 5,914.89 M | 2,399.95 M |
+| `bisect2/` | `51e969b9`, `6cea6c24`, `73ad6e13` | 5,910.34 M, 5,914.89 M, 5,912.03 M | 2,390.13 M, 2,399.08 M, 2,397.20 M |
+| `bisect3/` | `734aff5b`, `b4401c64`, `a917e5e2`, `ba5bfd5c` | 5,912.10 M, 5,917.21 M, 5,930.55 M, 5,926.61 M | 2,394.28 M, 2,394.47 M, 2,405.69 M, 2,402.18 M |
+| `bisect4/` | `734aff5b`, `9004e177`, `b4401c64` | 5,912.10 M, 5,913.45 M, 5,917.21 M | 2,394.72 M, 2,391.74 M, 2,394.77 M |
+| `bisect5/` | `734aff5b`, `9004e177`, `ba5bfd5c`, `15929849` | 5,912.10 M, 5,913.45 M, 5,926.61 M, 5,923.77 M | 2,394.35 M, 2,390.30 M, 2,402.24 M, 2,402.87 M |
+| `bisect/` (sixth run) | `1794ac13`, `c27be772`, `vpat` | 5,841.01 M, 5,851.32 M, 5,850.95 M | 2,383.04 M, 2,385.17 M, 2,397.33 M |
+| `bisect7/` | `c27be772`, `vscan` | 5,851.33 M, 5,847.94 M | 2,383.80 M, 2,392.40 M |
+| `bisect8/` | `vscan`, `ldscan` | 5,847.94 M, 5,842.79 M | 2,391.26 M, 2,388.95 M |
+
+- `bisect5/` splits the vectors' cost:
+  - the IR commit `9004e177`: +1.35 M instructions, −0.17% cycles;
+  - Tier 1's commit `15929849`: +10.32 M instructions, +0.53% cycles.
+- The sixth run used `bisect6.sh`, a copy of `bisect.sh` whose rename of the output directory didn't apply. It wrote
+  into `bisect/` beside the first run, under its own trees' names (`bisect-run6.log`).
+- On the rebased trees (main `703ae9f5`), Tier 1's vector commit costs the same +10.32 M (`1794ac13` → `c27be772`).
+- `vpat` moves selection's vector candidates out of the twice-inlined candidates body. It saved 0.37 M instructions and
+  cost 0.5% to 0.6% more cycles, so it was not taken.
+- Commit 8 (`vscan`) removes 3.38 M instructions with 0.36% more cycles. Commit 9 (`ldscan`) removes 5.15 M with 0.10%
+  fewer cycles. With both, the head takes 5,842.79 M instructions: 8.54 M fewer than `c27be772` and 1.78 M more than
+  `1794ac13`. Commit 9's part recovers the long double commit's cost, not the vector commit's.
+- Cycles move with code placement as well as with work. `vpat` and `vscan` each removed instructions yet ran more
+  cycles. Wall time decides (`ab9/`, below).
+
+## Attribution by instruction samples
+
+- `irec2.sh TREE...` (`irec2/`): `perf record -e instructions:u -c 2000003` over 20 compiles per tree. That sample
+  period is below perf's throttling rate; `throttle-*.txt` counts 0 throttle events for each tree. Each report keeps
+  the `compiler` command alone and gives samples per symbol. A sample is 2,000,003 instructions, so per compile one
+  sample is about 0.1 M.
+  - `1794ac13` → `c27be772`: the samples sum to +10.8 M per compile (`perf stat`: +10.32 M).
+    `ir_function_has_vectors_path` became its own symbol at 16 samples, about 1.6 M per compile, because Tier 1's
+    commit scanned for vectors three times per function. Commit 8 brings that back to one scan.
+  - `efb954e9` → `51e969b9`: the samples sum to +19.5 M per compile (`perf stat`: +15.25 M).
+    `tier1_select_x87_node`, a new out-of-line symbol at 18 samples (about 1.8 M per compile), ran on every node.
+    Commit 9 gates it by a scan per function.
+  - The rest of each delta can't be pinned on functions. Inlining in the unity build shifts between the trees and moves
+    tens of millions of instructions between functions, in both directions, that the commits don't touch:
+    - for the vectors: `ir_cfg_validated` −28.5 M, `ir_check_graph` +30.1 M, `tier1_emit_cfg_problem` +52.9 M;
+    - for long double: `tier1_emit_cfg_problem` outlined at +131.0 M, `tier1_emit_cfg_function` −102.7 M.
+- `irec.sh` (`irec/`) and `irecord.sh` (`irecord/`) are earlier profiles at a 200,000-instruction period. `irec/`'s
+  totals don't match `perf stat`'s, which points to throttling, so `irec2/` replaces it. `irecord/` (one compile each of
+  `734aff5b`, `b4401c64`, `a917e5e2` and `ba5bfd5c`) guided the iterations and was not checked for throttling.
+
+## Commits 7, 8 and 9 by wall time (`ab9/`)
+
+`queue9.sh` runs `ab` of `--tier1 -c sqlite3.c` by `c27be772`, `vscan` and `ldscan`: 5 rounds of 21 runs, in an order
+that rotates by round (`ab9/compile-tier1-ab.log`). The rounds' medians (ms):
+
+| Tree | Rounds' medians | Median |
+| --- | --- | ---: |
+| `c27be772` (commit 7) | 447.759, 448.036, 448.048, 448.209, 448.908 | 448.048 |
+| `vscan` (commit 8) | 449.235, 449.391, 449.446, 449.963, 450.244 | 449.446 |
+| `ldscan` (commit 9) | 448.663, 448.899, 449.048, 449.199, 449.639 | 449.048 |
+
+- Commit 8 reads 0.31% slower than commit 7, and commit 9 reads 0.09% faster than commit 8. That leaves commit 9
+  0.22% slower than commit 7 with 8.54 M (0.15%) fewer instructions, as the cycles above read.
+- One executable per tree is one placement of its code. buster's profiling guide ("Comparing two versions", #509)
+  puts a whole compile's difference below about 0.2% under what this comparison resolves. So `place10.sh` compares
+  commit 7 and commit 9 over placements (below).
+
+## Commits 7 and 9 over placements (`place10/`)
+
+`place10.sh` follows #509's method ("Comparing two versions" in buster's `docs/profiling.md`):
+- Each tree's `./build.sh shifts` links its objects at six placements of `main_unit_checker.c`'s code: 0, 704, 1,408,
+  2,112, 2,816 and 3,520 bytes later (`shifts-*.log`). The unit's `.text` is aligned to 64.
+- `time-runs` then runs every placement from three fresh copies in turn, 3 runs per round, 3 rounds under `ab`.
+- Commit 7's executables run twice (`c27be772-again`), as the comparison's floor
+  (`compile-tier1-placements.log`, 486 runs).
+
+| Round | `ldscan` against `c27be772`, wall | user cycles | `c27be772-again` against `c27be772`, wall | user cycles |
+| --- | --- | --- | --- | --- |
+| 1 | +0.16% (placements −0.14% to +0.51%) | +0.17% (−0.07% to +0.53%) | −0.04% (−0.28% to +0.28%) | +0.00% (−0.25% to +0.24%) |
+| 2 | +0.10% (−0.21% to +0.47%) | +0.13% (−0.20% to +0.55%) | −0.05% (−0.38% to +0.23%) | −0.03% (−0.34% to +0.23%) |
+| 3 | +0.20% (−0.09% to +0.47%) | +0.17% (−0.06% to +0.54%) | −0.02% (−0.22% to +0.26%) | +0.01% (−0.18% to +0.26%) |
+
+- Commit 9 reads slower in every round, by 0.10% to 0.20%, with 0.15% fewer instructions. Commit 7 against itself
+  stays within 0.05%.
+- #509 counts a difference within the floors when it is within the reference's against itself and its range over the
+  placements includes 0. This one's range includes 0 but is past the reference's own difference.
+- buster#1204 had set that as the bar for keeping commits 8 and 9, so it reverts both (`9a26fd50`). It keeps their
+  test of the x87 stack's depth (`e7312716`), which doesn't depend on them.
+- `place10-failed/` is the first attempt. It asked for shifts in steps of 688 bytes, which the unit's 64-byte
+  alignment refuses (`shifts-head-c27be772.log`), so its comparison ran no process.
+
+## The review's fixes, and the head against main (`queue11.sh`, `queue12.sh`, `queue14.sh`)
+
+The same methods as above: `bisect.sh` (`perf stat`, the mean of 3 holds of 11 runs) and `ab`, 5 rounds of 21 runs,
+the median of the rounds' medians. The scripts' build lines are in `queue*-run.log`.
+
+| Directories | Base | Head | Instructions | Cycles | Wall (`ab`) |
+| --- | --- | --- | --- | --- | --- |
+| `bisect11/`, `ab11/` | commit 11 (`9a26fd50`) | commit 12 (`3a2ce1b5`) | 5,852.95 M → 5,853.90 M (+0.95 M, +0.016%) | 2,382.74 M → 2,385.43 M (+0.11%) | 448.76 → 448.95 ms (+0.04%) |
+| `bisect12/` | `3a2ce1b5` | `head-12x` | 5,853.898 M → 5,853.906 M (+7,556) | 2,384.14 M → 2,384.86 M (+0.03%) | not run |
+| `bisect14/`, `ab14/` | main `730eea0a` | head `c5f4863a` | 5,821.32 M → 5,850.85 M (+29.53 M, +0.51%) | 2,393.36 M → 2,396.31 M (+0.12%) | 450.55 → 451.49 ms (+0.21%) |
+
+- Commit 12 adds a test of the plan's or the request's path to each vector scan, and a count in each scan's vector
+  branch. Its round medians overlap commit 11's: 448.27 to 449.17 ms against 448.80 to 449.36 ms.
+- Commit 13 moves the count from a static per-unit variable to one that main.c's units share (buster's
+  `./build.sh check-call-graph` reported the static one as split state). It costs 7,556 instructions per compile.
+- The head against its main: +29.53 M instructions, within 0.22 M of the sum of the commits' own costs as measured on
+  earlier bases (−0.33 M, +15.25 M, +1.76 M, +11.67 M, +0.95 M and +0.01 M: 29.31 M; commit 14 wasn't measured alone).
+- Its wall time: the head is slower in every round, by 0.48 to 1.49 ms; the round medians are 450.40 to 450.84 ms for
+  main and 451.03 to 451.89 ms for the head (`ab14/`, 210 runs).
+
+## #142's campaign at the head (`campaign.sh`, `diff-head-c5f4863a/`, `diff-scalar-head-c5f4863a/`)
+
+Queued after `ab14/` (`queue14.sh`): seeds 3400 to 3439 of Csmith `0cdc710` and YARPGen `1adb290`, two seeds a chunk,
+80 programs, by Tier 0 and `--tier1`, and again with `--tier1 --scalar`, against clang -O0 and -O2 (30 s a run). These
+are the seeds of #1117's record ([`tier1-burs-lifetimes-141-2026-11-02`](https://github.com/buster14a/buster-performance/pull/218)),
+so each program's steps compare. Each pass's `campaign.tsv` has a line per program; `chunk-*.log` are the harness's own.
+
+A failed program's signature (`sig=`) is its first failing step's in the order buster's `test-differential` runs
+them (`differential_compilers`: clang -O0, clang -O2, then Buster's Tier 0 and Tier 1), so a program that fails in
+clang's steps and in Buster's both has a clang signature. The table counts signatures, then the clang-primary programs
+whose Buster steps fail too:
+
+| Pass | Passed | Clang-primary signatures | Buster-primary signatures | Clang-primary, Buster's compile fails too | Clang-primary, Buster's run times out too |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `--tier1` (`diff-head-c5f4863a/`) | 60 | 20 | 0 | 13 | 4 |
+| `--tier1 --scalar` (`diff-scalar-head-c5f4863a/`) | 60 | 20 | 0 | 13 | 4 |
+
+- The two passes' 80 lines (status and failure signature) are identical.
+- The 20 failures' signatures are clang -O0's; 17 of them fail in Buster's steps too, at both tiers, and no Buster
+  step fails where clang's pass:
+  - 14 compiles that fail (`sig=clang-o0-compile:exit`): YARPGen's arrays past the small code model, which Buster refuses
+    at both tiers too (`buster-tier0-compile=exit:1` and `buster-tier1-compile=exit:1`), but for `yarpgen-3437`, which
+    Buster now compiles and runs at both tiers (`buster-tier0-run=ok`, `buster-tier1-run=ok`), where #1117's linker
+    refused its 3.6 GB array;
+  - 2 compiles past the output limit, which Buster compiles and runs at both tiers (`sig=clang-o0-compile:output-limit`);
+  - 4 runs past 30 s (`sig=clang-o0-run:timeout`), where Buster's runs pass 30 s too, at both tiers
+    (`buster-tier0-run=timeout:0` and `buster-tier1-run=timeout:0`).
+- 79 of the 80 lines equal #1117's record's (`diff-h-153497c4/campaign.tsv` there, status and every step); the 80th
+  is `yarpgen-3437`, above.
+
+## The last review commits against the head (`queue15.sh`, `queue16.sh`)
+
+Measured after the campaign, by the same methods (`bisect.sh`; `ab`, 5 rounds of 21 runs):
+
+| Directories | Base | Head | Instructions | Cycles | Wall (`ab`) | `sqlite3.o` |
+| --- | --- | --- | --- | --- | --- | --- |
+| `bisect15/` | `c5f4863a` | commit 15 (`b6d9570c`) | 5,850.855 M → 5,850.862 M (+7,572) | 2,398.03 M → 2,412.31 M (+0.60%) | not run | identical |
+| `bisect16/` | main `730eea0a` | commit 19 (`1b073842`) | 5,821.32 M → 5,851.11 M (+29.79 M, +0.51%) | 2,393.74 M → 2,406.31 M (+0.52%) | | |
+| `bisect16/` | `c5f4863a` | commit 19 (`1b073842`) | 5,850.85 M → 5,851.11 M (+0.26 M, +0.004%) | 2,398.11 M → 2,406.31 M (+0.34%) | | identical |
+| `ab16/` | main `730eea0a` | commit 19 (`1b073842`) | 5,821.32 M → 5,851.11 M (+0.51%) | 2,393.19 M → 2,406.10 M (+0.54%) | 450.33 → 452.76 ms (+0.54%) | |
+
+- Commit 15 and commit 19 write the same `sqlite3.o` as `c5f4863a`. So their instructions (+7,572 and +0.26 M) are what
+  their code costs code without 128-bit, long double or vector values. Their cycle changes (+0.60% and +0.34%), which
+  run against the instructions, read as code placement (the limitations below).
+- The merged tree against its main is +0.51% in instructions, as `ab14/` read `c5f4863a`, and +0.54% in cycles and
+  wall time. The head is slower in every round: round medians of 452.46 to 453.17 ms against 449.91 to 450.89 ms.
+
+## The campaign's programs compiled again by the merged tree (`equal15.py`, `equal16/`)
+
+`queue16.sh` compiled each program of both campaign passes again by `c5f4863a` and by `1b073842`, Tier 1's path as
+the pass ran it (`equal15.py`), and compared each executable with the campaign's `buster-tier1.exe` byte for byte:
+
+- all 100 compiles of each pass (the 80 programs and each chunk's preflight) give the same executable from
+  `1b073842` as from `c5f4863a`;
+- all 87 executables the campaign kept are those `1b073842` writes; the other 13 compiles fail at every compiler (the
+  YARPGen programs above);
+- where a compile fails, its stderr differs between runs of the same compiler (10 of the 13, temporary paths in the
+  messages), so `equal16/`'s stderr columns compare nothing.
+
+So the campaign's result holds for the merged tree, which writes the campaign's programs byte for byte as the measured
+head did.
+
+## Limitations
+
+- Cycles and wall time swing by about 0.5% to 1% between builds that differ in code placement alone; instruction
+  counts are deterministic to a few hundred.
+- The speedtest1 rows compare executables built by different compilers. Where those executables are identical, the
+  rows show the noise floor.
+- The per-function attribution names only the work whose symbol appears or disappears. Inlining hides the rest.

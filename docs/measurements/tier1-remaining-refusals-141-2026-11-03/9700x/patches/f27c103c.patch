@@ -1,0 +1,732 @@
+From f27c103ca7786b37f1e41a5f6194faa37de4e216 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 01:52:07 +0000
+Subject: [PATCH] Tier 1: the convention's rarer aggregate shapes (#141)
+
+A by-value aggregate's parts now come from one function,
+tier1_select_parts_of, as Tier 0's tier0_parts_of has them. A part with
+no register is in its location's stack slot:
+
+- a SPLIT location's other part, where a register clang doesn't count
+  (an _Atomic scalar's or nullptr_t's) left LLVM without one for it;
+- a STACK location's high or low eightbyte alone (HIGH, LOW), the other
+  eightbyte being padding.
+
+In registers, a high eightbyte of padding takes none, and with HIGH the
+only register holds eightbyte 1. Results take HIGH the same way
+(tier1_select_result_parts).
+
+The entry stores a parameter's slot part into its copy through the
+scratch register. A call copies an argument's slot part from its
+address into the outgoing slot, and stages only its register parts.
+
+Still refused: an ignored aggregate, and the shapes only vectors make
+(a part in a vector register whole, a DEMOTED result).
+
+test-checker-driver's fixtures of two units share one harness now, and
+gain the rarer shapes' fixture: HIGH and LOW in registers and slots,
+and SPLIT integer and double-long pairs, both ways round, against
+clang -O0's build.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TiDLnvjnrjwbym9rZvTaVA
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/tier1-selection.md                       |  29 ++-
+ docs/tier1.md                                 |  13 +-
+ .../compiler/c_check_tier1_driver_test.c      | 209 +++++++++++-------
+ src/buster/compiler/c_checker_driver_test.c   |   4 +
+ src/buster/compiler/tier1_emit.c              |  21 +-
+ src/buster/compiler/tier1_emit_cfg.c          |  55 +++--
+ src/buster/compiler/tier1_select.c            | 101 ++++++---
+ 7 files changed, 280 insertions(+), 152 deletions(-)
+
+diff --git a/docs/tier1-selection.md b/docs/tier1-selection.md
+index 00c9e011..25101fc6 100644
+--- a/docs/tier1-selection.md
++++ b/docs/tier1-selection.md
+@@ -241,17 +241,24 @@ patterns are:
+ - By-value aggregates (#789): a call or a function with ABI records takes each
+   argument and parameter where its record says (`tier1_select_argument_place`,
+   `tier1_select_parameter_place`): a scalar in its register or stack slot, and
+-  an aggregate, whose IR value is a pointer to its bytes, in registers as parts
+-  of up to 8 bytes (`tier1_select_parts`: a general or an xmm register per
+-  eightbyte) or on the stack whole (up to 512 bytes). A result in registers comes
+-  back as parts in rax and rdx or xmm0 and xmm1, and one of the memory class
+-  through the hidden pointer (up to 4,096 bytes for a function's own, which its
+-  return copies). An aggregate parameter's value is its copy's address, a frame
+-  object past the IR's slots that the entry fills from its registers, or its
+-  stack slots in the incoming area, selected as a frame object's address
+-  (`TIER1_RULE_STACK_ADDRESS`). Refused: a part LLVM puts in a stack slot
+-  (`SPLIT`), a high or low eightbyte alone, a 16-byte vector part and a result
+-  LLVM demotes to a hidden pointer. Every function and
++  an aggregate, whose IR value is a pointer to its bytes, in parts of up to 8
++  bytes, one per eightbyte (`tier1_select_location_parts`, as Tier 0's
++  `tier0_parts_of`), or on the stack whole (up to 512 bytes). A part is in a
++  general or an xmm register, or (#141) in a stack slot: a `SPLIT` location's
++  other part, after a register clang doesn't count (an `_Atomic` scalar's or
++  `nullptr_t`'s) left LLVM without one for it, and a `STACK` location's high or
++  low eightbyte alone (`HIGH`, `LOW`), the other one padding. In registers, a
++  high eightbyte of padding takes none, and with `HIGH` the only register holds
++  eightbyte 1. A result in registers comes back as parts in rax and rdx or xmm0
++  and xmm1 (`tier1_select_result_parts`, eightbyte 1 alone with `HIGH`), and
++  one of the memory class through the hidden pointer (up to 4,096 bytes for a
++  function's own, which its return copies). An aggregate parameter's value is
++  its copy's address, a frame object past the IR's slots that the entry fills
++  from its registers and slots, or its stack slots in the incoming area when it
++  is there whole, selected as a frame object's address
++  (`TIER1_RULE_STACK_ADDRESS`). Refused: an ignored aggregate, a 16-byte vector
++  part and a result LLVM demotes to a hidden pointer (`DEMOTED`), both of which
++  only a vector type makes. Every function and
+   call with records goes to the CFG consumer. Before a call's moves, it copies
+   the call's aggregates from their addresses into their stack slots, or into the
+   red zone's staging slots, whose registers it loads after the moves. An address
+diff --git a/docs/tier1.md b/docs/tier1.md
+index c0671e0c..ff5157cd 100644
+--- a/docs/tier1.md
++++ b/docs/tier1.md
+@@ -263,10 +263,11 @@ from rsp around it (the selection guide's "The dynamic stack"). So do the
+ 128-bit integers (#141), as pairs of 64-bit halves ("The 128-bit integers",
+ below), and long double (#141), in frame objects of their own, computed on the
+ x87 stack (the selection guide's "Long double"), with aggregates returned in
+-the x87's registers. Still refused: vectors, the convention's rarer aggregate
+-shapes (a part in a stack slot, a high or low eightbyte alone, a vector's
+-register), and naked functions, whose bodies are assembly Tier 0 copies as
+-written. The IR's switches and selects of floating
++the x87's registers, and the convention's rarer aggregate shapes (#141): a
++part in a stack slot, and a high or low eightbyte alone. Still refused:
++vectors (and with them an aggregate's part in a vector register whole and a
++result LLVM demotes to a hidden pointer), an ignored aggregate, and naked
++functions, whose bodies are assembly Tier 0 copies as written. The IR's switches and selects of floating
+ values are refused too, but the C driver's lowering makes neither: a `switch`
+ comes as compares or a jump table, which Tier 1 takes, and `?:` as branches.
+ 
+@@ -351,7 +352,9 @@ machine (#141). `test-checker-driver`'s wide values' fixture
+ x87's registers (a struct of a long double, a `_Complex long double`) and the
+ memory class's, to and from clang -O2's code and through a variadic
+ definition, beside 128-bit integers within its bodies, every function Tier 1's
+-by both paths, against clang -O0's build.
++by both paths, against clang -O0's build; and its rarer shapes' fixture passes
++aggregates with a high or a low eightbyte alone, in a register and in a stack
++slot, and `SPLIT` ones, so.
+ 
+ `test-c-testsuite --tier1` runs c-testsuite's programs so, and
+ `test-differential --tier1-arg --tier1` #142's campaigns.
+diff --git a/src/buster/compiler/c_check_tier1_driver_test.c b/src/buster/compiler/c_check_tier1_driver_test.c
+index c20d2ccb..cb7447db 100644
+--- a/src/buster/compiler/c_check_tier1_driver_test.c
++++ b/src/buster/compiler/c_check_tier1_driver_test.c
+@@ -825,6 +825,89 @@ static const char check_test_tier1_wide_source[] =
+     "    return 0;\n"
+     "}\n";
+ 
++// The convention's rarer shapes' fixture (#141): by-value aggregates whose low eightbyte is padding (HIGH: eightbyte 1
++// alone in a register or a stack slot) or whose high one is (in a register alone, or LOW: on the stack in one slot), and
++// SPLIT ones, a part in a register and the other in a stack slot, where an _Atomic scalar takes a register clang doesn't
++// count: an integer pair split between r9 and the stack, and a double and a long split between rdi and the stack, each
++// way round. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results.
++static const char check_test_tier1_shapes_header[] =
++    "#include <stdio.h>\n"
++    "typedef struct { long x; long : 64; } Low;\n"
++    "typedef struct { long : 64; long y; } High;\n"
++    "typedef struct { int : 32; int : 32; float f; int i; } HighMixed;\n"
++    "typedef struct { double d; long l; } DL;\n"
++    "typedef struct { long l; double d; } LD;\n"
++    "typedef struct { long a, b; } LL;\n"
++    "long b_low(Low s);\n"
++    "long b_high(High s);\n"
++    "long b_high_mixed(HighMixed s);\n"
++    "long b_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t);\n"
++    "long b_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t);\n"
++    "long b_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t);\n"
++    "long b_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t);\n"
++    "long b_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t);\n"
++    "Low b_make_low(long x);\n"
++    "High b_make_high(long y);\n"
++    "HighMixed b_make_high_mixed(int k);\n"
++    "long b_back(int k);\n"
++    "long a_low(Low s);\n"
++    "long a_high(High s);\n"
++    "long a_high_mixed(HighMixed s);\n"
++    "long a_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t);\n"
++    "long a_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t);\n"
++    "long a_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t);\n"
++    "long a_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t);\n"
++    "long a_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t);\n"
++    "Low a_make_low(long x);\n"
++    "High a_make_high(long y);\n"
++    "HighMixed a_make_high_mixed(int k);\n";
++
++static const char check_test_tier1_shapes_other_source[] =
++    "#include \"tier1-shapes.h\"\n"
++    "long b_low(Low s) { return a_low(s) * 2 + s.x; }\n"
++    "long b_high(High s) { return a_high(s) * 2 + s.y; }\n"
++    "long b_high_mixed(HighMixed s) { return a_high_mixed(s) * 2 + s.i; }\n"
++    "long b_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t) { return a_low_stack(a, b, c, d, e, u, s, t) + s.x; }\n"
++    "long b_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t) { return a_high_stack(a, b, c, d, e, u, s, t) + s.y; }\n"
++    "long b_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t) { return a_split_int(a, b, c, d, u, s, t) + s.a - s.b; }\n"
++    "long b_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t) { return a_split_sse(a, b, c, d, e, f, g, u, s, t) + s.l; }\n"
++    "long b_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t) { return a_split_ld(a, b, c, d, e, f, g, u, s, t) + s.l; }\n"
++    "Low b_make_low(long x) { Low r = { x * 11 }; return r; }\n"
++    "High b_make_high(long y) { High r; r.y = y * 13; return r; }\n"
++    "HighMixed b_make_high_mixed(int k) { HighMixed r; r.f = k * 1.25f; r.i = k * 3; return r; }\n"
++    "long b_back(int k) { return a_make_low(k).x * 3 + a_make_high(k + 1).y * 5 + a_make_high_mixed(k + 2).i + (long)(a_make_high_mixed(k).f * 8); }\n";
++
++static const char check_test_tier1_shapes_source[] =
++    "#include \"tier1-shapes.h\"\n"
++    "long a_low(Low s) { return s.x * 3 + 1; }\n"
++    "long a_high(High s) { return s.y * 5 + 2; }\n"
++    "long a_high_mixed(HighMixed s) { return (long)(s.f * 4) + s.i * 7; }\n"
++    "long a_low_stack(long a, long b, long c, long d, long e, _Atomic long u, Low s, long t) { return a + b * 2 + c * 3 + d * 4 + e * 5 + u * 6 + s.x * 7 + t * 8; }\n"
++    "long a_high_stack(long a, long b, long c, long d, long e, _Atomic long u, High s, long t) { return a + b * 2 + c * 3 + d * 4 + e * 5 + u * 6 + s.y * 9 + t * 10; }\n"
++    "long a_split_int(long a, long b, long c, long d, _Atomic long u, LL s, long t) { return a + b * 2 + c * 3 + d * 4 + u * 5 + s.a * 6 + s.b * 7 + t * 8; }\n"
++    "long a_split_sse(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, DL s, long t) { return (long)(a + b * 2 + c * 3 + d * 4 + e * 5 + f * 6 + g * 7 + u * 8 + s.d * 9) + s.l * 11 + t * 13; }\n"
++    "long a_split_ld(double a, double b, double c, double d, double e, double f, double g, _Atomic double u, LD s, long t) { return (long)(a + b + c + d + e + f + g + u * 2 + s.d * 3) + s.l * 17 + t * 19; }\n"
++    "Low a_make_low(long x) { Low r = { x * 3 }; return r; }\n"
++    "High a_make_high(long y) { High r; r.y = y * 5; return r; }\n"
++    "HighMixed a_make_high_mixed(int k) { HighMixed r; r.f = k * 0.5f; r.i = k * 9; return r; }\n"
++    "int main(void)\n"
++    "{\n"
++    "    for (int k = 1; k < 4; k += 1)\n"
++    "    {\n"
++    "        Low l = b_make_low(k);\n"
++    "        High h = b_make_high(k + 1);\n"
++    "        HighMixed m = b_make_high_mixed(k + 2);\n"
++    "        LL p = { k, k * 2 };\n"
++    "        DL q = { k * 1.5, k * 3 };\n"
++    "        LD r = { k * 4, k * 2.25 };\n"
++    "        printf(\"%ld %ld %ld %ld\\n\", b_low(l), b_high(h), b_high_mixed(m), b_back(k));\n"
++    "        printf(\"%ld %ld %ld\\n\", b_low_stack(1, 2, 3, 4, 5, k, l, 6), b_high_stack(1, 2, 3, 4, 5, k, h, 7), b_split_int(1, 2, 3, 4, k, p, 8));\n"
++    "        printf(\"%ld %ld\\n\", b_split_sse(1, 2, 3, 4, 5, 6, 7, k, q, 9), b_split_ld(1, 2, 3, 4, 5, 6, 7, k, r, 10));\n"
++    "        printf(\"%ld %ld %ld\\n\", a_make_low(k).x, a_make_high(k).y, (long)a_make_high_mixed(k).i);\n"
++    "    }\n"
++    "    return 0;\n"
++    "}\n";
++
+ // The value of `name` (as "spill_stores") in --tier1-report's line of `text`, into *value: whether it has one.
+ static bool check_test_tier1_field(const char* text, const char* name, uint64_t* value)
+ {
+@@ -2272,10 +2355,12 @@ static void check_test_driver_tier1_dynamic(CheckTest* test, const char* clang,
+     unlink(reference);
+ }
+ 
+-// The by-value aggregates' fixture (#789): its unit by --tier1 -c, by each path with and without rematerialization, every
+-// function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both prints; and
+-// both units by --tier1, every function of both Tier 1's (the other unit's va_arg of an aggregate among them), print it too.
+-static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
++// A fixture of two units sharing a header, `name`.h (#789, #141): its unit by --tier1 -c, by each path with and without
++// rematerialization, every function Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's
++// build of both prints; and both units by --tier1, every function of both Tier 1's, print it too. `what` names it in the
++// checks' messages.
++static void check_test_driver_tier1_units(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* name, const char* what, const char* header_source,
++                                          const char* unit_source, const char* other_source)
+ {
+     char header[512];
+     char unit[512];
+@@ -2283,15 +2368,15 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang,
+     char other_object[512];
+     char reference[512];
+     char both[512];
+-    snprintf(header, sizeof(header), "%s/tier1-records.h", directory);
+-    snprintf(unit, sizeof(unit), "%s/tier1-records.c", directory);
+-    snprintf(other, sizeof(other), "%s/tier1-records-other.c", directory);
+-    snprintf(other_object, sizeof(other_object), "%s/tier1-records-other.o", directory);
+-    snprintf(reference, sizeof(reference), "%s/tier1-records-clang", directory);
+-    snprintf(both, sizeof(both), "%s/tier1-records-both", directory);
+-    const bool written = parse_test_write(header, check_test_tier1_records_header, sizeof(check_test_tier1_records_header) - 1) &&
+-                         parse_test_write(unit, check_test_tier1_records_source, sizeof(check_test_tier1_records_source) - 1) &&
+-                         parse_test_write(other, check_test_tier1_records_other_source, sizeof(check_test_tier1_records_other_source) - 1);
++    char message[256];
++    snprintf(header, sizeof(header), "%s/%s.h", directory, name);
++    snprintf(unit, sizeof(unit), "%s/%s.c", directory, name);
++    snprintf(other, sizeof(other), "%s/%s-other.c", directory, name);
++    snprintf(other_object, sizeof(other_object), "%s/%s-other.o", directory, name);
++    snprintf(reference, sizeof(reference), "%s/%s-clang", directory, name);
++    snprintf(both, sizeof(both), "%s/%s-both", directory, name);
++    const bool written = parse_test_write(header, header_source, strlen(header_source)) && parse_test_write(unit, unit_source, strlen(unit_source)) &&
++                         parse_test_write(other, other_source, strlen(other_source));
+     char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+     char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+     char* text = NULL;
+@@ -2302,25 +2387,27 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang,
+     free(text);
+     char expected[4096] = { 0 };
+     const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+-    check_test_expect(test, ran, "clang's builds of the by-value aggregates' fixture run");
++    snprintf(message, sizeof(message), "clang's builds of the %s fixture run", what);
++    check_test_expect(test, ran, message);
+     for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+     {
+         for (uint32_t path = 0; path < 2; path += 1)
+         {
+             char object[512];
+             char program[512];
+-            snprintf(object, sizeof(object), "%s/tier1-records-%u-%u.o", directory, rematerialize, path);
+-            snprintf(program, sizeof(program), "%s/tier1-records-%u-%u", directory, rematerialize, path);
++            snprintf(object, sizeof(object), "%s/%s-%u-%u.o", directory, name, rematerialize, path);
++            snprintf(program, sizeof(program), "%s/%s-%u-%u", directory, name, rematerialize, path);
+             CheckTestTier1Build build;
+             const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
+-            check_test_expect(test, compiled, "the by-value aggregates' unit compiles by --tier1, every function Tier 1's");
++            snprintf(message, sizeof(message), "the %s unit compiles by --tier1, every function Tier 1's (rematerialize %u, path %u)", what, rematerialize, path);
++            check_test_expect(test, compiled, message);
+             char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+             char* link_text = NULL;
+             const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+             free(link_text);
+             char actual[4096] = { 0 };
+-            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+-                              "Tier 1's aggregates pass to and from clang -O2's code as arguments and results");
++            snprintf(message, sizeof(message), "the %s unit's Tier 1 code passes to and from clang -O2's as clang -O0's does (rematerialize %u, path %u)", what, rematerialize, path);
++            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+             unlink(object);
+             unlink(program);
+         }
+@@ -2330,8 +2417,8 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang,
+     const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+     free(text);
+     char actual[4096] = { 0 };
+-    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+-                      "both units of the by-value aggregates' fixture by --tier1, every function Tier 1's, print clang's build's output");
++    snprintf(message, sizeof(message), "both units of the %s fixture by --tier1, every function Tier 1's, print clang's build's output", what);
++    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+     unlink(header);
+     unlink(unit);
+     unlink(other);
+@@ -2340,72 +2427,24 @@ static void check_test_driver_tier1_records(CheckTest* test, const char* clang,
+     unlink(both);
+ }
+ 
+-// The wide values' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every function
+-// Tier 1's, linked with its other unit compiled by clang -O2, prints what clang -O0's build of both prints; and both units
+-// by --tier1, every function of both Tier 1's, print it too.
++// The by-value aggregates' fixture (#789), the other unit's va_arg of an aggregate among its functions.
++static void check_test_driver_tier1_records(CheckTest* test, const char* clang, const char* executable, const char* directory)
++{
++    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-records", "by-value aggregates'", check_test_tier1_records_header, check_test_tier1_records_source,
++                                  check_test_tier1_records_other_source);
++}
++
++// The wide values' fixture (#141).
+ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, const char* executable, const char* directory)
+ {
+-    char header[512];
+-    char unit[512];
+-    char other[512];
+-    char other_object[512];
+-    char reference[512];
+-    char both[512];
+-    snprintf(header, sizeof(header), "%s/tier1-wide.h", directory);
+-    snprintf(unit, sizeof(unit), "%s/tier1-wide.c", directory);
+-    snprintf(other, sizeof(other), "%s/tier1-wide-other.c", directory);
+-    snprintf(other_object, sizeof(other_object), "%s/tier1-wide-other.o", directory);
+-    snprintf(reference, sizeof(reference), "%s/tier1-wide-clang", directory);
+-    snprintf(both, sizeof(both), "%s/tier1-wide-both", directory);
+-    const bool written = parse_test_write(header, check_test_tier1_wide_header, sizeof(check_test_tier1_wide_header) - 1) &&
+-                         parse_test_write(unit, check_test_tier1_wide_source, sizeof(check_test_tier1_wide_source) - 1) &&
+-                         parse_test_write(other, check_test_tier1_wide_other_source, sizeof(check_test_tier1_wide_other_source) - 1);
+-    char* reference_arguments[] = { (char*)clang, "-O0", "-o", reference, unit, other, NULL };
+-    char* other_arguments[] = { (char*)clang, "-O2", "-c", "-o", other_object, other, NULL };
+-    char* text = NULL;
+-    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+-    free(text);
+-    text = NULL;
+-    const bool other_built = written && check_test_driver_spawn(other_arguments, &text) == 0;
+-    free(text);
+-    char expected[4096] = { 0 };
+-    const bool ran = referenced && other_built && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+-    check_test_expect(test, ran, "clang's builds of the wide values' fixture run");
+-    for (uint32_t rematerialize = 0; ran && rematerialize < 2; rematerialize += 1)
+-    {
+-        for (uint32_t path = 0; path < 2; path += 1)
+-        {
+-            char object[512];
+-            char program[512];
+-            snprintf(object, sizeof(object), "%s/tier1-wide-%u-%u.o", directory, rematerialize, path);
+-            snprintf(program, sizeof(program), "%s/tier1-wide-%u-%u", directory, rematerialize, path);
+-            CheckTestTier1Build build;
+-            const bool compiled = check_test_tier1_build(executable, unit, "", object, rematerialize != 0, path != 0, true, false, NULL, &build);
+-            check_test_expect(test, compiled, "the wide values' unit compiles by --tier1, every function Tier 1's");
+-            char* link_arguments[] = { (char*)clang, "-o", program, object, other_object, NULL };
+-            char* link_text = NULL;
+-            const bool linked = compiled && check_test_driver_spawn(link_arguments, &link_text) == 0;
+-            free(link_text);
+-            char actual[4096] = { 0 };
+-            check_test_expect(test, linked && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+-                              "Tier 1's long doubles, x87 aggregates and 128-bit integers pass to and from clang -O2's code");
+-            unlink(object);
+-            unlink(program);
+-        }
+-    }
+-    char* both_arguments[] = { (char*)executable, "--tier1", "--tier1-report", "--tier1-refusals", "--verify", "-o", both, unit, other, NULL };
+-    text = NULL;
+-    const bool both_built = ran && check_test_driver_spawn(both_arguments, &text) == 0 && text != NULL && strstr(text, "tier1-refused") == NULL;
+-    free(text);
+-    char actual[4096] = { 0 };
+-    check_test_expect(test, both_built && check_test_driver_capture(both, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+-                      "both units of the wide values' fixture by --tier1, every function Tier 1's, print clang's build's output");
+-    unlink(header);
+-    unlink(unit);
+-    unlink(other);
+-    unlink(other_object);
+-    unlink(reference);
+-    unlink(both);
++    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source);
++}
++
++// The convention's rarer shapes' fixture (#141).
++static void check_test_driver_tier1_shapes(CheckTest* test, const char* clang, const char* executable, const char* directory)
++{
++    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-shapes", "rarer aggregate shapes'", check_test_tier1_shapes_header, check_test_tier1_shapes_source,
++                                  check_test_tier1_shapes_other_source);
+ }
+ 
+ // The stack arguments' fixture (#141): its unit by --tier1 -c, by each path with and without rematerialization, every
+diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
+index 74c6c2b9..aeb9b191 100644
+--- a/src/buster/compiler/c_checker_driver_test.c
++++ b/src/buster/compiler/c_checker_driver_test.c
+@@ -6393,6 +6393,10 @@ static int run_checker_driver_tests(int argc, char** argv)
+                 check_test_driver_tier1_wide(&test, clang, executable, directory);
+             }
+             if (!lazy && check_test_driver_takes())
++            {
++                check_test_driver_tier1_shapes(&test, clang, executable, directory);
++            }
++            if (!lazy && check_test_driver_takes())
+             {
+                 check_test_driver_tier1_dynamic(&test, clang, executable, directory);
+             }
+diff --git a/src/buster/compiler/tier1_emit.c b/src/buster/compiler/tier1_emit.c
+index 652a95fb..03faf0e5 100644
+--- a/src/buster/compiler/tier1_emit.c
++++ b/src/buster/compiler/tier1_emit.c
+@@ -785,7 +785,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+     // wait in the red zone's staging slots (tier1_emit_staging), one after another in the arguments' order, where the CFG
+     // consumer copied them from its address before the moves read and write the argument registers it may be in
+     // (tier1_emit_cfg_aggregate_copy); their registers are loaded from there after the moves. One on the stack whole is
+-    // the CFG consumer's too, copied into its slots.
++    // the CFG consumer's too, copied into its slots, and so is a part in a stack slot (#141, tier1_select_location_parts).
+     const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
+     uint8_t part_registers[BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS];
+     uint32_t part_count = 0;
+@@ -797,12 +797,21 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+         const uint32_t location = argument_registers[argument];
+         const IrPassed* record = place.kind == BUSTER_TIER1_PLACE_AGGREGATE ? tier1_select_argument_record(function, call, argument) : 0;
+         Tier1SelectPart parts[2];
+-        const uint32_t count = record != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS ? tier1_select_parts(record->location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
+-        error = record == 0 || record->location.kind == BUSTER_ABI_LOCATION_STACK || (count != 0 && part_count + count <= BUSTER_ARRAY_LENGTH(part_registers)) ? error : TIER1_EMIT_ALLOCATION;
++        const bool whole = record != 0 && tier1_select_location_whole(record->location);
++        const uint32_t count = record != 0 && !whole ? tier1_select_location_parts(record->location, record->size, parts) : 0;
++        uint32_t registered = 0;
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            registered += parts[k].reg != BUSTER_ABI_REGISTER_NONE;
++        }
++        error = record == 0 || whole || (count != 0 && part_count + registered <= BUSTER_ARRAY_LENGTH(part_registers)) ? error : TIER1_EMIT_ALLOCATION;
+         for (uint32_t k = 0; error == TIER1_EMIT_OK && k < count; k += 1)
+         {
+-            part_registers[part_count] = parts[k].reg;
+-            part_count += 1;
++            if (parts[k].reg != BUSTER_ABI_REGISTER_NONE)
++            {
++                part_registers[part_count] = parts[k].reg;
++                part_count += 1;
++            }
+         }
+         if (place.kind == BUSTER_TIER1_PLACE_GENERAL)
+         {
+@@ -943,7 +952,7 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
+     // may be no larger than the aggregate), a general register's by tier1_emit_store_part and an xmm one's by movss or movsd,
+     // or through the scratch register for any other size.
+     Tier1SelectPart returned[2];
+-    const uint32_t returned_count = parts_returned ? tier1_select_parts(abi->call.result.registers, abi->result_size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, returned) : 0;
++    const uint32_t returned_count = parts_returned ? tier1_select_result_parts(abi->call.result, abi->result_size, returned) : 0;
+     // In the x87's registers (#141): st0's 10 bytes into the first part's 16, then st1's into the second's.
+     const uint32_t x87_parts = parts_returned ? tier1_select_x87_parts(abi->call.result, abi->result_size) : 0;
+     error = error == TIER1_EMIT_OK && parts_returned && returned_count == 0 && x87_parts == 0 ? TIER1_EMIT_ALLOCATION : error;
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index e5ada35c..ee067c93 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -192,8 +192,16 @@ static uint32_t tier1_emit_cfg_x87_object(const IrFunction* function, const Tier
+     return tier1_emit_cfg_record_count(function) + (node == UINT32_MAX ? prepared->x87_count : prepared->x87_ranks[node]);
+ }
+ 
++// Whether a by-value aggregate parameter's `record` has its copy in the frame (#789), which the entry stores its parts into
++// (tier1_emit_cfg_entry): in registers, or in a register and a stack slot or in a slot alone (#141), but not on the stack
++// whole, whose copy is its stack slots (tier1_emit_cfg_incoming_object).
++static bool tier1_emit_cfg_record_copied(const IrPassed* record)
++{
++    return record != 0 && record->size != 0 && record->location.kind != BUSTER_ABI_LOCATION_IGNORE && !tier1_select_location_whole(record->location);
++}
++
+ // The bytes frame object `object` past the IR's slots takes (#789): a by-value aggregate parameter's copy, which the entry
+-// stores its registers into whole, 8 bytes each, so its size rounded up to them, and the hidden pointer's 8 bytes. A
++// stores its parts into whole, 8 bytes each, so its size rounded up to them, and the hidden pointer's 8 bytes. A
+ // parameter in registers of its own, or one on the stack whole (whose copy is its stack slots, tier1_emit_cfg_incoming),
+ // takes a row of one byte, which nothing reads, as a function without the hidden pointer does for it.
+ static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, uint32_t object)
+@@ -202,7 +210,7 @@ static uint32_t tier1_emit_cfg_record_object_bytes(const IrFunction* function, u
+     const bool x87 = object >= tier1_emit_cfg_record_count(function);
+     const uint32_t parameter = object - function->slot_count;
+     const IrPassed* record = parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
+-    const bool copied = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS;
++    const bool copied = tier1_emit_cfg_record_copied(record);
+     const bool hidden = parameter == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
+     return x87 ? 16 : copied ? (record->size + 7u) & ~7u : hidden ? 8 : 1;
+ }
+@@ -215,7 +223,7 @@ static bool tier1_emit_cfg_incoming_object(const IrFunction* function, uint32_t
+ {
+     const uint32_t parameter = object - function->slot_count;
+     const IrPassed* record = object >= function->slot_count && parameter < function->parameter_count ? tier1_select_parameter_record(function, parameter) : 0;
+-    const bool stacked = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_STACK;
++    const bool stacked = record != 0 && record->size != 0 && tier1_select_location_whole(record->location);
+     const bool overflow = tier1_emit_cfg_overflow_area(function, object);
+     *past = overflow ? function->incoming.stack_bytes : stacked ? record->location.stack_offset : 0;
+     return overflow || stacked;
+@@ -1289,30 +1297,37 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
+     uint32_t count = 0;
+     uint32_t vectors = 0;
+     Tier1EmitError error = TIER1_EMIT_OK;
+-    // A function with its own ABI records (#789): each by-value aggregate parameter in registers into its copy, its parts
+-    // stored whole, 8 bytes each (the copy's size is rounded up to them, tier1_emit_cfg_record_object_bytes), a general
+-    // register's by mov and an xmm one's by movsd; and the hidden pointer an aggregate result returns through, rdi, into
+-    // its object. Before the moves, which may write those registers; the prologue writes none of them.
++    // A function with its own ABI records (#789): each by-value aggregate parameter with a copy into it, its parts stored
++    // whole, 8 bytes each (the copy's size is rounded up to them, tier1_emit_cfg_record_object_bytes), a general
++    // register's by mov, an xmm one's by movsd, and one in an incoming stack slot (#141, tier1_select_location_parts)
++    // through the scratch register; and the hidden pointer an aggregate result returns through, rdi, into its object.
++    // Before the moves, which may write those registers; the prologue writes none of them.
+     for (uint32_t p = 0; error == TIER1_EMIT_OK && function->parameter_passed != 0 && p <= function->parameter_count; p += 1)
+     {
+         const IrPassed* record = p < function->parameter_count ? tier1_select_parameter_record(function, p) : 0;
+-        const bool copied = record != 0 && record->size != 0 && record->location.kind == BUSTER_ABI_LOCATION_REGISTERS;
++        const bool copied = tier1_emit_cfg_record_copied(record);
+         const bool hidden = p == function->parameter_count && function->result_size != 0 && function->result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
+         Tier1SelectPart parts[2] = { { .reg = BUSTER_ABI_RDI, .offset = 0, .bytes = 8 } };
+-        const uint32_t part_count = copied ? tier1_select_parts(record->location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : hidden ? 1 : 0;
++        const uint32_t part_count = copied ? tier1_select_location_parts(record->location, record->size, parts) : hidden ? 1 : 0;
+         int32_t offset = 0;
+         error = (!copied && !hidden) || (part_count != 0 && tier1_emit_cfg_object(function, emitted, function->slot_count + p, &offset)) ? error : TIER1_EMIT_FRAME;
+         for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
+         {
+-            const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
++            const bool slot = parts[k].reg == BUSTER_ABI_REGISTER_NONE;
++            const bool vector = !slot && (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
++            uint8_t base = X86_REGISTER_RSP;
++            int32_t incoming = 0;
++            error = !slot || tier1_emit_cfg_incoming(emitted, record->location.stack_offset, &base, &incoming) ? error : TIER1_EMIT_FRAME;
++            const X86Instruction load = { .displacement = incoming, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
++            error = error != TIER1_EMIT_OK || !slot || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+             const X86Instruction store = {
+                 .displacement = offset + parts[k].offset,
+-                .reg = (uint8_t)(parts[k].reg & 0x1f),
++                .reg = slot ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)(parts[k].reg & 0x1f),
+                 .rm = (uint8_t)emitted->frame.base_register,
+                 .mode = BUSTER_X86_MEMORY_BASE,
+                 .form = vector ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOV_RM64_R64,
+             };
+-            error = tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY;
++            error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY;
+         }
+     }
+     for (uint32_t node = 0; error == TIER1_EMIT_OK && function->block_count != 0 && node < function->block_offsets[1]; node += 1)
+@@ -1725,7 +1740,7 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
+ {
+     const AbiReturn result = function->result_abi;
+     Tier1SelectPart parts[2];
+-    const uint32_t part_count = result.kind == BUSTER_ABI_RESULT_REGISTERS ? tier1_select_parts(result.registers, function->result_size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
++    const uint32_t part_count = tier1_select_result_parts(result, function->result_size, parts);
+     // In the x87's registers (#141): each part's 10 bytes loaded from its 16, the last first, so that st0 holds the first.
+     const uint32_t x87_parts = tier1_select_x87_parts(result, function->result_size);
+     const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
+@@ -2320,20 +2335,22 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const
+                         error = tier1_emit_cfg_stack_argument(emitted, value, use, BUSTER_ABI_SLOT_BYTES * place.index, &buffer);
+                     }
+                     // A by-value aggregate (#789): its bytes from its address now, before the moves, on the stack whole into
+-                    // its slots, else each part into the red zone's next staging slot, which tier1_emit_call loads its
+-                    // register from after the moves.
++                    // its slots, else each part in a register into the red zone's next staging slot, which tier1_emit_call
++                    // loads its register from after the moves, and a part in a stack slot (#141) into that slot.
+                     const IrPassed* record = aggregate ? tier1_select_argument_record(function, called, argument) : 0;
+                     Tier1SelectPart parts[2];
+-                    const bool whole = record != 0 && record->location.kind == BUSTER_ABI_LOCATION_STACK;
+-                    const uint32_t part_count = record != 0 && !whole ? tier1_select_parts(record->location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
++                    const bool whole = record != 0 && tier1_select_location_whole(record->location);
++                    const uint32_t part_count = record != 0 && !whole ? tier1_select_location_parts(record->location, record->size, parts) : 0;
+                     if (whole && registered && error == TIER1_EMIT_OK)
+                     {
+                         error = tier1_emit_cfg_aggregate_copy(emitted, value, use, (int32_t)record->location.stack_offset, 0, record->size, &buffer);
+                     }
+                     for (uint32_t k = 0; registered && error == TIER1_EMIT_OK && k < part_count; k += 1)
+                     {
+-                        error = staged < BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS ? tier1_emit_cfg_aggregate_copy(emitted, value, use, tier1_emit_staging(staged), parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
+-                        staged += 1;
++                        const bool slot = parts[k].reg == BUSTER_ABI_REGISTER_NONE;
++                        const int32_t to = slot ? (int32_t)record->location.stack_offset : tier1_emit_staging(staged);
++                        error = slot || staged < BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS ? tier1_emit_cfg_aggregate_copy(emitted, value, use, to, parts[k].offset, parts[k].bytes, &buffer) : TIER1_EMIT_ALLOCATION;
++                        staged += !slot;
+                     }
+                 }
+                 error = registered ? error : TIER1_EMIT_ALLOCATION;
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index a94acda4..53b1ec8b 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -1760,7 +1760,8 @@ static uint32_t tier1_select_argument_type(const IrFunction* function, const IrC
+ #define BUSTER_TIER1_PLACE_GENERAL 0
+ #define BUSTER_TIER1_PLACE_VECTOR 1
+ #define BUSTER_TIER1_PLACE_STACK 2
+-// A by-value aggregate's place (#789): its ABI record says where its bytes go (tier1_select_parts, or its stack slots).
++// A by-value aggregate's place (#789): its ABI record says where its bytes go (tier1_select_location_parts, or its stack
++// slots).
+ #define BUSTER_TIER1_PLACE_AGGREGATE 3
+ 
+ typedef struct Tier1SelectPlace Tier1SelectPlace;
+@@ -1878,8 +1879,10 @@ static uint32_t tier1_select_call_stack_bytes(const IrFunction* function, const
+     return call->abi != 0 ? function->abi_calls[call->abi - 1].call.stack_bytes : BUSTER_ABI_SLOT_BYTES * places.stack;
+ }
+ 
+-// An aggregate's part in a register (#789): its register, an ABI one (a general register's number, or an xmm one's plus
+-// BUSTER_ABI_REGISTER_VECTOR), and the bytes it holds from its offset in the aggregate.
++// An aggregate's part (#789): its register, an ABI one (a general register's number, or an xmm one's plus
++// BUSTER_ABI_REGISTER_VECTOR), or BUSTER_ABI_REGISTER_NONE for its location's stack slot (#141: a SPLIT location's part
++// with no register, or a STACK location's high or low eightbyte alone), and the bytes it holds from its offset in the
++// aggregate.
+ typedef struct Tier1SelectPart Tier1SelectPart;
+ struct Tier1SelectPart
+ {
+@@ -1900,35 +1903,73 @@ struct Tier1SelectPart
+ // The largest constant size an allocation folds (#141): rounded up to any frame's alignment, it fits a sub's imm32.
+ #define BUSTER_TIER1_SELECT_MAX_ALLOCA_IMMEDIATE (UINT64_C(1) << 30)
+ 
+-// An aggregate of `size` bytes in `registers` (a location's two, or a result's first two) as its parts (#789): eightbyte
+-// k in registers[k], 8 bytes or what is left of the aggregate. Returns how many, into `parts`, or 0 for a shape Tier 1
+-// doesn't take: no first register, a second one for 8 bytes or less, none past them, more than 16 bytes (a value in one
+-// vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
++// An aggregate of `size` bytes in `registers` (a location's two, or a result's first two) as its parts (#789), as Tier 0's
++// tier0_parts_of has them: eightbyte k in registers[k], 8 bytes or what is left of the aggregate, and none for a
++// register that is none, the high eightbyte past 8 bytes being padding; with `high` (#141) eightbyte 1 alone in
++// registers[0], its low one padding; with `slot` (#141) a SPLIT location's two eightbytes, one in a register and the other
++// in its stack slot, or with `high` or `low` a STACK location's one eightbyte in its slot (the low one alone of a larger
++// value), each part with no register its slot's. Returns how many, into `parts`, or 0 for a shape Tier 1 doesn't take: no
++// part in a register (a whole STACK location's), a second register for 8 bytes or less, more than 16 bytes (a value in
++// one vector register whole, which only a vector makes, among them), or a register outside the general ones in `general`
+ // and the first `vectors` xmm ones.
+-static uint32_t tier1_select_parts(const uint8_t* registers, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
++static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool low, bool slot, uint32_t size, uint32_t general, uint32_t vectors, Tier1SelectPart* parts)
+ {
++    const bool one = high || low;
++    const bool first = registers[0] != BUSTER_ABI_REGISTER_NONE;
++    const bool second = registers[1] != BUSTER_ABI_REGISTER_NONE;
++    const bool shape = one ? !(high && low) && !second && size > 8 && first != slot : slot ? first != second && size > 8 : first && (!second || size > 8);
++    bool valid = size != 0 && size <= 16 && shape;
+     uint32_t count = 0;
+-    bool valid = size != 0 && size <= 16 && registers[0] != BUSTER_ABI_REGISTER_NONE && (registers[1] != BUSTER_ABI_REGISTER_NONE) == (size > 8);
+-    for (uint32_t k = 0; valid && k < 2; k += 1)
++    for (uint32_t k = 0; valid && k < (one ? 1u : 2u); k += 1)
+     {
+         const uint8_t reg = registers[k];
+-        if (reg != BUSTER_ABI_REGISTER_NONE)
++        if (reg != BUSTER_ABI_REGISTER_NONE || slot)
+         {
+-            const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+-            const uint32_t left = size - 8 * k;
+-            valid = vector ? (reg & 0x1fu) < vectors : reg < 16 && ((general >> reg) & 1) != 0;
+-            parts[count] = (Tier1SelectPart){ .reg = reg, .offset = (uint8_t)(8 * k), .bytes = (uint8_t)(left < 8 ? left : 8) };
++            const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
++            const uint32_t offset = high ? 8 : 8 * k;
++            const uint32_t left = size - offset;
++            valid = reg == BUSTER_ABI_REGISTER_NONE || (vector ? (reg & 0x1fu) < vectors : reg < 16 && ((general >> reg) & 1) != 0);
++            parts[count] = (Tier1SelectPart){ .reg = reg, .offset = (uint8_t)offset, .bytes = (uint8_t)(left < 8 ? left : 8) };
+             count += 1;
+         }
+     }
+     return valid ? count : 0;
+ }
+ 
++// Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
++// first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot.
++static bool tier1_select_location_whole(AbiLocation location)
++{
++    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
++}
++
++// The parts of an aggregate argument or parameter of `size` bytes at `location` (#789, #141): in argument registers, a
++// SPLIT location's register and stack slot, or a STACK location's high or low eightbyte alone in its slot
++// (tier1_select_parts_of); none on the stack whole or ignored.
++static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
++{
++    const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
++    const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
++    const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low;
++    const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low;
++    const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low);
++    const bool taken = registers || split || slot;
++    return taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
++}
++
++// The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
++// (#141); none for any other result.
++static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1SelectPart* parts)
++{
++    const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
++    return registers ? tier1_select_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) : 0;
++}
++
+ // Whether Tier 1 takes an argument's or a parameter's ABI record for a value of IR type `type` (#789): a scalar in one
+ // register of its class (a general argument register for an integer or a pointer, xmm0 to xmm7 for a floating value) or
+-// in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, in registers (tier1_select_parts)
+-// or on the stack whole. Not the convention's rarer shapes: a part LLVM put in a stack slot (SPLIT), a value's high or low
+-// eightbyte alone (HIGH, LOW), an ignored one.
++// in a stack slot, its extension the IR's; or a by-value aggregate, a ptr to its bytes, on the stack whole or in its
++// parts (tier1_select_location_parts): in registers, and since #141 a part LLVM put in a stack slot (SPLIT) and a
++// value's high or low eightbyte alone (HIGH, LOW). Not an ignored one.
+ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
+ {
+     const AbiLocation location = record->location;
+@@ -1948,8 +1989,16 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
+     }
+     else
+     {
+-        const bool registered = location.kind == BUSTER_ABI_LOCATION_REGISTERS && tier1_select_parts(location.registers, record->size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) != 0;
+-        supported = type == IR_PTR && location.flags == 0 && (registered || (stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
++        // A part in a stack slot has it where a whole one's first slot would be.
++        const bool slotted = location.stack_offset % BUSTER_ABI_SLOT_BYTES == 0 && location.stack_offset < BUSTER_TIER1_SELECT_MAX_STACK_OFFSET;
++        const bool whole = tier1_select_location_whole(location);
++        const uint32_t count = tier1_select_location_parts(location, record->size, parts);
++        bool placed = count != 0;
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
++        }
++        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0 && (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
+     }
+     return supported;
+ }
+@@ -1966,15 +2015,15 @@ static uint32_t tier1_select_x87_parts(AbiReturn result, uint32_t size)
+ }
+ 
+ // Whether Tier 1 takes a result as the convention returns it (#789): a scalar's (`size` 0) as the IR's result type says,
+-// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts (tier1_select_parts), in st0 and st1
+-// (tier1_select_x87_parts, #141), or through the hidden pointer (MEMORY). Not a high eightbyte's alone, or one LLVM
+-// returns through a hidden pointer that clang doesn't count (DEMOTED).
++// and an aggregate's of `size` bytes in rax and rdx or xmm0 and xmm1 as its parts, a high eightbyte's alone among them
++// (tier1_select_result_parts, #141), in st0 and st1 (tier1_select_x87_parts, #141), or through the hidden pointer
++// (MEMORY). Not one LLVM returns through a hidden pointer that clang doesn't count (DEMOTED), which only a vector makes.
+ static bool tier1_select_result_supported(AbiReturn result, uint32_t size)
+ {
+     Tier1SelectPart parts[2];
+-    const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0;
+-    const bool registers = result.kind == BUSTER_ABI_RESULT_REGISTERS && result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE &&
+-                           tier1_select_parts(result.registers, size, BUSTER_TIER1_SELECT_RESULT_GENERAL, 2, parts) != 0;
++    const uint32_t high = size != 0 ? BUSTER_ABI_FLAG_HIGH : 0;
++    const bool flags = (result.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO | high)) == 0;
++    const bool registers = tier1_select_result_parts(result, size, parts) != 0;
+     return flags && (size == 0 || registers || tier1_select_x87_parts(result, size) != 0 || result.kind == BUSTER_ABI_RESULT_MEMORY);
+ }
+ 
+-- 
+2.43.0
+
