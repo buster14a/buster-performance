@@ -23,6 +23,7 @@ It covers, on the 9700X, its head against its main:
 | `var-defer` | `b37f0d25` with `variant/ir_defer.c` | the intrinsic's rule deferred to the verifier's scalar path |
 | `var-inline` | `b37f0d25` with `variant/ir_inline.c` | `ir_constant_fits` always inlined |
 | `var-fix` | `b37f0d25` with `variant-inline/fix.patch` | `ir_constant_fits` always inlined, and one test for the intrinsics in selection's chain: buster#1256's `94add8c0` |
+| `var-fix2` | `var-fix` with `variant-inline/fix2.patch` | `ir_simd_value_valid` always inlined too: buster#1256's `a6ec6917` |
 
 The two revisions are `git archive`s of those commits. Each variant is a copy of `head-b37f0d25`'s tree with the
 named file in place of `src/buster/compiler/ir.c`, or with the patch applied (`variant-fix/patch.txt`).
@@ -46,12 +47,14 @@ Everything ran on the Ryzen 7 9700X (benchpress), reached over the tailnet from 
     `bisect/`);
   - `benchmark-ir` (`verifier.sh`, `verifier/`);
   - `main.c` by `--tier1 --tier1-report --tier1-refusals -march=native` (`selfhost/`).
-- `variant.sh`, `variant-inline.sh` and `variant-fix.sh` build a variant each and run `perf stat` of the same
-  `sqlite3.c` compile by main, the head and the variant, 11 runs a hold, 3 rounds in a rotating order. Each compares
+- `variant.sh`, `variant-inline.sh`, `variant-fix.sh` and `variant-fix2.sh` build a variant each and run `perf stat` of
+  the same `sqlite3.c` compile by main, the head (`var-fix` in `variant-fix2.sh`) and the variant, 11 runs a hold, 3
+  rounds in a rotating order. Each compares
   the three `sqlite3.o` and lists which builds have `ir_constant_fits` and `ir_simd_value_valid` out of line.
   `variant-inline.sh`'s last loop quoted its trees wrongly, so its `inlining.txt` pairs two trees on one line;
   `variant-inline/inlining-trees.txt` is the same `nm` count taken afterwards for each tree.
-- `attribute.sh`, `attribute-fix.sh` and `attribute-slow.sh` sample the compiles' instructions by symbol (below).
+- `attribute.sh`, `attribute-fix.sh` and `attribute-slow.sh` sample the compiles' instructions by symbol (below), by
+  main and the head, and by main and `var-fix`.
 - `common.sh` has the paths, the options and the lock's metadata.
 - The input is the frozen `sqlite3.c` 3.53.2 of earlier records, SHA-256
   `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, with
@@ -111,7 +114,7 @@ program ran 11 runs a hold, 3 rounds in a rotating order; the table gives the me
 The two trees write the same `sqlite3.o` (`bisect/cmp.txt`). The head takes 45.66 M more instructions (+0.78%) at the
 same cycles.
 
-## Where the instructions went (`variant/`, `variant-inline/`, `variant-fix/`, `attribute*/`)
+## Where the instructions went (`variant*/`, `attribute*/`)
 
 Each variant set ran with main and the head again:
 
@@ -121,7 +124,8 @@ Each variant set ran with main and the head again:
 | head `b37f0d25` | 5,906.297 M | 2,405.47 to 2,408.98 M | 3 copies |
 | `var-defer` | 5,905.514 M | 2,407.69 to 2,409.45 M | 3 copies |
 | `var-inline` | 5,878.831 M | 2,400.70 to 2,404.38 M | 0 copies |
-| `var-fix` | 5,878.987 M | 2,394.76 to 2,395.89 M | 0 copies |
+| `var-fix` | 5,878.987 M | 2,392.46 to 2,395.89 M | 0 copies |
+| `var-fix2` | 5,864.046 M | 2,397.55 to 2,397.81 M | 0 copies, and none of `ir_simd_value_valid` |
 
 - Each tree's instructions are the same in every hold, across all three sets, to within 2,000.
 - All five trees write the same `sqlite3.o` (each set's `cmp.txt`).
@@ -134,8 +138,18 @@ Each variant set ran with main and the head again:
   of candidates, rather than two, changes nothing measurable: `var-fix` reads 0.16 M more than `var-inline`.
 - `var-fix` is buster#1256's `94add8c0`. It takes 18.35 M more instructions than main (+0.31%), at 0.47% fewer cycles
   than main and the head in its set.
-
-ATTRIBUTION
+- Sampled by symbol below the kernel's sample-rate limit (`attribute-slow/`), 14.07 M a compile of `var-fix`'s
+  difference is `ir_check_rows`, alike in each of three holds of ten compiles. Main has 24,609 to 24,738 samples
+  there and `var-fix` 25,206 to 25,232, at a period of 250,000. `ir_simd_value_valid`, a call in that loop's vector
+  constant case, was still out of line.
+- With it always inlined too (`var-fix2`, buster#1256's `a6ec6917`), the compile takes 3.41 M more instructions than
+  main (+0.06%), at 0.43% fewer cycles. Its `ir_constant_fits` and `ir_simd_value_valid` are inlined everywhere, as
+  at main.
+- `attribute/` (a period of 100,000, five compiles) and `attribute-fix/` (20,000, one compile) went past the kernel's
+  limit of 63,300 samples a second: perf counted about half and a tenth of the instructions, and functions the change
+  doesn't touch moved by hundreds of samples between holds. `attribute-slow/` (250,000, ten compiles a hold) counted
+  them all, with 64 to 83 throttle events in about 233,000 samples a hold (its `stats-*.txt`). Its totals put `var-fix` at
+  16.6 M a compile above main, against `perf stat`'s 18.35 M.
 
 ## The IR verifier (`verifier/`)
 
@@ -171,3 +185,5 @@ elements other than 32-bit integers and the x86 builtins' rows of vectors.
 - Cycles and wall time swing by about 0.5% between builds that differ in code placement alone; instruction counts are
   deterministic to a few thousand. `var-fix`'s 0.47% fewer cycles is within that swing.
 - The variants were measured on `b37f0d25`'s tree, not on buster#1256's head after its merge of main.
+- Sampled attribution is statistical: `attribute-slow/`'s other differences of 1 to 3 M a compile, spread over
+  functions the change doesn't touch, are within its holds' spread.
