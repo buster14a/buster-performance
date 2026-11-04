@@ -2,8 +2,9 @@
 // usage: counters < counters.txt > counters-summary.txt
 //   Each input line is "BUILD PLACEMENT MODE RUN EVENT VALUE". Per build, mode, event and placement, the least of the
 //   runs; per build, mode and event, their mean over the placements. The first build is the reference: each other
-//   build's mean is compared with its mean, and its range is its change at each placement against the reference's at
-//   the same placement. A value that isn't a number (perf's "<not counted>" or "<not supported>") fails the summary.
+//   build's mean is compared with its mean, and its range is each of its placements against each of the reference's,
+//   as time-runs compares builds (#509): a placement of one tree isn't the same placement of another, so the range
+//   pairs nothing. A value that isn't a number (perf's "<not counted>" or "<not supported>") fails the summary.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,29 +52,37 @@ static int name_index(NameTable* table, const char* name)
     return result;
 }
 
-// The build's mean over the placements that the reference (build 0) also has, and the least and greatest change at a
-// placement against the reference's; false when they share none.
+// The build's mean over its placements, and the least and greatest change of one of its placements against one of the
+// reference's (build 0); false when either has none.
 static bool summarize(int build, int mode, int event, double* mean, double* low, double* high)
 {
     double sum = 0;
     int count = 0;
+    bool any = false;
     *low = 0;
     *high = 0;
     for (int placement = 0; placement < placements.count; placement += 1)
     {
         const Cell* cell = &cells[build][placement][mode][event];
-        const Cell* reference = &cells[0][placement][mode][event];
-        if (cell->present && reference->present)
+        if (cell->present)
         {
-            const double change = cell->least / reference->least - 1;
-            *low = count == 0 || change < *low ? change : *low;
-            *high = count == 0 || change > *high ? change : *high;
             sum += cell->least;
             count += 1;
+            for (int other = 0; other < placements.count; other += 1)
+            {
+                const Cell* reference = &cells[0][other][mode][event];
+                if (reference->present)
+                {
+                    const double change = cell->least / reference->least - 1;
+                    *low = !any || change < *low ? change : *low;
+                    *high = !any || change > *high ? change : *high;
+                    any = true;
+                }
+            }
         }
     }
     *mean = count != 0 ? sum / count : 0;
-    return count != 0;
+    return any;
 }
 
 int main(void)
@@ -128,7 +137,8 @@ int main(void)
     }
     if (status == 0)
     {
-        printf("Least of each placement's runs, mean over %d placements; the change against %s, and its range over the placements\n", placements.count, builds.names[0]);
+        printf("Least of each placement's runs, mean over %d placements; the change against %s, and its range over each placement against each of %s's\n",
+               placements.count, builds.names[0], builds.names[0]);
         for (int mode = 0; mode < modes.count; mode += 1)
         {
             for (int event = 0; event < events.count; event += 1)

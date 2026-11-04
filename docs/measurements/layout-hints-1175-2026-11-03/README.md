@@ -234,13 +234,33 @@ script does the following:
 - **Counters.** At every placement, `perf stat` counts `instructions:u`, `cycles:u` and `ex_ret_brn_tkn:u` three times
   per list. The lists are `sqlite3.c`'s `-fsyntax-only` and `-c` and the musl units' `-c`, with the frozen corpus's
   headers and predefines. `counters.c` takes the least of each placement's runs and their mean over the placements. It
-  gives each build's change against the first build's, and the range of that change over the placements.
+  gives each build's change against the first build's, and that change's range: each of the build's placements against
+  each of the reference's. A placement of one tree isn't the same placement of the other, so as with `time-runs`
+  (buster#509) the range pairs nothing.
 - **Times.** `time-runs --runs 11 --warmups 1 --copies 2` times the same lists over the placements and the copies.
 
 Every build, each placement's counts, each executable's objects and the `time-runs` take the lock for themselves alone.
-Where `cores` is on PATH, the builds also go through it. A placement after the first rebuilds the checker's unit alone. The logs land in `~/buster-fast-bench/claude-1175/logs`:
-`receipts.txt`, `counters.txt`, `counters-summary.txt` and `time-runs.txt`.
+Where `cores` is on PATH, the builds also go through it. A placement after the first rebuilds the checker's unit alone.
+The logs land in `~/buster-fast-bench/claude-1175/logs`: `receipts.txt`, `counters.txt`, `counters-summary.txt` and
+`time-runs.txt`.
 
+**A dry run on this VM.** The whole script ran here on 2026-11-04, exiting 0, with these stand-ins:
+
+- `env` for the lock and `native` for `znver5`, since the Xeon can't run some of `znver5`'s instructions;
+- a stand-in `perf` that runs the command and prints made-up counts, since the VM has no PMU;
+- one `time-runs` run, on CPU 0.
+
+Every stage ran. Its counts and times mean nothing; only these checks of the script stand:
+
+- **Placements.** At the four placements, `check_input_resolve_range` started 0x370, 0x620, 0x8d0 and 0xb80 into its
+  page in main's executables, and 0xc40, 0xef0, 0x1a0 and 0x450 in head's: 0, 688, 1,376 and 2,064 bytes on. `main`
+  started 0x150, 0x250, 0x350 and 0x450 into its page in both, 0, 256, 512 and 768 bytes on.
+- **Objects.** All eight executables' 140 objects were main 0:0's, byte for byte.
+- **Counts.** `counters.txt` had its 216 lines: 8 executables, 3 runs, 3 lists and 3 events. `time-runs` ended with no
+  failed process.
+- **Trees.** Both worktrees were left clean.
+
+On this VM, a placement after the first rebuilt the checker's unit in about 90 seconds.
 
 ## Limitations
 
