@@ -11,6 +11,7 @@ sizes them by the parts `lane_parts_by_cost` can cut, `min(units, BUSTER_LANE_MA
 | --- | --- | --- |
 | `base` | `cdee12f2ee9dbb03ccc87071fe76f278a369ec70`'s `git archive` | main, the branch's merge-base |
 | `head` | `84d0b572eaf8773c586bf1ea8bb64bd915e1e99b`'s `git archive` | the change, with its test and guide |
+| `swch` | `head` with `scripts/switch.patch` | a measurement switch, not committed: main's bound where `BUSTER_1236_OLD_BOUND` is set |
 
 Each tree was extracted into an empty directory on the 9700X and built there with `BUSTER_HOST_ARCH=znver5
 ./build.sh`, each build under the machine's lock. The executables' and inputs' SHA-256 are in `raw/ab.log`, and the
@@ -35,9 +36,11 @@ transparent huge pages `always`) with that machine's native builds.
   `base`, `head` and `base-again` (base's executable again, the floor): the one-line `-c` (31 runs) and `sqlite3.c`'s
   `-c` (7 runs).
 - `scripts/ab1236c.sh` (`raw/abc.log`): the builds over their code's placements (#509): each tree's checker unit
-  (`main_unit_checker.c`, which holds the `-c` driver and `object_writer.c`) linked at shifts of 0, 704, 1,408, 2,048,
-  2,752 and 3,456 bytes, then `ab --rounds 3` of `time-runs --copies 3` over the six placements of each of `base`,
-  `head` and `base-again`: the one-line `-c` (11 runs) and `sqlite3.c`'s `-c` (1 run). Its first attempt
+  (`main_unit_checker.c`, whose `.text` holds `object_writer.c`) linked at shifts of 0, 704, 1,408, 2,048, 2,752 and 3,456
+  bytes. As #1233 found ([buster14a/buster#1312](https://github.com/buster14a/buster/issues/1312)), the shifts don't move
+  `.text.buster_checker`, the page-aligned section that holds the checker and the `-c` driver, and as multiples of 64
+  they keep the unit's packing into cache lines. Then `ab --rounds 3` of `time-runs --copies 3` over the six placements
+  of each of `base`, `head` and `base-again`: the one-line `-c` (11 runs) and `sqlite3.c`'s `-c` (1 run). Its first attempt
   (`raw/abc-failed-shifts.log`) asked for shifts that aren't multiples of the unit's `.text` alignment, 64, which
   `build.sh shifts` refused; nothing was timed.
 - `scripts/stat1236.sh` (`raw/stat.log`): three rounds of `perf stat -r 51` of each tree's one-line `-c`, back to back,
@@ -46,6 +49,16 @@ transparent huge pages `always`) with that machine's native builds.
 - `scripts/stat1236b.sh` (`raw/statb.log`, summarized by `scripts/medians.py` in `raw/statb-medians.txt`): `perf stat`
   of one process at a time, the executables alternating as `time-runs` alternates them (`base`, `head`, and a copy of
   base's executable as `base-again`, rotated by iteration), 41 iterations a round, three rounds.
+- `scripts/ab1236d.sh` (`raw/abd.log`): one `ab --rounds 3` of three `time-runs` lists of the one-line `-c`: copies on
+  tmpfs, copies on `~/.cache` (btrfs with zstd compression, as `abb` and `abc` had them), and no copies.
+- `scripts/ab1236e.sh` (`raw/abe.log`): the copies' and the no-copies list, each with transparent huge pages on and off
+  for every measured process (`scripts/thpoff.c`), and `/proc/vmstat`'s THP and compaction counters around each.
+- `scripts/ab1236f.sh` (`raw/abf.log`, `raw/abf-cases.txt` by `scripts/cases.py`): a third tree, `swch` (below), and
+  the copies' and no-copies lists of `base`, `head`, `swch` and `base-again`, each with the switch unset and set.
+- `scripts/ab1236g.sh` (`raw/abg.log`, `raw/abg-cases.txt`): each file's mappings of itself at a `-c`'s exit
+  (`scripts/smapsfile.gdb`, `scripts/smapsfile.py`), then lists with copies in three orders, and the usual order with the
+  branch predictors flushed between processes (`scripts/ibpb.c`).
+- `scripts/ab1236h.sh` (`raw/abh.log`, `raw/abh-cases.txt`): `abf`'s copies' lists with the predictors flushed.
 
 The logs keep every line the scripts, `ab`, `time-runs` and `perf` print; the lock's waiting notices, which name other
 sessions, were dropped, and nothing else was.
@@ -81,11 +94,11 @@ to 16,996; `sqlite3.c`'s `-c` 6,397 to 6,401 faults against 6,400 to 6,404, at 2
 to 296,140, with about 6,800 fewer user instructions (1,863,543,528 to 1,863,543,713 against 1,863,550,306 to
 1,863,550,512).
 
-### The one-line `-c`'s user cycles
+### The one-line `-c`'s user cycles: the harness, not the change
 
 `time-runs` reads `head`'s user cycles 2% to 3.5% over `base`'s, net of the floor, in both campaigns, with 253 fewer
-user instructions. Placement doesn't explain it: in `abc` each of `head`'s six placements took 2.134 to 2.196 million
-user cycles, and each of `base`'s 2.069 to 2.115. `perf stat` doesn't reproduce it:
+user instructions, and in `abc` each of `head`'s six placements took more (2.134 to 2.196 million) than each of
+`base`'s (2.069 to 2.115). `perf stat` doesn't reproduce it:
 
 - back to back (`raw/stat.log`, `-r 51`): `base` 1.22–1.27 million user cycles, `head` 1.16–1.22; L1 dTLB misses
   3,176–3,204 against 2,152–2,153; demand fills 13,025–13,059 against 12,984–13,002, of them from DRAM 42–50 against
@@ -96,9 +109,64 @@ user cycles, and each of `base`'s 2.069 to 2.115. `perf stat` doesn't reproduce 
   the floor's −10.1% to −10.3%; kernel cycles (multiplexed, 10 to 17 processes each) −21.5%, −32.8% and −26.9%, the
   floor's −1.8%, −18.8% and −6.7%.
 
-So the wall time falls by 0.8% to 2.6% on the one-line `-c`, 8 to 21 µs of its medians, with the kernel's huge-page
-clear gone; the user-cycle reading depends on the harness, and this record doesn't say why `time-runs` reads it
-higher.
+The runs below (`scripts/ab1236d.sh` to `ab1236h.sh`) take the reading apart. It has three parts, none of them the
+change's work.
+
+**The floor is biased by the order (branch predictors).** `time-runs` takes its slots in one cyclic order
+([buster14a/buster#1311](https://github.com/buster14a/buster/issues/1311)), so `base` always runs right after `base-again`,
+the same non-PIE code at the same virtual addresses, and every other build after another's code. Mitigations here are
+"IBPB: conditional", so nothing flushes the branch predictors between these processes. `raw/abg-cases.txt`, with copies:
+
+| order | base-again, user cycles | head, user cycles |
+| --- | --- | --- |
+| base, head, base-again (the usual) | +1.29%, +1.09%, +2.41% | +2.79%, +2.95%, +3.99% |
+| base, base-again, head | −0.98%, −1.67%, −1.41% | +2.12%, +1.12%, +3.82% |
+| base, base-again | −0.95%, −0.72%, +1.21% | |
+| the usual, predictors flushed between processes (`ibpb`) | +0.39%, −0.90%, −0.23% | +2.53%, +2.30%, +1.96% |
+
+`scripts/ibpb.c` force-disables indirect branch speculation (`PR_SPEC_FORCE_DISABLE`) for `ab` and everything it runs,
+so the kernel issues an IBPB when it switches between them. With it the floor is 0 within a point; so the usual floor's
++1% to +2.4%, and 0.5 to 2 points of `head`'s reading (+2.79% to +3.99% before, +1.96% to +2.53% after), is `base`
+running on the predictions its twin left.
+
+**The bound itself costs no user cycles.** `swch` is `head` with `scripts/switch.patch`, one executable that takes main's
+bound where `BUSTER_1236_OLD_BOUND` is set; only `swch` reads it, so each round runs the same lists with it unset and set
+(`raw/abf-cases.txt` without `ibpb`, `raw/abh-cases.txt` with it). `swch`'s readings against `base`, new bound minus old:
+
+| run | wall | user cycles |
+| --- | --- | --- |
+| copies (`abf`) | −2.21, −1.38, −2.75 points | +1.23, +0.44, −0.43 points |
+| no copies (`abf`) | −3.46, −2.25, −2.26 points | −0.16, +0.64, −1.16 points |
+| copies, `ibpb` (`abh`) | −4.23, −2.76, −1.43 points | −0.63, −0.99, +0.38 points |
+
+The rest is `head`'s executable: with the predictors flushed, `head` read 0.8 to 1.3 points over `swch` with the same
+bound (`abh`, the switch unset). `abc`'s shifts couldn't show that: they kept the unit's packing into cache lines and
+never moved `.text.buster_checker` (#1312). By the symbol tables (`nm`, functions present in both), the
+executables' code differs in more than that: `head`'s functions sit about a page after `base`'s (4,366 of them exactly
+4,096 bytes; the most common other shifts are 4,080, 4,448, 4,400, 4,512 and 4,336), and `swch`'s mostly within −48 to
++128 bytes of `head`'s (3,303 of them at 0; the most common others are −32, +112, +128, −48 and −16). That is #509's
+placement noise, on the one-line `-c`'s cold code.
+
+**It shows only with fresh copies.** `raw/abd.log` runs three lists each round: copies on tmpfs, copies on `~/.cache`
+(btrfs, zstd), and no copies. With copies `head` reads +2.65% to +3.97% in user cycles (floor +0.61% to +2.90%);
+without, −0.53% to +1.12% (floor −1.93% to +0.63%). A copy's code is in physical pages no recent process touched, so
+each process starts colder: 1.6 to 1.7 million user cycles against 1.24 to 1.41 without copies, where code placement
+weighs more. `raw/abe.log` runs the same with transparent huge pages off for every measured process (`scripts/thpoff.c`,
+`PR_SET_THP_DISABLE`, inherited): `head` still reads +2.56% to +4.55% with copies (floor +1.05% to +2.66%), so the huge
+page isn't the cause either. Its `/proc/vmstat` deltas (rounds 2 and 3; round 1's include other work while it waited for
+the lock) count the expected huge-page faults, 482 per list with copies (96 processes each of 2 + 1 + 2) and 161
+without, no fallbacks and no compaction stalls.
+
+**Without copies, `head`'s own file is fast for another reason.** There `head` reads −9.8% to −10.6% in wall time with
+430 or 431 faults a process, against `swch`'s −2.4% to −3.2% with 485 to 487 (`abf`). `../head/build/compiler` is also
+`ab`'s and `time-runs`' own executable, which stays mapped while they run, and the kernel (`CONFIG_READ_ONLY_THP_FOR_FS`,
+khugepaged) has collapsed its read-only segment into file-backed huge pages: at exit a `head` process maps 6,144 KB of
+it with `FilePmdMapped`, where `base`'s and `swch`'s files, base's copy and a fresh copy of `head` map none
+(`raw/abg.log`'s `== text` lines, `scripts/smapsfile.py`). With copies, `time-runs` avoids that.
+
+So, with one executable for both bounds, the change takes 1.4% to 4.2% off the one-line `-c`'s wall time and leaves its
+user cycles within 1.2 points either way; the 2% to 3.5% that `time-runs` read was its order's bias and the two
+executables' code placement.
 
 ## Limitations
 
@@ -106,5 +174,8 @@ higher.
   `head` with `scripts/old-bound.patch`, main's bound, holds the same two huge pages as `base`, and fails
   `test-object-writer`'s new check).
 - The lock was contended: batches waited for CI jobs and another session between them, though none ran during one.
+- `swch` is a throwaway patch, measured but not committed, and its code sits apart from `head`'s as above; `ibpb` also
+  slows every switch between the measured processes, which reads in their wall times, not in their user cycles alone.
+- The order and setting experiments (`abd` to `abh`) have three rounds each, one `time-runs` process per list and round.
 - `perf stat`'s sixth counter was multiplexed (`cycles:k` and `ls_bad_status2.stli_other` were often not counted), and
   four of `raw/statb.log`'s processes read `cycles:u=0`; `scripts/medians.py` leaves those out.
