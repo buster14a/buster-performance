@@ -108,3 +108,72 @@ are within 0.7% of main's. The spellings kept in scratch until a table is decide
 
 The remaining fallback cost is the spellings gathered before the last element refuses the table: about 23 ns for each
 element at 200,000 elements.
+
+## The fallback's last costs: 1a1a09d4 to 188d0a10
+
+The review asked for the late fallback's remaining cost to be accepted or optimized; it was optimized. A profile at
+`65f678d9` (perf on the 9700X) put that cost in gathering every element's spelling before any conversion
+(`check_input_spelling`: an arena push, a range search and a splice scan each, then 16 bytes of columns): the table
+step 3.24%, `pp_without_splices` 0.96%, `pp_spelling` 0.58%. The heads since:
+
+- `1a1a09d4` (not timed): elements read in place (`check_literal_table_element`): a number token in one source range
+  without a splice is spelled by its bytes there, the range searched for once; an element shorter than 8 bytes (16 for
+  `double`) passed on its length; a longer one classified by one masked 64-byte load (`check_literal_table_classify`).
+- `39f13edfa9de46096cd17d9fc61a09e7e7a34734` (`head6-1210`, executable
+  `6dad31b92ef338907d12f8ce0b3e9892e31f979cd8c1a91d004b8030e4fad7f7`): one scan of the bytes from the table's first
+  number to its last clears them of splices (`check_literal_table_span`).
+- `8abc6cbf7b89972d7550d4760ae4319927facc9b` (`head7-1210`, executable
+  `9f5513b7ff02113a8b398699eb23ac31c3342571f4c6de8cbdc6000c1d2f42e3`): short numbers and in-span spellings without a
+  call; the classifier stops at a '.' or an exponent.
+- `188d0a10bbcba60c4559fbb0a08df2db06dc83e4` (`head8-1210`): a long number in the span classified without a call.
+
+A further input, `t_float_xfallback_*.c`, is the `x` table with a last element `16777217`, so that every element before
+the refusal is long and read (SHA-256: 128 `e37ac0fd89f6c5880f26b73da0f0ec71f4afd2a4811fc670c5c771cd52ec14ce`, 4,096
+`6b5d8de11747e6be2690866a8d016b254b204f53773092e25c61b95b60bf7a95`, 200,000
+`22394d5d609ff605518c88748e686e16a4e7cebc6e68239d5f64bdecb2d29ebb`, the same bytes as `float_fallback_200000.c`
+above).
+
+`scripts/run-v6.sh` and `scripts/run-v7.sh` time main, the previous head and the new one against main again, in one
+`time-runs --copies 3` process for the 200,000-element tables (15 runs) and one for the others (60 runs), pinned to
+CPU 2 under the lock (`raw/ab-1210-v6-*.txt`, `raw/ab-1210-v7-*.txt`). Against main, the late fallbacks:
+
+| head | `fallback` 128 | 4,096 | 200,000 | `xfallback` 128 | 4,096 | 200,000 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `65f678d9` (v6) | +1.58% | +3.60% | +5.23% | +1.08% | +3.32% | +5.02% |
+| `39f13edf` (v6) | +1.41% | +0.47% | +1.19% | +1.04% | +1.14% | +2.19% |
+| `8abc6cbf` (v7) | +0.16% | +0.07% | +1.27% | −0.01% | +1.03% | +2.49% |
+
+The accepted tables gained at each step: at `8abc6cbf`, 200,000 elements −55.30% (`x`) to −77.07% (`s`), 4,096
+−33.24% to −50.11%, 128 −7.49% to −10.87%. In a profile of `8abc6cbf` (`perf record` of five compiles, under the
+lock), the table step of the long-integer fallback is 0.40% and that of the rounded fallback 0.63%, plus 0.62% in
+`check_literal_table_element`, which `188d0a10` inlines.
+
+The same code at other addresses runs up to 2% faster or slower on the 9700X (#509), more than the remaining fallback
+costs, so the last head was timed as the 9700X workflow's checker A/B times one: `scripts/run-v8.sh` links main and
+`188d0a10` at four placements of `main_unit_checker.c`'s code (`./build.sh shifts`: 0, 1,088, 2,112 and 3,136 bytes)
+and times them over their placements with main's placements again as the floor (`raw/ab-1210-v8-*.txt`; executables'
+SHA-256, main: `7af605913d1a83f28587bb2c56248250fe0ccd0dfac07c19baa1e198f4888dca`,
+`349c74e9672fcb2409ca8862c794a56258124a198ecf18c8d28485a78f09af2a`,
+`3360f9b24f66927ed5df0ac68a37764efcc7d1a828fe0179aedc6f9be78f4c14`,
+`9e0dc8e59ffff08019e6a199b86a3c195f2da06f1a6b67fac7c0e600e49182ae`; `188d0a10`:
+`103321964fc167d6a24bb59b0905206f5984d29fb5767d608efc9dcd82222838`,
+`8ab5eb43ba37e25c353e004dd1ca63807aa5b2e2723cd4b1d8f3e0e03de8c581`,
+`4b559defbec2afc5f60ef3c52dad23e976e85a578c07d54369e2edfb1e52defd`,
+`1d7a38d92d4e7c2d984dfa14383b1e3f5e943b435d4365018574edf505fc4cad`). Wall time against main, the range over
+placements:
+
+| table | 128 | 4,096 | 200,000 |
+| --- | --- | --- | --- |
+| `float` `f` | −7.13% (−16.22% to −3.42%) | −42.69% (−46.53% to −40.37%) | −66.11% (−66.30% to −65.84%) |
+| `float` `x` | −6.15% (−13.44% to −2.13%) | −35.39% (−37.52% to −33.70%) | −55.95% (−56.25% to −55.43%) |
+| `float` `s` | −8.04% (−14.68% to −4.34%) | −48.72% (−50.90% to −47.15%) | −77.17% (−77.44% to −76.97%) |
+| `float` `l` | −5.06% (−12.17% to −1.59%) | −32.06% (−34.77% to −30.12%) | −57.72% (−58.39% to −56.94%) |
+| `float` `m` | −6.00% (−13.00% to −2.50%) | −38.29% (−40.74% to −36.67%) | −63.16% (−63.34% to −62.91%) |
+| `double` `x` | −7.48% (−14.40% to −3.99%) | −41.94% (−44.00% to −40.66%) | −64.19% (−64.32% to −63.84%) |
+| `float` `fallback` | +1.52% (−5.71% to +5.64%) | +0.83% (−3.36% to +3.28%) | +1.00% (−0.11% to +1.45%) |
+| `float` `xfallback` | +1.83% (−5.32% to +5.47%) | +1.55% (−2.05% to +3.41%) | +1.05% (+0.48% to +1.82%) |
+
+The floor (`main-again`, main's placements timed again) is within −0.45% to +0.47% of main, and its placements range
+from −7.44% to +7.01% at 128 elements, −4.72% to +7.01% at 4,096 and −2.29% to +1.31% at 200,000. A table refused at
+its last element now costs about 1% more than main at 200,000 elements, against 27.8% at `e2024897`; at 128 and 4,096
+elements the difference is within the spread of placements.
