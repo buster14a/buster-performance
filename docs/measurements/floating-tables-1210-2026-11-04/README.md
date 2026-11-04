@@ -173,7 +173,7 @@ placements:
 | `float` `fallback` | +1.52% (−5.71% to +5.64%) | +0.83% (−3.36% to +3.28%) | +1.00% (−0.11% to +1.45%) |
 | `float` `xfallback` | +1.83% (−5.32% to +5.47%) | +1.55% (−2.05% to +3.41%) | +1.05% (+0.48% to +1.82%) |
 
-The floor (`main-again`, main's placements timed again) is within −0.45% to +0.47% of main, and its placements range
-from −7.44% to +7.01% at 128 elements, −4.72% to +7.01% at 4,096 and −2.29% to +1.31% at 200,000. A table refused at
+The floor (`main-again`, main's placements timed again) is within −0.55% to +0.47% of main, and over its placements and
+copies it ranges from −9.81% to +6.69% at 128 elements, −7.50% to +7.01% at 4,096 and −2.29% to +1.31% at 200,000. A table refused at
 its last element now costs about 1% more than main at 200,000 elements, against 27.8% at `e2024897`; at 128 and 4,096
 elements the difference is within the spread of placements.
