@@ -254,3 +254,37 @@ in zmm16 and on rather than the red zone's staging slots. By `same.sh` against `
 (`same-f6d0-merge.log`, `objects-f6d0-merge.sha256`), Lua's 34 objects are byte-identical, so the Lua counts in the
 section above are `f55bd18b`'s too. `sqlite3.o` and `speedtest1.o` differ, 2,684 and 2,681 bytes of `.text` smaller
 (1,186,676 → 1,183,992 and 1,242,548 → 1,239,867). Nothing was counted or timed again.
+
+## After main's #939 code certificate (`b5589a47`)
+
+The pull request then merged main `2fef25b0` (`b5589a47`), whose #939 certifies the CFG consumer's code from its
+records under `--verify` (`tier1_certificate_emitted.c`). Two of this pull request's changes met it:
+
+- The certificate expected `mov eax, eax` after a call whose I32 result is already in `rax`, which pattern 1 drops. The
+  merge drops that move from the certificate's call kernel too: an I32's bits past its 32 are unspecified in Tier 1.
+- The certificate proves each block from its entry facts, which hold each value in one location, so it refused a
+  reload from a row that a block's one predecessor stored (it couldn't know the row still held the value). The merge
+  stops carrying rows across blocks: every block's first call stores again what it saves. On the merged tree before
+  that change, Lua's 34 sources had 3,163 call stores and 255,363 bytes of `.text`, and failed `--verify` in 31 of them;
+  after it, 4,253 call stores and 260,821 bytes, and none fails.
+
+Lua's counts were taken again on the minipc, by `measure.sh`, `compare.sh` and `classify.sh`, for main `2fef25b0` and the
+merge (`local/lua-counts/main-2fef25b0`, `local/lua-counts/head-b5589a47`):
+
+| | main `2fef25b0` | head `b5589a47` |
+| --- | ---: | ---: |
+| `.text` (clang -O0's: 273,461) | 283,922 | 260,821 |
+| Instructions | 82,358 | 75,707 |
+| `mov r32, same` | 4,658 | 176 |
+| Reload-then-store pairs | 133 | 11 |
+| `call_stores` / `call_loads` | 5,954 / 5,954 | 4,253 / 5,205 |
+| Records | 74,451 | 67,491 |
+| Tier 1's 1,104 compiled functions, bytes against clang -O0's 265,499 | 276,015 (1.040×) | 252,605 (0.951×) |
+
+Tier 1 compiles all 1,104 functions at both, and `lua-run.sh`'s scripts give clang -O0's build's output at the merge.
+`local/verify/verify.txt` has `--tier1 --verify --tier1-report`'s totals: both trees certify the same 883 of Lua's
+functions' code (50 in shapes the certificate doesn't decode yet; the rest are the straight-line consumer's), with no
+failure, and the merge compiles the frozen `sqlite3.c` (the benchmark's flags) with 2,161 certified and none refused.
+`benchmark-tier1-code-certificate` of `sqlite3.c` (`local/verify/`) passes at the merge, which it doesn't on a refusal;
+its times are the minipc's, not a measurement. Main `2fef25b0` itself refuses `test-checker-driver`'s atomic counter
+litmus (buster#1261, buster#1262), and so does the merge. Nothing was timed again.
