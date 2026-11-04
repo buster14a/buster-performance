@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # campaign-9700x.sh REPOSITORY NAME=COMMIT...: #1175's acceptance measurement on the Ryzen 7 9700X.
+# See ../ACCEPTANCE.md for the integrated pair, strict counter manifest and validation status.
 #
 # Builds each commit (the first is the reference: main) at four placements of its code, then counts and times them:
 #
@@ -24,7 +25,8 @@
 # executable's objects and the time-runs take the 9700X's lock for themselves alone (EXCLUSIVE_OWNER defaults to
 # claude-1175); builds also go through `cores` where it is on PATH. DIRECTORY (CAMPAIGN_DIRECTORY, default
 # ~/buster-fast-bench/claude-1175) gets tree-NAME (a detached worktree, left clean), shifts/NAME/compiler-SKIP-SHIFT and
-# logs/: receipts.txt, counters.txt (a line per run), counters-summary.txt and time-runs.txt.
+# logs/: receipts.txt, counters-expected.txt (the planned sample grid), counters.txt (a line per run),
+# perf-*.csv (unfiltered perf output), counters-summary.txt and time-runs.txt.
 #
 # For a dry run off the 9700X: CAMPAIGN_LOCK=env, CAMPAIGN_HOST_ARCH=native, CAMPAIGN_EVENTS (perf's events, or
 # "none"), CAMPAIGN_CORPUS (the frozen corpus, tools/ci/fetch-corpus.sh's layout), CAMPAIGN_CPU (default 2),
@@ -66,7 +68,7 @@ for pair in "$@"; do
     commits+=("$(git -C "$repository" rev-parse --verify "${pair#*=}^{commit}")")
 done
 mkdir -p "$R/logs" "$R/out" "$R/copies"
-cc -std=c17 -O2 -Wall -Wextra -Werror -o "$R/counters" "$here/counters.c"
+"$lock" cc -std=c17 -O2 -Wall -Wextra -Werror -o "$R/counters" "$here/counters.c"
 
 SQLITE=(--predefines "$C/provenance/gnu17-pinned-predefines.txt" --clang-features -march=znver5 -std=gnu17 -nostdinc
         -isystem "$C/headers/usr/lib/clang/23/include" -isystem "$C/headers/usr/local/include"
@@ -157,7 +159,21 @@ printf '%s\0' "${syntax[@]}" > "$R/arguments-syntax"
 printf '%s\0' "${sqlite_c[@]}" > "$R/arguments-sqlite-c"
 printf '%s\0' "${musl_c[@]}" > "$R/arguments-musl-c"
 : > "$R/logs/counters.txt"
+: > "$R/logs/counters-summary.txt"
 if [ "$events" != none ]; then
+    # Declare the intended grid independently of perf's output, so an absent whole event/build cannot disappear.
+    IFS=, read -r -a event_names <<< "$events"
+    : > "$R/logs/counters-expected.txt"
+    for line in "${executables[@]}"; do
+        read -r name placement path <<< "$line"
+        for run in 1 2 3; do
+            for mode in syntax sqlite-c musl-c; do
+                for event in "${event_names[@]}"; do
+                    printf '%s %s %s %s %s\n' "$name" "$placement" "$mode" "$run" "$event"
+                done
+            done
+        done
+    done > "$R/logs/counters-expected.txt"
     for line in "${executables[@]}"; do
         read -r name placement path <<< "$line"
         "$lock" bash -c '
@@ -167,13 +183,14 @@ if [ "$events" != none ]; then
                 for mode in syntax sqlite-c musl-c; do
                     mapfile -d "" -t arguments < "$R/arguments-$mode"
                     (cd "$R/out" && taskset -c "$cpu" perf stat -x, -e "$events" -- "$binary" "${arguments[@]}" 2>&1 > /dev/null) |
+                        tee "$R/logs/perf-$name-$placement-$mode-$run.csv" |
                         awk -F, -v b="$name" -v p="$placement" -v m="$mode" -v r="$run" \
                             '"'"'$3 ~ /:u$/ { printf "%s %s %s %s %s %s\n", b, p, m, r, $3, $1 }'"'"'
                 done
             done
         ' counters "$R" "$path" "$name" "$placement" "$cpu" "$events" >> "$R/logs/counters.txt"
     done
-    "$R/counters" < "$R/logs/counters.txt" | tee "$R/logs/counters-summary.txt"
+    "$R/counters" "$R/logs/counters-expected.txt" < "$R/logs/counters.txt" | tee "$R/logs/counters-summary.txt"
 fi
 
 # time-runs over the placements and two fresh copies of each executable, the reference's 0:0 running it.
