@@ -6,7 +6,7 @@ Ryzen 7 9700X. The VM has no hardware PMU, so the counts are BOLT's instrumented
 
 **Not covered: cycles.** buster#1175 keeps a change only when its taken branches and cycles fall over placements
 (`time-runs --copies`, buster#509) on the 9700X. That measurement is still to be made, and nothing here stands in for
-it.
+it. `scripts/campaign-9700x.sh` makes it in one command on the 9700X ("The 9700X measurement", below).
 
 ## Sources, host and inputs
 
@@ -188,6 +188,60 @@ visit's test takes 98 thousand more jumps, because the layout around it changed.
 it inlines (`check_input_add_node`'s hinted tests among them), falls 18%: 4,356,918 to 3,565,835
 (`functions-taken.txt`).
 
+## The 9700X measurement
+
+**What CI has.** buster#1225's own 9700X job measured its head `22b16e4e` alone
+([job 125967206614](https://github.com/buster14a/buster/actions/runs/41649129901/job/125967206614)). Its compile-time
+step ran `perf stat -r 11` of `-c sqlite3.c`, with that step's options (the host's headers, the default lanes), on CPU 2:
+
+| `22b16e4e`, `-c sqlite3.c` | |
+| --- | ---: |
+| `cycles:u` | 525.72 M (±0.06%) |
+| `instructions:u` | 1,186.34 M |
+| `branch-misses:u` | 3.05 M |
+| `measure-compile`'s median wall time of 11 | 110.91 ms |
+
+Main's run at the base `8c9c5bf0` ([run 41644431545](https://github.com/buster14a/buster/actions/runs/41644431545))
+skipped that step and the checker's timings, since that merge changed no checker or compile-time source. Main's later
+push runs did the same where their merges didn't touch the checker, such as `48ac6d71`'s
+([run 41735471087](https://github.com/buster14a/buster/actions/runs/41735471087)). So CI has no matched pair, and these
+numbers compare with nothing.
+
+**`scripts/campaign-9700x.sh`** makes buster#1175's measurement on the 9700X, from a buster clone that has both commits:
+
+```sh
+git -C ~/buster fetch origin 8c9c5bf02160a2784a637548362148872e471adb 22b16e4ee3dda030dd858b9c7381ea0d44e20013
+EXCLUSIVE_TITLE="<session title>" EXCLUSIVE_LINK=https://github.com/buster14a/buster/pull/1225 \
+    "$RECORD/scripts/campaign-9700x.sh" ~/buster main=8c9c5bf0 head=22b16e4e
+```
+
+`head` is `main` with buster#1225's diff alone: the pull request merged `8c9c5bf0` before its last code commit. The
+script does the following:
+
+- **Placements.** A shift of `.text` alone wouldn't move the code this change touches. Six of its seven files are the
+  checker's own code, in `.text.buster_checker`, which starts each unit on a page (buster#502). So `./build.sh shifts`,
+  of `main.c` as buster#880's record did or of the checker's unit as buster#509's example does, moves it only by whole
+  pages. Its offsets in the page, which the caches and the op cache see, stay.
+
+  The script therefore builds each commit (`BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0`) four times. Each time,
+  `main_unit_checker.c` gets a line of file-scope assembly for that build alone, `.skip SKIP, 0xcc` in that section.
+  That starts the unit's checker code SKIP bytes into its page, ahead of every function, with bytes that never run.
+  `./build.sh shifts DIR main.c SHIFT` moves the rest. The placements, SKIP:SHIFT, are 0:0 (the code as buster ships
+  it), 688:256, 1376:512 and 2064:768, so the skips fall 0, 48, 32 and 16 bytes into a 64-byte line. The receipts give
+  each executable's offsets of `check_input_resolve_range`, `check_graph_run` and `main` in their pages.
+- **Objects.** Every object of `sqlite3.c` and of the 139 musl units (buster#182's list, in
+  `pgo-port-880-2026-11-02/logs`), from every executable, must be the reference's at 0:0, byte for byte.
+- **Counters.** At every placement, `perf stat` counts `instructions:u`, `cycles:u` and `ex_ret_brn_tkn:u` three times
+  per list. The lists are `sqlite3.c`'s `-fsyntax-only` and `-c` and the musl units' `-c`, with the frozen corpus's
+  headers and predefines. `counters.c` takes the least of each placement's runs and their mean over the placements. It
+  gives each build's change against the first build's, and the range of that change over the placements.
+- **Times.** `time-runs --runs 11 --warmups 1 --copies 2` times the same lists over the placements and the copies.
+
+Every build, each placement's counts, each executable's objects and the `time-runs` take the lock for themselves alone.
+Where `cores` is on PATH, the builds also go through it. A placement after the first rebuilds the checker's unit alone. The logs land in `~/buster-fast-bench/claude-1175/logs`:
+`receipts.txt`, `counters.txt`, `counters-summary.txt` and `time-runs.txt`.
+
+
 ## Limitations
 
 - **No cycles, no 9700X.** These are counts of the layout's taken branches and of instructions. Nothing here measures
@@ -219,7 +273,8 @@ sha256 sums are in `logs/receipts.txt`.
 - **`scripts/`:**
   - `taken.c`, `measure.sh`, `attribute.sh`, `site.sh` and `branches.sh` (the coverage counts' extraction);
   - `build.sh` and the three clang wrappers;
-  - `probe-expect.c`.
+  - `probe-expect.c`;
+  - `campaign-9700x.sh` and `counters.c`, the 9700X measurement still to make.
 - **`patches/`:** the variants' diffs against main.
 - **`logs/`:**
   - `receipts.txt` and `sites.txt`;
