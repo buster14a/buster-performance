@@ -1,0 +1,140 @@
+name: Tests and Zen 5 benchmarks
+
+# A one-off A/B for buster#775 (buster#1224) on the 9700X, dispatched by hand on a short-lived branch that holds this
+# file alone in place of the usual workflow, and deleted after its run: main at the pull request's merge base against
+# its head, on the frozen sqlite3.c, which has no vectors. The issue asks that code without vectors is unchanged: the
+# same object, and the 9700X's instructions and cycles, main against the head. The job hooks hold the shared host lock
+# for the job, as for any CI job; keep it short, since other jobs give up after waiting 10 minutes for the lock.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: buster-fast-9700x-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ab:
+    name: A/B of buster#1224 on the Ryzen 7 9700X
+    if: ${{ github.repository_id == '1421805693' }}
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: znver5
+      # Main at #1224's merge base, and #1224's head, which merges it: the head's tree is the base's and the pull
+      # request's changes.
+      BASE_SHA: e98426b2a230e0bc9083b5be9d520d7c8e0f172b
+      HEAD_SHA: 1ed9666b7c2a9f9a34a6b21294e1cee637611707
+      SHIFTS: 0 704 1408 2048 2752 3456
+    steps:
+      - name: Verify benchmark host
+        run: |
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          grep -m1 '^model name[[:space:]]*:' /proc/cpuinfo
+          grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          uname -r
+          awk '/^Cpus_allowed_list:/' /proc/self/status
+          perf --version
+
+      - name: Check out the pull request's head
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          path: head
+          persist-credentials: false
+
+      - name: Stage official Clang 23.1.4 in the private runner cache
+        run: bash head/tools/ci/setup-benchpress.sh
+
+      - name: Check out main at the merge base
+        run: |
+          # The public base commit alone, without tokens, as the branch-sizing A/B fetches it.
+          GIT_TERMINAL_PROMPT=0 timeout 60s git -C head -c credential.helper= -c http.extraHeader= fetch \
+              --no-tags --no-recurse-submodules --depth=1 https://github.com/buster14a/buster.git "$BASE_SHA"
+          git -C head worktree add --detach "$GITHUB_WORKSPACE/base" "$BASE_SHA"
+          test "$(git -C head rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git -C base rev-parse HEAD)" = "$BASE_SHA"
+          clang --version
+
+      - name: Build both trees at six placements of the checker's unit
+        run: |
+          for tree in base head; do
+              (cd "$tree" && BUSTER_DEBUG_INFO=0 taskset -c 0-7 ./build.sh shifts "$RUNNER_TEMP/shifts/$tree" main_unit_checker.c $SHIFTS)
+          done
+          sha256sum base/build/compiler head/build/compiler "$RUNNER_TEMP"/shifts/*/compiler-*
+
+      - name: Measure
+        run: |
+          set -euo pipefail
+          unset CPATH C_INCLUDE_PATH
+          export SOURCE_DATE_EPOCH=1792454400
+          corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+          sqlite="$corpus/sqlite/sqlite3.c"
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite" | sha256sum --check
+          frozen=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc
+              -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
+          out="$RUNNER_TEMP/ab-775"
+          mkdir -p "$out"
+          # Both executables at paths of the same length, so that argv[0] leaves their stacks at the same offset (#445).
+          base="$GITHUB_WORKSPACE/base/build/compiler"
+          head="$GITHUB_WORKSPACE/head/build/compiler"
+
+          echo "=== objects: -c of sqlite3.c by each build, which must be the same bytes"
+          for b in base head; do
+              taskset -c 2 "${!b}" "${frozen[@]}" -c "$sqlite" -o "$out/$b.o"
+          done
+          sha256sum "$out/base.o" "$out/head.o"
+          cmp "$out/base.o" "$out/head.o"
+
+          echo "=== counters: 21 rounds of -c, the builds' order alternating by round, one process each"
+          events=cycles:u,instructions:u,task-clock
+          : > "$out/stat.txt"
+          for round in $(seq 1 21); do
+              order="base head"
+              if [ $((round % 2)) = 0 ]; then order="head base"; fi
+              for b in $order; do
+                  taskset -c 2 perf stat -x, -e "$events" -o "$out/stat.csv" -- "${!b}" "${frozen[@]}" -c "$sqlite" -o "$out/stat.o"
+                  if grep -E '<not (supported|counted)>' "$out/stat.csv"; then
+                      echo "::error::perf didn't count every event"
+                      exit 1
+                  fi
+                  awk -F, -v b="$b" -v round="$round" '$1 ~ /^[0-9.]+$/ { printf "STAT %s %s %s %s\n", b, round, $3, $1 }' "$out/stat.csv" \
+                      | tee -a "$out/stat.txt"
+              done
+          done
+          echo "=== counters' medians over the 21 rounds"
+          for b in base head; do
+              for event in cycles:u instructions:u task-clock; do
+                  awk -v b="$b" -v e="$event" '$2 == b && $4 == e { print $5 }' "$out/stat.txt" | sort -g \
+                      | awk -v b="$b" -v e="$event" '{ v[NR] = $1 } END { printf "MEDIAN %s %s %s (min %s, max %s, n %d)\n", b, e, v[(NR + 1) / 2], v[1], v[NR], NR }'
+              done
+          done
+
+          echo "=== whole compiles over placements and copies (#509): main, the head, and main again as the floor"
+          builds=()
+          for b in base:base head:head base-again:base; do
+              for s in $SHIFTS; do
+                  builds+=(--build "${b%%:*}" "$RUNNER_TEMP/shifts/${b#*:}/compiler-$s")
+              done
+          done
+          # The job holds the host lock already: ab runs without --lock.
+          "$head" ab --rounds 2 --cpu 2 "$head" \
+              -- time-runs --runs 3 --copies 2 "${builds[@]}" \
+              --list "${frozen[@]}" -c "$sqlite" -o /dev/null
+
+      - name: Keep the raw captures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ab-775
+          path: ${{ runner.temp }}/ab-775
+          if-no-files-found: ignore
+          retention-days: 30
