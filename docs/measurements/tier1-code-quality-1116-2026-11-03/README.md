@@ -265,7 +265,7 @@ records under `--verify` (`tier1_certificate_emitted.c`). Two of this pull reque
 - The certificate proves each block from its entry facts, which hold each value in one location, so it refused a
   reload from a row that a block's one predecessor stored (it couldn't know the row still held the value). The merge
   stops carrying rows across blocks: every block's first call stores again what it saves. On the merged tree before
-  that change, Lua's 34 sources had 3,163 call stores and 255,363 bytes of `.text`, and failed `--verify` in 31 of them;
+  that change, Lua's 34 sources had 3,163 call stores and 255,363 bytes of `.text`, and with the call kernel fixed, 29 of them failed `--verify`;
   after it, 4,253 call stores and 260,821 bytes, and none fails.
 
 Lua's counts were taken again on the minipc, by `measure.sh`, `compare.sh` and `classify.sh`, for main `2fef25b0` and the
