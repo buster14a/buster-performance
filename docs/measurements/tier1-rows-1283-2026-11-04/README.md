@@ -91,6 +91,27 @@ Within those runs, the lexer's own `c_tokenize` medians were:
   - Zen 5 renames most register-to-register vector moves, so a removed `vmovdqa64` saves an instruction more than a cycle.
 - **Tier 1 is slower than Tier 0** on the rows unit (1.20×) and the lexer (1.10×), and faster on the scan (0.58×). That gap isn't the rows' placement: main shows it too.
 
+## The merged head (`4a98ff9b`), again on the 9700X
+
+After main gained buster#1280's 4- and 8-byte vectors, #1332 merged it (head `4a98ff9b`, adding the review's gather and complex multiplication fixtures, test code only). The same step ran against that head's base, main `2244e4e7879b7559569c738dde25102728abf7bc`, in [run 41889112152](https://github.com/buster14a/buster/actions/runs/41889112152/job/126796248955), on the same host. `9700x-4a98ff9b/` has its whole log and host line.
+
+| Unit | main records | head records | rows | head `row_moves` | main's moves |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| rows | 5658 | 5526 | 58 | 18 | 150 |
+| scan | 281 | 255 | 11 | 0 | 26 |
+| lexer | 26724 | 26482 | 118 | 75 | 317 |
+
+| Program | Tier 0 | `--tier1` (main) | `--tier1` (head) | clang -O2 | head / Tier 0 | head / main |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| rows, user cycles, M | 116.01 | 137.10 | 137.07 | 28.48 | 1.182 | 1.000 |
+| rows, instructions, M | 117.10 | 139.02 | 136.60 | 26.27 | 1.167 | 0.983 |
+| scan, user cycles, M | 299.12 | 180.24 | 173.62 | 25.22 | 0.580 | 0.963 |
+| scan, instructions, M | 1254.05 | 716.64 | 644.55 | 103.87 | 0.514 | 0.899 |
+| lexer, user cycles, M | 780.16 | 871.04 | 868.80 | 36.88 | 1.114 | 0.997 |
+| lexer, instructions, M | 1474.40 | 1287.15 | 1274.93 | 134.52 | 0.865 | 0.991 |
+
+The two runs agree: the scan takes 3.7% fewer cycles and 10.1% fewer instructions, and the rows unit and the lexer the same cycles with 1.7% and 0.9% fewer instructions. With #1280, the lexer has two more rows (118), and main's moves around them are 317.
+
 ## Limitations
 
 - This is one job's 11 rounds on one CPU.
