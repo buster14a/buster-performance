@@ -36,9 +36,11 @@ transparent huge pages `always`) with that machine's native builds.
   `base`, `head` and `base-again` (base's executable again, the floor): the one-line `-c` (31 runs) and `sqlite3.c`'s
   `-c` (7 runs).
 - `scripts/ab1236c.sh` (`raw/abc.log`): the builds over their code's placements (#509): each tree's checker unit
-  (`main_unit_checker.c`, which holds the `-c` driver and `object_writer.c`) linked at shifts of 0, 704, 1,408, 2,048,
-  2,752 and 3,456 bytes, then `ab --rounds 3` of `time-runs --copies 3` over the six placements of each of `base`,
-  `head` and `base-again`: the one-line `-c` (11 runs) and `sqlite3.c`'s `-c` (1 run). Its first attempt
+  (`main_unit_checker.c`, whose `.text` holds `object_writer.c`) linked at shifts of 0, 704, 1,408, 2,048, 2,752 and 3,456
+  bytes. As #1233 found ([buster14a/buster#1312](https://github.com/buster14a/buster/issues/1312)), the shifts don't move
+  `.text.buster_checker`, the page-aligned section that holds the checker and the `-c` driver, and as multiples of 64
+  they keep the unit's packing into cache lines. Then `ab --rounds 3` of `time-runs --copies 3` over the six placements
+  of each of `base`, `head` and `base-again`: the one-line `-c` (11 runs) and `sqlite3.c`'s `-c` (1 run). Its first attempt
   (`raw/abc-failed-shifts.log`) asked for shifts that aren't multiples of the unit's `.text` alignment, 64, which
   `build.sh shifts` refused; nothing was timed.
 - `scripts/stat1236.sh` (`raw/stat.log`): three rounds of `perf stat -r 51` of each tree's one-line `-c`, back to back,
@@ -138,8 +140,8 @@ bound where `BUSTER_1236_OLD_BOUND` is set; only `swch` reads it, so each round 
 | copies, `ibpb` (`abh`) | −4.23, −2.76, −1.43 points | −0.63, −0.99, +0.38 points |
 
 The rest is `head`'s executable: with the predictors flushed, `head` read 0.8 to 1.3 points over `swch` with the same
-bound (`abh`, the switch unset). `abc`'s shifts, multiples of the unit's 64-byte alignment, moved the unit within its
-pages but kept its code's packing into cache lines. By the symbol tables (`nm`, functions present in both), the
+bound (`abh`, the switch unset). `abc`'s shifts couldn't show that: they kept the unit's packing into cache lines and
+never moved `.text.buster_checker` (#1312). By the symbol tables (`nm`, functions present in both), the
 executables' code differs in more than that: `head`'s functions sit about a page after `base`'s (4,366 of them exactly
 4,096 bytes; the most common other shifts are 4,080, 4,448, 4,400, 4,512 and 4,336), and `swch`'s mostly within −48 to
 +128 bytes of `head`'s (3,303 of them at 0; the most common others are −32, +112, +128, −48 and −16). That is #509's
