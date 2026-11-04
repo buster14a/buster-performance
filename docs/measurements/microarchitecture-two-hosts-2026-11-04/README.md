@@ -10,15 +10,15 @@ for `znver4`, `znver5` and the scalar `x86-64` host:
 
 The measurements are wall time and stages, every core event perf lists, every perf metric, same-run top-down groups, per-function profiles (leader-sampled groups, IBS, LBR), multicore scaling, energy and, on the 9700X, DRAM traffic. A three-way A/B pins the largest finding to one pull request.
 
-The [harness](harness/README.md) reruns all of it: a C runner and reducer (`uarch.c`), `run.sh` with one profile per host, and `tables.sh`, which rebuilds [every table](tables.md) from the raw files.
+The harness that reruns all of it lives in buster as [`tools/microarch/`](https://github.com/buster14a/buster/tree/4dfe849a91e8c2000183ea730e774e708251310f/tools/microarch) ([buster#1343](https://github.com/buster14a/buster/pull/1343), commit `4dfe849a`; [its guide](https://github.com/buster14a/buster/blob/4dfe849a91e8c2000183ea730e774e708251310f/docs/commands/microarch.md)). It is a C runner and reducer (`uarch.c`), `run.sh` with one profile per host, and `tables.sh`, which rebuilds [every table](tables.md) from the raw files here. It ran from a copy at the time; the port in buster produces byte-identical tables from these raw files. Its `setup`, `build-commit` and generic `ab` steps replace the one-off steps named below (`ab1049`, `ab3`, `ab-self`: `AB_NAME=ab3 AB_BUILDS="pre1049-znver5 m1049-znver5 znver5" run.sh ... ab`).
 
 ## Issues filed and updated
 
 | | issue | what |
 | --- | --- | --- |
-| new | (linked in the next commit) | #1049's common warnings make `-c sqlite3.c` 52% slower on the 9700X (107.0 → 162.4 ms); `check-program` 10.4 → 58.6 ms |
-| new | (linked in the next commit) | `check_common_evaluated` scans every graph node per `_Generic` selection: quadratic; the compiler's own `main.c` goes from 1.44 to 4.44 s |
-| new | (linked in the next commit) | the vector path warns `-Wempty-body` at `sqlite3.c:74649`; `--scalar`, the x86-64 build and clang don't |
+| new | [#1340](https://github.com/buster14a/buster/issues/1340) | #1049's common warnings make `-c sqlite3.c` 52% slower on the 9700X (107.0 → 162.4 ms); `check-program` 10.4 → 58.6 ms |
+| new | [#1341](https://github.com/buster14a/buster/issues/1341) | `check_common_evaluated` scans every graph node per `_Generic` selection: quadratic; the compiler's own `main.c` goes from 1.44 to 4.44 s |
+| new | [#1339](https://github.com/buster14a/buster/issues/1339) | the vector path warns `-Wempty-body` at `sqlite3.c:74649`; `--scalar`, the x86-64 build and clang don't |
 | evidence | [#672](https://github.com/buster14a/buster/issues/672) | 1/2/4/8-worker throughput, DRAM bytes per source byte and energy at main |
 | evidence | [#1213](https://github.com/buster14a/buster/issues/1213) | musl's 1,355 units on 1–8 lanes: 22–31% of the time in the kernel, its profile |
 | evidence | [#892](https://github.com/buster14a/buster/issues/892) | the mispredicted sites at main on both hosts |
@@ -26,14 +26,14 @@ The [harness](harness/README.md) reruns all of it: a C runner and reducer (`uarc
 
 ## Findings
 
-1. **#1049 (common warnings, merged 4 November) is the largest change in compile time since the 27 October attribution.**
+1. **#1049 (common warnings, merged 4 November) is the largest change in compile time since the 27 October attribution** ([#1340](https://github.com/buster14a/buster/issues/1340)).
    - On the 9700X, sqlite3.c's `-c` takes 107.0 ms before it (`aca9e53a`), 162.4 ms at its merge (`e36740b8`) and 165.1 ms at main.
    - User instructions go from 1,156 M to 1,972 M, mispredicts from 3.1 M to 7.0 M.
    - The 7940HS shows the same: 194.7 → 276.9 → 278.1 ms.
    - Its four functions take 23.8% of main's user cycles on the 9700X.
    - The pass has no vector path: the scalar host build spends as long in `check-program` as the AVX-512 build.
-2. **The same pass is quadratic in `_Generic` selections.** The compiler's own `main.c` (36 MB preprocessed, 389 selections) goes from 1,442 to 4,437 ms on the 9700X, `check-program` from 102 to 2,885 ms. A generated unit shows `check-program` growing about 4× per doubling of selections (1.9 → 346 ms from 250 to 4,000).
-3. **The vector and scalar paths disagree** on one `-Wempty-body` warning in sqlite3.c. Every build's object (`61eb96dd…`) and `-E` output are byte-identical across the three builds and both hosts; only that diagnostic differs.
+2. **The same pass is quadratic in `_Generic` selections** ([#1341](https://github.com/buster14a/buster/issues/1341)). The compiler's own `main.c` (36 MB preprocessed, 389 selections) goes from 1,442 to 4,437 ms on the 9700X, `check-program` from 102 to 2,885 ms. A generated unit shows `check-program` growing about 4× per doubling of selections (1.9 → 346 ms from 250 to 4,000).
+3. **The vector and scalar paths disagree** on one `-Wempty-body` warning in sqlite3.c ([#1339](https://github.com/buster14a/buster/issues/1339)). Every build's object (`61eb96dd…`) and `-E` output are byte-identical across the three builds and both hosts; only that diagnostic differs.
 4. **Zen 5 retires the same binary in 30% fewer cycles,** and the 8-wide machine is frontend-bound where Zen 4 is backend-bound.
    - For `znver4.sq-c`, IPC is 2.38 against 1.67.
    - Frontend-bound is 27.6% of slots on Zen 5 against 15.7% on Zen 4; whole cycles with nothing delivered are 17.2% against 8.6%.
@@ -87,7 +87,7 @@ The [harness](harness/README.md) reruns all of it: a C runner and reducer (`uarc
 - The frozen CI corpus `preprocessor-391e729af658` (`MANIFESTS.sha256` `391e729a…`), linked as `corpus` in each run root. Its `sqlite3.c` is 9,507,037 bytes, SHA-256 `0a409f16…`.
 - `self-main.i`: the compiler's `main.c` at `9e7f918f`, preprocessed once by `compiler-znver4 -E`. It is 36,149,566 bytes, SHA-256 `ff2cd38f…`, the same file on both hosts.
 
-**Workloads** (`harness/workloads.sh`):
+**Workloads** (`tools/microarch/workloads.sh`):
 
 | name | command |
 | --- | --- |
@@ -98,7 +98,7 @@ The [harness](harness/README.md) reruns all of it: a C runner and reducer (`uarc
 | `musl-syn` | musl's 1,355 sources as one command, `-fsyntax-only --lanes N` |
 | `tcc-c` | tcc 0.9.28rc on sqlite3.c with the frozen headers (the reference compiler) |
 
-**Steps** (`harness/run.sh`, each held per chunk; [harness README](harness/README.md)):
+**Steps** (`tools/microarch/run.sh`, each held per chunk; [the guide](https://github.com/buster14a/buster/blob/4dfe849a91e8c2000183ea730e774e708251310f/docs/commands/microarch.md)):
 
 | step | runs |
 | --- | --- |
@@ -115,7 +115,7 @@ The [harness](harness/README.md) reruns all of it: a C runner and reducer (`uarc
 
 ## Results
 
-[tables.md](tables.md) has every table for both hosts, generated by `harness/tables.sh`. The rest of this section picks from it.
+[tables.md](tables.md) has every table for both hosts, generated by `tools/microarch/tables.sh`. The rest of this section picks from it.
 
 ### Whole processes and stages
 
@@ -251,9 +251,7 @@ Both hosts counted every core event `perf list` names, each with `cycles:u` and 
 
 ```text
 README.md                     this report
-tables.md                     every table, from harness/tables.sh
-harness/                      the harness (README.md: how to rerun)
-harness/generic-scaling/      the _Generic scaling check and its Zen 4 output
+tables.md                     every table, from buster's tools/microarch/tables.sh
 zen4-7940hs/, zen5-9700x/     each host's results:
   env/                        identity, settings, catalogs, hashes
   validate.tsv                each build's output hashes
@@ -262,6 +260,7 @@ zen4-7940hs/, zen5-9700x/     each host's results:
   sweep-BUILD-WORKLOAD/sweep.tsv, metrics-BUILD-WORKLOAD/metrics.tsv
   profiles/BUILD/*.tsv, *.txt per-function tables, perf reports, record logs and headers
   scaling/, energy/, uncore/, ab1049/, ab3/, ab-self/
+  generic-scaling/            (7940HS) the _Generic scaling check: best of 3 per build and size
   holds.txt                   one receipt per lock hold or core grant
   raw.tar.zst                 every per-run file: perf stat CSVs, status files, logs
 ```
