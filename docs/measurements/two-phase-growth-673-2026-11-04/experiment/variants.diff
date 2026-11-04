@@ -1,0 +1,104 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 186e5603..8318db06 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -906,9 +906,14 @@ static bool check_program_emit_common(uint8_t bits, bool all)
+ 
+ // A part of the bodies on lane `lane`: their lowering (check_lower_part), then each one's Tier 0 code, the lane's
+ // function access column given, and its code after Tier 0 (check_program_emit_code) until one of them fails.
++// EXPERIMENT (#673): 0 both halves, 1 the lowering alone, 2 the code alone.
++static uint32_t check_emit_phase;
+ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
+ {
+-    if (run->sources)
++    if (check_emit_phase == 2)
++    {
++    }
++    else if (run->sources)
+     {
+         check_lower_part_sources(&lane->writer, run->shared, &part->lower, lane->output, lane->scratch);
+     }
+@@ -920,6 +925,10 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
+     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_STATEMENTS, part->lower.statement_ticks);
+     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_BODIES, part->lower.body_ticks);
+     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
++    if (check_emit_phase == 1)
++    {
++        return;
++    }
+     const uint32_t end = part->lower.end;
+     part->tier0_failed = end;
+     part->code_failed = end;
+@@ -1201,14 +1210,25 @@ static __attribute__((noinline)) void check_program_emit_supply(int fd, uint32_t
+ // (parts_by_cost), taken by lane 0 alone until it admits another lane, then in a round of `lanes` lanes. Each growth's
+ // lease goes in `leases` after the others, `*lease_count` of them. When lane 0 finds no part left it closes the
+ // admission, and the round ends as every round does, once every lane has met. Returns the lanes it admitted.
++// EXPERIMENT (#673, not for commit): BUSTER_673_VARIANT's digit. 1 doesn't grow, 2 grows without polling, 3 cuts the
++// parts for the admitted lanes, 4 takes them in source order, 5 cuts one part, 6/7/8 cut 2/4/8 parts, 9 lowers every
++// part before any part's code, without polling.
++static uint32_t check_emit_variant;
+ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, CheckEmitGrowth* growth, uint32_t lanes, uint32_t admitted, WorkerBudget* budget,
+                                            WorkerBudgetLease* leases, uint32_t* lease_count)
+ {
+-    const uint64_t parts = parts_cut_by_cost(run->costs, run->body_count, (uint64_t)BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE * lanes, run->boundaries, run->orders[0]);
++    const uint64_t cut = check_emit_variant == 3 ? (uint64_t)BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE * admitted :
++                         check_emit_variant == 5 ? 1 :
++                         check_emit_variant == 6 ? 2 :
++                         check_emit_variant == 7 ? 4 :
++                         check_emit_variant == 8 ? 8 :
++                                                   (uint64_t)BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE * lanes;
++    const uint64_t parts = parts_cut_by_cost(run->costs, run->body_count, cut, run->boundaries, run->orders[0]);
+     // The costliest part first, as in every lane's order, then the others in source order: lane 0 alone takes most of
+     // them, and in source order its lowering and code keep more of one lane's locality than in cost order.
+     uint32_t* order = run->orders[0];
+-    const uint32_t costliest = order[0];
++    const uint32_t costliest = check_emit_variant == 4 ? 0 : order[0];
++    order[0] = costliest;
+     uint64_t next = 1;
+     for (uint32_t part = 0; part < parts; part += 1)
+     {
+@@ -1243,6 +1263,7 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
+     uint32_t supply = run->lanes->grow_supply;
+     uint32_t count = *lease_count;
+     uint64_t polled = 0;
++    check_emit_phase = check_emit_variant == 9 ? 1 : 0;
+     uint64_t taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED);
+     for (; taken < parts; taken = __atomic_fetch_add(&growth->ticket, 1, __ATOMIC_RELAXED))
+     {
+@@ -1252,7 +1273,7 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
+             check_program_emit_supply(budget->write_fd, supply);
+             supply = 0;
+         }
+-        const bool open = admitted < lanes && count < BUSTER_CHECK_EMIT_GROW_LEASES;
++        const bool open = check_emit_variant != 2 && check_emit_variant != 9 && admitted < lanes && count < BUSTER_CHECK_EMIT_GROW_LEASES;
+         const uint64_t now = open ? check_program_lanes_now() : polled;
+         if (now - polled >= BUSTER_CHECK_EMIT_GROW_NANOSECONDS)
+         {
+@@ -1273,6 +1294,15 @@ static uint32_t check_program_emit_growing(LaneFlow* flow, CheckEmitRun* run, Ch
+             }
+         }
+     }
++    if (check_emit_variant == 9)
++    {
++        check_emit_phase = 2;
++        for (uint64_t place = 0; place < parts; place += 1)
++        {
++            check_program_emit_part(run, lane, run->parts + order[place]);
++        }
++        check_emit_phase = 0;
++    }
+     *lease_count = count;
+     if (round)
+     {
+@@ -2198,6 +2228,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+         room = flow_lanes < room ? flow_lanes : room;
+         room = active > room ? active : room;
+     }
++    {
++        const char* variant = getenv("BUSTER_673_VARIANT");
++        check_emit_variant = variant != NULL && variant[0] >= '0' && variant[0] <= '9' ? (uint32_t)(variant[0] - '0') : 0;
++    }
++    room = check_emit_variant == 1 ? active : room;
+     const bool growing = room > active;
+     const uint64_t per_lane = growing ? BUSTER_CHECK_EMIT_GROW_PARTS_PER_LANE : BUSTER_LANE_PARTS_PER_LANE;
+     const uint64_t part_room = room > 1 ? per_lane * room : 1;
