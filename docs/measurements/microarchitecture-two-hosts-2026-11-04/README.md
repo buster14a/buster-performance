@@ -105,8 +105,8 @@ The harness that reruns all of it lives in buster as [`tools/microarch/`](https:
 | `validate` | each build's outputs, hashed |
 | `time` | 13 lists, 11 rotated rounds, with `--time-stages` runs |
 | `groups` | 6 counter groups (at most 5 counters, never multiplexed), 5 runs each |
-| `sweep` | every core event, user and kernel, 2 runs: Zen 4 `znver4` on `sq-c` and `sq-syn`; Zen 5 `znver5` and `znver4` on `sq-c` |
-| `metrics` | every perf metric, 2 runs, native build, `sq-c` and `sq-syn` |
+| `sweep` | every core event, user and kernel, 2 runs: Zen 4 `znver4` on `sq-c` and `sq-syn`; Zen 5 `znver5` and `znver4` on `sq-c` (and `znver5` on the first 100 of `sq-syn`) |
+| `metrics` | every perf metric, 2 runs, native build: `sq-c` and `sq-syn` on Zen 4, `sq-c` on Zen 5 |
 | `profiles` | cycles (user and kernel); leader-sampled groups for top-down L1/L2, memory, frontend and microcode; IBS ops (all, and L3 misses only); LBR |
 | `scaling` | `sq-c` on 1..N lanes, `musl-syn` on 1..N lanes, K independent compiles with package energy |
 | `energy` | package and core energy, APERF/MPERF |
@@ -163,16 +163,16 @@ The fixed groups, user mode, `sq-c`, with `znver4` code on both hosts:
 | DRAM demand fills per 1,000 instructions | 0.88 | 0.80 |
 | L1 DTLB misses per 1,000 instructions | 0.50 | 0.18 |
 
-From the sweeps (each host's native build; the instruction counts are within 0.1%), per 1,000 user instructions:
+From the sweeps, with the same `znver4` executable on both hosts, per 1,000 user instructions:
 
-| event | 7940HS `znver4` | 9700X `znver5` |
+| event | 7940HS | 9700X |
 | --- | ---: | ---: |
-| L1D demand fills from L2 (`ls_dmnd_fills_from_sys.local_l2`) | 5.49 | 4.19 |
-| L1D demand fills from L3 (`.local_ccx`) | 2.05 | 0.55 |
-| L1D demand fills from DRAM (`.dram_io_near`) | 0.89 | 0.79 |
-| all L1D fills (`ls_any_fills_from_sys.all`) | 15.90 | 11.44 |
-| instruction cache fills from L2 (`ic_cache_fill_l2`) | 3.89 | 5.25 |
-| op cache misses (`op_cache_hit_miss.op_cache_miss`) | 11.7 | 24.7 |
+| L1D demand fills from L2 (`ls_dmnd_fills_from_sys.local_l2`) | 5.49 | 4.21 |
+| L1D demand fills from L3 (`.local_ccx`) | 2.05 | 0.60 |
+| L1D demand fills from DRAM (`.dram_io_near`) | 0.89 | 0.78 |
+| all L1D fills (`ls_any_fills_from_sys.all`) | 15.90 | 11.46 |
+| instruction cache fills from L2 (`ic_cache_fill_l2`) | 3.89 | 5.15 |
+| op cache misses (`op_cache_hit_miss.op_cache_miss`) | 11.7 | 24.9 |
 | microcoded ops (`ex_ret_ucode_ops`) | 27.0 | 14.0 |
 
 Zen 5's 48 KiB L1D, larger L1 DTLB and 32 MiB L3 take away much of the data side's stall, and the backend-bound share falls. The wider front end becomes the next limit: Zen 5 fills a third more instruction-cache lines and misses its op cache twice as often for the same instructions. The instruction-cache tag events (`ic_tag_hit_miss`) count very differently per generation (16.6 against 394.7 accesses per 1,000 instructions), so this record compares fills, not tag misses.
@@ -232,9 +232,9 @@ In the frontend group, the functions with the worst op-cache hit rates (Zen 5) a
 Both hosts counted every core event `perf list` names, each with `cycles:u` and `instructions:u` in one group and in user and kernel mode, 2 runs:
 
 - **7940HS:** 376 names on `sq-c` and on `sq-syn` (`znver4`). All counted at full duty; 14 needed the one-event fallback, and 280 are nonzero. `cycles`, `instructions` (the anchors themselves) and `temp1` (a sensor) have no value of their own.
-- **9700X:** 416 names on `sq-c` (`znver5`). All counted at full duty; 40 through the fallback, and 267 are nonzero. 21 have no value: the anchors, two sensors, and 17 L3 events (`l3_lookup_state.*`, `l3_xi_sampled_latency*`) that perf lists among the core events but that count only system-wide.
-- The 9700X's `znver4` sweep of `sq-c`, its metrics and its self-compile groups come in this record's next commit. Its `sq-syn` sweep stopped after 100 events: the run was narrowed to `sq-c` to keep the shared machine's holds few.
-- **Metrics on the 7940HS:** 143 per workload. 103 gave a finite value at full duty; 37 failed per thread (uncore, RAPL and other system-wide metrics).
+- **9700X:** 416 names on `sq-c`, for `znver5` and for `znver4` (the same executable as the 7940HS's). All counted at full duty; 40 through the fallback, and 267 (`znver5`) and 266 (`znver4`) are nonzero. 21 have no value: the anchors, two sensors, and 17 L3 events (`l3_lookup_state.*`, `l3_xi_sampled_latency*`) that perf lists among the core events but that count only system-wide. The `sq-syn` sweep stopped after 100 events: the run was narrowed to `sq-c` to keep the shared machine's holds few.
+- **Metrics on the 7940HS:** 143 per workload, on `sq-c` and `sq-syn`. 103 gave a finite value at full duty; 37 failed per thread (uncore, RAPL and other system-wide metrics).
+- **Metrics on the 9700X:** 147, on `sq-c`. 105 gave a finite value at full duty; 22 failed per thread.
 
 `sweep.tsv` (one per build and workload) gives each event's user and kernel medians, its rate per 1,000 user instructions and per user cycle, its kernel share, and its minimum duty. `metrics.tsv` gives each metric's reported values and whether it failed. Metrics that need system-wide counting (uncore, RAPL) fail per thread; that failure is recorded, not hidden.
 
