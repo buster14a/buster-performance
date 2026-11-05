@@ -30,8 +30,18 @@ and Tier 1. The call graph reports 42 units, 33,437 functions, 205,002 calls,
 zero unapproved cycles and zero split variables. The final DCO audit reports
 seven signed commits, zero missing trailers and zero findings.
 
-The final-head generator smoke and sanitizer repetition are pending behind
-shared-machine CI jobs. Their results will be recorded separately when complete.
+The final-head bounded seed-176 smoke passes both Csmith and YARPGen: two
+cases generated, two passed, and two receive interpreter campaign credit.
+Its separate receipt is `campaigns/campaign-ibPPF1`, with all five execution
+modes retained. This does not erase any earlier failed seed.
+
+All eight hosted correctness shards pass in [run 42078033414, attempt
+2](https://github.com/buster14a/buster/actions/runs/42078033414/attempts/2),
+with six successful shards preserved while two stalled Ubuntu-package installs
+were canceled and retried on fresh runners. Both self-host configurations pass
+in [run 42077674473](https://github.com/buster14a/buster/actions/runs/42077674473).
+The native hardware job and local sanitizer repetition remain queued behind
+shared-machine CI jobs; they are not reported as complete.
 
 ## Earlier acceptance results
 
