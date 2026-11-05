@@ -26,6 +26,10 @@ shows part of the difference arises outside that check, but does not explain
 the rest or prove the cause is binary layout. It is a single pair, not a
 statistical performance comparison.
 
+`-E` still enters `main_unit_checker` during command dispatch before falling
+back to preprocessing. The control excludes the target-feature **code-generation
+check**, not every instruction in the checker translation unit.
+
 A second bounded `-E` control used **the same executable path and argv** for
 each compiler, copying the respective binary to that path before its separate
 locked run. Base counted 197,340,294 instructions and head 197,352,637
@@ -42,6 +46,49 @@ were `main.c.o` (SHA-256
 `main_unit_checker.c.o` differed. The `-E` observation and these object hashes
 are consistent with indirect link or runtime-layout effects, but do not prove
 which effect caused the delta.
+
+## Hybrid attribution control
+
+One diagnostic build used head `5929d0e2` including its tests, but substituted
+the exact `src/buster/compiler/c_check_target_feature.c` from base `441db242`
+before building. Its SHA-256 is
+`59626d6a29c7a4b55eff7dfa496c32344ffcf30b9d91b86c0adb0fdb8e07c0f2`.
+The substituted file's SHA-256 was
+`636401d06a8fcded081bbc3b0a44d43fcd0b66b6990adf743429c0ea1bec77f2`.
+The source was restored after this build and the original head binary restored;
+the hybrid is not a PR commit or a correctness-qualified compiler. The build
+used the same Clang, Release, architecture and debug settings as above; its
+[build log](raw/hybrid-build.log) is retained.
+
+In the isolated head checkout, the substitution was made with
+`git show 441db2428d2bd8d28503037b28c1b3740fe4b25a:src/buster/compiler/c_check_target_feature.c`,
+then built using `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh
+--jobs 4` under one lock grant. The pre-existing head binary was saved before
+the build, and the resulting hybrid binary saved before restoration. The
+intermediate build directory contains hybrid objects and must be rebuilt
+before reuse as a head build.
+
+The base, hybrid and head binaries were copied in turn to the same executable
+path and each ran `-E` and `-c` once using the same options, input, output
+path, CPU, event and individual lock grants as above. All `-E` output hashes
+matched each other and all `-c` object hashes matched each other. These are
+single-sample attribution controls, not repeated performance measurements.
+
+| Mode | Base | Hybrid | Head |
+| --- | ---: | ---: | ---: |
+| `-E` | 197,340,288 | 197,334,948 | 197,352,640 |
+| `-c` | 1,971,930,833 | 1,971,925,537 | 1,971,990,752 |
+
+The production-file substitution changes the measured binary and correlates
+with the difference; it does not distinguish executed startup/dispatch code
+from indirect code or data placement effects. All three binaries are ET_EXEC
+with 252 `.rela.dyn` entries. The hybrid and head `main_unit_checker` symbols
+have the same address (`0x10587d0`) and size (`0x11ef`); inspection shows
+the same dispatcher instruction sequence with relocated addresses changed,
+including some strings shifted by 32 bytes. The no-attribute target-feature
+early path in the head has one fewer load than the hybrid. These observations
+do not establish the cause of the whole-process instruction delta. The raw
+control counters are [here](raw/).
 
 ## Method and identities
 
