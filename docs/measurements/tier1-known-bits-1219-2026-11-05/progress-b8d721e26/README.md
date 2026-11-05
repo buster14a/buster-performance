@@ -55,7 +55,7 @@ The self-move columns count all self-moves, an upper bound on outside-call
 (SQLite `memsys5Free`) and 400,344 (Lua `luaO_ceillog2` across five scripts).
 Thus 345,916 < 2 × 188,673 and 610,084 < 2 × 400,344 prove both requested
 outside-call gates. The table's all-self-move Clang counts are **not** used as
-lower bounds. Addresses, complete leaf disassemblies and reproduction commands
+lower bounds. Addresses, the leaf-function proof and reproduction commands
 remain in the parent record.
 
 `counts/summary.json` and twelve per-function TSVs retain the exact counts.
