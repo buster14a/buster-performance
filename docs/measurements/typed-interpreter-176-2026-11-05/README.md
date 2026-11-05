@@ -10,11 +10,30 @@ and tool identities are retained in `logs/`.
 Follow-up `abba33f61edda10fc3a51d5c8068bc83e02e3c6c` preserves unresolved weak
 function/object addresses as null values without granting memory or a callable
 target. It extends the linked-unit fixture and corrects a dispatch comment.
-The final build and targeted normal/sanitizer regressions are recorded
+The final build and targeted normal/sanitizer regressions pass, recorded
 separately as `final-*` logs; the full C-suite and generator results below
 identify their original tested revision rather than being relabeled.
 
-## Results
+## Current-main integration
+
+Revision `3f2750451ed333940551ffe840e54993b4f5589a` merges main through
+`e7d3fc79` and adapts host-symbol lookup to main's static compiler linkage.
+A static compiler binds only its own table (including `div` for the aggregate
+return fixture), avoiding a second C library through `libgcc_s`.
+
+At this revision the full normal acceptance passes again: all 220 C-suite
+programs, all 48 generated C programs, source controls, source/native/unit
+fixtures and every suite in `reproduction/acceptance.tests`. The native-bridge
+suite now has 48 checks, including the new main tests. The additional linked
+weak-symbol checks pass with undefined-byte checking and against Clang, Tier 0
+and Tier 1. The call graph reports 42 units, 33,437 functions, 205,002 calls,
+zero unapproved cycles and zero split variables. The final DCO audit reports
+seven signed commits, zero missing trailers and zero findings.
+
+The final-head generator smoke and sanitizer repetition are pending behind
+shared-machine CI jobs. Their results will be recorded separately when complete.
+
+## Earlier acceptance results
 
 | Check | Result |
 | --- | --- |
@@ -93,8 +112,7 @@ not redistributed in this record.
 The older synthetic generator's expanded `test-interpreter --count 256
 --seed 176` campaign is not source acceptance. Baseline `41f7eefd` reproduces
 64 failed checks with arithmetic diagnostics, consistent with the generator's
-already documented out-of-range floating-to-integer/CVTT boundary. The final
-head also reports 64 failures in the same expanded campaign. The interpreter keeps
+already documented out-of-range floating-to-integer/CVTT boundary. Acceptance revision `4813ca6f` also reports 64 failures in the same expanded campaign. The interpreter keeps
 its arithmetic diagnostics; no test or detector suppression was introduced.
 The baseline log and final diagnostic log are retained separately from passing
 acceptance runs. A baseline executable hash was not captured before rebuilding.
