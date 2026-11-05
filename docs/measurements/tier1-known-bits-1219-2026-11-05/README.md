@@ -243,5 +243,23 @@ incorporated in this evidence record. Generated differential receipts identify
 their inputs without shipping executables. No imported implementation code was
 used for the selector changes.
 
+## Follow-up review coverage
+
+Commit `0216fe051a1105caeec60a387324765ff6c44416` changes only the selector tests
+after the measured `08545d5c` implementation. It adds direct rule and native
+value regressions for NEG, UDIV and UREM: masked negation through truncation and
+signed widening, bounded unsigned division by four, and arbitrary unsigned
+remainder by eight. Both selection paths run boundary/random values with
+poisoned ABI upper halves and coalesced registers. The native selector passes
+601,336 checks with zero failures at this commit (`native/review-select.log`).
+
+The new compiler rebuilds **both** corpus executables byte-for-byte identically
+to the measured candidate. `identity/review-programs-identical.txt` and
+`identity/review-binaries.sha256` retain that proof; the production selector
+source hash is unchanged. The compiler-cost measurements remain pinned to the
+original `08545d5c` compiler executable, since a test-only commit can still change
+the host executable's layout. `scripts/validate-review-tests.sh` records the
+locked build, native test and corpus identity checks.
+
 Agent session: `01a1ab58-d20a-7f91-b522-34a0c70fa8f5` (no private share URL is
 exposed). Model: OpenAI / GPT-6.
