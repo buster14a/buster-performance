@@ -40,8 +40,23 @@ All eight hosted correctness shards pass in [run 42078033414, attempt
 with six successful shards preserved while two stalled Ubuntu-package installs
 were canceled and retried on fresh runners. Both self-host configurations pass
 in [run 42077674473](https://github.com/buster14a/buster/actions/runs/42077674473).
-The native hardware job and local sanitizer repetition remain queued behind
-shared-machine CI jobs; they are not reported as complete.
+The same CI run completes successfully, including the selected 9700X IR and
+certificate benchmarks and the final qualification gate. Its native job builds
+and parses with the complete vector feature set; complete native vector
+correctness is skipped by the repository's PR policy, so that job is not claimed
+as a new full native correctness run. The local normal acceptance above runs
+its named suites and source/native comparisons on the 9700X.
+
+The final-head AddressSanitizer/UndefinedBehaviorSanitizer/bounds build passes
+both test invocations, with leak detection and fatal reports enabled. The first
+runs the interpreter, native bridge, Link, IR, lowering, SSA and differential
+harness suites, process controls, 16 generated C programs and source/unit
+fixtures. The second adds the linked absent-weak-address check with undefined
+bytes checked, native Clang/Tier 0/Tier 1 comparisons, the aggregate/variadic
+source fixture and main-source syntax. Neither log has a sanitizer report;
+`post-merge-sanitizer-report-audit.txt` records that audit. All eight stages in
+`post-merge-checks.status` succeed. `post-merge-binary-sha256.txt` identifies
+both final-head executables. No pending local validation process remains.
 
 ## Earlier acceptance results
 
