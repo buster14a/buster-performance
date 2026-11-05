@@ -26,6 +26,23 @@ shows part of the difference arises outside that check, but does not explain
 the rest or prove the cause is binary layout. It is a single pair, not a
 statistical performance comparison.
 
+A second bounded `-E` control used **the same executable path and argv** for
+each compiler, copying the respective binary to that path before its separate
+locked run. Base counted 197,340,294 instructions and head 197,352,637
+(+12,343, +0.006255%); the preprocessed output hash matched the one above in
+both runs. The respective copied executables' hashes matched their original
+binary hashes. This reproduces the preprocessing delta and makes differing
+executable-path spelling an unlikely explanation for it. It does not identify
+the cause of the full `-c` delta.
+
+The two builds' `main_unit_frontend.c.o` files were byte-identical (SHA-256
+`7662f57b2f9d7b992242fff118bce31ad17b6b8530f314557d48ab20e0f63462`), as
+were `main.c.o` (SHA-256
+`12f6df8282f2d5016d24bfe01a7f7267c18786f4e93ce679acabb823005a50cf`);
+`main_unit_checker.c.o` differed. The `-E` observation and these object hashes
+are consistent with indirect link or runtime-layout effects, but do not prove
+which effect caused the delta.
+
 ## Method and identities
 
 - Linux x86-64, Ryzen 7 9700X, microcode `0xb404038`, kernel
@@ -50,6 +67,14 @@ statistical performance comparison.
   [comparison script](compare.sh) are retained. The script names the original
   workspace paths; adjust them to reproduce. The separate `-E` control used
   the same locking, CPU and event as the script.
+
+For the second `-E` control, the base and then head compiler were copied to
+one shared `same/compiler` path. Each was run under its own lock grant as
+`taskset -c 2 perf stat -x, -e instructions:u -- same/compiler -E` followed
+by the same `-D`, `-I`, input and output options as above, with the same
+`same/output` path. The two raw receipts are `base-same-E.perf` and
+`head-same-E.perf`; both records report 100% event running. The single pair
+is diagnostic evidence, not a repeated measurement of variability.
 
 No instrumentation or code changes were made for these counts. The current
 source retains an early return when target-attribute keys and the x86 builtin
