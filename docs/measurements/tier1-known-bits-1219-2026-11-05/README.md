@@ -1,6 +1,6 @@
 # Tier 1 known upper bits, #1219 (2026-11-05)
 
-Follow-up: the [integrated b8d721e26 milestone](progress-b8d721e26/README.md) records fresh current-main counts and locked runtime. Lua and both self-move gates pass; SQLite remains at 2.083x Clang and work continues. The original first-step record below, its source pins and raw material are preserved.
+Follow-up: [dfd2183a3 passes all four manual #1219 count gates](qualified-dfd2183a3/README.md), with locked runtime and current-source compiler costs. Hosted/native workflow qualification and integration remain pending. The [b8 milestone](progress-b8d721e26/README.md) and the original first-step record below retain their original sources, failed extension gates and raw material.
 
 This record qualifies [buster#1419](https://github.com/buster14a/buster/pull/1419),
 the known-bits selection work for [buster#1219](https://github.com/buster14a/buster/issues/1219).
