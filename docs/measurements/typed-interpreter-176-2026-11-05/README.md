@@ -14,6 +14,16 @@ The final build and targeted normal/sanitizer regressions pass, recorded
 separately as `final-*` logs; the full C-suite and generator results below
 identify their original tested revision rather than being relabeled.
 
+## Review correction
+
+The ignored-x87-return review is addressed at
+`cc5b243986ffea6f4565d2b55ad0c989c03cf903`.
+[The review record](review-x87/README.md) contains the isolated before/after
+regression: 52 checks with one expected failure on the unchanged adapter, then
+52 passing checks in normal and sanitizer builds. Related focused suites, all
+current-head required CI and the nine-commit sign-off audit pass. Earlier
+acceptance and generator results below retain their original revisions.
+
 ## Current-main integration
 
 Revision `3f2750451ed333940551ffe840e54993b4f5589a` merges main through
