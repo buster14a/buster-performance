@@ -26,7 +26,8 @@ The pull request is [buster14a/buster#1415](https://github.com/buster14a/buster/
   - Lua 5.4.8, built as its Makefile's linux target builds it, and the five original scripts of #141's records
     (`claude-141-reciprocal/lua`).
 - **Harness:** [`run177.sh`](run177.sh), run as `run177.sh 824caec5`. Its log, `out/steps.log`, is on benchpress
-  (below).
+  (below). [`frames177.sh`](frames177.sh), run as `frames177.sh 07e4552a`, measured the frames again with #1415's
+  review's control-flow reading; its log is [`out/frames2/steps.log`](out/frames2/steps.log).
 
 | Build | Command |
 | --- | --- |
@@ -50,27 +51,42 @@ The pull request is [buster14a/buster#1415](https://github.com/buster14a/buster/
 
 ## Frame sizes against clang -O2
 
-`measure-frames` (`frame_measure.c`, new in the head) decodes each function's code from the file's symbol table. A
-function's frame is the most bytes it takes below its return address: pushes and `sub rsp` add, pops and `add rsp` take
-back, at their deepest in address order. The comparison runs over the functions both files have, each name once:
-`sqlite3.c`'s `-c` objects and Lua's executables. Every file's summary line is in
-[`out/frames/summary.txt`](out/frames/summary.txt); the per-function lines are on benchpress (below).
+`measure-frames` (`frame_measure.c`) decodes each function's code from the file's symbol table. A function's frame is
+the most bytes it takes below its return address on any path of its control flow:
+- each instruction's depth on entry is its predecessors';
+- pushes and `sub rsp` add, pops and `add rsp` take back, and `mov rsp, rbp` and `leave` go back to rbp's;
+- in an object, a relocated jump (a tail call) leaves the function;
+- code only a jump table reaches takes its indirect jump's depth (`assumed`), padding none;
+- paths that join at different depths are `unresolved`, and the comparison leaves them out.
+
+These numbers are buster#1415's head `07e4552a` (#1415's review: the depth along the control flow) reading
+`run177.sh`'s objects and executables again under the lock (`frames177.sh 07e4552a`). That commit changes the reader,
+not the code the objects hold. The comparison runs over the functions both files have, each name once: `sqlite3.c`'s
+`-c` objects and Lua's executables. Every file's summary line is in [`out/frames2/summary.txt`](out/frames2/summary.txt);
+the per-function lines are on benchpress (below).
 
 | Corpus | Build | Functions in common | Their frames, bytes | Against clang -O2 | Median per-function ratio | Larger / equal / smaller |
 | --- | --- | ---: | ---: | ---: | ---: | --- |
-| sqlite3.c | clang -O2 | 1,600 | 112,032 | 1.000 | 1.000 | |
-| | `--tier1` | 1,600 | 168,296 | 1.502 | 1.680 | 1,309 / 192 / 99 |
-| | `--tier1-no-lifetimes` | 1,600 | 169,704 | 1.515 | 1.714 | 1,310 / 192 / 98 |
-| | Tier 0 | 1,600 | 143,400 | 1.280 | 1.250 | 922 / 463 / 215 |
-| | clang -O0 | 1,600 | 144,160 | 1.287 | 1.500 | 1,199 / 243 / 158 |
+| sqlite3.c | clang -O2 | 1,600 | 112,744 | 1.000 | 1.000 | |
+| | `--tier1` | 1,600 | 168,296 | 1.493 | 1.667 | 1,304 / 195 / 101 |
+| | `--tier1-no-lifetimes` | 1,600 | 169,704 | 1.505 | 1.667 | 1,306 / 194 / 100 |
+| | Tier 0 | 1,600 | 143,400 | 1.272 | 1.250 | 917 / 468 / 215 |
+| | clang -O0 | 1,600 | 144,160 | 1.279 | 1.500 | 1,197 / 245 / 158 |
 | Lua 5.4.8 | clang -O2 | 653 | 55,896 | 1.000 | 1.000 | |
 | | `--tier1` | 653 | 80,928 | 1.448 | 2.500 | 576 / 54 / 23 |
 | | `--tier1-no-lifetimes` | 653 | 81,600 | 1.460 | 2.500 | 576 / 54 / 23 |
 | | Tier 0 | 653 | 67,896 | 1.215 | 1.333 | 373 / 197 / 83 |
-| | clang -O0 | 654 | 68,288 | 1.222 | 1.500 | 490 / 109 / 55 |
+| | clang -O0 | 653 | 68,280 | 1.222 | 1.500 | 490 / 108 / 55 |
 
 The per-function ratio is (bytes + 8) / (clang -O2's + 8), so that the return address counts.
 
+- **Nothing in `sqlite3.c` is unresolved**, by any build. 59 of clang -O2's functions and 49 of each other build's are
+  assumed (jump tables). In Lua's executables only the C runtime's `_start`, which pops past its entry, is unresolved
+  (clang's builds), and it is left out.
+- **What the earlier reading got wrong:** a first reading in address order (`run177.sh`'s,
+  [`out/frames/summary.txt`](out/frames/summary.txt)) undercounted clang -O2's frames: 112,032 bytes on `sqlite3.c`,
+  where the control flow gives 112,744. clang's shrink-wrapped paths and early returns lost bytes there, and so did its
+  pushed stack arguments. Tier 0's and Tier 1's frames come out the same either way.
 - **Slot sharing** saves 0.8% of the frames: 1,408 bytes on `sqlite3.c`, 672 on Lua.
 - **Tier 1's frames are larger than Tier 0's.** Over all 2,668 of `sqlite3.c`'s functions, Tier 1's frames are 242,384
   bytes against Tier 0's 189,512, larger in 1,869.
@@ -140,11 +156,13 @@ These files are too large to publish through this session's tools. They stay in
 
 | File | Bytes | SHA-256 |
 | --- | ---: | --- |
-| `frames/sqlite3-frames.tsv` (each function's frame, by build) | 477,786 | `4e00d1cf6311b84a8a8a3978b03d22322d949c4c68e949a2246741ad177d5e42` |
+| `frames/sqlite3-frames.tsv` (each function's frame, by build, address order, superseded) | 477,786 | `4e00d1cf6311b84a8a8a3978b03d22322d949c4c68e949a2246741ad177d5e42` |
 | `frames/lua-frames.tsv` | 159,519 | `0b1e8bab248f06bf18950e5c14000d7aba62c523234ff8abb18e47acb6ae73d3` |
 | `lua/time-runs.txt` (every run's line) | 238,843 | `e6dd35c9f28dd68dc904e3e001f8f29b5ac29577d503d786ae8f0535cb9d303e` |
 | `st/time-runs.txt` (every run's line) | 16,151 | `216b4e152b90146c32a7aec420f0e8df687023b263a44f5e889af0b8c53c51e0` |
 | `identity.txt` (the objects' comparison, with the compiles' warnings) | 2,799 | `6bc69831748c87b3db5a6d13d9ddb0b7a0b33f31b8dac16f886b6c2a7d645656` |
 | `steps.log` (the harness's log) | 6,265 | `adf18ad0909771da3f3731d0122f1acd0208d3ecdf314a50b834ee60993a4c7f` |
+| `frames2/sqlite3-frames.tsv` (each function's frame and state, by build, at `07e4552a`) | 588,201 | `d5cce4c05f89da147bd6bc8daf718677b9db432ad3563eded7235365dc31f110` |
+| `frames2/lua-frames.tsv` | 204,603 | `c062a81fa43b9a4735cd3f47fa34ce6a8ec948225a99cf62bd4e010ab4127c29` |
 
-`run177.sh` writes them again from the same commits.
+`run177.sh` and `frames177.sh` write them again from the same commits.
