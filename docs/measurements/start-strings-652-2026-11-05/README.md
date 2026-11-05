@@ -1,6 +1,6 @@
 # A small unit's start: the string pool's order (#652)
 
-Evidence for the pull request after buster14a/buster#1431 from `claude/fervent-meitner-mg6onh`, part of
+Evidence for buster14a/buster#1437, from `claude/fervent-meitner-mg6onh` after buster14a/buster#1431, part of
 [#652](https://github.com/buster14a/buster/issues/652): the fixed cost every translation unit's compile pays at its
 start. The change links a static build with lld at `-O0` (lld first for a static build's `auto` linker), which keeps each
 object's strings in its order where lld and mold merge every object's identical strings in their hashes' order. It also
