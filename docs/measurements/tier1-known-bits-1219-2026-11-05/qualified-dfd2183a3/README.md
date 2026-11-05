@@ -3,8 +3,8 @@
 All four manual instruction-count gates pass for
 [buster#1419](https://github.com/buster14a/buster/pull/1419), source
 `dfd2183a3bbe96f8a99d39b1c36036aeb500ac08`. Locked 9700X runtime and compiler
-cost measurements are complete. **Hosted checks and ordinary native workflow
-qualification are still pending; this record does not assert integration.**
+cost measurements are complete. **All eight hosted correctness shards and the
+required 9700X workflow qualification pass. Integration remains pending.**
 
 The [initial record](../README.md) and [b8 milestone](../progress-b8d721e26/README.md)
 retain their original sources and raw evidence. Their failed extension gates
@@ -148,9 +148,25 @@ protected logical tails remain covered. No emulated vector qualification was
 used. Executables used only for disassembly and hash analysis are not shipped.
 
 The current-head official DCO audit in
-[run 42109303955](https://github.com/buster14a/buster/actions/runs/42109303955)
+[ready-for-review run 42110352930](https://github.com/buster14a/buster/actions/runs/42110352930)
 reports **33 signed commits, zero missing and zero trailer findings**.
-`native/dco-audit.txt` retains that exact-head tool report. Hosted and native
-workflow checks are still pending at publication; manual acceptance evidence
-is not a substitute for those integration gates. The issue remains open until
-integration, and no merge is claimed.
+`native/dco-audit.txt` retains that exact-head tool report. The ready-for-review workflow
+[42110352930](https://github.com/buster14a/buster/actions/runs/42110352930)
+completed successfully: all eight hosted shards, the Benchpress benchmark job,
+the required hardware gate and the coverage record. Measurement storage also
+passes. `native/workflow-checks.json` retains every job/step status, and
+`hardware-workflow-excerpt.txt` identifies the real 9700X and checked-out source.
+
+Standard PR checks use merge context
+`cdf6d7310b0ff47f4eb6a0aed7d451705fde54c9`, merging this head into
+`613ad1d3d1528729e6e7ca53a42e94440935ea47`. The manual counts, timings and
+correctness above remain pinned to the bare candidate; they are not attributed
+to that later merge context. PR policy skips duplicate native correctness and
+libFuzzer in this workflow; the manual native suites above actually ran on the
+9700X, and the admitted workflow ran its native benchmark/vector qualification.
+The cancelled superseded draft run is not counted as passed.
+`native/workflow-program-timings.log` retains the separate CI program/vector
+rows; those merge-context observations are not mixed into the manual tables.
+
+The code and evidence PRs remain unmerged, and the issue stays open until
+integration. No protected integration or post-merge main qualification is claimed.

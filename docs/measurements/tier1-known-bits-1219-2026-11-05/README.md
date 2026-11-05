@@ -1,6 +1,6 @@
 # Tier 1 known upper bits, #1219 (2026-11-05)
 
-Follow-up: [dfd2183a3 passes all four manual #1219 count gates](qualified-dfd2183a3/README.md), with locked runtime and current-source compiler costs. Hosted/native workflow qualification and integration remain pending. The [b8 milestone](progress-b8d721e26/README.md) and the original first-step record below retain their original sources, failed extension gates and raw material.
+Follow-up: [dfd2183a3 passes all four manual #1219 count gates](qualified-dfd2183a3/README.md), with locked runtime and current-source compiler costs. All eight hosted shards and the required 9700X workflow qualification pass; integration remains pending. The [b8 milestone](progress-b8d721e26/README.md) and the original first-step record below retain their original sources, failed extension gates and raw material.
 
 This record qualifies [buster#1419](https://github.com/buster14a/buster/pull/1419),
 the known-bits selection work for [buster#1219](https://github.com/buster14a/buster/issues/1219).
