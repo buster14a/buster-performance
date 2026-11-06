@@ -192,8 +192,7 @@ The diagnostics don't change. All of these ran on the 7940HS:
 - **The corpus's 1,745 units with `-Wall -Wextra`** (sqlite, musl and the c-testsuite subset; the frozen corpus
   `391e729a…`'s local copy). Each unit ran `-fsyntax-only` and `-c`, by `head` vector and `--scalar`, and `-fsyntax-only`
   by `head`'s x86-64 host build, from `git archive 9fa45bbb`
-  ([`scripts/diag-final.sh`](scripts/diag-final.sh), [`scripts/diag.sh`](scripts/diag.sh)). Every output, diagnostics
-  and exit status, is identical to `main`'s on the same path (vector to vector; `--scalar` and x86-64 to `--scalar`)
+  ([`scripts/diag-final.sh`](scripts/diag-final.sh), [`scripts/diag.sh`](scripts/diag.sh)). Every captured diagnostic and exit status is identical to `main`'s on the same path (vector to vector; `--scalar` and x86-64 to `--scalar`). The script discards generated objects without comparing their bytes
   ([`validation/diag-final.log`](validation/diag-final.log)). The vector outputs hold 1,568 warnings (286
   `-Wsign-compare`, 24 `-Wuninitialized`, 8 `-Wself-assign`); the scalar ones 1,564. The 4 extra vector warnings are
   `-Wempty-body` (sqlite3.c:74649 and musl's `execl.c`, `execle.c`, `execlp.c`), #1339's divergence; `main` gives
