@@ -24,8 +24,53 @@ The options are the 9700X job's `compile_time` step's, with one lane:
 -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE -I$sqlite $sqlite/sqlite3.c --lanes 1
 ```
 
-Every run held the host's lock (`scripts/lock.sh`), one hold per script. Every object of every configuration is the
-same bytes (`*/objects*.sha256`, `final/objects-unique.txt`).
+**Scope.** This is exploratory evidence for buster#672 and buster#1561, not hardware qualification. Every script
+below ran under the host's lock (`scripts/lock.sh`), but each took one hold for its whole series of runs, against the
+host's rule of a hold per run ("Lock holds and their limits", below). The 9700X job's own steps remain the
+qualification. A repeat of the branch against main that takes one hold per run, with a receipt and each process's
+exit status, is `per-run/` (pending at this commit).
+
+The objects that were hashed are the same bytes across every configuration (`*/objects*.sha256`,
+`final/objects-unique.txt`). The worker rounds' processes were not checked one by one ("Lock holds and their limits").
+
+## Lock holds and their limits
+
+The host's `README-9700x.md` asks for a hold per build, test, benchmark or perf run, never around a series of runs. This
+session's scripts each took a single hold (`lock.sh SCRIPT`) and ran a series inside it. The table gives each hold's
+span, from the creation and modification times of its files on the host (no hold logged its own start or end):
+
+| hold | from | to | about | what ran inside it |
+| --- | --- | --- | ---: | --- |
+| main's build (`./build.sh`) | 18:25:53 (queued) | 18:29:17 | 3 min | one build |
+| `measure.sh` | 18:34:19 | 18:34:24 | 5 s | 7 `--time-stages` compiles, 5 `vmstat` compiles, `perf stat -r 7`, 5 rounds of 8 concurrent compiles, one `perf stat -a` round of 8 |
+| `pages.sh` | 18:39:58 | 18:40:02 | 4 s | `time-runs` of `-E`, `parse` and `-c` in both page modes, 6 `--time-stages` compiles |
+| `workers.sh` (huge pages) | 18:51:54 | 18:51:59 | 5 s | 20 rounds of 1 to 8 concurrent compiles, `perf stat -a` of 1 and of 8 |
+| `workers.sh` (base pages) | 19:06:11 | 19:06:16 | 5 s | the same |
+| `profile.sh` | 19:18:14 | 19:18:15 | 1 s | `perf record` of 5 compiles |
+| the branch's build | 19:16:49 (queued) | 19:27:30 | 3 min | one build |
+| `fe-workers.sh` | 19:30:41 | 19:30:43 | 2 s | 40 rounds of 1 or 8 concurrent `parse` or `-E` (not in this record) |
+| `final.sh` | 19:39:23 | 19:40:03 | 40 s | 18 `--time-stages` compiles, 168 rounds of 1 to 8 concurrent compiles, 6 rounds of 8 with `--time-stages` |
+| `profile8.sh` | 19:45:41 | 19:45:43 | 2 s | `perf record -a` of 3 rounds of 8 (not in this record) |
+
+All times are UTC on 2026-11-06. The builds' "queued" times include their wait for the lock.
+
+- **The series.** No hold came near a CI job's 10-minute wait, but each held the machine for a series of runs where
+  the host asks for one hold per run.
+- **Concurrent processes in one hold.** The worker rounds start up to 8 compiler processes at once inside a hold. That
+  is the measurement itself, which needs the whole machine.
+- **No receipts.** No script recorded the owner file while it held the lock, so the record has no positive receipt
+  that a given run held it. Only `exclusive.sh`'s own mechanism and the queue's waiting messages in the session's logs,
+  which aren't in this record, show it did.
+- **No per-process status.** The worker rounds started their processes in the background and waited for all of them,
+  without checking each one's exit status. Their objects were overwritten round after round, and only the last
+  round's objects were hashed. A failed compile in an earlier round would have gone unseen in the wall times, though a
+  failure shortens its round rather than lengthening it.
+
+`per-run/` repeats the comparison that buster#1561 rests on under the host's rule:
+- one hold per run, a run being one batch of N concurrent compiles of one build;
+- in each hold, the owner file as its receipt, each process's exit status and its objects' hashes
+  (`scripts/one-run.sh`, `scripts/ab-per-run.sh`);
+- main's executable against the PR head's own build (`scripts/build-head.sh`, one hold).
 
 ## Main's baseline (`main-ec5f0f6b/`, `scripts/measure.sh`, `scripts/pages.sh`)
 
@@ -162,7 +207,8 @@ a last round of 8 at once (`final/decide-*.txt`):
 - `BUSTER_EXP_FLOOR_MB` exists only in the measured executable (`final/`'s `br-f*` configurations), not in the branch.
 - The VM's attribution is the arenas' own; the 9700X's peak (293.7 MB) is within 1.2% of the VM's (297.0 MB).
 - `scripts/fe-workers.sh` (the front end alone on 1 and 8) and `scripts/profile8.sh` (a system-wide profile of 8 at
-  once) were queued after the branch's measurement; their results are not in this record.
+  once) ran after the branch's measurement, each in one hold ("Lock holds and their limits"). Their results are not in
+  this record.
 - The branch's measured executable predates the branch's documentation, some comment edits, `tests/peak-rss.c`'s
   base pages, and a refactor of how `--time-stages` learns the `busy` decision (a `CheckClock` field the driver sets,
   so that `tests/peak-rss.c` still compiles). The compiler's behavior is otherwise the branch head's.
