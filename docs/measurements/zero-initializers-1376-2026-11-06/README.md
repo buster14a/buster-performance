@@ -1,7 +1,14 @@
 # Zero-initialized locals by memset, Buster #1376
 
-Compiler issue: [#1376](https://github.com/buster14a/buster/issues/1376). Compiler PR: the branch
-`opencode/1376-zero-init` of buster14a/buster.
+**Historical, nonqualifying archive.** The measurements below used grouped lock holds that violated the
+9700X per-run lock policy. They must not qualify the compiler change or be interpreted as current-head
+performance acceptance. Preserve these data as observations; run a separately coordinated, individually
+locked repeat on the selected current compiler and base before using them for qualification.
+
+Compiler issue: [#1376](https://github.com/buster14a/buster/issues/1376). Compiler PR: [#1548](https://github.com/buster14a/buster/pull/1548).
+At this review the PR head was `a4d0289f1b3b640da2412c92f79394a95ebc7687` and main had advanced beyond
+the base below. The measured head differs from that PR head in documentation and tests; this historical
+record does not establish qualification of the newer head or base.
 
 Frozen sources:
 
@@ -18,10 +25,17 @@ object.
 ## Host and method
 
 The Ryzen 7 9700X (`benchpress`), CPU 2 (governor and EPP `performance`), THP `always`, clang 23.1.1, CMake 4.4.4,
-Ninja 1.13.2 (`host.txt`). Each tree is built with `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh`, one lock
-hold per build (`build.sh`, `builds.sh`, `update.sh`; `builds.log` keeps the builds' own lines and the executables'
-SHA-256). Every run went through `~/buster-fast-bench/exclusive.sh`, one hold per script (`run-all.sh`, `self.sh`);
-the lock's waiting messages, which name other sessions, are left out of the logs.
+Ninja 1.13.2 (`host.txt`), recorded as a host snapshot rather than a per-sample receipt. Each tree was built with
+`BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh`, with one lock invocation per build (`build.sh`,
+`builds.sh`, `update.sh`; `builds.log` retains build lines and executable SHA-256 values). Positive build-lock
+receipts and a build-time source/input manifest were not retained.
+
+`run-all.sh` held the shared lock once around the entire `measure.sh` series, including compiler invocations,
+links and 65 measured executables, and once around the entire `compile.sh` series, including all `time-runs`
+processes and two follow-up compiles. **Neither hold was acquired separately per measured run, as host policy
+requires.** The self-source script's lock invocation and positive per-run lock receipts were not retained in this
+archive. Waiting messages identifying other sessions were omitted from the retained logs; the scripts and measured
+rows remain historical evidence of what was run. The resulting timings are not qualification evidence.
 
 **Kernels** (`k/kernel.c`, the issue's four and two more): each is compiled by each compiler (`-c`, and `-c --tier1`
 for Tier 1), clang `-O0` and clang `-O2 -fno-vectorize`, and linked with one driver compiled by clang `-O2`
@@ -50,8 +64,8 @@ ns per call, medians of five rounds:
 | `struct Big b = *p;` (copy) | 10.458 | **4.375** (2.4×) | 9.568 | **4.371** (2.2×) | 4.719 | 4.479 |
 | `struct Big b = k_make(i);` (return) | 14.876 | 9.945 (1.5×) | 14.100 | 10.169 (1.4×) | 3.064 | 3.549 |
 
-Every kernel but `return` now takes at most 11% more than clang `-O0`'s code in Tier 0 (`partial`, 2.600 against
-2.347 ns) and no more than it in Tier 1, and Tier 1 is no longer slower than Tier 0. `return` keeps a temporary and a `memmove` into the object, where clang passes the object itself as the
+In these historical medians every kernel but `return` took at most 11% more than clang `-O0` in Tier 0 (`partial`,
+2.600 against 2.347 ns) and no more than it in Tier 1. `return` keeps a temporary and a `memmove` into the object, where clang passes the object itself as the
 hidden result pointer; the head only drops the clear before the copy.
 
 The threshold, ns per call:
@@ -67,8 +81,9 @@ The threshold, ns per call:
 | 192 | 5.409 | 2.525 | 2.166 | 5.409 | 2.524 | 2.164 | 1.722 |
 | 256 | 7.577 | 2.524 | 2.169 | 6.852 | 2.166 | 2.168 | 2.082 |
 
-Up to 128 bytes the head's code is the base's (the same times). Past it the loop's cost grows with the size and the
-call's doesn't. Calling memset below 64 bytes (`fill8`) would cost 2 to 4.5 times the stores in both tiers. At 96 and
+Up to 128 bytes the reported head and base timings are close. The generated objects are not archived, so these
+measurements alone do not prove machine-code equality. Past 128 bytes the reported loop cost grows with size while
+the call cost is comparatively flat. Calling memset below 64 bytes (`fill8`) would cost 2 to 4.5 times the stores in both tiers. At 96 and
 128 bytes, Tier 0's stores take 0.2 and 0.5 ns more than the call, and Tier 1's 0.6 and 0.3 ns less, so 128 stays the
 threshold. Head and `fill8` call the same memset past 128 bytes and differ there by about 0.36 ns: their kernels' code
 sits at different places, which this record doesn't separate.
@@ -85,9 +100,10 @@ Code shape (`objdump -dr` and `size -A` of the objects; `results/compile-1793987
 | frozen `sqlite3.c` | 1,279,192 | 1,278,280 | 268 | 269 |
 | the compiler's own `main.c` at base, `-march=znver5` | 1,314,830 | 1,290,158 (−1.9%) | 107 | 278 |
 
-SQLite has one large zero-initialized local; the compiler's own source has 171, whose loops become calls.
+These object summaries count memset relocation entries, not source locals. The extra 171 entries do not establish
+that 171 source locals changed; the underlying objects are not included for independent inspection.
 
-## Correctness
+## Historical correctness context
 
 The PR runs `test-checker --program-initializers` (1,414 checks: each path's shapes and native runs against clang
 `-O0` on a dirtied stack) and the whole correctness inventory (`tools/ci/correctness.tests`, 126 commands) on a
@@ -99,3 +115,9 @@ Ryzen 9 7940HS native build; those are the PR's receipts, not this record's.
 - Each compiler is one build at one code placement; the threshold's 96- and 128-byte differences are within the
   placement effect the head/`fill8` comparison past 128 bytes shows.
 - The `sqlite3.c` and `main.c` shapes are counts from object files, not timings.
+
+
+The committed [archive verifier](verify-archive.py) recomputes retained medians and checks fixture hashes, row
+counts, per-round check totals and reported `time-runs` statuses. It does not recover omitted binaries, prove the
+build-time source/input state or establish per-run locking. The original scripts are preserved as historical
+records and must not be used to repeat a grouped-lock campaign.
