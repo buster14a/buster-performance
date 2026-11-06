@@ -1,0 +1,1 @@
+bin/compiler-znver5 --predefines predefines-znver5.h -march=znver5 -fwrapv -funsigned-char -fno-strict-aliasing -fsyntax-only self-main.i 
