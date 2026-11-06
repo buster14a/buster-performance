@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and THIRD_PARTY_NOTICES.md.
 //
 // #149: whole-process, compile-only 1..8-lane acceptance on Benchpress. The controller never holds the host lock:
-// it invokes exclusive.sh once per sample, which invokes this executable's --sample helper. Only the compiler's
+// it invokes exclusive.sh once per sample, with a bounded guard around the --sample helper. Only the compiler's
 // fork-to-wait4 interval is timed. Inputs, binaries, source revision and host policy are checked outside that interval.
 // Each sample has fresh outputs, full logs and an exact child status; complete objects are compared with one lane's.
 // --self-test uses private in-process configuration and this executable's fake compiler. It cannot publish acceptance.
@@ -38,6 +38,9 @@
 #define BUSTER_MAX_SOURCES 65536u
 #define BUSTER_TEXT_LIMIT (16u << 20)
 #define BUSTER_SAMPLE_SECONDS 120u
+#define BUSTER_HOLD_SECONDS 240u
+#define BUSTER_HOLD_GRACE_SECONDS 10u
+#define BUSTER_REAP_SECONDS 5u
 #define BUSTER_LOCK_SECONDS 1200u
 #define BUSTER_LOCK_PATH "/var/lib/buster-9700x/lock"
 
@@ -100,6 +103,7 @@ struct Process
 static volatile sig_atomic_t process_group;
 static volatile sig_atomic_t process_signal;
 static volatile sig_atomic_t process_grace = 5;
+static unsigned process_grace_override;
 
 static void stop_process(int number)
 {
@@ -176,6 +180,13 @@ static uint64_t now_ns(void)
 {
     struct timespec value = { 0 };
     const bool read = clock_gettime(CLOCK_MONOTONIC, &value) == 0;
+    return read ? (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec : 0;
+}
+
+static uint64_t realtime_ns(void)
+{
+    struct timespec value = { 0 };
+    const bool read = clock_gettime(CLOCK_REALTIME, &value) == 0;
     return read ? (uint64_t)value.tv_sec * UINT64_C(1000000000) + (uint64_t)value.tv_nsec : 0;
 }
 
@@ -357,7 +368,7 @@ static void free_case(Case* input)
 
 static bool controlled_argument(const char* argument)
 {
-    const char* prefixes[] = { "--lanes", "--lane-cpus", "--time-stages", "--worker-budget", "--sample", "--fake-compiler", "--self-test", "--id-order", "--poison-arenas", "--units-memory", "--shared-parts", "--dump-", "-o", "-M" };
+    const char* prefixes[] = { "--lanes", "--lane-cpus", "--time-stages", "--worker-budget", "--sample", "--hold-guard", "--fake-compiler", "--self-test", "--id-order", "--poison-arenas", "--units-memory", "--shared-parts", "--dump-", "-o", "-M" };
     bool controlled = argument[0] == '@' || strcmp(argument, "-E") == 0 || strcmp(argument, "-S") == 0 || strcmp(argument, "-fsyntax-only") == 0;
     for (size_t i = 0; !controlled && i < sizeof(prefixes) / sizeof(prefixes[0]); i += 1)
     {
@@ -509,8 +520,19 @@ static Process run_process(char* const* arguments, const char* directory, int ou
         .status = -1,
     };
     fflush(NULL);
+    sigset_t blocked;
+    sigset_t previous;
+    sigemptyset(&blocked);
+    sigaddset(&blocked, SIGALRM);
+    sigaddset(&blocked, SIGINT);
+    sigaddset(&blocked, SIGTERM);
+    sigaddset(&blocked, SIGHUP);
+    if (sigprocmask(SIG_BLOCK, &blocked, &previous) != 0)
+    {
+        return result;
+    }
     process_signal = 0;
-    process_grace = compile ? 2 : 5;
+    process_grace = process_grace_override != 0 ? (sig_atomic_t)process_grace_override : compile ? 2 : 5;
     const pid_t parent = getpid();
     const uint64_t begin = now_ns();
     const pid_t child = fork();
@@ -523,7 +545,8 @@ static Process run_process(char* const* arguments, const char* directory, int ou
         signal(SIGHUP, SIG_DFL);
         const struct rlimit cores = { 0 };
         bool ready = setpgid(0, 0) == 0 && setrlimit(RLIMIT_CORE, &cores) == 0;
-        ready = ready && (!compile || (prctl(PR_SET_PDEATHSIG, SIGKILL) == 0 && getppid() == parent));
+        ready = ready && prctl(PR_SET_PDEATHSIG, SIGKILL) == 0 && getppid() == parent;
+        ready = sigprocmask(SIG_SETMASK, &previous, NULL) == 0 && ready;
         ready = ready && (directory == NULL || chdir(directory) == 0);
         ready = ready && (affinity == NULL || sched_setaffinity(0, sizeof(*affinity), affinity) == 0);
         ready = ready && (output < 0 || dup2(output, STDOUT_FILENO) >= 0) && (errors < 0 || dup2(errors, STDERR_FILENO) >= 0);
@@ -565,6 +588,7 @@ static Process run_process(char* const* arguments, const char* directory, int ou
         (void)setpgid(child, child);
         alarm(seconds);
     }
+    (void)sigprocmask(SIG_SETMASK, &previous, NULL);
     struct rusage usage = { 0 };
     int status = 0;
     pid_t waited = -1;
@@ -599,6 +623,103 @@ static Process run_process(char* const* arguments, const char* directory, int ou
 static bool successful(Process result)
 {
     return result.status != -1 && WIFEXITED(result.status) && WEXITSTATUS(result.status) == 0 && !result.interrupted;
+}
+
+// The guard runs inside exclusive.sh's lock, around the entire sample helper, including input hashing and output
+// comparisons. Its monotonic interval begins after lock acquisition and ends before exclusive.sh releases the lock;
+// the small wrapper entry/exit overhead is outside the receipt. A timeout is always a failed, incomplete sample.
+// A subreaper also adopts descendants if the helper dies before its own nested process-group cleanup runs.
+static bool reap_guard_descendants(unsigned seconds)
+{
+    const uint64_t start = now_ns();
+    bool had_descendants = false;
+    for (;;)
+    {
+        int status;
+        pid_t child;
+        do
+        {
+            child = waitpid(-1, &status, WNOHANG);
+            had_descendants = had_descendants || child > 0;
+        } while (child > 0);
+        if (child < 0 && errno == ECHILD)
+        {
+            return !had_descendants;
+        }
+        if (child < 0 && errno != EINTR)
+        {
+            return false;
+        }
+        had_descendants = true;
+        char path[128];
+        snprintf(path, sizeof(path), "/proc/self/task/%ld/children", (long)getpid());
+        FILE* children = fopen(path, "r");
+        if (children == NULL)
+        {
+            return false;
+        }
+        long pid = 0;
+        while (fscanf(children, "%ld", &pid) == 1)
+        {
+            if (pid > 1 && pid <= INT_MAX)
+            {
+                (void)kill(-(pid_t)pid, SIGKILL);
+                (void)kill((pid_t)pid, SIGKILL);
+            }
+        }
+        const bool read_ok = !ferror(children);
+        const bool closed = fclose(children) == 0;
+        const uint64_t now = now_ns();
+        if (!read_ok || !closed || start == 0 || now < start || now - start >= (uint64_t)seconds * UINT64_C(1000000000))
+        {
+            return false;
+        }
+        const struct timespec pause = { .tv_nsec = 10000000 };
+        (void)nanosleep(&pause, NULL);
+    }
+}
+
+static bool hold_guard(char* const* arguments, unsigned seconds, unsigned grace, FILE* receipt)
+{
+    const uint64_t start = realtime_ns();
+    const uint64_t begin = now_ns();
+    if (prctl(PR_SET_CHILD_SUBREAPER, 1) != 0)
+    {
+        return false;
+    }
+    process_grace_override = grace;
+    const Process process = run_process(arguments, NULL, STDOUT_FILENO, STDERR_FILENO, seconds, NULL, false);
+    process_grace_override = 0;
+    const bool descendants_clean = reap_guard_descendants(BUSTER_REAP_SECONDS);
+    const uint64_t end = now_ns();
+    const uint64_t finish = realtime_ns();
+    bool valid = start != 0 && begin != 0 && end >= begin && finish != 0 && receipt != NULL;
+    if (receipt != NULL)
+    {
+        fprintf(receipt, "lock-guard\tstart-realtime-ns=%" PRIu64 "\tend-realtime-ns=%" PRIu64 "\tmonotonic-ns=%" PRIu64 "\tstatus=%d\tinterrupted=%u\tdescendants-clean=%u\n",
+                start, finish, end >= begin ? end - begin : 0, process.status, process.interrupted, descendants_clean);
+        valid = !ferror(receipt) && fflush(receipt) == 0 && valid;
+    }
+    return valid && successful(process) && descendants_clean;
+}
+
+static bool read_guard(const char* path, uint64_t* elapsed)
+{
+    FILE* file = fopen(path, "r");
+    char row[512];
+    uint64_t start = 0, end = 0;
+    int status = -1, consumed = 0;
+    unsigned interrupted = 1, descendants_clean = 0;
+    bool valid = file != NULL && fgets(row, sizeof(row), file) != NULL &&
+                 sscanf(row, "lock-guard\tstart-realtime-ns=%" SCNu64 "\tend-realtime-ns=%" SCNu64 "\tmonotonic-ns=%" SCNu64 "\tstatus=%d\tinterrupted=%u\tdescendants-clean=%u%n",
+                        &start, &end, elapsed, &status, &interrupted, &descendants_clean, &consumed) == 6 &&
+                 row[consumed] == '\n' && row[consumed + 1] == 0 && fgetc(file) == EOF && !ferror(file) &&
+                 start != 0 && end != 0 && *elapsed != 0 && status == 0 && interrupted == 0 && descendants_clean == 1;
+    if (file != NULL)
+    {
+        valid = fclose(file) == 0 && valid;
+    }
+    return valid;
 }
 
 static bool capture(char* const* arguments, char* result, size_t capacity)
@@ -1336,7 +1457,7 @@ static bool locked_sample(const Configuration* campaign, const Case* input, cons
     size_t used = 0;
     arguments[used++] = one.lock;
     arguments[used++] = one.executable;
-    arguments[used++] = "--sample";
+    arguments[used++] = "--hold-guard";
     arguments[used++] = "--case";
     arguments[used++] = one.case_directory;
     arguments[used++] = "--output";
@@ -1368,10 +1489,12 @@ static bool locked_sample(const Configuration* campaign, const Case* input, cons
     const int output = valid ? open(output_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
     const int errors = valid ? open(error_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600) : -1;
     valid = valid && output >= 0 && errors >= 0;
+    Process wrapper = { .status = -1 };
     if (valid)
     {
         fprintf(stdout, "multicore-149: %s, lanes=%u, mask=%s, instrumented=%u\n", name, lanes, cpu2 ? "2" : "0..7", instrumented);
-        valid = successful(run_process(arguments, NULL, output, errors, BUSTER_LOCK_SECONDS, NULL, false));
+        wrapper = run_process(arguments, NULL, output, errors, BUSTER_LOCK_SECONDS, NULL, false);
+        valid = successful(wrapper);
     }
     if (output >= 0)
     {
@@ -1381,7 +1504,24 @@ static bool locked_sample(const Configuration* campaign, const Case* input, cons
     {
         valid = close(errors) == 0 && valid;
     }
-    valid = valid && read_sample(&one, input->outputs.count, result);
+    uint64_t guard_ns = 0;
+    const bool guard_valid = read_guard(output_path, &guard_ns);
+    char window_name[128], window_path[PATH_MAX];
+    snprintf(window_name, sizeof(window_name), "%s.lock-window.txt", name);
+    FILE* window = path_join(window_path, sizeof(window_path), campaign->output, window_name) ? fopen(window_path, "wx") : NULL;
+    if (window != NULL)
+    {
+        fprintf(window, "guard-monotonic-ns=%" PRIu64 "\nwrapper-wall-ns-including-wait=%" PRIu64 "\nwrapper-status=%d\nwrapper-interrupted=%u\nlock-hold-upper-bound-valid=%u\n",
+                guard_ns, wrapper.wall_ns, wrapper.status, wrapper.interrupted, successful(wrapper) && guard_valid && guard_ns <= wrapper.wall_ns);
+        const bool wrote = !ferror(window);
+        const bool closed = fclose(window) == 0;
+        valid = wrote && closed && valid;
+    }
+    else
+    {
+        valid = false;
+    }
+    valid = valid && guard_valid && guard_ns <= wrapper.wall_ns && read_sample(&one, input->outputs.count, result);
     if (!valid)
     {
         fprintf(stderr, "multicore-149: sample failed; retained %s and %s\n", one.output, error_path);
@@ -1695,6 +1835,16 @@ int main(int argc, char** argv)
     if (valid && argc == 2 && strcmp(argv[1], "--self-test") == 0)
     {
         result = runner_self_test(executable);
+    }
+    else if (valid && argc > 2 && strcmp(argv[1], "--hold-guard") == 0)
+    {
+        // The outer lock-wait watchdog can terminate its shell while a late grant is running. Keep the guard in
+        // its own process group and retain fd 9 until cleanup completes, even if that outer shell disappears.
+        if (held_lock() && setpgid(0, 0) == 0)
+        {
+            argv[1] = "--sample";
+            result = hold_guard(argv, BUSTER_HOLD_SECONDS, BUSTER_HOLD_GRACE_SECONDS, stdout) ? 0 : 1;
+        }
     }
     else if (valid && argc > 2 && strcmp(argv[1], "--fake-compiler") == 0)
     {

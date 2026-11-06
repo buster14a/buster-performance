@@ -114,6 +114,24 @@ This lets waiting CI jobs take the host between samples. Do not wrap the whole
 campaign in `exclusive.sh`, and do not call it from a hardware CI job that
 already owns the job-hook lock.
 
+Within each lock grant, a guard limits the sample helper, including source and
+input hashing, compilation, and output comparisons, to 240 seconds; it sends
+TERM and escalates to KILL after 10 seconds. It adopts and kills any orphaned
+descendants, allowing up to a further 5 seconds for reaping. Leftover descendants
+or a timeout make the case incomplete. Kernel-uninterruptible tasks may not
+terminate on time and must be investigated before further host use. Logs are
+retained. Each `*.lock.stdout` records the guard's monotonic
+elapsed time and status, and `*.lock-window.txt` records both that interval
+and the whole wrapper's elapsed time, including lock wait. For a successful,
+uninterrupted wrapper with a valid guard receipt, these bound the actual lock
+hold from below and above respectively: the guard starts after lock acquisition
+and ends before the shell wrapper releases the lock. An interrupted or failed
+wrapper may exit before the detached guard finishes cleanup; its elapsed time
+is not a lock-hold upper bound, and its receipt can be missing or incomplete.
+The window file marks whether the upper bound is valid. Failed samples are not
+timing evidence. The wrapper's small entry and exit overhead is outside the
+guard deadline.
+
 ```sh
 "$campaign/tools/runner" --case "$campaign/cases/sqlite" --output "$campaign/results-sqlite" --compiler "$compiler_tree/build/compiler" --compiler-source "$compiler_tree" --lock "$lock" --runs 7 --cpus 0,1,2,3,4,5,6,7
 "$campaign/tools/runner" --case "$campaign/cases/synth" --output "$campaign/results-synth" --compiler "$compiler_tree/build/compiler" --compiler-source "$compiler_tree" --lock "$lock" --runs 7 --cpus 0,1,2,3,4,5,6,7

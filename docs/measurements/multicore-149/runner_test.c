@@ -50,6 +50,67 @@ static int fake_compiler(int argc, char** argv, const char* executable)
         const Process process = run_process(child, NULL, STDOUT_FILENO, STDERR_FILENO, 30, NULL, true);
         result = successful(process) ? 0 : 17;
     }
+    else if (valid && strcmp(mode, "orphan-worker") == 0)
+    {
+        const pid_t descendant = fork();
+        if (descendant == 0)
+        {
+            (void)setsid();
+            signal(SIGTERM, SIG_IGN);
+            char pid[64];
+            snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+            if (!write_text("descendant-pid.txt", pid)) _exit(1);
+            for (;;) pause();
+        }
+        signal(SIGTERM, SIG_IGN);
+        for (;;) pause();
+    }
+    else if (valid && strcmp(mode, "orphan-helper") == 0)
+    {
+        // Simulate an unresponsive sample helper killed before it can clean its own worker group.
+        signal(SIGTERM, SIG_IGN);
+        const pid_t worker = fork();
+        if (worker == 0)
+        {
+            (void)setpgid(0, 0);
+            execl(executable, executable, "--fake-compiler", "orphan-worker", (char*)NULL);
+            _exit(127);
+        }
+        for (;;) pause();
+    }
+    else if (valid && strcmp(mode, "outer-guard") == 0)
+    {
+        if (setpgid(0, 0) != 0) return 1;
+        if (!write_text("guard-ready.txt", "separate-group\n")) return 1;
+        char* helper[] = { (char*)executable, "--fake-compiler", "orphan-helper", NULL };
+        FILE* receipt = fopen("outer-receipt.txt", "w");
+        const bool accepted = receipt != NULL && hold_guard(helper, 3, 1, receipt);
+        const bool closed = receipt != NULL && fclose(receipt) == 0;
+        return !accepted && closed && write_text("outer-complete.txt", "incomplete\n") ? 0 : 1;
+    }
+    else if (valid && strcmp(mode, "outer-race-guard") == 0)
+    {
+        // A timeout before setpgid/child creation kills this process with the wrapper group.
+        signal(SIGTERM, SIG_IGN);
+        sleep(3);
+        return write_text("unexpected-child.txt", "started\n") ? 0 : 1;
+    }
+    else if (valid && (strcmp(mode, "outer-wrapper") == 0 || strcmp(mode, "outer-race-wrapper") == 0))
+    {
+        const int lock = open("outer-lock", O_RDWR | O_CREAT, 0600);
+        if (lock < 0 || dup2(lock, 9) < 0 || flock(9, LOCK_EX) != 0) return 1;
+        if (lock != 9) close(lock);
+        const pid_t guard = fork();
+        if (guard == 0)
+        {
+            const char* guard_mode = strcmp(mode, "outer-wrapper") == 0 ? "outer-guard" : "outer-race-guard";
+            execl(executable, executable, "--fake-compiler", guard_mode, (char*)NULL);
+            _exit(127);
+        }
+        if (guard < 0) return 1;
+        signal(SIGTERM, SIG_DFL); // Model exclusive.sh exiting immediately on the outer watchdog's TERM.
+        for (;;) pause();
+    }
     else if (valid)
     {
         char primary[32];
@@ -275,6 +336,105 @@ static int runner_self_test(const char* executable)
         const bool recorded = ready && small_text(pid_path, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &pid) && pid > 1;
         const bool gone = recorded && kill((pid_t)pid, 0) < 0 && errno == ESRCH;
         test_expect(&checks, &failures, process.interrupted && !successful(process) && gone, "outer timeout lets inner helper kill and reap a TERM-ignoring compiler");
+    }
+    if (ready)
+    {
+        char guard_path[PATH_MAX];
+        ready = path_join(guard_path, sizeof(guard_path), directory, "guard.receipt");
+        FILE* receipt = ready ? fopen(guard_path, "w") : NULL;
+        char* good[] = { "/bin/true", NULL };
+        const bool good_result = receipt != NULL && hold_guard(good, 5, 2, receipt);
+        const bool good_closed = receipt != NULL && fclose(receipt) == 0;
+        uint64_t elapsed = 0;
+        test_expect(&checks, &failures, good_result && good_closed && read_guard(guard_path, &elapsed) && elapsed > 0, "successful guard emits a valid duration receipt");
+        ready = ready && write_text(guard_path, "lock-guard\tstart-realtime-ns=1\tend-realtime-ns=2\tmonotonic-ns=3\tstatus=0\tinterrupted=0\tdescendants-clean=1\nextra\n");
+        test_expect(&checks, &failures, ready && !read_guard(guard_path, &elapsed), "guard rejects extra or duplicate receipt data");
+        ready = ready && write_text(guard_path, "lock-guard\tstart-realtime-ns=1\tend-realtime-ns=2\tmonotonic-ns=3\tstatus=0\tinterrupted=1\tdescendants-clean=1\n");
+        test_expect(&checks, &failures, ready && !read_guard(guard_path, &elapsed), "interrupted guard receipt is incomplete");
+        char nested[PATH_MAX], pid_path[PATH_MAX];
+        ready = ready && path_join(nested, sizeof(nested), directory, "guard-nested") && mkdir(nested, 0700) == 0 &&
+                path_join(pid_path, sizeof(pid_path), nested, "pid.txt");
+        const int original = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        receipt = ready ? fopen(guard_path, "w") : NULL;
+        char* child[] = { (char*)executable, "--fake-compiler", "nested", NULL };
+        const bool entered = original >= 0 && receipt != NULL && chdir(nested) == 0;
+        const bool guard_result = entered && hold_guard(child, 1, 6, receipt);
+        const bool restored = original >= 0 && fchdir(original) == 0;
+        if (original >= 0) close(original);
+        const bool closed = receipt != NULL && fclose(receipt) == 0;
+        char pid_text[64];
+        unsigned pid = 0;
+        const bool recorded = ready && small_text(pid_path, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &pid) && pid > 1;
+        const bool gone = recorded && kill((pid_t)pid, 0) < 0 && errno == ESRCH;
+        test_expect(&checks, &failures, entered && restored && closed && !guard_result && !read_guard(guard_path, &elapsed) && gone,
+                    "guard timeout fails and reaps a TERM-ignoring nested compiler");
+        char descendant_path[PATH_MAX];
+        ready = ready && path_join(descendant_path, sizeof(descendant_path), nested, "descendant-pid.txt");
+        const int saved = open(".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        receipt = ready ? fopen(guard_path, "w") : NULL;
+        char* orphan[] = { (char*)executable, "--fake-compiler", "orphan-helper", NULL };
+        const bool orphan_entered = saved >= 0 && receipt != NULL && chdir(nested) == 0;
+        const bool orphan_result = orphan_entered && hold_guard(orphan, 1, 1, receipt);
+        const bool orphan_restored = saved >= 0 && fchdir(saved) == 0;
+        if (saved >= 0) close(saved);
+        const bool orphan_closed = receipt != NULL && fclose(receipt) == 0;
+        pid = 0;
+        const bool descendant_recorded = ready && small_text(descendant_path, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &pid) && pid > 1;
+        const bool descendant_gone = descendant_recorded && kill((pid_t)pid, 0) < 0 && errno == ESRCH;
+        test_expect(&checks, &failures, orphan_entered && orphan_restored && orphan_closed && !orphan_result && descendant_gone,
+                    "subreaper cleans an escaped descendant after killing an unresponsive helper");
+        char outer[PATH_MAX], outer_done[PATH_MAX], outer_pid[PATH_MAX], outer_lock[PATH_MAX], outer_ready[PATH_MAX];
+        ready = ready && path_join(outer, sizeof(outer), directory, "outer") && mkdir(outer, 0700) == 0 &&
+                path_join(outer_done, sizeof(outer_done), outer, "outer-complete.txt") &&
+                path_join(outer_pid, sizeof(outer_pid), outer, "descendant-pid.txt") &&
+                path_join(outer_lock, sizeof(outer_lock), outer, "outer-lock") && path_join(outer_ready, sizeof(outer_ready), outer, "guard-ready.txt");
+        char* outer_child[] = { (char*)executable, "--fake-compiler", "outer-wrapper", NULL };
+        const int outer_null = open("/dev/null", O_RDWR | O_CLOEXEC);
+        const Process outer_process = ready && outer_null >= 0 ? run_process(outer_child, outer, outer_null, outer_null, 1, NULL, false) : (Process){ .status = -1 };
+        if (outer_null >= 0) close(outer_null);
+        const int contender = open(outer_lock, O_RDWR | O_CLOEXEC);
+        const bool held = contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) < 0 && (errno == EWOULDBLOCK || errno == EAGAIN);
+        const uint64_t outer_start = now_ns();
+        while (access(outer_done, F_OK) != 0 && now_ns() - outer_start < UINT64_C(8000000000))
+        {
+            const struct timespec pause = { .tv_nsec = 10000000 };
+            (void)nanosleep(&pause, NULL);
+        }
+        pid = 0;
+        const bool outer_recorded = small_text(outer_pid, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &pid) && pid > 1;
+        const bool outer_gone = outer_recorded && kill((pid_t)pid, 0) < 0 && errno == ESRCH;
+        const bool released = contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) == 0;
+        if (contender >= 0) close(contender);
+        test_expect(&checks, &failures, outer_process.interrupted && access(outer_ready, F_OK) == 0 && held && released && access(outer_done, F_OK) == 0 && outer_gone,
+                    "outer-wrapper timeout retains fd 9 lock until the separate guard cleans active descendants");
+        while (waitpid(-1, NULL, WNOHANG) > 0) { }
+        char race[PATH_MAX], race_lock[PATH_MAX], unexpected[PATH_MAX];
+        ready = ready && path_join(race, sizeof(race), directory, "outer-race") && mkdir(race, 0700) == 0 &&
+                path_join(race_lock, sizeof(race_lock), race, "outer-lock") && path_join(unexpected, sizeof(unexpected), race, "unexpected-child.txt");
+        char* race_child[] = { (char*)executable, "--fake-compiler", "outer-race-wrapper", NULL };
+        const int race_null = open("/dev/null", O_RDWR | O_CLOEXEC);
+        const Process race_process = ready && race_null >= 0 ? run_process(race_child, race, race_null, race_null, 1, NULL, false) : (Process){ .status = -1 };
+        if (race_null >= 0) close(race_null);
+        const int race_contender = open(race_lock, O_RDWR | O_CLOEXEC);
+        bool race_released = false;
+        const uint64_t race_start = now_ns();
+        do
+        {
+            race_released = race_contender >= 0 && flock(race_contender, LOCK_EX | LOCK_NB) == 0;
+            if (!race_released)
+            {
+                const struct timespec pause = { .tv_nsec = 10000000 };
+                (void)nanosleep(&pause, NULL);
+            }
+        } while (!race_released && now_ns() - race_start < UINT64_C(2000000000));
+        if (race_contender >= 0) close(race_contender);
+        test_expect(&checks, &failures, race_process.interrupted && race_released && access(unexpected, F_OK) != 0,
+                    "outer timeout before guard process-group setup starts no descendants and releases fd 9");
+        char* forbidden[] = { (char*)executable, "--hold-guard", "--case", NULL };
+        const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+        const Process refused = null >= 0 ? run_process(forbidden, directory, null, null, 5, NULL, false) : (Process){ .status = -1 };
+        if (null >= 0) close(null);
+        test_expect(&checks, &failures, refused.status != -1 && !successful(refused), "guard rejects an invocation outside the host lock");
     }
     if (ready)
     {
