@@ -93,7 +93,6 @@ resources on its 7 GiB, and source fixture and backend-source cases fail as well
 
 ## Limits
 
-These are a 2-vCPU virtual machine's numbers on an Ice Lake server, not the 9700X's. Zen 5 runs `vpcompressb` to a
-register as 2 µops and the 512-bit permutes at full width, so the ratios should hold or grow there; the 9700X numbers
-are still to be taken. The literals are #1388's synthetic megabyte. Wide, UTF-16 and UTF-32 literals and raw ones are
-unchanged.
+These are a 2-vCPU virtual machine's numbers on an Ice Lake server, not the 9700X's. Instruction throughput alone does
+not establish the overall ratios on Zen 5; the 9700X numbers are still to be taken. The literals are #1388's synthetic
+megabyte. Wide, UTF-16 and UTF-32 literals and raw ones are unchanged.
