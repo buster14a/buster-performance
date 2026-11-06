@@ -35,6 +35,8 @@ filters the inventory by whether Buster happened to produce an object.
 
 `prepare.c` consumes the existing verified corpus from
 `tools/ci/fetch-corpus.sh`; it does not download or incorporate upstream source.
+Its argument manifests target the Buster driver and omit Clang-only options such
+as `--no-default-config`, which that driver rejects.
 The corpus identities are:
 
 | Input | SHA-256 |

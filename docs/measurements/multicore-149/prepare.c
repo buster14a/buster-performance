@@ -838,7 +838,8 @@ static bool argument_path(Strings* arguments, const char* option, const char* ro
 
 static bool common_arguments(Strings* arguments, const Corpus* corpus, bool musl)
 {
-    static const char* const common[] = { "-c", "--no-default-config", "--target=x86_64-linux-gnu", "-march=znver5", "-nostdinc" };
+    // These arguments go to Buster, not Clang: its driver rejects Clang's --no-default-config.
+    static const char* const common[] = { "-c", "--target=x86_64-linux-gnu", "-march=znver5", "-nostdinc" };
     bool valid = true;
     for (size_t i = 0; valid && i < sizeof(common) / sizeof(common[0]); i += 1)
     {
@@ -891,7 +892,7 @@ static bool case_base(PreparedCase* item, const char* name, const Corpus* corpus
     valid = valid && strings_add(&item->provenance, "corpus=preprocessor-391e729af658; archive-sha256=ceb39bf938cd7a7469bbb53646c3318d0cbfdac4d37b6d05b183c4fd0b9898c2");
     valid = valid && strings_format(&item->provenance, "source-count=%zu", sources->count);
     valid = valid && strings_add(&item->provenance, "corpus-verification=pinned manifests and SQLite/predefines; full headers/libc/sqlite/musl-generated SHA-256 and exact regular-file inventories");
-    valid = valid && strings_add(&item->provenance, "header-scope=explicit frozen directories; -nostdinc; no default config; caller must clear CPATH/C_INCLUDE_PATH/CPLUS_INCLUDE_PATH");
+    valid = valid && strings_add(&item->provenance, "header-scope=explicit frozen directories; -nostdinc; caller must clear CPATH/C_INCLUDE_PATH/CPLUS_INCLUDE_PATH");
     valid = valid && strings_add(&item->provenance, "source-date-epoch=0 (runner must set SOURCE_DATE_EPOCH)");
     valid = valid && strings_add(&item->provenance, "lanes-and-time-stages=owned by runner; absent from args.txt");
     return valid;
@@ -1276,6 +1277,17 @@ static int self_test(const char* corpus)
                          !relative_path("a//b") && !relative_path("a/./b") && !relative_path("a\nb") && !relative_path("a\\b"), "manifest path boundaries");
     if (created)
     {
+        Corpus argument_corpus = { 0 };
+        const int root_length = snprintf(argument_corpus.root, sizeof(argument_corpus.root), "%s", directory);
+        for (unsigned musl = 0; musl < 2; musl += 1)
+        {
+            Strings arguments = { 0 };
+            const bool built = root_length > 0 && (size_t)root_length < sizeof(argument_corpus.root) && common_arguments(&arguments, &argument_corpus, musl != 0);
+            strings_sort(&arguments);
+            test_expect(&test, built && strings_contains(&arguments, "-c") && strings_contains(&arguments, "-nostdinc") &&
+                                 !strings_contains(&arguments, "--no-default-config"), "Buster arguments exclude the Clang-only default-config flag");
+            strings_free(&arguments);
+        }
         static const char* const names[] = {
             "musl/src/math/plain.c",
             "musl/src/math/a.c",
