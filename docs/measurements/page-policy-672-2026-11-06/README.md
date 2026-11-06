@@ -27,35 +27,33 @@ The options are the 9700X job's `compile_time` step's, with one lane:
 **Scope.** This is exploratory evidence for buster#672 and buster#1561, not hardware qualification. Every script
 below ran under the host's lock (`scripts/lock.sh`), but each took one hold for its whole series of runs, against the
 host's rule of a hold per run ("Lock holds and their limits", below). The 9700X job's own steps remain the
-qualification. A repeat of the branch against main that takes one hold per run, with a receipt and each process's
-exit status, is `per-run/` (pending at this commit).
+qualification. A repeat that takes one hold per run is proposed (`scripts/ab-per-run.sh`). It waits for the hardware
+coordinator's admission and an independent review of its scripts, and no part of it has run.
 
-The objects that were hashed are the same bytes across every configuration (`*/objects*.sha256`,
-`final/objects-unique.txt`). The worker rounds' processes were not checked one by one ("Lock holds and their limits").
+The objects that were hashed are the same bytes (`*/objects*.sha256`, `final/objects-unique.txt`), but they are only
+some of the runs' objects. The worker rounds' processes were not checked one by one, and their earlier rounds'
+objects were overwritten unhashed ("Lock holds and their limits").
 
 ## Lock holds and their limits
 
 The host's `README-9700x.md` asks for a hold per build, test, benchmark or perf run, never around a series of runs. This
-session's scripts each took a single hold (`lock.sh SCRIPT`) and ran a series inside it. The table gives each hold's
-span, from the creation and modification times of its files on the host (no hold logged its own start or end):
+session's scripts each took a single hold (`lock.sh SCRIPT`) and ran a series inside it, all on 2026-11-06:
 
-| hold | from | to | about | what ran inside it |
-| --- | --- | --- | ---: | --- |
-| main's build (`./build.sh`) | 18:25:53 (queued) | 18:29:17 | 3 min | one build |
-| `measure.sh` | 18:34:19 | 18:34:24 | 5 s | 7 `--time-stages` compiles, 5 `vmstat` compiles, `perf stat -r 7`, 5 rounds of 8 concurrent compiles, one `perf stat -a` round of 8 |
-| `pages.sh` | 18:39:58 | 18:40:02 | 4 s | `time-runs` of `-E`, `parse` and `-c` in both page modes, 6 `--time-stages` compiles |
-| `workers.sh` (huge pages) | 18:51:54 | 18:51:59 | 5 s | 20 rounds of 1 to 8 concurrent compiles, `perf stat -a` of 1 and of 8 |
-| `workers.sh` (base pages) | 19:06:11 | 19:06:16 | 5 s | the same |
-| `profile.sh` | 19:18:14 | 19:18:15 | 1 s | `perf record` of 5 compiles |
-| the branch's build | 19:16:49 (queued) | 19:27:30 | 3 min | one build |
-| `fe-workers.sh` | 19:30:41 | 19:30:43 | 2 s | 40 rounds of 1 or 8 concurrent `parse` or `-E` (not in this record) |
-| `final.sh` | 19:39:23 | 19:40:03 | 40 s | 18 `--time-stages` compiles, 168 rounds of 1 to 8 concurrent compiles, 6 rounds of 8 with `--time-stages` |
-| `profile8.sh` | 19:45:41 | 19:45:43 | 2 s | `perf record -a` of 3 rounds of 8 (not in this record) |
+| hold | what ran inside it |
+| --- | --- |
+| main's build (`./build.sh`) | one build |
+| `measure.sh` | 7 `--time-stages` compiles, 5 `vmstat` compiles, `perf stat -r 7`, 5 rounds of 8 concurrent compiles, one `perf stat -a` round of 8 |
+| `pages.sh` | `time-runs` of `-E`, `parse` and `-c` in both page modes, 6 `--time-stages` compiles |
+| `workers.sh` (huge pages) | 20 rounds of 1 to 8 concurrent compiles, `perf stat -a` of 1 and of 8 |
+| `workers.sh` (base pages) | the same |
+| `profile.sh` | `perf record` of 5 compiles |
+| the branch's build | one build |
+| `fe-workers.sh` | 40 rounds of 1 or 8 concurrent `parse` or `-E` (not in this record) |
+| `final.sh` | 18 `--time-stages` compiles, 168 rounds of 1 to 8 concurrent compiles, 6 rounds of 8 with `--time-stages` |
+| `profile8.sh` | `perf record -a` of 3 rounds of 8 (not in this record) |
 
-All times are UTC on 2026-11-06. The builds' "queued" times include their wait for the lock.
-
-- **The series.** No hold came near a CI job's 10-minute wait, but each held the machine for a series of runs where
-  the host asks for one hold per run.
+- **The series.** Each hold covered a series of runs where the host asks for one hold per run. No hold recorded when
+  it took or gave back the lock, so the record cannot say how long any hold lasted or how it delayed anyone else's.
 - **Concurrent processes in one hold.** The worker rounds start up to 8 compiler processes at once inside a hold. That
   is the measurement itself, which needs the whole machine.
 - **No receipts.** No script recorded the owner file while it held the lock, so the record has no positive receipt
@@ -63,14 +61,18 @@ All times are UTC on 2026-11-06. The builds' "queued" times include their wait f
   which aren't in this record, show it did.
 - **No per-process status.** The worker rounds started their processes in the background and waited for all of them,
   without checking each one's exit status. Their objects were overwritten round after round, and only the last
-  round's objects were hashed. A failed compile in an earlier round would have gone unseen in the wall times, though a
-  failure shortens its round rather than lengthening it.
+  round's objects were hashed. The record therefore shows that the hashed objects match. It does not show that every
+  process of every round succeeded, and the wall times of a round with a failed process would mean nothing.
 
-`per-run/` repeats the comparison that buster#1561 rests on under the host's rule:
-- one hold per run, a run being one batch of N concurrent compiles of one build;
-- in each hold, the owner file as its receipt, each process's exit status and its objects' hashes
-  (`scripts/one-run.sh`, `scripts/ab-per-run.sh`);
-- main's executable against the PR head's own build (`scripts/build-head.sh`, one hold).
+The proposed repeat (`scripts/build-head.sh`, `scripts/ab-per-run.sh`, `scripts/one-run.sh`) is held until the
+hardware coordinator admits it and its scripts pass an independent review, which also decides whether a batch of N
+concurrent compiles may count as one run. As written:
+- it builds an exact commit in one hold, and fails without copying if the build fails;
+- it takes one hold per run;
+- each run checks its receipt (`BUSTER_9700X_HELD`, the owner file naming the session) and both pinned SHA-256s;
+- each run keeps every process's exit status, standard error, object and full SHA-256, and fails if any process fails
+  or leaves no object;
+- it stops at the first failed run, and writes `done` only after every object of every run has one hash.
 
 ## Main's baseline (`main-ec5f0f6b/`, `scripts/measure.sh`, `scripts/pages.sh`)
 
@@ -109,8 +111,8 @@ rotating; each round's wall time is from the first start to the last exit:
 | 8 | 326.1 ms, 233.2 MB/s | 282.0 ms, **269.7 MB/s** |
 
 `perf stat -a` of one round of 8 (`perf-w8.csv`): huge pages took 10,651 M user cycles and 3,007 M kernel cycles, base
-pages 9,080 M and 2,813 M. That is 15% fewer user cycles and 6% fewer kernel cycles, though base pages fault 11
-times as often.
+pages 9,080 M and 2,813 M. These count the whole host over one round each, whatever else ran, and attribute nothing
+to a compile. One compile alone faults 11 times as often in base pages (`pages-hp*.txt`).
 
 ## Where the peak holds huge pages it uses little of (`diag/`)
 
@@ -152,12 +154,18 @@ At the peak (the backend's end), the differences larger than 0.5 MB:
 The branch's first commit gives those four base pages for their first 2 or 4 MB. On the VM, the peak falls from 296.8 to
 288.3 MB (two runs each, 386 more faults), with the object the same bytes.
 
+This attribution is the VM's, from instrumentation that isn't in any measured 9700X executable. It shows where the VM's
+compile held its pages. It does not by itself show the 9700X's allocations, or cause the 9700X's timings.
+
 ## The branch against main (`final/`, `scripts/final.sh`)
 
-The branch's executable (SHA-256 `29a2c890…cf16`, `final/identities.txt`) is the branch's two commits on `ec5f0f6b`
-plus an experiment-only knob in `main.c`: `BUSTER_EXP_FLOOR_MB=N` gives every arena of the calling thread N MB of base
-pages first (`arena_small_floor`). The knob tests whether a fixed floor could do what the busy test does. It is not
-in the branch.
+The branch's executable (SHA-256 `29a2c890…cf16`, `final/identities.txt`) is not the PR head's. It was built from the
+branch's two commits on `ec5f0f6b` as they stood before the PR's head, with two differences:
+- an experiment-only knob in `main.c`, `BUSTER_EXP_FLOOR_MB=N`, gives every arena of the calling thread N MB of base
+  pages first (`arena_small_floor`). It tests whether a fixed floor could do what the busy test does, and it is not in
+  the branch;
+- `--time-stages` reads the busy decision directly, where the head copies it into a `CheckClock` field
+  ("Limits", below).
 
 Six configurations, each on 1, 2, 4 and 8 independent processes pinned one per physical core:
 - `main`, main's executable as it runs;
@@ -189,13 +197,15 @@ a last round of 8 at once (`final/decide-*.txt`):
 | `br-f8` | 268,340 KB | 146.5 ms | 23,314 | `system` | `system` ×8 |
 | `br-f32` | 267,484 KB | 149.3 ms | 30,013 | `system` | `system` ×8 |
 
-- **Eight at once.** The branch runs 15.5% faster than main (270.3 against 234.0 MB/s): every process found the host
-  busy and took base pages, as fast as `BUSTER_HUGE_PAGES=0`.
+- **Eight at once.** The branch's rounds are 15.5% faster than main's (270.3 against 234.0 MB/s), as fast as
+  `BUSTER_HUGE_PAGES=0`'s. In the one round whose processes reported their decision (`decide-*`), each of the 8 found
+  the host busy. The timed rounds recorded no decision and no per-process status.
 - **One, two and four at once.** It runs as fast as main: one compile alone keeps huge pages. The small arenas alone
   (`br-hp1`) take 6.5 MB off the peak, within the noise in time.
 - **A fixed floor does neither.** 8 and 32 MB of base pages in front of every arena cost a compile alone 6% to 8%, and
   gain 4% on 8.
-- **Every object is the same bytes:** 54 objects, one hash (`final/objects-unique.txt`).
+- **The objects hashed are the same bytes:** 54 objects, each configuration's last round and its `--time-stages`
+  objects, one hash (`final/objects-unique.txt`). Earlier rounds' objects were overwritten unhashed.
 
 `scripts/summarize.py final` prints both tables from the raw files.
 
@@ -211,4 +221,8 @@ a last round of 8 at once (`final/decide-*.txt`):
   this record.
 - The branch's measured executable predates the branch's documentation, some comment edits, `tests/peak-rss.c`'s
   base pages, and a refactor of how `--time-stages` learns the `busy` decision (a `CheckClock` field the driver sets,
-  so that `tests/peak-rss.c` still compiles). The compiler's behavior is otherwise the branch head's.
+  so that `tests/peak-rss.c` still compiles). It also has the experiment-only knob. Its source differs from the head's
+  in those places alone, but it is not the head's executable, and no measurement here is of the head's.
+- **Causes.** The timings compare executables and page modes. The counters are system-wide, and the attribution comes
+  from the VM. Together they fit the explanations given (the 2 MB clears, their locality), but they do not establish
+  them.
