@@ -4,9 +4,9 @@ This directory contains the reproducible campaign for
 [Buster #149](https://github.com/buster14a/buster/issues/149). **It does not yet
 contain a passing 9700X measurement record.** The hosted workflow qualifies the
 tools with original stand-in fixtures; those runs are not compiler performance
-evidence. A separate hosted smoke job builds the audited `d9442df0` compiler
-and checks one source from each prepared argument manifest. That older compiler
-cannot test the newer lane-pinning interface.
+evidence. A separate hosted smoke job builds merged compiler `2dc50258`, checks one
+source from each prepared argument manifest and verifies its one-lane CPU pin
+receipt. Hosted smoke checks do not qualify the native hardware campaign.
 
 The implementation was audited against compiler commit
 `d9442df0dde83b9701b6ff7487f8916641736a84`. The compiler's per-function and
@@ -19,8 +19,9 @@ the runner now requires a later compiler with that option and its diagnostic
 The [d944 rehearsal](rehearsal-2026-11-06/README.md) retains native
 correctness, real-driver interface checks and a separately traced SQLite
 diagnostic. It contains no accepted scaling curves or pinned-lane evidence.
-The separate [wait-diagnostic prototype](wait-diagnostic-prototype-2026-11-06/README.md)
-has only provisional local validation and requires a later reviewed rebase.
+The separate [merged-source wait diagnostic](wait-diagnostic-merged-2026-11-06/README.md)
+has only bounded local equal-tree validation; exact-commit native qualification
+and independent review remain prerequisites for hardware measurements.
 
 ## Workloads
 
