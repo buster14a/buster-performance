@@ -76,8 +76,10 @@ bytes (the step's `cmp`).
 
 ### The change, by this record's A/B (`ab/`)
 
-These are the four rounds complete when the record was published. Rounds 5 to 8 and the two `measure-compile` runs
-were still waiting for the lock then.
+All 18 runs held the lock on their own: every receipt has `held=1`, this record's owner line and `status=0`.
+They ran from 20:22 to 23:12 UTC, between other sessions' and CI's holds. The record was first published with
+rounds 1 to 4. Rounds 5 to 8 and the `measure-compile` runs were added once they finished, after buster#1563
+merged.
 
 | round | task clock (ms) | user cycles | user instructions |
 | --- | --- | ---: | ---: |
@@ -85,11 +87,30 @@ were still waiting for the lock then.
 | 2 (change first) | 139.27 → 136.71 | −2.54% | −1.81% |
 | 3 (main first) | 139.13 → 136.90 | −1.76% | −1.81% |
 | 4 (change first) | 139.50 → 138.16 | −2.51% | −1.81% |
+| 5 (main first) | 140.83 → 136.47 | −3.43% | −1.81% |
+| 6 (change first) | 139.86 → 142.49 | +1.64% | −1.81% |
+| 7 (main first) | 139.41 → 136.07 | −2.89% | −1.81% |
+| 8 (change first) | 139.80 → 136.61 | −2.57% | −1.81% |
 
-- **Medians of the four.** The task clock is 139.3 → 137.0 ms, the user cycles 677.56 → 662.29 M, and the
-  user instructions 1,636.34 → 1,606.79 M.
-- **The objects.** Main's and the change's are the same bytes (`ab/objects-so-far.sha`, and `raw/*/object.sha`
-  from the profiles' compiles).
+- **Medians of the eight.**
+
+  | measure | main | change | difference |
+  | --- | ---: | ---: | ---: |
+  | task clock | 139.45 ms | 136.81 ms | −1.90% |
+  | user cycles | 679.20 M | 662.51 M | −2.46% |
+  | user instructions | 1,636.34 M | 1,606.79 M | −1.81% |
+  | kernel cycles | 94.22 M | 94.58 M | +0.37% |
+
+- **Round 6 is the outlier.** Its change run was consistent within itself (0.19% between its three runs) but
+  took 691.6 M user cycles, against 659.7 to 663.6 M in the other seven, at the same instruction count. It was that
+  hold of the machine, not the code.
+- **`measure-compile`, 11 runs each way, in a rotated order:**
+  - with the change first, its `-c` took 136.910 ms against main's 140.311 ms (−3.401 ms), and its `check-input`
+    56.835 ms with 3,376 faults (`ab/measure-final-vs-main.txt`);
+  - with main first, main took 140.634 ms against 137.648 ms (+2.986 ms), and its `check-input` 59.870 ms with
+    3,901 faults (`ab/measure-main-vs-final.txt`).
+- **The objects.** Main's and the change's are the same bytes (`ab/objects.sha`, and `raw/*/object.sha` from the
+  profiles' compiles).
 
 ### The faults
 
@@ -100,7 +121,6 @@ at `enum` keywords. The other passes touch the pages they touched before.
 ## Limitations
 
 - **One host, one workload.** The A/B ran at one placement each. The PR's job covers four placements.
-- **The A/B was incomplete at publication.** Its remaining rounds may be added to this directory later.
 - **The profiles' `measure-compile` runs aren't comparisons.** `raw/*/measure.txt` came from separate holds at
   different times.
 - **No combined measurement with #1530.** The change was not measured on top of #1530.
