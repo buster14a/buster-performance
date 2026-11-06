@@ -14,7 +14,8 @@ files elsewhere) as `03c713a2`. Both rebuilt with `BUSTER_DEBUG_INFO=0 ./build.s
   168 identical, 320 diagnostics.
 - `test-checker-driver-rebased.log`: 60,398 checks, 122 failures; `failures-rebased.txt` differs from the parent's
   `tests/failures-main.txt` only in the race counters and the check totals.
-- `ab-rebased.sh 7` (`ab-rebased-7.txt`): medians of 7, `vm.overcommit_memory` 1.
+- `ab-rebased.sh 7` (`ab-rebased-7.txt`): medians of 7, `vm.overcommit_memory` 1. Like the original A/B script, it
+  retains only the final repetition's exit code, not individual timing or status records.
 
 | input | main wall | rebased wall | main check-program | rebased check-program |
 |---|---:|---:|---:|---:|

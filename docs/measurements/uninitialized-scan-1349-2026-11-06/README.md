@@ -20,13 +20,15 @@ taken.
 `vm.overcommit_memory` was 1 for the A/B timings, the corpus and the test runs (the fuzz ran under the default 0, and
 its units are small). Under this VM's default heuristic overcommit both builds stop at `fatal error: can't reserve type
 table` on sqlite3.c, and earlier the 32,000-element `-c` runs ended in `code output capacity exhausted` on both
-builds; with 1, every run here succeeds.
+builds. With 1, the retained A/B summary reports exit 0 for the final run of each build and input. The script keeps only
+that final exit code, so the summary does not establish the outcome of every individual repetition.
 
 ## A/B timings
 
 `ab.sh 11`: main and the branch alternately, 11 runs each, `taskset -c 1`, `compiler check --time-stages`, medians of
 wall time (`run.py`), the check-program stage and peak RSS. Inputs are `gen.sh N [static|strings]`, the issue's
-generator: one function whose local (or static) `const int t[] = {0, 1, ..., N-1}`.
+generator: one function whose local (or static) `const int t[] = {0, 1, ..., N-1}`. Individual timing and status
+records were not retained, so the medians cannot be independently reconstructed or checked for failed repetitions.
 
 | input | main wall | branch wall | main check-program | branch check-program | peak RSS (both) |
 |---|---:|---:|---:|---:|---:|
@@ -59,6 +61,9 @@ which never ran the scan. Without `-Wall` neither build runs the analysis (buste
 - `corpus/`: `corpus.sh`, sqlite 3.50.4's `sqlite3.c` and `shell.c`, lua 5.4.8's `src/*.c` and the repository's
   `tests/` and `examples/` C files under 400 KB (84 files), `-Wall -Wextra -fsyntax-only`, vector and `--scalar`:
   168 runs, 168 identical outputs and exit codes, 320 diagnostics.
+
+The differential logs do not break out successful versus nonzero exits; identical failures are included in those
+counts and are not evidence of successful compilation.
 
 ## Tests
 
