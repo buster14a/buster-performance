@@ -15,6 +15,17 @@ The differences of medians are +27,324,039 instructions (+2.00%) and +18,698,460
 
 Three earlier candidate9-only runs produced 1,390,652,265, 1,390,651,764 and 1,390,651,751 user instructions. Their script invokes separate locks, but they have no positive lock receipts; their unpaired cycles are not a controlled comparison. All nine captured stdout files are empty and diagnostic streams have SHA-256 `8fdc9c0a66cb58dbf305ab63c97a595c36f2661ef1d74d29df63ad439a40cf35`.
 
+## Warning-policy controls
+
+The collector subsequently ran two alternating base/candidate9 pairs per warning policy, with a separate shared-lock call and positive owner/status/binary/output receipts for each of the eight samples. The same CPU and SQLite syntax-only workload were used. The independent verifier checked the requested policy in each recorded owner command, before/after owners, hashes and 100% counter coverage. The table gives means of the two instruction counts per variant; the individual counter files are retained.
+
+| Policy | Base mean instructions | Candidate9 mean instructions | Difference of means |
+| --- | ---: | ---: | ---: |
+| `-w` | 1,179,253,458.5 | 1,183,479,668.5 | +4,226,210 |
+| `-Wno-return-type` | 1,354,158,694.5 | 1,387,373,950.5 | +33,215,256 |
+
+Within each policy the captured outputs matched: both stdout and stderr were empty under `-w`, while the `-Wno-return-type` diagnostic hashes matched the default-policy diagnostics above. These flags alter warning behavior, so values across policies are not interchangeable. Two pairs do not establish statistical uncertainty, identify the functions responsible, or establish a general performance conclusion; the receipt timestamps have second resolution and cannot independently resolve order within the same second.
+
 ## Identities and limits
 
 The six paired receipts record copied binary SHA-256 `5c07df7932e9579424c4827ef6e129317f8d8d29fe5a00750414faa149a5bc04` (base) and `2a37f20b11904ffec4caac79267606429ec919f1ba679e74db0ff7141c24901e` (candidate9). During this later audit both retained executables still matched, and their worktrees reported the stated commits with clean tracked status. This is post-run evidence, not independent proof of build-time source state. The collector identified SQLite's source hash as `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`; the same hash was checked after collection, not before every run. Included headers were not individually verified.
@@ -30,6 +41,6 @@ tar -xzf raw-evidence.tar.gz -C /tmp/buster-1453-candidate9
 python3 verify.py /tmp/buster-1453-candidate9
 ```
 
-The verifier checks file hashes, all nine counter/output records and the six paired held/status/owner/hash receipts. It cannot prove source state at build time, independently reconstruct the lock mechanism, or qualify the compiler. Originals remain on Benchpress and in the local audit copy.
+The verifier checks file hashes, all 17 counter/output records and the 14 paired held/status/owner/hash receipts. It cannot prove source state at build time, independently reconstruct the lock mechanism, or qualify the compiler. Originals remain on Benchpress and in the local audit copy.
 
 Collection: OpenAI Codex, model OpenAI GPT-6, session `01a1b0e0-a314-7252-9c29-d958f2e64d73`, thread `01a1b0e1-01c7-77e3-aac3-5e875d1c15e1`. Audit and packaging: OpenAI Codex, model OpenAI GPT-6, same session, thread `01a1b0e1-da73-7731-9bcf-4312e3561034`. No shareable session URL was exposed.

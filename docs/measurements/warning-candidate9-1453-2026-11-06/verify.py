@@ -51,4 +51,38 @@ for name, pair in expected.items():
     times[name] = datetime.fromisoformat(before[0].split()[0])
 order = ('base-final-1', 'candidate9-final-1', 'candidate9-final-2', 'base-final-2', 'base-final-3', 'candidate9-final-3')
 assert [times[n] for n in order] == sorted(times.values())
-print('All 9 counter/output records and 6 paired held/status/owner/hash receipts verified; build-time source provenance is not established.')
+control_counts = {
+    'base-no-warnings-c9-1': (1179253463, 470777678), 'base-no-warnings-c9-2': (1179253454, 470542213),
+    'candidate9-no-warnings-c9-1': (1183479668, 475253884), 'candidate9-no-warnings-c9-2': (1183479669, 473105870),
+    'base-no-return-c9-1': (1354158680, 560083621), 'base-no-return-c9-2': (1354158709, 564810632),
+    'candidate9-no-return-c9-1': (1387373949, 583598486), 'candidate9-no-return-c9-2': (1387373952, 582311118),
+}
+for name, pair in control_counts.items():
+    variant = name.split('-', 1)[0]
+    policy = 'no-warnings' if '-no-warnings-' in name else 'no-return'
+    round_no = name.rsplit('-', 1)[1]
+    events = {}
+    for line in (root / f'{name}.perf').read_text().splitlines():
+        if not line or line.startswith('#'): continue
+        fields = line.split(',')
+        assert len(fields) >= 5 and fields[2] not in events and fields[4] == '100.00'
+        events[fields[2]] = int(fields[0])
+    assert events == {'instructions:u': pair[0], 'cycles:u': pair[1]}
+    assert hashlib.sha256((root / f'{name}.out').read_bytes()).hexdigest() == empty
+    expected_err = empty if policy == 'no-warnings' else diag
+    assert hashlib.sha256((root / f'{name}.err').read_bytes()).hexdigest() == expected_err
+    lines = (root / f'{name}.receipt').read_text().splitlines()
+    assert lines[0] == 'held=1' and lines.count('status=0') == 1
+    status = lines.index('status=0')
+    assert lines[status-1].split()[0] == binaries[variant]
+    assert lines[-2].split()[0] == empty and lines[-1].split()[0] == expected_err
+    before, after = lines[1:status-1], lines[status+1:-2]
+    assert before == after and any(f'title: PR 1453 {variant} {policy} sample {round_no}' in line for line in before)
+    assert sum('codex-1453: bash -c' in line for line in before) == 1
+    option = '-w' if policy == 'no-warnings' else '-Wno-return-type'
+    assert any(f' -- {variant} {policy} {round_no} {option} ' in line for line in before)
+    times[name] = datetime.fromisoformat(before[0].split()[0])
+for policy in ('no-warnings', 'no-return'):
+    order = (f'base-{policy}-c9-1', f'candidate9-{policy}-c9-1', f'candidate9-{policy}-c9-2', f'base-{policy}-c9-2')
+    assert [times[n] for n in order] == sorted(times[n] for n in order)
+print('All 17 counter/output records and 14 held/status/owner/hash receipts verified; build-time source provenance is not established.')
