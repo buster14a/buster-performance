@@ -64,4 +64,11 @@ comparisons. Keep smoke receipts distinct from the later campaign.
 `test_wait_observe.py` exercises the launch boundary and verifies that the PID
 is preserved across exec. The existing runner self-tests cover the reused guard
 and process cleanup, while the independent validator suite covers malformed
-trace rows. Synthetic tests do not admit hardware or publish observations.
+trace rows. The `wait-observe-fixtures` end-to-end test generates compile-time
+test seams in temporary source copies, then exercises the real controller,
+guard, helper and validator through a temporary fd-9 flock and fake compiler.
+Those seams are absent from the production binary. The fixture checks success,
+smoke and rejected guard/lock, subprocess, trace, output and identity failures;
+its delayed-lock case expires before acquisition, while the runner guard suite
+covers an outer interruption with a lock-held guard. Synthetic tests do not
+admit hardware or publish observations.
