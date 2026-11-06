@@ -10,12 +10,14 @@ the pinning PR passed. Rebase, independently review and requalify the final
 compiler and diagnostic before using this on the 9700X.
 
 [`apply-diagnostic.sh`](apply-diagnostic.sh) checks both patch hashes, requires
-that exact commit, a clean repository root with no ignored files or existing
-`build` directory, and checks both patches before applying them. It refuses any other source
+that exact commit and tree, a clean repository root with no hidden-index flags,
+ignored files or existing `build` directory, and checks both patches before
+applying them. It refuses any other source
 revision, even a later fixed version. Use it only on an isolated checkout. The
 separate [`test-applicator.py`](test-applicator.py) creates a disposable clone
-and checks wrong revision, existing build, tracked, untracked or ignored files
-and a tampered patch, then checks the resulting three source hashes.
+and checks wrong revision or replacement tree, assume-unchanged and
+skip-worktree flags, existing build, tracked, untracked or ignored files and a
+tampered patch, then checks the resulting three source hashes.
 
 The changes are in [`instrumentation.patch`](instrumentation.patch) and
 [`provisional-1522-build-repair.patch`](provisional-1522-build-repair.patch).

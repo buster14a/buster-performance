@@ -40,6 +40,17 @@ with tempfile.TemporaryDirectory(prefix='buster-wait-applicator-') as name:
     assert 'revision does not match' in run(script, checkout, ok=False).stderr
     clean()
     run('git', '-C', checkout, 'reset', '--quiet', '--hard', BASE)
+    replacement_file = checkout / 'src/buster/compiler/lane.c'
+    replacement_file.write_bytes(replacement_file.read_bytes() + b'\n')
+    run('git', '-C', checkout, 'add', 'src/buster/compiler/lane.c')
+    run('git', '-C', checkout, '-c', 'user.name=Test fixture', '-c', 'user.email=test@example.invalid',
+        '-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'Replacement tree fixture')
+    replacement = run('git', '-C', checkout, 'rev-parse', 'HEAD').stdout.strip()
+    run('git', '-C', checkout, 'reset', '--quiet', '--hard', BASE)
+    run('git', '-C', checkout, 'replace', BASE, replacement)
+    assert 'tree does not match' in run(script, checkout, ok=False).stderr
+    run('git', '-C', checkout, 'replace', '-d', BASE)
+    clean()
     (checkout / 'build').mkdir()
     assert 'fresh checkout' in run(script, checkout, ok=False).stderr
     (checkout / 'build').rmdir()
@@ -50,6 +61,14 @@ with tempfile.TemporaryDirectory(prefix='buster-wait-applicator-') as name:
     assert 'not clean' in run(script, checkout, ok=False).stderr
     changed.write_bytes(original)
     clean()
+    for flag, unflag in (('--assume-unchanged', '--no-assume-unchanged'), ('--skip-worktree', '--no-skip-worktree')):
+        run('git', '-C', checkout, 'update-index', flag, 'src/buster/compiler/lane.c')
+        changed.write_bytes(original + b'\n')
+        clean()  # The index flag would otherwise conceal this edit from a normal status check.
+        assert 'unsupported flags' in run(script, checkout, ok=False).stderr
+        changed.write_bytes(original)
+        run('git', '-C', checkout, 'update-index', unflag, 'src/buster/compiler/lane.c')
+        clean()
     extra = checkout / 'diagnostic-test-untracked'
     extra.write_text('untracked')
     assert 'not clean' in run(script, checkout, ok=False).stderr
@@ -70,5 +89,5 @@ with tempfile.TemporaryDirectory(prefix='buster-wait-applicator-') as name:
     run(script, checkout)
     for path, expected in EXPECTED.items():
         assert hashlib.sha256((checkout / path).read_bytes()).hexdigest() == expected, path
-    print('PASS wrong revision, existing build, tracked, untracked and ignored files, and tampered patch refused before mutation')
+    print('PASS wrong revision/tree, hidden-index flags, existing build, tracked, untracked and ignored files, and tampered patch refused before mutation')
     print('PASS pinned clean checkout reproduces all three tested source files')
