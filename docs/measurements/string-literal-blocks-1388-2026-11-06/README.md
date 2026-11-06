@@ -39,7 +39,9 @@ the six inputs' SHA-256.
 
 - `ab.sh BINARY 11`: 11 runs per input of `BINARY check --time-stages -c INPUT -o /tmp/ab.o`, pinned to CPU 1
   (`taskset -c 1`). It prints the median wall time and the medians of the `check-input` and `preprocess` stages.
-  `base.txt` and `new.txt` are its outputs for the two executables.
+  `base.txt` and `new.txt` are its outputs for the two executables. The script does not check or retain individual
+  exit statuses and the per-run values were not retained, so the medians cannot be independently reconstructed or
+  checked for failed repetitions.
 - `perf.txt`: `perf record -F 20000` of 6 runs of `check -c` on `hex.c`, `letters.c` and `utf8.c`, by symbol, for both.
 - `decoder-microbench.txt`: `bench.c` drives `check_literal_string_part` alone (`extract.py` cuts the decoder out of
   `c_check_literals.c` into `extract.h`), over each input's 31,250 parts, scalar twin and blocks, best of 15 passes
@@ -76,8 +78,8 @@ The decoder alone, per 32-character part (`decoder-microbench.txt`): `hex` 646.7
 `letters` 108.1 to 21.4 ns, `text` 244.0 to 22.6 ns.
 
 On `hex.c`, `check_literal_string_part` went from 60.2% to 32.0% of the samples, and `__memchr_evex` (7.5%) and
-`get_char_slow` (4.2%), the copies of the escaped spellings, are gone (`perf.txt`). Every input's object is byte for
-byte main's.
+`get_char_slow` (4.2%), the copies of the escaped spellings, are gone (`perf.txt`). The measurement session reported
+that every input's object matched main's byte for byte; the object-comparison receipts are not retained here.
 
 The fuzz runs found no difference in 9,783,106 parts (`fuzz.txt`). The harness found every planted fault that changes
 the result, as a difference or a fault at the guard page: a 62-byte window, octal values past 255 let through, `\x`
