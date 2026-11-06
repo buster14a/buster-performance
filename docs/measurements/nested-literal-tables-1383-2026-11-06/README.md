@@ -93,7 +93,8 @@ The grammar alone (`grammar/microbench.txt`), scalar twin → vector:
 Equivalence:
 
 - The four inputs' objects are byte-identical between the executables.
-- `identity.txt`: no difference in the 198 files.
+- `identity.txt`: no difference in the 198 files, of which 36 compiled successfully. The other 162 did not produce
+  a successful compile in this environment; this comparison does not establish object equality for those files.
 - `fuzz/fuzz.txt`: of 2,000 generated tables, 1,960 compile and 40 are refused by both. There is no difference in exit
   status, object bytes or diagnostics.
 - `edge/results.txt`: all 11 cases have the same exit status, objects and diagnostics.
