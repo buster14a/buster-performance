@@ -98,7 +98,8 @@ The scaling tables' `check-program` (ms):
 
 [`compare.txt`](compare.txt), from [`scripts/compare.sh`](scripts/compare.sh) on round 1's outputs: every workload's
 diagnostics (the stage clock's lines aside) are the same lines from both builds (88 lines for `self`, sqlite3.c's
-`-Wempty-body` warning and note), and every object written (`sq-*`, `asserts-*`) is byte-identical. [`stages/`](stages)
+`-Wempty-body` warning and note), and the retained SQLite and assert objects (`sq-*`, `asserts-*`) are byte-identical.
+The Lua wrapper overwrote a single object for each file, so Lua object equality was not checked. [`stages/`](stages)
 has round 1's standard error of each run.
 
 ## Correctness (7940HS)
