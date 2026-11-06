@@ -39,7 +39,9 @@ all four files compile on both executables.
 
 - `ab.sh BINARY 11`: 11 runs per input of `BINARY check --time-stages -c INPUT`, pinned to CPU 1 (`taskset -c 1`), each
   through `run.py` for the child's wall time and `ru_maxrss`. It prints the median wall time, the median `check-input`
-  stage and the median peak RSS. `ab-main.txt` and `ab-branch.txt` are its outputs.
+  stage and the median peak RSS. `ab-main.txt` and `ab-branch.txt` are its outputs. The script does not check or
+  retain individual exit statuses and the per-run values were not retained, so the medians cannot be independently
+  reconstructed or checked for failed repetitions.
 - `stages-rows4.txt`: each stage's median of 3 quiet `--time-stages` runs of `rows4.c` by each executable.
 - `grammar/`: `bench.c` times `check_literal_table_rows` alone (`extract.py` cuts it from the branch into `extract.h`),
   scalar twin and vector, on 48,000 numbers in rows of 1, 4 and 16, best of 50 with warm caches.
