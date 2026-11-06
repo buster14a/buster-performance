@@ -8,6 +8,8 @@ Verification of [buster #1439](https://github.com/buster14a/buster/issues/1439),
 
 The coordinator crash is corrected in [buster PR #1506](https://github.com/buster14a/buster/pull/1506), with GitHub-hosted regression and dry-run results. Historical-window scheduling is tracked in [#1504](https://github.com/buster14a/buster/issues/1504), and static-host libc discovery in [#1505](https://github.com/buster14a/buster/issues/1505). This report freezes the pre-fix cycle. The coordinator correction was delivered separately in #1506; its effect on a subsequent enabled cycle remains unobserved.
 
+The subsequent corrective PRs and their GitHub-hosted results are recorded in the separate [follow-up validation](followup-validation/README.md). Those checks do not replace production-cycle acceptance or native benchmark evidence.
+
 ## Frozen inputs and scope
 
 - Ledger/report checkpoint: [buster-performance `affb8428e68e8defacbb0cfa4c5fe3993258b564`](https://github.com/buster14a/buster-performance/commit/affb8428e68e8defacbb0cfa4c5fe3993258b564), published by [coordinator 42183677391](https://github.com/buster14a/buster/actions/runs/42183677391) at 2026-11-06 07:54:28 UTC.
