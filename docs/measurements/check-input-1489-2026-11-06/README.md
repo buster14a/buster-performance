@@ -9,9 +9,10 @@ self-source rounds grouped several compiler invocations under each shared-lock
 lease; `perf stat -r 5` and the exploratory profiles also grouped invocations.
 The repository's Benchpress policy requires a separate lock grant per run.
 These historical observations are retained with that limitation; a compliant
-repeat is needed before using them as performance qualification. The measured
-`rhead` is an earlier compiler revision, not the current head of
-[buster#1530](https://github.com/buster14a/buster/pull/1530).
+repeat for the same historical binaries is recorded [here](repeat-2026-11-06/README.md).
+That repeat does not qualify a later repaired base or newly built current-head
+executable. The measured `rhead` is an earlier compiler revision, not the
+current head of [buster#1530](https://github.com/buster14a/buster/pull/1530).
 
 ## What was measured
 
