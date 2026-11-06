@@ -1,5 +1,10 @@
 # Line-crossing loads in the refine pass and the lexer (buster#1555)
 
+**Historical, nonqualifying exploratory archive.** The retained scripts held the 9700X shared lock across
+whole series of builds, tests and samples, contrary to the host policy requiring a separate grant per run. These
+records do not establish hardware qualification or resolve the issue for all workloads. A separately coordinated,
+per-run-lock repeat with complete provenance and event-coverage receipts is needed before qualification.
+
 This record holds the evidence for [buster#1555](https://github.com/buster14a/buster/issues/1555). That issue takes the
 two sites of line-crossing loads that
 [buster#873's third comment](https://github.com/buster14a/buster/issues/873#issuecomment-6507873354) placed and no
@@ -8,12 +13,10 @@ issue owned:
 - the refine pass's plain 32-byte loads at each identifier's start (`refine_hash_batch`, `c_refine.c`);
 - the lexer's 64-byte load one byte into each chunk vector (`write_chunk`, `c_lexer.c`).
 
-**The result: no change at either site.** The two candidates that remove or move the loads are no faster:
-
-- The lexer's candidate removes its crossing loads but is 1.3% to 1.7% slower.
-- The refine pass's only drop-in alternative, masked loads, crosses all the same.
-
-The doc and comment notes that say so are in buster#1554's branch.
+**Bounded observations:** the retained one-process lexer results show lower candidate throughput than the control
+in the listed cases. Its name is absent from the exported top-25 profiles, which does not establish that its events
+were eliminated. The masked-load probe and refine profile reported line-misalignment events. These observations do
+not prove the candidates are unsuitable generally or close buster#1555; whole-driver placement comparisons were not run.
 
 ## Sources, host and inputs
 
@@ -31,19 +34,28 @@ The doc and comment notes that say so are in buster#1554's branch.
 
 - **Host:** AMD Ryzen 7 9700X (benchpress), kernel 6.18.50-2-lts, perf 7.2.9, clang 23.1.1.
 - **Running:**
-  - every run was under the host's lock (`exclusive.sh`) and pinned to CPU 2;
-  - one lock hold per script: the probes, a stage's builds, or a stage's measurements.
+  - the documented commands use `exclusive.sh` and CPU 2, but the lock was held per script across multiple runs,
+    not separately per measured process; positive per-process lock receipts were not retained;
+  - the counter CSVs retain event values but omit event-running percentages, and the scripts do not retain a
+    successful status for every process. Some shell pipelines can hide a subprocess failure.
 - **Input:**
   - the frozen `sqlite3.c` of corpus `preprocessor-391e729af658`, with `tools/microarch/workloads.sh`'s `sq-c` (`-c --lanes 1`) and `sq-syn` (`-fsyntax-only`) command lines;
   - `SOURCE_DATE_EPOCH=1792454400`;
   - for the lexer variants, also the C library corpus (`~/azp-bench/c-tokenizer/corpus/libc`, 8,983 files, 93.8 MB) and main's `src` (857 files, 44.9 MB).
 
-## What a line-crossing load costs on Zen 5 (`logs/probe`)
+The executable hashes and source diffs identify recorded artifacts but there is no independently captured complete
+build-time source or input manifest. Individual libc/src input identities and the external workload script were not
+retained. The described base/head identities are therefore collector-reported rather than a source-to-binary proof.
+
+## Probe observations on the recorded host (`logs/probe`)
 
 **The probes:**
 
-- `scripts/split-probe.c` reads each line of a 32 KiB buffer, from L1, at an offset. Its two independent accumulators make the loop not bound by its loads.
-- `scripts/split-probe2.c` makes eight independent loads per iteration, so loads bound the loop.
+- `scripts/split-probe.c` reads each line of a 32 KiB buffer at an offset, with two independent accumulators.
+- `scripts/split-probe2.c` makes eight independent loads per iteration to emphasize load throughput.
+
+The buffer was intended to fit in L1; this archive does not independently establish cache residency or that loads
+alone bound either loop.
 
 **Method:** each configuration ran three times under `perf stat`, at 20,000 passes. The tables give one representative run's numbers; all three are in the logs.
 
@@ -61,7 +73,7 @@ Not load-bound (`probe.log`), 10.24 million loads:
 
 Load-bound (`probe2.log`), 10.08 million loads:
 
-| Load | Aligned | Crossing | More per crossing load |
+| Load | Aligned | Crossing | Probe delta per requested crossing load |
 | --- | ---: | ---: | ---: |
 | 32-byte plain | 9.24M cycles | 10.46M–10.52M (+40) | about 0.12 cycles |
 | 32-byte masked, 8 bytes enabled | 9.19M–10.32M | 10.47M–10.49M (+40) | the same |
@@ -69,9 +81,10 @@ Load-bound (`probe2.log`), 10.08 million loads:
 
 **What the probes show:**
 
-- **Masked loads still split.** A masked load whose enabled bytes lie in one line, and whose masked-off bytes cross into the next, is counted as crossing on Zen 5. It costs as much as the plain one when loads bound the loop, and more when they don't.
-- **A crossing 32-byte load is nearly free.** It costs about 0.12 cycles at most.
-- **A crossing 64-byte load costs about half a cycle.** It halves the load throughput when loads bound the loop.
+- In these probe configurations, the event counter was higher for the masked-load address crossing a line even when
+  only bytes within the first line were enabled. This is an observation of the named counter under this probe.
+- The selected load-emphasizing probe showed approximately 0.12 and 0.5 additional cycles per requested 32-byte and
+  64-byte crossing load respectively. These are not universal bounds or direct application costs.
 
 ## Main's line-crossing loads (`logs/counters/stage1.log`, `logs/profiles/profile-main-*`)
 
@@ -87,7 +100,9 @@ Load-bound (`probe2.log`), 10.08 million loads:
 | `refine_pass_b_64_plain` (the refine pass's stage 1, inlined) | 4.56% | 3.58% | 3.83% |
 | `tokenize_c_raw_no_separators` (the lexer, `write_chunk` inlined) | 1.82% | 1.64% | 1.67% |
 
-So the refine pass has about 0.45 to 0.55 million of the crossing loads, and the lexer about 0.2 million. From the probes, those cost at most about 0.07 million and 0.1 million cycles of the 680 million.
+These are sampled symbol shares, not exact per-function event counts. Sampling skid, top-25 truncation and different
+measurement conditions limit attribution; multiplying these shares by microprobe deltas does not establish an
+application-wide cycle cost.
 
 ## The lexer candidate
 
@@ -109,7 +124,9 @@ So the refine pass has about 0.45 to 0.55 million of the crossing loads, and the
 | `-fsyntax-only` cycles | 569.93M (565.92–574.25) | 567.66M (563.91–572.26) | −0.40%, ranges overlap |
 | `-fsyntax-only` instructions | 1,363.24M | 1,364.02M | +0.8M |
 
-**Where the crossing loads went:** the counter's spread between processes, about 0.7M, is larger than what the lexer had. The candidate's profiles (`logs/profiles/profile-lexer-*`) settle it: `tokenize_c_raw_no_separators` isn't among the top 25 functions in any of the three runs.
+**Profile limit:** the counter's spread between processes is larger than the estimated lexer share. The candidate's
+exported profiles (`logs/profiles/profile-lexer-*`) list only the top 25 functions; `tokenize_c_raw_no_separators`
+is absent from those lists, which does not prove that its events were eliminated.
 
 **The lexer itself, in one process** (`logs/stage4.log`):
 
@@ -127,7 +144,11 @@ So the refine pass has about 0.45 to 0.55 million of the crossing loads, and the
 
 - **Per byte:** the candidate runs 3.262 instructions per byte against 3.182, and 0.994 cycles per byte against 0.981 on `sqlite3.c`.
 
-**Against the control, the candidate is 1.3% to 1.7% slower** in every corpus and mode. The permute and its operands add about 5 instructions per 64-byte vector, and they cost more than the split load they remove.
+The displayed candidate-minus-control differences in the separately summarized reference ratios range from
+−1.24 to −1.68 percentage points. These are differences of medians relative to `c_tokenize`, not medians of paired
+candidate/control ratios. The SQLite instruction-per-byte difference is about 0.080 (about 5.1 instructions per 64
+input bytes); that aggregate comparison does not attribute all additional instructions or cycle differences to the
+permute itself.
 
 ## The refine experiment (`logs/counters/stage5.log`)
 
@@ -144,14 +165,14 @@ So the refine pass has about 0.45 to 0.55 million of the crossing loads, and the
 
 **Profiles:** in the experiment's profiles (`logs/profiles/profile-refine-*`), `refine_pass_b_64_plain` still has 4.22% to 4.54% of the line-crossing samples.
 
-**Reading:** masked loads don't remove the crossing, as the probe showed. A change of a fifth of a percent at one placement is within the 2% that placements alone move the driver (buster#509).
+**Reading:** these counter and profile observations are compatible with the masked-load probe. The single-placement
+comparison does not establish a general effect or its cause; no independent placement sweep was collected here.
 
 ## Not run
 
-- **The whole drivers over placements** (`scripts/stage6.sh`, buster#509's method with the frontend unit shifted). I cancelled it before it took the lock:
-  - the in-process comparison already rejects the lexer candidate;
-  - its measured slowdown, about 1.5% of the lexer's 1.7 ms in `sqlite3.c`'s `-c`, is about 0.02% of the driver, below the method's floor;
-  - neither candidate removes or adds enough to show there.
+- **The whole drivers over placements** (`scripts/stage6.sh`, buster#509's method with the frontend unit shifted)
+  were cancelled before taking the lock. This record therefore does not establish placement variability, a
+  measurement floor, or a general decision on either candidate.
 - **The C++ corpus and the 7940HS:** neither was run.
 
 ## Files
@@ -168,4 +189,11 @@ So the refine pass has about 0.45 to 0.55 million of the crossing loads, and the
   - **the profiles:** the top 25 symbols per run;
   - **the builds' logs.**
 
-  The lock's waiting lines name other sessions' runs as they stood.
+  Eight lock-wait blocks were replaced with omission markers because they contained other holders' details.
+  Pre-redaction copies remain in the local audit workspace; all other retained log content and the historical scripts were preserved.
+
+
+The historical scripts document the original grouped-lock procedure and must not be used as a compliant repeat.
+The committed [counter verifier](verify-counters.py) checks the retained CSV row inventories and recomputes their
+medians and ranges. It does not recover per-process statuses or event-running coverage, validate source-to-binary
+provenance, or establish isolation or causal attribution.
