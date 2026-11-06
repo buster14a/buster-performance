@@ -1,0 +1,133 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and README.md.
+name: Multicore acceptance harness qualification
+
+on:
+  pull_request:
+    paths:
+      - 'docs/measurements/multicore-149/**'
+      - '.github/workflows/multicore-qualification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/measurements/multicore-149/**'
+      - '.github/workflows/multicore-qualification.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: multicore-149-${{ github.event.pull_request.number || (github.event_name == 'push' && format('push-{0}', github.run_id)) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  qualify:
+    # Stand-in subprocesses, original temporary fixtures and preparation of frozen inputs
+    # only; no compiler campaign or timing claim. Native measurements use the approved
+    # 9700X and its per-sample lock outside this hosted qualification workflow.
+    name: Harness self-tests (${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: ${{ github.event_name == 'pull_request' }}
+      matrix:
+        mode: [plain, sanitize]
+    defaults:
+      run:
+        shell: bash
+    env:
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - name: Check out the triggering revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Record the source and hosted toolchain
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/multicore-149"
+          mkdir -p "$out"
+          git rev-parse HEAD > "$out/commit.txt"
+          shopt -s nullglob
+          sources=(docs/measurements/multicore-149/*.c docs/measurements/multicore-149/*.h)
+          test "${#sources[@]}" -gt 0
+          sha256sum "${sources[@]}" > "$out/sources.sha256"
+          uname -srvm > "$out/host.txt"
+          clang --version 2>&1 | tee "$out/clang.txt"
+
+      - name: Build both standalone C tools
+        timeout-minutes: 3
+        env:
+          MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          source="$PWD/docs/measurements/multicore-149"
+          out="$RUNNER_TEMP/multicore-149"
+          flags=(-std=c17 -Wall -Wextra -Werror -fno-strict-aliasing)
+          if [ "$MODE" = sanitize ]; then
+            flags+=(-O1 -g -fno-omit-frame-pointer -fno-optimize-sibling-calls -fsanitize=address,undefined -fno-sanitize-recover=all)
+          else
+            flags+=(-O2)
+          fi
+          printf '%s\n' "${flags[@]}" > "$out/flags.txt"
+          for name in runner prepare; do
+            clang "${flags[@]}" "$source/$name.c" -o "$out/$name" 2>&1 | tee "$out/build-$name.log"
+          done
+
+      - name: Check fixture preparation and subprocess accounting
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/multicore-149"
+          mkdir "$out/tmp"
+          export TMPDIR="$out/tmp"
+          for name in prepare runner; do
+            timeout --signal=TERM --kill-after=5s 120s "$out/$name" --self-test 2>&1 | tee "$out/test-$name.log"
+          done
+          git diff --exit-code
+
+      - name: Check out the pinned frozen-input verifier
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster
+          ref: d9442df0dde83b9701b6ff7487f8916641736a84
+          path: build/multicore-corpus-verifier
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            tools/ci/fetch-corpus.sh
+            tools/ci/cached-download.sh
+            LICENSE
+            LICENSING.md
+
+      - name: Verify the frozen source and header inputs
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/multicore-149"
+          verifier="$PWD/build/multicore-corpus-verifier"
+          git -C "$verifier" rev-parse HEAD > "$out/corpus-verifier-commit.txt"
+          sha256sum "$verifier/tools/ci/fetch-corpus.sh" "$verifier/tools/ci/cached-download.sh" > "$out/corpus-verifier-sources.sha256"
+          bash "$verifier/tools/ci/fetch-corpus.sh" "$RUNNER_TEMP/multicore-corpus" 2>&1 | tee "$out/fetch-corpus.log"
+          sha256sum "$RUNNER_TEMP/multicore-corpus/MANIFESTS.sha256" > "$out/corpus-manifest.sha256"
+
+      - name: Qualify preparation against the real frozen corpus
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/multicore-149"
+          export TMPDIR="$out/tmp"
+          timeout --signal=TERM --kill-after=5s 120s "$out/prepare" --self-test --corpus "$RUNNER_TEMP/multicore-corpus" 2>&1 | tee "$out/test-frozen-corpus.log"
+          git diff --exit-code
+
+      - name: Preserve qualification logs and retained failure fixtures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: multicore-149-${{ matrix.mode }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/multicore-149
+          if-no-files-found: error
+          retention-days: 14
