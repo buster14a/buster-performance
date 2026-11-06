@@ -422,7 +422,7 @@ int main(int argc, char** argv)
     bool valid = wait_options(argc, argv, &options);
     if (valid && options.helper)
     {
-        valid = held_lock() && fcntl(9, F_SETFD, FD_CLOEXEC) == 0 && wait_observe(&options);
+        valid = held_lock() && fcntl(9, F_SETFD, FD_CLOEXEC) == 0 && compiler_environment() && wait_observe(&options);
         return valid ? 0 : 1;
     }
     const char* inherited = getenv("BUSTER_9700X_HELD");

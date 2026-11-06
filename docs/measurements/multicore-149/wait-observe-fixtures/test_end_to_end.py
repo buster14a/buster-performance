@@ -61,6 +61,7 @@ def fixture(root):
         env.pop(name, None)
     env.update(WAIT_E2E_LOCK_PATH=str(root/'mock.lock'), WAIT_E2E_OWNER_PATH=str(root/'owner'), WAIT_E2E_IDENTITIES=str(root/'expected.sha256'),
                WAIT_E2E_INPUT=str(files[0]), WAIT_E2E_ORPHAN_PID=str(root/'orphan.pid'), WAIT_E2E_STARTED=str(root/'compiler.started'), CPATH='should-be-cleared', BUSTER_TEST_149='should-be-cleared')
+    env.update(LC_ALL='C.UTF-8', LANG='C.UTF-8', TZ='Europe/Madrid', SOURCE_DATE_EPOCH='42')
     put(root/'expected.sha256', ''.join(f'{sha(p)}  {p}\n' for p in (control_exe, diag_exe, validator)))
     identity = f'compiler-source={control}\ncompiler-revision={REV}\ncompiler-source-state=clean\nsha256sum:\n{CONTROL}  {control_exe}\n'
     policy = 'synthetic policy\n'; environment = env_receipt(env)

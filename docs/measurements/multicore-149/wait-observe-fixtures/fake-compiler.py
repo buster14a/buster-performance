@@ -9,7 +9,9 @@ import sys
 import time
 
 Path(os.environ['WAIT_E2E_STARTED']).write_text(str(os.getpid()))
-if os.environ.get('BUSTER_WAIT_TRACE') != '1' or os.environ.get('SOURCE_DATE_EPOCH') != '0' or any(os.environ.get(k) is not None for k in ('CPATH', 'BUSTER_TEST_149')):
+if (os.environ.get('BUSTER_WAIT_TRACE') != '1' or os.environ.get('SOURCE_DATE_EPOCH') != '0'
+        or os.environ.get('LC_ALL') != 'C' or os.environ.get('LANG') != 'C' or os.environ.get('TZ') != 'UTC'
+        or any(os.environ.get(k) is not None for k in ('CPATH', 'BUSTER_TEST_149'))):
     sys.exit(11)
 mode = os.environ.get('WAIT_E2E_MODE', '')
 if mode == 'nonzero': sys.exit(7)
