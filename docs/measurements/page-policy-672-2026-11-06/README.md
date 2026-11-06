@@ -238,9 +238,11 @@ establishes a difference or its absence:
 - `scripts/fe-workers.sh` (the front end alone on 1 and 8) and `scripts/profile8.sh` (a system-wide profile of 8 at
   once) ran after the branch's measurement, each in one hold ("Lock holds and their limits"). Their results are not in
   this record.
-- **The measured branch executable's source** is retained exactly: `final/measured-tree.diff` is its worktree's
-  whole diff against `ec5f0f6b`, with no untracked files outside `build/`. Its `build/compiler` still had the measured
-  SHA-256 when the diff was taken. `final/measured-to-head.diff` is that tree's `src` and `tests` diff to the PR head
+- **The measured branch executable's source**, as its worktree stood after the runs: `final/measured-tree.diff` is
+  that worktree's whole diff against `ec5f0f6b`, with no untracked files outside `build/`. Its `build/compiler` still
+  had the measured SHA-256 when the diff was taken. Both were captured after the build and the measurements, at the
+  review. Their match is evidence of the source state after the runs. It cannot independently prove the source or the
+  environment at build time. `final/measured-to-head.diff` is that tree's `src` and `tests` diff to the PR head
   `9d6b50e3`: the experiment-only knob, the `CheckClock` field the driver sets for `--time-stages`, `tests/peak-rss.c`'s
   base pages, and comments in `lane.c`. The build environment (the host's clang 23.1.1, CMake, the libraries) has no
   manifest. The executable is not the head's, and no measurement here is of the head's.
