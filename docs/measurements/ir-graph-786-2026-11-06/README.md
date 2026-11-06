@@ -1,6 +1,6 @@
 # The IR verifier's graph check, its type windows and the optimizer's verifications over placements, Buster #786
 
-Compiler branch: `claude/magical-johnson-bs4q9x` of buster14a/buster, its pull request PULL_REQUEST, for
+Compiler branch: `claude/magical-johnson-bs4q9x` of buster14a/buster, its pull request buster14a/buster#1570, for
 [the claim on #786](https://github.com/buster14a/buster/issues/786#issuecomment-6692072182): the rest of #786's "Done
 when" after #861 and #994. Before this work, on the 9700X, main ran `benchmark-ir`'s 262,144-instruction CFG row 9% over
 #774's base and `benchmark-ir-optimize`'s phi-diamond, loop and jump-chain 5% to 10% over it, and the verifier's time
