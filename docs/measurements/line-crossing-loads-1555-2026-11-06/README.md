@@ -16,7 +16,7 @@ issue owned:
 **Bounded observations:** the retained one-process lexer results show lower candidate throughput than the control
 in the listed cases. Its name is absent from the exported top-25 profiles, which does not establish that its events
 were eliminated. The masked-load probe and refine profile reported line-misalignment events. These observations do
-not prove the candidates are unsuitable generally or close buster#1555; whole-driver placement comparisons were not run.
+not prove the candidates are unsuitable generally or close buster#1555; multi-placement whole-driver comparisons were not run.
 
 ## Sources, host and inputs
 
@@ -59,7 +59,7 @@ alone bound either loop.
 
 **Method:** each configuration ran three times under `perf stat`, at 20,000 passes. The tables give one representative run's numbers; all three are in the logs.
 
-Not load-bound (`probe.log`), 10.24 million loads:
+Two-accumulator probe (`probe.log`), 10.24 million requested loads:
 
 | Load | `ls_misal_loads.ma64` | Cycles |
 | --- | ---: | ---: |
@@ -71,7 +71,7 @@ Not load-bound (`probe.log`), 10.24 million loads:
 | 64-byte plain at +1 (crosses: the lexer's case) | 11.97M | 17.67M–19.38M |
 | 64-byte `vpermt2b` of two aligned lines (the lexer candidate's form) | 318 | 11.19M |
 
-Load-bound (`probe2.log`), 10.08 million loads:
+Eight-load probe (`probe2.log`), 10.08 million requested loads:
 
 | Load | Aligned | Crossing | Probe delta per requested crossing load |
 | --- | ---: | ---: | ---: |
@@ -106,7 +106,9 @@ application-wide cycle cost.
 
 ## The lexer candidate
 
-**Outputs** (`logs/counters/stage3.log`): main's and the candidate's are the same bytes:
+**Outputs** (`logs/counters/stage3.log`): the collection log reports that main and candidate outputs matched. The
+objects and preprocessed outputs themselves are not archived, so these comparisons cannot be independently repeated
+from this record:
 
 - the `-c` object, `61eb96dd…`;
 - the `-E` output, `a984f9ca…`;
@@ -152,7 +154,7 @@ permute itself.
 
 ## The refine experiment (`logs/counters/stage5.log`)
 
-**Outputs:** the same `-c` object and diagnostics as main's.
+**Outputs:** the collection log reports matching `-c` object and diagnostics; the objects themselves are not archived.
 
 **Counters** (10 rounds, rotating):
 
