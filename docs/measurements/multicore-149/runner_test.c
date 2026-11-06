@@ -403,10 +403,22 @@ static int runner_self_test(const char* executable)
         pid = 0;
         const bool outer_recorded = small_text(outer_pid, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &pid) && pid > 1;
         const bool outer_gone = outer_recorded && kill((pid_t)pid, 0) < 0 && errno == ESRCH;
-        const bool released = contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) == 0;
+        bool released = false;
+        const uint64_t release_start = now_ns();
+        do
+        {
+            released = contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) == 0;
+            if (!released)
+            {
+                const struct timespec pause = { .tv_nsec = 10000000 };
+                (void)nanosleep(&pause, NULL);
+            }
+        } while (!released && now_ns() - release_start < UINT64_C(2000000000));
         if (contender >= 0) close(contender);
-        test_expect(&checks, &failures, outer_process.interrupted && access(outer_ready, F_OK) == 0 && held && released && access(outer_done, F_OK) == 0 && outer_gone,
-                    "outer-wrapper timeout retains fd 9 lock until the separate guard cleans active descendants");
+        test_expect(&checks, &failures, outer_process.interrupted && access(outer_ready, F_OK) == 0, "outer wrapper timed out after guard entered its own group");
+        test_expect(&checks, &failures, held, "guard retains fd 9 lock after the outer wrapper dies");
+        test_expect(&checks, &failures, access(outer_done, F_OK) == 0 && outer_gone, "separate guard cleans active descendants after wrapper timeout");
+        test_expect(&checks, &failures, released, "fd 9 lock is released when separate guard exits");
         while (waitpid(-1, NULL, WNOHANG) > 0) { }
         char race[PATH_MAX], race_lock[PATH_MAX], unexpected[PATH_MAX];
         ready = ready && path_join(race, sizeof(race), directory, "outer-race") && mkdir(race, 0700) == 0 &&
