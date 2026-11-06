@@ -109,7 +109,13 @@ int main(void)
     test_expect(&checks, &failures, ready && !wait_reference(&options, &input), "smoke rejects a missing reference guard receipt");
     ready = ready && write_text(path, "lock-guard\tstart-realtime-ns=1\tend-realtime-ns=2\tmonotonic-ns=100\tstatus=1\tinterrupted=1\tdescendants-clean=1\n");
     test_expect(&checks, &failures, ready && !wait_reference(&options, &input), "smoke rejects a failed reference guard receipt");
+    char window[PATH_MAX];
+    ready = ready && write_text(path, "lock-guard\tstart-realtime-ns=1\tend-realtime-ns=2\tmonotonic-ns=256000000000\tstatus=0\tinterrupted=0\tdescendants-clean=1\n") &&
+            fixture_path(window, sizeof(window), directory, "reference.lock-window.txt") &&
+            write_text(window, "guard-monotonic-ns=256000000000\nwrapper-wall-ns-including-wait=256000000001\nwrapper-status=0\nwrapper-interrupted=0\nlock-hold-upper-bound-valid=1\n");
+    test_expect(&checks, &failures, ready && !wait_reference(&options, &input), "smoke rejects a successful guard beyond the hold limit");
     ready = ready && write_text(path, "lock-guard\tstart-realtime-ns=1\tend-realtime-ns=2\tmonotonic-ns=100\tstatus=0\tinterrupted=0\tdescendants-clean=1\n");
+    ready = ready && write_text(window, "guard-monotonic-ns=100\nwrapper-wall-ns-including-wait=200\nwrapper-status=0\nwrapper-interrupted=0\nlock-hold-upper-bound-valid=1\n");
     test_expect(&checks, &failures, strcmp(wait_result_state(true, true), "smoke-passed") == 0 && strcmp(wait_result_state(false, true), "failed") == 0 &&
                 strcmp(wait_result_state(true, false), "validated") == 0, "smoke success cannot become a validated campaign observation");
     options.smoke = false;

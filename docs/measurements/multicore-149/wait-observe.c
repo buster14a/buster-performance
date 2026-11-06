@@ -11,6 +11,7 @@
 #define WAIT_DIAGNOSTIC "098eebdffc96491035b3508d56df6546aba5c97209b3f556088f9b1b73d049e3"
 #define WAIT_CONTROL "51b54dd02986a28f294c0d5b2539e93739acb8962851127316da7953d4f8b09b"
 #define WAIT_VALIDATOR "91168e21edbe8c68e56eb491ec41a2a98e241fe00b529ee641366c7ae99fce17"
+#define WAIT_GUARD_LIMIT_NS ((uint64_t)(BUSTER_HOLD_SECONDS + BUSTER_HOLD_GRACE_SECONDS + BUSTER_REAP_SECONDS) * UINT64_C(1000000000))
 
 typedef struct WaitOptions WaitOptions;
 struct WaitOptions
@@ -120,6 +121,7 @@ static bool wait_timing_sample(const WaitOptions* options, const Case* input, co
     if (file != NULL) valid = fclose(file) == 0 && valid;
     Process observed;
     valid = valid && status == 0 && interrupted == 0 && bound == 1 && read_guard(guard, &guard_ns) && guard_ns == recorded_guard && guard_ns <= wrapper_ns &&
+            guard_ns <= WAIT_GUARD_LIMIT_NS &&
             read_sample(&c, input->outputs.count, &observed);
     const char* root_names[] = { "identity.before.txt", "host-policy.before.txt", "environment.txt" };
     const char* sample_names[][2] = { { "identity.before.txt", "identity.after.txt" }, { "host-policy.before.txt", "host-policy.after.txt" }, { "environment.txt", "environment.after.txt" } };
@@ -455,7 +457,7 @@ int main(int argc, char** argv)
     if (err >= 0) valid = close(err) == 0 && valid;
     free(args);
     uint64_t guard_ns = 0;
-    valid = valid && successful(wrapper) && read_guard(out_path, &guard_ns) && guard_ns <= wrapper.wall_ns;
+    valid = valid && successful(wrapper) && read_guard(out_path, &guard_ns) && guard_ns <= wrapper.wall_ns && guard_ns <= WAIT_GUARD_LIMIT_NS;
     char receipt[256];
     snprintf(receipt, sizeof(receipt), "observation-status=%s\nobservation-scope=%s\nguard-monotonic-ns=%" PRIu64 "\nwrapper-wall-ns-including-wait=%" PRIu64 "\nlock-hold-upper-bound-valid=%u\n",
              wait_result_state(valid, options.smoke), options.smoke ? "smoke" : "campaign", guard_ns, wrapper.wall_ns, valid);
