@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """Verify retained counters and recorded receipts, not build provenance."""
+from datetime import datetime
 import hashlib
 from pathlib import Path
 import sys
@@ -25,6 +26,7 @@ samples = {
 }
 empty_hash = hashlib.sha256(b'').hexdigest()
 error_hash = '8fdc9c0a66cb58dbf305ab63c97a595c36f2661ef1d74d29df63ad439a40cf35'
+times = {}
 for (version, label), pairs in samples.items():
     for number, pair in enumerate(pairs, 1):
         prefix = root / f'{version}-{label}-{number}'
@@ -43,10 +45,18 @@ for (version, label), pairs in samples.items():
         assert lines[0] == 'held=1' and lines[-1].split()[0] == hashes[version]
         assert lines[1:-1] == after_lines[:-2] and 'codex-1453' in lines[1]
         assert f'-- {version} {number} ' in before
+        title = 'style comparison' if label == 'style-paired' else 'style current-base'
+        assert any(f'title: PR 1453 {version} {title} sample {number}' in line for line in lines[1:-1])
+        times[(version, label, number)] = datetime.fromisoformat(lines[1].split()[0])
         assert after_lines[-2].split()[0] == empty_hash and after_lines[-2].endswith(prefix.name + '.out')
         assert after_lines[-1].split()[0] == error_hash and after_lines[-1].endswith(prefix.name + '.err')
+for label, parent in (('style-paired', 'currenthead'), ('style-base', 'currentbase')):
+    order = ((parent, label, 1), ('style', label, 1), ('style', label, 2),
+             (parent, label, 2), (parent, label, 3), ('style', label, 3))
+    assert [times[key] for key in order] == sorted(times[key] for key in order)
 before, after = (root / 'style-build.receipt').read_text().split('\nstatus=0\n')
 lines, after_lines = before.splitlines(), after.splitlines()
 assert lines[0] == 'held=1' and lines[1:] == after_lines[:-1]
 assert 'codex-1453' in lines[1] and after_lines[-1].split()[0] == hashes['style']
+assert any('title: PR 1453 one-return style build' in line for line in lines[1:])
 print('Archived hashes, counters, outputs and recorded receipts verified; build provenance is not established.')
