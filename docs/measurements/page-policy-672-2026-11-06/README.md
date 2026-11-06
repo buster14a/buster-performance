@@ -30,9 +30,14 @@ host's rule of a hold per run ("Lock holds and their limits", below). The 9700X 
 qualification. A repeat that takes one hold per run is proposed (`scripts/ab-per-run.sh`). It waits for the hardware
 coordinator's admission and an independent review of its scripts, and no part of it has run.
 
-The objects that were hashed are the same bytes (`*/objects*.sha256`, `final/objects-unique.txt`), but they are only
-some of the runs' objects. The worker rounds' processes were not checked one by one, and their earlier rounds'
-objects were overwritten unhashed ("Lock holds and their limits").
+The objects that were hashed are the same bytes (`*/objects*.sha256`, `final/objects-unique.txt`). None of them comes
+from a timed worker round. Each script hashed its objects at its end, after later runs had written over the timed
+rounds' objects at the same paths:
+- `measure.sh`'s come from its `perf stat` runs;
+- `workers.sh`'s from its two `perf stat -a` runs;
+- `final.sh`'s from its `--time-stages` runs and its decision round.
+
+The worker rounds' processes were not checked one by one either ("Lock holds and their limits").
 
 ## Lock holds and their limits
 
@@ -60,9 +65,10 @@ session's scripts each took a single hold (`lock.sh SCRIPT`) and ran a series in
   that a given run held it. Only `exclusive.sh`'s own mechanism and the queue's waiting messages in the session's logs,
   which aren't in this record, show it did.
 - **No per-process status.** The worker rounds started their processes in the background and waited for all of them,
-  without checking each one's exit status. Their objects were overwritten round after round, and only the last
-  round's objects were hashed. The record therefore shows that the hashed objects match. It does not show that every
-  process of every round succeeded, and the wall times of a round with a failed process would mean nothing.
+  without checking each one's exit status. Their objects were overwritten round after round, and then by the runs
+  after the rounds, whose objects alone were hashed. The record therefore shows that the hashed objects match. It does
+  not show that any timed round's processes succeeded, and the wall times of a round with a failed process would mean
+  nothing.
 
 The proposed repeat (`scripts/build-head.sh`, `scripts/ab-per-run.sh`, `scripts/one-run.sh`) is held until the
 hardware coordinator admits it and its scripts pass an independent review, which also decides whether a batch of N
@@ -87,8 +93,9 @@ concurrent compiles may count as one run. As written:
   is the largest function, 8.77% of the samples, then `check_input_run` 7.45% and `check_driver_common_warnings`
   4.82%.
 
-With the arenas in base pages (`BUSTER_HUGE_PAGES=0`) against huge pages, one compile at a time, 7 rotated runs each
-(`pages-hp*.txt`):
+With the arenas in base pages (`BUSTER_HUGE_PAGES=0`) against huge pages, one compile at a time (`pages-hp*.txt`).
+`time-runs` ran 7 runs of each command, rotating the three commands' order within one page mode. The huge-page set
+ran first, then the base-page set, not interleaved:
 
 | command | huge pages | base pages |
 | --- | ---: | ---: |
@@ -100,8 +107,9 @@ With the arenas in base pages (`BUSTER_HUGE_PAGES=0`) against huge pages, one co
 
 ## Several compiles at once (`workers-main-hp*/`, `scripts/workers.sh`)
 
-1, 2, 4 and 8 independent processes, each pinned to its own physical core (CPUs 0 to 7), 5 rounds with the counts
-rotating; each round's wall time is from the first start to the last exit:
+1, 2, 4 and 8 independent processes, each pinned to its own physical core (CPUs 0 to 7). 5 rounds, each running the
+counts in the same order, 1, 8, 2 and 4, with no rotation. The two page modes ran in separate scripts and holds, one
+after the other, not interleaved. Each round's wall time is from the first start to the last exit:
 
 | compiles at once | huge pages | base pages (`BUSTER_HUGE_PAGES=0`) |
 | ---: | ---: | ---: |
@@ -174,7 +182,8 @@ Six configurations, each on 1, 2, 4 and 8 independent processes pinned one per p
 - `br-hp0`, the branch with `BUSTER_HUGE_PAGES=0`;
 - `br-f8` and `br-f32`, the branch with huge pages and floors of 8 and 32 MB.
 
-7 rounds, configurations and counts rotating, medians:
+7 rounds, medians. Neither the configurations nor the counts rotate (`scripts/final.sh`): each round runs the
+configurations in the order listed, and each configuration on 1, 8, 2 and 4 in that order.
 
 | configuration | 1 at once | 2 at once | 4 at once | 8 at once |
 | --- | ---: | ---: | ---: | ---: |
@@ -204,8 +213,9 @@ a last round of 8 at once (`final/decide-*.txt`):
   (`br-hp1`) take 6.5 MB off the peak, within the noise in time.
 - **A fixed floor does neither.** 8 and 32 MB of base pages in front of every arena cost a compile alone 6% to 8%, and
   gain 4% on 8.
-- **The objects hashed are the same bytes:** 54 objects, each configuration's last round and its `--time-stages`
-  objects, one hash (`final/objects-unique.txt`). Earlier rounds' objects were overwritten unhashed.
+- **The objects hashed are the same bytes:** 54 objects, one hash (`final/objects-unique.txt`). They are the six
+  configurations' `--time-stages` objects and the 48 of the decision round. The decision round ran after the seven
+  timed rounds and wrote over their objects at the same paths, so no timed round's object was hashed.
 
 `scripts/summarize.py final` prints both tables from the raw files.
 

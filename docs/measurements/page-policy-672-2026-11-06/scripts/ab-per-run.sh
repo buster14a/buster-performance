@@ -4,7 +4,8 @@
 # One hold of the 9700X's lock per run: lock.sh (exclusive.sh) around one one-run.sh, never around several. This
 # script itself holds no lock. It stops at the first run that fails (a lock that isn't held, a changed identity, a
 # compile that fails or leaves no object) and exits nonzero without writing `done`. After the last run it requires every
-# object of every run to have one SHA-256, and only then writes `done`.
+# object of every run to have one SHA-256, and both executables and the input their SHA-256s from before the first run,
+# and only then writes `done`.
 # Pending: the hardware coordinator's admission of the runs, and review of whether a batch of N concurrent compiles may
 # count as one run.
 set -u
@@ -29,6 +30,10 @@ for r in 1 2 3 4 5 6 7; do
         done
     done
 done
+if [ "$failed" = 0 ] && ! sha256sum --check --quiet "$out/identities.sha256"; then
+    failed=1
+    echo "ab-per-run.sh: an executable or the input changed during the runs" >&2
+fi
 if [ "$failed" = 0 ]; then
     hashes=$(cat "$out"/runs/*/objects.sha256 | cut -d' ' -f1 | sort -u | wc -l)
     objects=$(cat "$out"/runs/*/objects.sha256 | wc -l)
