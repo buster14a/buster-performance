@@ -54,4 +54,5 @@ before, after = (root / 'style-build.receipt').read_text().split('\nstatus=0\n')
 lines, after_lines = before.splitlines(), after.splitlines()
 assert lines[0] == 'held=1' and lines[1:] == after_lines[:-1]
 assert 'codex-1453' in lines[1] and after_lines[-1].split()[0] == 'af29480fadd7731fa3aad10f2cb64ea56a26ee24125612ce95ea0e3ce1e7f295'
+assert any('title: PR 1453 one-return style build' in line for line in lines[1:])
 print('Archived hashes, counters, outputs and recorded receipts verified; build provenance is not established.')
