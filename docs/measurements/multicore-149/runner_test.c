@@ -81,10 +81,13 @@ static int fake_compiler(int argc, char** argv, const char* executable)
     else if (valid && strcmp(mode, "outer-guard") == 0)
     {
         if (setpgid(0, 0) != 0) return 1;
-        if (!write_text("guard-ready.txt", "separate-group\n")) return 1;
+        char pid[64];
+        snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+        if (!write_text("guard-ready.txt", pid)) return 1;
         char* helper[] = { (char*)executable, "--fake-compiler", "orphan-helper", NULL };
         FILE* receipt = fopen("outer-receipt.txt", "w");
-        const bool accepted = receipt != NULL && hold_guard(helper, 3, 1, receipt);
+        // The test drives TERM only after observing a live descendant and contended fd 9; this is a fallback bound.
+        const bool accepted = receipt != NULL && hold_guard(helper, 30, 1, receipt);
         const bool closed = receipt != NULL && fclose(receipt) == 0;
         return !accepted && closed && write_text("outer-complete.txt", "incomplete\n") ? 0 : 1;
     }
@@ -392,16 +395,26 @@ static int runner_self_test(const char* executable)
         const int outer_null = open("/dev/null", O_RDWR | O_CLOEXEC);
         const Process outer_process = ready && outer_null >= 0 ? run_process(outer_child, outer, outer_null, outer_null, 1, NULL, false) : (Process){ .status = -1 };
         if (outer_null >= 0) close(outer_null);
-        const int contender = open(outer_lock, O_RDWR | O_CLOEXEC);
-        const bool held = contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) < 0 && (errno == EWOULDBLOCK || errno == EAGAIN);
         const uint64_t outer_start = now_ns();
-        while (access(outer_done, F_OK) != 0 && now_ns() - outer_start < UINT64_C(8000000000))
+        while (access(outer_pid, F_OK) != 0 && now_ns() - outer_start < UINT64_C(8000000000))
         {
             const struct timespec pause = { .tv_nsec = 10000000 };
             (void)nanosleep(&pause, NULL);
         }
         pid = 0;
         const bool outer_recorded = small_text(outer_pid, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &pid) && pid > 1;
+        const bool outer_live = outer_recorded && kill((pid_t)pid, 0) == 0;
+        const int contender = open(outer_lock, O_RDWR | O_CLOEXEC);
+        const bool held = contender >= 0 && flock(contender, LOCK_EX | LOCK_NB) < 0 && (errno == EWOULDBLOCK || errno == EAGAIN);
+        unsigned guard_pid = 0;
+        const bool guard_recorded = small_text(outer_ready, pid_text, sizeof(pid_text)) && number(pid_text, INT_MAX, &guard_pid) && guard_pid > 1;
+        const bool signalled = guard_recorded && kill((pid_t)guard_pid, SIGTERM) == 0;
+        const uint64_t cleanup_start = now_ns();
+        while (access(outer_done, F_OK) != 0 && now_ns() - cleanup_start < UINT64_C(8000000000))
+        {
+            const struct timespec pause = { .tv_nsec = 10000000 };
+            (void)nanosleep(&pause, NULL);
+        }
         const bool outer_gone = outer_recorded && kill((pid_t)pid, 0) < 0 && errno == ESRCH;
         bool released = false;
         const uint64_t release_start = now_ns();
@@ -415,9 +428,9 @@ static int runner_self_test(const char* executable)
             }
         } while (!released && now_ns() - release_start < UINT64_C(2000000000));
         if (contender >= 0) close(contender);
-        test_expect(&checks, &failures, outer_process.interrupted && access(outer_ready, F_OK) == 0, "outer wrapper timed out after guard entered its own group");
+        test_expect(&checks, &failures, outer_process.interrupted && guard_recorded && outer_live, "outer wrapper timed out while guard and descendant remained active");
         test_expect(&checks, &failures, held, "guard retains fd 9 lock after the outer wrapper dies");
-        test_expect(&checks, &failures, access(outer_done, F_OK) == 0 && outer_gone, "separate guard cleans active descendants after wrapper timeout");
+        test_expect(&checks, &failures, signalled && access(outer_done, F_OK) == 0 && outer_gone, "separate guard cleans active descendants after wrapper timeout");
         test_expect(&checks, &failures, released, "fd 9 lock is released when separate guard exits");
         while (waitpid(-1, NULL, WNOHANG) > 0) { }
         char race[PATH_MAX], race_lock[PATH_MAX], unexpected[PATH_MAX];
