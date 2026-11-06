@@ -6,7 +6,7 @@ Verification of [buster #1439](https://github.com/buster14a/buster/issues/1439),
 
 **Verdict:** the branch-token problem was resolved operationally, and all 26 admitted nightly hardware jobs stayed inside the intended window. The rollout is not fully accepted: both main coordinator window jobs crashed, historical workers repeatedly rejected the expanded window, the comprehensive snapshot failed a benchmark, and the backlog did not keep up with arrivals.
 
-The coordinator crash is corrected in [buster PR #1506](https://github.com/buster14a/buster/pull/1506), with GitHub-hosted regression and dry-run results. Historical-window scheduling is tracked in [#1504](https://github.com/buster14a/buster/issues/1504), and static-host libc discovery in [#1505](https://github.com/buster14a/buster/issues/1505). No production workflow was changed by this audit.
+The coordinator crash is corrected in [buster PR #1506](https://github.com/buster14a/buster/pull/1506), with GitHub-hosted regression and dry-run results. Historical-window scheduling is tracked in [#1504](https://github.com/buster14a/buster/issues/1504), and static-host libc discovery in [#1505](https://github.com/buster14a/buster/issues/1505). This report freezes the pre-fix cycle. The coordinator correction was delivered separately in #1506; its effect on a subsequent enabled cycle remains unobserved.
 
 ## Frozen inputs and scope
 
@@ -55,6 +55,8 @@ The raw files and normalized observations accompanying this report retain the so
 | **Total** | **130** | **26** | **25 successful measurement completions** |
 
 The generated report's **111 selected** counts admission requests. It does not mean 111 executions on the 9700X. The 85 deferrals consist of 50 requests for `a98b996e` and 35 for `a984aceb`.
+
+The archived `raw/coordinator/coordinator-summary.json` field `unique_admitted_states: 27` likewise counts distinct states receiving admission requests. It includes deferred-only `a984aceb`; **26 distinct states actually acquired the hardware**. The raw file is retained unchanged as historical evidence.
 
 | Coordinator | Window job, UTC | Result |
 | --- | --- | --- |
@@ -210,3 +212,5 @@ Agent session: 01a1afff-6d1a-7609-84e2-3a5518fc904e (OpenAI session ID; no priva
 Model: OpenAI / GPT-6 Astra Pro
 
 Parallel work in the same session: coordinator audit thread 01a1b001-6105-7220-b90b-10b4a4d03045; pending-fix thread 01a1b002-7af5-7477-afe6-a98aee9b5054. All use OpenAI / GPT-6 Astra Pro. Timing-audit attribution accompanies its retained source notes.
+
+Publication and independent evidence review: session 01a1b01e-f9a7-752f-9ade-46286198507d, review thread 01a1b021-bdad-733f-ba54-b4cbc8135073; OpenAI / GPT-6 Astra Pro. No private session URL is exposed. The publication review checked the archive manifest, both timing cohorts and the exact hook intervals; it clarified the frozen-cycle boundary and the historical request-count label above without changing the raw evidence or reported measurements.
