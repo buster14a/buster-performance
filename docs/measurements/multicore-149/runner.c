@@ -357,7 +357,7 @@ static void free_case(Case* input)
 
 static bool controlled_argument(const char* argument)
 {
-    const char* prefixes[] = { "--lanes", "--time-stages", "--worker-budget", "--sample", "--fake-compiler", "--self-test", "--id-order", "--poison-arenas", "--units-memory", "--shared-parts", "--dump-", "-o", "-M" };
+    const char* prefixes[] = { "--lanes", "--lane-cpus", "--time-stages", "--worker-budget", "--sample", "--fake-compiler", "--self-test", "--id-order", "--poison-arenas", "--units-memory", "--shared-parts", "--dump-", "-o", "-M" };
     bool controlled = argument[0] == '@' || strcmp(argument, "-E") == 0 || strcmp(argument, "-S") == 0 || strcmp(argument, "-fsyntax-only") == 0;
     for (size_t i = 0; !controlled && i < sizeof(prefixes) / sizeof(prefixes[0]); i += 1)
     {
@@ -537,7 +537,7 @@ static Process run_process(char* const* arguments, const char* directory, int ou
             ready = ready && placement != NULL;
             if (placement != NULL)
             {
-                fprintf(placement, "scope=initial-thread-before-exec\nindividual-worker-pinning=no\ncurrent-cpu=%d\naffinity=", cpu);
+                fprintf(placement, "scope=initial-thread-before-exec\nworker-pinning-request=driver-lane-cpus\ncurrent-cpu=%d\naffinity=", cpu);
                 bool first = true;
                 for (unsigned c = 0; c < CPU_SETSIZE; c += 1)
                 {
@@ -756,8 +756,8 @@ static bool environment_receipt(const char* path)
     return valid;
 }
 
-// The receipt distinguishes initial process affinity from individual worker pinning. Frequencies and temperatures
-// are observations, not claims of a constant frequency. The policy file excludes those deliberately varying values.
+// Frequencies and temperatures are observations, not claims of a constant frequency. The policy file excludes
+// those deliberately varying values. Per-lane placement is checked separately in each diagnostic receipt.
 static bool host_receipt(const char* directory, const char* suffix)
 {
     char report_name[64];
@@ -790,7 +790,7 @@ static bool host_receipt(const char* directory, const char* suffix)
     {
         fprintf(report, "hostname=%s\nmodel=%s\nflags=%s\nhelper-current-cpu=%d\n", hostname, model, flags, sched_getcpu());
         fprintf(policy, "hostname=%s\nmodel=%s\nflags=%s\n", hostname, model, flags);
-        fprintf(report, "primary-compiler-affinity=0,1,2,3,4,5,6,7\nworker-affinity=inherited-mask; workers may migrate\n");
+        fprintf(report, "primary-compiler-affinity=0,1,2,3,4,5,6,7\nworker-affinity=driver-pinned-to-requested-cpus; diagnostic-receipts-verify-placement\n");
         fprintf(report, "wait-policy=source-pinned lane.c; gates/serial-stage parks/helper-board use immediate futex; barriers use 128 PAUSE, up to 1000000ns MWAITX (PAUSE without __MWAITX__), then futex\n");
         fprintf(report, "wait-duration-measurement=unavailable; source policy is not an observed waiting-time distribution\n");
     }
@@ -921,6 +921,7 @@ static bool read_stage_receipt(const Configuration* configuration, const Case* i
     unsigned asked = 0;
     unsigned actual = 0;
     unsigned seen[BUSTER_STAGES + 2] = { 0 };
+    unsigned pin_seen[BUSTER_LANES] = { 0 };
     double values[BUSTER_STAGES + 2] = { 0 };
     char* line = NULL;
     size_t capacity = 0;
@@ -928,6 +929,10 @@ static bool read_stage_receipt(const Configuration* configuration, const Case* i
     while (valid && (length = getline(&line, &capacity, file)) >= 0)
     {
         valid = length < (1 << 20) && memchr(line, 0, (size_t)length) == NULL;
+        if (valid && strncmp(line, "lane-pin", 8) == 0)
+        {
+            valid = length > 0 && line[length - 1] == '\n' && memchr(line, '\r', (size_t)length) == NULL;
+        }
         if (valid)
         {
             line[strcspn(line, "\r\n")] = 0;
@@ -942,6 +947,28 @@ static bool read_stage_receipt(const Configuration* configuration, const Case* i
             {
                 actual_count += 1;
                 valid = number(line + strlen(actual_prefix), 4096, &actual);
+            }
+            else if (strncmp(line, "lane-pin", 8) == 0)
+            {
+                unsigned index = UINT_MAX;
+                unsigned expected = UINT_MAX;
+                unsigned observed = UINT_MAX;
+                char* cursor = line;
+                char* fields[5];
+                for (size_t f = 0; f < 5; f += 1)
+                {
+                    fields[f] = cursor != NULL ? strsep(&cursor, "\t") : NULL;
+                }
+                valid = fields[0] != NULL && strcmp(fields[0], "lane-pin") == 0 && fields[1] != NULL && strncmp(fields[1], "index=", 6) == 0 &&
+                        fields[2] != NULL && strncmp(fields[2], "expected=", 9) == 0 && fields[3] != NULL && strncmp(fields[3], "observed=", 9) == 0 &&
+                        fields[4] != NULL && strcmp(fields[4], "status=0") == 0 && cursor == NULL &&
+                        number(fields[1] + 6, BUSTER_LANES - 1, &index) && number(fields[2] + 9, BUSTER_LANES - 1, &expected) &&
+                        number(fields[3] + 9, BUSTER_LANES - 1, &observed) && index < configuration->lanes &&
+                        expected == (configuration->cpu2 ? 2u : index) && observed == expected;
+                if (valid)
+                {
+                    pin_seen[index] += 1;
+                }
             }
             else if (strncmp(line, "time-stage\t", 11) == 0)
             {
@@ -978,6 +1005,10 @@ static bool read_stage_receipt(const Configuration* configuration, const Case* i
         valid = fclose(file) == 0 && valid;
     }
     valid = valid && asked_count == 1 && actual_count == 1 && asked == configuration->lanes && actual == configuration->lanes;
+    for (unsigned lane = 0; lane < configuration->lanes; lane += 1)
+    {
+        valid = valid && pin_seen[lane] == 1;
+    }
     double sum = 0;
     double serial = input->outputs.count == 1 ? values[BUSTER_STAGES + 1] : 0;
     for (size_t s = 0; s < BUSTER_STAGES + 2; s += 1)
@@ -1016,7 +1047,7 @@ static bool read_stage_receipt(const Configuration* configuration, const Case* i
     }
     if (!valid)
     {
-        fprintf(stderr, "multicore-149: missing, duplicate, invalid or wrong-team stage receipt for requested lanes=%u\n", configuration->lanes);
+        fprintf(stderr, "multicore-149: missing, duplicate, invalid or wrong-team stage/pin receipt for requested lanes=%u\n", configuration->lanes);
     }
     return valid;
 }
@@ -1057,6 +1088,19 @@ static bool output_hashes(const Configuration* configuration, const Case* input)
 }
 
 static const char sample_header[] = "lanes\tinstrumented\tcpu_mask\twall_ns\tuser_us\tsystem_us\twait4_peak_kb\tminor_faults\tmajor_faults\tvoluntary_switches\tinvoluntary_switches\twait_status\tinterrupted\tobjects\tverified\n";
+
+static bool lane_cpu_argument(unsigned lanes, bool cpu2, char* output, size_t capacity)
+{
+    bool valid = lanes > 0 && lanes <= BUSTER_LANES && (!cpu2 || lanes == 1);
+    size_t used = 0;
+    for (unsigned lane = 0; valid && lane < lanes; lane += 1)
+    {
+        const int written = snprintf(output + used, capacity - used, "%s%u", lane == 0 ? "" : ",", cpu2 ? 2u : lane);
+        valid = written >= 0 && (size_t)written < capacity - used;
+        used += valid ? (size_t)written : 0;
+    }
+    return valid;
+}
 
 static bool sample_record(const Configuration* configuration, const Case* input, Process process, bool verified)
 {
@@ -1108,7 +1152,9 @@ static bool sample(const Configuration* configuration, const Case* input, Proces
     }
     char lane_text[16];
     snprintf(lane_text, sizeof(lane_text), "%u", configuration->lanes);
-    char** arguments = valid ? calloc(input->arguments.count + 10, sizeof(*arguments)) : NULL;
+    char cpu_text_list[32];
+    valid = valid && lane_cpu_argument(configuration->lanes, configuration->cpu2, cpu_text_list, sizeof(cpu_text_list));
+    char** arguments = valid ? calloc(input->arguments.count + 12, sizeof(*arguments)) : NULL;
     valid = valid && arguments != NULL;
     size_t used = 0;
     if (valid)
@@ -1121,6 +1167,8 @@ static bool sample(const Configuration* configuration, const Case* input, Proces
         }
         arguments[used++] = "--lanes";
         arguments[used++] = lane_text;
+        arguments[used++] = "--lane-cpus";
+        arguments[used++] = cpu_text_list;
         arguments[used++] = "--worker-budget=8";
         if (configuration->instrumented)
         {

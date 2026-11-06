@@ -4,13 +4,21 @@ This directory contains the reproducible campaign for
 [Buster #149](https://github.com/buster14a/buster/issues/149). **It does not yet
 contain a passing 9700X measurement record.** The hosted workflow qualifies the
 tools with original stand-in fixtures; those runs are not compiler performance
-evidence.
+evidence. A separate hosted smoke job builds the audited `d9442df0` compiler
+and checks one source from each prepared argument manifest. That older compiler
+cannot test the newer lane-pinning interface.
 
 The implementation was audited against compiler commit
 `d9442df0dde83b9701b6ff7487f8916641736a84`. The compiler's per-function and
 multi-file machinery and its output-determinism tests already exist. This
 campaign measures that machinery without replacing its scheduler or adding
-instrumentation to its hot paths.
+instrumentation to its hot paths. That audited revision predates `--lane-cpus`;
+the runner now requires a later compiler with that option and its diagnostic
+`lane-pin` receipts. Qualify the exact later compiler before collecting results.
+
+The [d944 rehearsal](rehearsal-2026-11-06/README.md) retains native
+correctness, real-driver interface checks and a separately traced SQLite
+diagnostic. It contains no accepted scaling curves or pinned-lane evidence.
 
 ## Workloads
 
@@ -119,7 +127,8 @@ For each case, the controller establishes a one-lane object reference, warms
 each lane count, then rotates the order of counts 1 through 8 across repetitions.
 The normal samples have no stage-clock instrumentation. Separate instrumented
 processes retain the complete `--time-stages` reports and their own wall times;
-their command-team receipts must match the requested count.
+their command-team receipts must match the requested count and contain exactly
+one successful pin receipt for each requested lane and CPU.
 
 A separately labeled CPU-2-only one-lane control participates in the rotated
 order too. With seven repetitions, a case contains 82 compiler processes: one
@@ -130,8 +139,9 @@ Every compile has a bounded lifetime and an individually checked exit status.
 Every expected object must be freshly created, regular, nonempty, and
 byte-identical to the one-lane reference. Comparisons and input hashing are
 outside the timed region. A signal, timeout, failed compiler, missing or changed
-object, malformed team receipt, or changed source/compiler identity fails the
-case. A stable nonzero compiler exit is never a successful sample.
+object, missing or malformed team or pin receipt, or changed source/compiler
+identity fails the case. A stable nonzero compiler exit is never a successful
+sample.
 
 The raw records retain fork-to-reap wall time and `wait4` resources. These
 include process creation and exit, not just the driver's stage total. The
@@ -145,9 +155,12 @@ fresh.
 
 The compiler driver inherits the fixed CPU mask 0–7. The runner verifies that
 these are eight distinct physical cores and records current topology and power
-policy. **This is process affinity, not individual lane pinning**: the driver
-passes no CPU list to `lane_session_run`, and workers may migrate within that
-set. The command-team receipt proves team size, not worker utilization.
+policy. For N lanes it requests the ordered CPU prefix 0 through N−1 with
+`--lane-cpus`; the separate one-lane control requests CPU 2. The compiler must
+establish every lane's affinity before work begins and fail if it cannot. The
+instrumented samples additionally report and verify each lane's observed CPU;
+the normal samples rely on the driver's fail-closed pinning contract. These
+receipts prove placement at startup, not worker utilization.
 
 CPU 2 historically used the `performance` governor while other cores used a
 different policy. Read the actual campaign receipts instead of copying that

@@ -8,6 +8,7 @@ static int fake_compiler(int argc, char** argv, const char* executable)
 {
     const char* mode = argc > 0 ? argv[0] : "invalid";
     unsigned lanes = 1;
+    const char* cpus = NULL;
     bool instrumented = false;
     bool valid = argc > 0;
     for (int i = 1; valid && i < argc; i += 1)
@@ -15,6 +16,11 @@ static int fake_compiler(int argc, char** argv, const char* executable)
         if (strcmp(argv[i], "--lanes") == 0)
         {
             valid = i + 1 < argc && number(argv[++i], BUSTER_LANES, &lanes) && lanes > 0;
+        }
+        else if (strcmp(argv[i], "--lane-cpus") == 0)
+        {
+            valid = cpus == NULL && i + 1 < argc;
+            cpus = valid ? argv[++i] : NULL;
         }
         instrumented = instrumented || strcmp(argv[i], "--time-stages") == 0;
     }
@@ -46,9 +52,13 @@ static int fake_compiler(int argc, char** argv, const char* executable)
     }
     else if (valid)
     {
+        char primary[32];
+        char control[32];
+        valid = lane_cpu_argument(lanes, false, primary, sizeof(primary)) && lane_cpu_argument(1, true, control, sizeof(control)) &&
+                cpus != NULL && (strcmp(cpus, primary) == 0 || (lanes == 1 && strcmp(cpus, control) == 0));
         // Make the positive path depend on sanitization, rather than just checking a printed policy string.
         const char* epoch = getenv("SOURCE_DATE_EPOCH");
-        valid = getenv("MAKEFLAGS") == NULL && getenv("MFLAGS") == NULL && getenv("CPATH") == NULL && getenv("BUSTER_TEST_149") == NULL &&
+        valid = valid && getenv("MAKEFLAGS") == NULL && getenv("MFLAGS") == NULL && getenv("CPATH") == NULL && getenv("BUSTER_TEST_149") == NULL &&
                 epoch != NULL && strcmp(epoch, "0") == 0;
         if (valid && strcmp(mode, "missing") != 0)
         {
@@ -62,6 +72,44 @@ static int fake_compiler(int argc, char** argv, const char* executable)
             if (strcmp(mode, "duplicate-lanes") == 0)
             {
                 fprintf(stderr, "time-process\tlanes\t%u\n", lanes);
+            }
+            for (unsigned lane = lanes; lane > 0; lane -= 1)
+            {
+                const unsigned index = lane - 1;
+                const unsigned cpu = lanes == 1 && strcmp(cpus, control) == 0 ? 2u : index;
+                if (strcmp(mode, "missing-pin") == 0 && index == 0)
+                {
+                    continue;
+                }
+                if (index == 0 && (strcmp(mode, "missing-tabs") == 0 || strcmp(mode, "signed-field") == 0 || strcmp(mode, "spaced-field") == 0 || strcmp(mode, "carriage-suffix") == 0))
+                {
+                    if (strcmp(mode, "missing-tabs") == 0)
+                    {
+                        fprintf(stderr, "lane-pinindex=%uexpected=%uobserved=%ustatus=0\n", index, cpu, cpu);
+                    }
+                    else if (strcmp(mode, "signed-field") == 0)
+                    {
+                        fprintf(stderr, "lane-pin\tindex=+%u\texpected=%u\tobserved=%u\tstatus=0\n", index, cpu, cpu);
+                    }
+                    else if (strcmp(mode, "carriage-suffix") == 0)
+                    {
+                        fprintf(stderr, "lane-pin\tindex=%u\texpected=%u\tobserved=%u\tstatus=0\rignored\n", index, cpu, cpu);
+                    }
+                    else
+                    {
+                        fprintf(stderr, "lane-pin\tindex=%u\texpected= %u\tobserved=%u\tstatus=0\n", index, cpu, cpu);
+                    }
+                    continue;
+                }
+                fprintf(stderr, "lane-pin\tindex=%u\texpected=%u\tobserved=%u\tstatus=%d%s\n",
+                        strcmp(mode, "extra-index") == 0 && index == 0 ? lanes : index, cpu,
+                        strcmp(mode, "wrong-cpu") == 0 && index == 0 ? cpu + 1 : cpu,
+                        strcmp(mode, "pin-error") == 0 && index == 0 ? -1 : 0,
+                        strcmp(mode, "malformed-pin") == 0 && index == 0 ? " extra" : "");
+                if (strcmp(mode, "duplicate-pin") == 0 && index == 0)
+                {
+                    fprintf(stderr, "lane-pin\tindex=%u\texpected=%u\tobserved=%u\tstatus=0\n", index, cpu, cpu);
+                }
             }
             for (size_t s = 0; s < BUSTER_STAGES; s += 1)
             {
@@ -154,7 +202,7 @@ static int runner_self_test(const char* executable)
         ready = path_join(configuration.output, sizeof(configuration.output), directory, "positive") && mkdir(configuration.output, 0700) == 0;
         Process process;
         const bool passed = ready && sample(&configuration, &input, &process);
-        test_expect(&checks, &failures, passed, "eight-lane bytes and complete unique stage/team receipts");
+        test_expect(&checks, &failures, passed, "eight-lane bytes and unordered complete unique stage/team/pin receipts");
         Process reloaded = { 0 };
         test_expect(&checks, &failures, passed && read_sample(&configuration, 1, &reloaded) && reloaded.wall_ns == process.wall_ns, "raw sample receipt reads back exact wall time and status");
     }
@@ -178,7 +226,19 @@ static int runner_self_test(const char* executable)
         test_expect(&checks, &failures, model && summary(&controller, samples), "timing summary includes one-lane model bounds");
         configuration.lanes = 8;
     }
-    const char* modes[] = { "exit", "signal", "timeout", "missing", "changed", "empty", "symlink", "bad-lanes", "duplicate-lanes", "no-report" };
+    if (ready)
+    {
+        configuration.lanes = 1;
+        configuration.cpu2 = true;
+        ready = path_join(configuration.output, sizeof(configuration.output), directory, "cpu2") && mkdir(configuration.output, 0700) == 0;
+        Process process;
+        const bool passed = ready && sample(&configuration, &input, &process);
+        test_expect(&checks, &failures, passed, "CPU-2 control requests and verifies the CPU-2 lane receipt");
+        configuration.lanes = 8;
+        configuration.cpu2 = false;
+    }
+    const char* modes[] = { "exit", "signal", "timeout", "missing", "changed", "empty", "symlink", "bad-lanes", "duplicate-lanes", "no-report",
+                            "missing-pin", "duplicate-pin", "wrong-cpu", "pin-error", "extra-index", "malformed-pin", "missing-tabs", "signed-field", "spaced-field", "carriage-suffix" };
     for (size_t i = 0; ready && i < sizeof(modes) / sizeof(modes[0]); i += 1)
     {
         configuration.fake_mode = modes[i];
@@ -224,6 +284,8 @@ static int runner_self_test(const char* executable)
         test_expect(&checks, &failures, ready && !test_read_case(directory), "unsafe output path is rejected");
         ready = write_text(outputs_path, "unit.o\n") && write_text(arguments_path, "-c\n--lanes=8\n") && ready;
         test_expect(&checks, &failures, ready && !test_read_case(directory), "case cannot override lane ownership");
+        ready = write_text(arguments_path, "-c\n--lane-cpus=2\n") && ready;
+        test_expect(&checks, &failures, ready && !test_read_case(directory), "case cannot override lane CPU assignment");
         char file_arguments[2 * PATH_MAX + 128];
         snprintf(file_arguments, sizeof(file_arguments), "-c\n--predefines\n%s\n%s\n", source, source);
         ready = write_text(arguments_path, file_arguments) && ready;
