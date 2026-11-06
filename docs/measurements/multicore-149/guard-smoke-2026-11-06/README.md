@@ -37,3 +37,28 @@ replayable commands. The original unredacted files remain on the host.
 The exact-merged compiler's hosted sanitizer/fuzz prerequisite, the three-case
 campaign, and measured waits remained pending when this smoke ran. The native
 qualification's documented internal host/tool exclusions still apply.
+
+## Handshake-fixture follow-up
+
+Hosted sanitizer run [42266176543](https://github.com/buster14a/buster-performance/actions/runs/42266176543)
+failed a combined outer-wrapper fixture assertion; its available artifact did
+not identify the failing conjunct. The subsequent fixture waits for a live
+escaped descendant, verifies that fd 9 is contended, then signals cleanup and
+checks descendant death and lock release. Local optimized and sanitizer
+self-tests passed 55 checks each. The original failed hosted run remains part
+of the record; its precise cause was not established.
+
+A new separately locked build at performance revision
+`0404e7cf12f04c9995b42108e4313c919d1e0a55` produced runner SHA-256
+`e354444a18ae4a079014d3d0bef0b5107d8294ca633cbc2655f70ed04d416ca1`;
+a separately locked self-test passed 55 checks. The compiler revision and
+executable were unchanged. The second single-grant SQLite reference passed,
+with no interrupted guard or remaining descendants; its guard interval was
+270,809,506 ns and its successful wrapper interval was 275,390,089 ns. The
+wrapper intentionally refused warmup 0 and the controller recorded
+`case-status=failed` and `parent-issue-status=not-established`.
+
+`receipts-0404e7cf.tar.gz` contains this second smoke's sanitized receipts,
+post-smoke identities, lock wrapper, build and self-test logs, and its own
+`SHA256SUMS`; the same redactions and omitted-object limitation described above
+apply. It does not alter the first smoke or establish acceptance.
