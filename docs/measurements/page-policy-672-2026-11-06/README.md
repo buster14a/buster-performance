@@ -27,8 +27,10 @@ The options are the 9700X job's `compile_time` step's, with one lane:
 **Scope.** This is exploratory evidence for buster#672 and buster#1561, not hardware qualification. Every script
 below ran under the host's lock (`scripts/lock.sh`), but each took one hold for its whole series of runs, against the
 host's rule of a hold per run ("Lock holds and their limits", below). The 9700X job's own steps remain the
-qualification. A repeat that takes one hold per run is proposed (`scripts/ab-per-run.sh`). It waits for the hardware
-coordinator's admission and an independent review of its scripts, and no part of it has run.
+qualification. Every timing below is an observed figure from unpaired runs in a fixed order, with unchecked
+processes. None of them shows that one executable or page mode is faster than another. A repeat under the host's rule
+needs its own procedure, reviewed with a negative-test harness and admitted by the hardware coordinator. It isn't
+part of this record, and none of it has run.
 
 The objects that were hashed are the same bytes (`*/objects*.sha256`, `final/objects-unique.txt`). None of them comes
 from a timed worker round. Each script hashed its objects at its end, after later runs had written over the timed
@@ -70,22 +72,23 @@ session's scripts each took a single hold (`lock.sh SCRIPT`) and ran a series in
   not show that any timed round's processes succeeded, and the wall times of a round with a failed process would mean
   nothing.
 
-The proposed repeat (`scripts/build-head.sh`, `scripts/ab-per-run.sh`, `scripts/one-run.sh`) is held until the
-hardware coordinator admits it and its scripts pass an independent review, which also decides whether a batch of N
-concurrent compiles may count as one run. As written:
-- it builds an exact commit in one hold, and fails without copying if the build fails;
-- it takes one hold per run;
-- each run checks its receipt (`BUSTER_9700X_HELD`, the owner file naming the session) and both pinned SHA-256s;
-- each run keeps every process's exit status, standard error, object and full SHA-256, and fails if any process fails
-  or leaves no object;
-- it stops at the first failed run, and writes `done` only after every object of every run has one hash.
+A repeat under the host's rule, one hold per run, is not part of this record. A first draft of its scripts went
+through two reviews here (buster-performance#296). They found that it needs:
+- the exact base, head, integrated tree, corpus, headers and toolchain pinned and rechecked at each boundary;
+- a clean build with a positive lock receipt and a source and environment manifest;
+- every retained object rechecked against its manifest before completion;
+- a negative-test harness exercised without the shared host.
+
+The hardware coordinator must also decide whether a batch of concurrent compiles may count as one run. The draft was
+removed from this record and was never run.
 
 ## Main's baseline (`main-ec5f0f6b/`, `scripts/measure.sh`, `scripts/pages.sh`)
 
 - **One compile**, pinned to CPU 2: 140.4 ms (`perf stat -r 7`), 67.7 MB/s of source, 1,636 M user instructions,
   676 M user cycles and 94 M kernel cycles. Peak RSS 293.7 MB (`--time-stages`, 7 runs).
-- **The pages it faults:** 163 transparent huge pages and about 5,950 base pages a compile (`vmstat.txt`, 5 runs), about
-  349 MB, against the 294 MB peak.
+- **Pages faulted, illustratively:** `/proc/vmstat`'s system-wide deltas around 5 single compiles (`vmstat.txt`) are
+  163 transparent huge pages and about 5,950 base pages each, about 349 MB, against the 294 MB peak. They count the
+  whole host, not the compile alone.
 - **Its stages** (median of 7): `check-input` 59.7 ms and +149.9 MB of the peak, `check-program` 27.0 ms,
   `check-expressions` 10.2 ms, `lower` 10.3 ms, `preprocess` 9.8 ms and +47.1 MB, `parse` 7.4 ms and +79.7 MB,
   `tier0` 5.1 ms.
@@ -103,7 +106,8 @@ ran first, then the base-page set, not interleaved:
 | `parse` | 18.0 ms, 131.9 MB | 22.4 ms, 76.6 MB |
 | `-c` | 140.0 ms, 293.7 MB | 166.7 ms, 225.0 MB |
 
-(`wait4` peaks.) Alone, base pages cost `-c` 19%: 73,137 faults against 6,613, and 8% more user cycles.
+(`wait4` peaks.) Alone, base pages' observed `-c` median was 19% above huge pages', with 73,137 faults against 6,613
+and 8% more user cycles.
 
 ## Several compiles at once (`workers-main-hp*/`, `scripts/workers.sh`)
 
@@ -116,7 +120,7 @@ after the other, not interleaved. Each round's wall time is from the first start
 | 1 | 141.9 ms, 67.0 MB/s | 168.5 ms, 56.4 MB/s |
 | 2 | 161.4 ms, 117.8 MB/s | 181.3 ms, 104.8 MB/s |
 | 4 | 206.6 ms, 184.0 MB/s | 206.2 ms, 184.4 MB/s |
-| 8 | 326.1 ms, 233.2 MB/s | 282.0 ms, **269.7 MB/s** |
+| 8 | 326.1 ms, 233.2 MB/s | 282.0 ms, 269.7 MB/s |
 
 `perf stat -a` of one round of 8 (`perf-w8.csv`): huge pages took 10,651 M user cycles and 3,007 M kernel cycles, base
 pages 9,080 M and 2,813 M. These count the whole host over one round each, whatever else ran, and attribute nothing
@@ -124,7 +128,8 @@ to a compile. One compile alone faults 11 times as often in base pages (`pages-h
 
 ## Where the peak holds huge pages it uses little of (`diag/`)
 
-On this session's cloud VM (Intel Xeon, THP `madvise`, which the arenas' own advice turns on), with the arenas' huge
+This attribution is illustrative, from another system. On this session's cloud VM (Intel Xeon, THP `madvise`, which
+the arenas' own advice turns on), with the arenas' huge
 pages forced on (`BUSTER_HUGE_PAGES=1`) and off (`=0`), main's `-c` peaks at 297.0 MB against 228.0 MB.
 `diag/diag-instrumentation.patch` (never for Buster's tree) logs each arena mapping with its call stack and the TSC
 (`BUSTER_ARENA_LOG`), pushes of 16 KB or more, and copies `/proc/self/smaps` at every `--time-stages` mark
@@ -188,7 +193,7 @@ configurations in the order listed, and each configuration on 1, 8, 2 and 4 in t
 | configuration | 1 at once | 2 at once | 4 at once | 8 at once |
 | --- | ---: | ---: | ---: | ---: |
 | `main` | 141.5 ms, 67.2 MB/s | 160.8 ms, 118.2 MB/s | 205.6 ms, 184.9 MB/s | 325.0 ms, 234.0 MB/s |
-| `br` | 141.0 ms, 67.4 MB/s | 161.1 ms, 118.0 MB/s | 206.6 ms, 184.1 MB/s | 281.4 ms, **270.3 MB/s** |
+| `br` | 141.0 ms, 67.4 MB/s | 161.1 ms, 118.0 MB/s | 206.6 ms, 184.1 MB/s | 281.4 ms, 270.3 MB/s |
 | `br-hp1` | 141.0 ms, 67.4 MB/s | 161.7 ms, 117.6 MB/s | 204.7 ms, 185.8 MB/s | 322.5 ms, 235.9 MB/s |
 | `br-hp0` | 169.5 ms, 56.1 MB/s | 181.9 ms, 104.5 MB/s | 207.6 ms, 183.2 MB/s | 282.7 ms, 269.0 MB/s |
 | `br-f8` | 150.7 ms, 63.1 MB/s | 169.0 ms, 112.5 MB/s | 210.0 ms, 181.1 MB/s | 312.2 ms, 243.6 MB/s |
@@ -206,13 +211,16 @@ a last round of 8 at once (`final/decide-*.txt`):
 | `br-f8` | 268,340 KB | 146.5 ms | 23,314 | `system` | `system` ×8 |
 | `br-f32` | 267,484 KB | 149.3 ms | 30,013 | `system` | `system` ×8 |
 
-- **Eight at once.** The branch's rounds are 15.5% faster than main's (270.3 against 234.0 MB/s), as fast as
-  `BUSTER_HUGE_PAGES=0`'s. In the one round whose processes reported their decision (`decide-*`), each of the 8 found
-  the host busy. The timed rounds recorded no decision and no per-process status.
-- **One, two and four at once.** It runs as fast as main: one compile alone keeps huge pages. The small arenas alone
-  (`br-hp1`) take 6.5 MB off the peak, within the noise in time.
-- **A fixed floor does neither.** 8 and 32 MB of base pages in front of every arena cost a compile alone 6% to 8%, and
-  gain 4% on 8.
+These are observed medians of unpaired rounds in a fixed order, with unchecked processes, not a comparison that
+establishes a difference or its absence:
+- **Eight at once.** The branch's median round was 281.4 ms against main's 325.0 ms (270.3 against 234.0 MB/s),
+  close to `br-hp0`'s 282.7 ms. In the one round whose processes reported their decision (`decide-*`), each of the 8
+  reported `busy`. The timed rounds recorded no decision and no per-process status.
+- **One, two and four at once.** The branch's and main's medians were within 0.5% of each other. Alone, its
+  `--time-stages` runs reported `huge-pages system`. With huge pages forced (`br-hp1`), its peak alone was 6.5 MB
+  below main's.
+- **Fixed floors.** The 8 and 32 MB floors' medians were 6.5% and 8.7% above main's alone, and 3.9% and 4.6% below
+  main's at 8.
 - **The objects hashed are the same bytes:** 54 objects, one hash (`final/objects-unique.txt`). They are the six
   configurations' `--time-stages` objects and the 48 of the decision round. The decision round ran after the seven
   timed rounds and wrote over their objects at the same paths, so no timed round's object was hashed.
@@ -221,7 +229,8 @@ a last round of 8 at once (`final/decide-*.txt`):
 
 ## Limits
 
-- One input, one host. The busy test's share (a quarter of the CPUs online) is this host's crossover, 4 of 8 cores.
+- One input, one host. The busy test's share, a quarter of the CPUs online or 4 of this host's 15, was chosen where
+  the two page modes' observed medians were closest (4 at once). That is not an established crossover.
 - The worker rounds start all their processes at once, where a build starts a compile as another ends; the busy test
   reads the runnable tasks when each process starts.
 - `BUSTER_EXP_FLOOR_MB` exists only in the measured executable (`final/`'s `br-f*` configurations), not in the branch.
@@ -229,10 +238,12 @@ a last round of 8 at once (`final/decide-*.txt`):
 - `scripts/fe-workers.sh` (the front end alone on 1 and 8) and `scripts/profile8.sh` (a system-wide profile of 8 at
   once) ran after the branch's measurement, each in one hold ("Lock holds and their limits"). Their results are not in
   this record.
-- The branch's measured executable predates the branch's documentation, some comment edits, `tests/peak-rss.c`'s
-  base pages, and a refactor of how `--time-stages` learns the `busy` decision (a `CheckClock` field the driver sets,
-  so that `tests/peak-rss.c` still compiles). It also has the experiment-only knob. Its source differs from the head's
-  in those places alone, but it is not the head's executable, and no measurement here is of the head's.
+- **The measured branch executable's source** is retained exactly: `final/measured-tree.diff` is its worktree's
+  whole diff against `ec5f0f6b`, with no untracked files outside `build/`. Its `build/compiler` still had the measured
+  SHA-256 when the diff was taken. `final/measured-to-head.diff` is that tree's `src` and `tests` diff to the PR head
+  `9d6b50e3`: the experiment-only knob, the `CheckClock` field the driver sets for `--time-stages`, `tests/peak-rss.c`'s
+  base pages, and comments in `lane.c`. The build environment (the host's clang 23.1.1, CMake, the libraries) has no
+  manifest. The executable is not the head's, and no measurement here is of the head's.
 - **Causes.** The timings compare executables and page modes. The counters are system-wide, and the attribution comes
   from the VM. Together they fit the explanations given (the 2 MB clears, their locality), but they do not establish
   them.
