@@ -83,14 +83,16 @@ The threshold, ns per call:
 
 Up to 128 bytes the reported head and base timings are close. The generated objects are not archived, so these
 measurements alone do not prove machine-code equality. Past 128 bytes the reported loop cost grows with size while
-the call cost is comparatively flat. Calling memset below 64 bytes (`fill8`) would cost 2 to 4.5 times the stores in both tiers. At 96 and
-128 bytes, Tier 0's stores take 0.2 and 0.5 ns more than the call, and Tier 1's 0.6 and 0.3 ns less, so 128 stays the
-threshold. Head and `fill8` call the same memset past 128 bytes and differ there by about 0.36 ns: their kernels' code
-sits at different places, which this record doesn't separate.
+the call cost is comparatively flat. Below 64 bytes, the measured `fill8` kernels took 2 to 4.5 times the
+reported store-kernel medians in both tiers. At 96 and
+128 bytes, Tier 0's reported stores take 0.2 and 0.5 ns more than the call, and Tier 1's 0.6 and 0.3 ns less.
+The 128-byte threshold was the historical compiler setting; this record does not establish an optimal threshold.
+The reported head and `fill8` timings differ by about 0.36 ns past 128 bytes. Placement or other effects could
+contribute, but this record does not identify the cause.
 
 Compile time of `sqlite3.c` (`-c --lanes 1`, one placement): base 139.411 ms median wall, head 139.719 ms (+0.22%);
 user cycles 675.127 M against 676.760 M (+0.24%); instructions 1,636,696,182 against 1,636,707,749 (+11,567, +0.0007%).
-Within a single placement's layout effect; no compile-time change is claimed.
+These are single-placement measurements; placement could contribute, but no cause or compile-time change is established.
 
 Code shape (`objdump -dr` and `size -A` of the objects; `results/compile-1793987650/shape.txt`,
 `results/self-1793988037/shape-and-sha256.txt`):
