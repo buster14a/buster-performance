@@ -4,6 +4,15 @@ This record has the 9700X evidence for buster's pull request on
 [#1489](https://github.com/buster14a/buster/issues/1489). The issue reports that sqlite3.c's
 `check-input` grew from about 45 ms before #1049 to 59 ms on main.
 
+**Exploratory record; not policy-compliant qualification.** The SQLite and
+self-source rounds grouped several compiler invocations under each shared-lock
+lease; `perf stat -r 5` and the exploratory profiles also grouped invocations.
+The repository's Benchpress policy requires a separate lock grant per run.
+These historical observations are retained with that limitation; a compliant
+repeat is needed before using them as performance qualification. The measured
+`rhead` is an earlier compiler revision, not the current head of
+[buster#1530](https://github.com/buster14a/buster/pull/1530).
+
 ## What was measured
 
 | name | buster commit | what it is |
@@ -23,7 +32,10 @@ layout). That root supplies the frozen corpus `preprocessor-391e729af658`, `self
 `record/host.txt` has the host, the tools, CPU 2's governor and EPP, the transparent huge pages' settings and
 the commits. The host is a Ryzen 7 9700X running Linux 6.18.50-2-lts, with clang 23.1.1 and perf 7.2.9-1.
 
-`scripts/record.sh` made everything under `record/`:
+[`scripts/record.historical.txt`](scripts/record.historical.txt) is the
+byte-for-byte original recording script, retained for provenance as a
+non-executable text file. Do not run it through a shell: its grouped lock leases
+must not be repeated. It made everything under `record/`:
 
 - **sqlite3.c**, as tools/microarch's `sq-c` workload: the frozen sqlite3.c with the CI's options, `-c --lanes 1`,
   `--time-stages`, on CPU 2. Each of 11 lock holds runs the three builds once, in an order that rotates by round
@@ -34,13 +46,18 @@ the commits. The host is a Ryzen 7 9700X running Linux 6.18.50-2-lts, with clang
   There are 3 lock holds, each running `rbase` and `rhead` once, in alternating order
   (`record/raw/self-BUILD.ROUND.log`).
 
-Every lock hold appends the holder's line of `/var/lib/buster-9700x/owner` to `record/holds.txt`. All 19 are this
-session's. Every timed run appends its exit status to `record/status.txt`; all 44 runs and both builds exited
-with 0. No other session waited on the lock while this record ran, so the logs contain no `exclusive.sh` messages.
+Every lock hold appends the holder's line of `/var/lib/buster-9700x/owner` to
+`record/holds.txt`; all 19 are this session's. `record/status.txt` has 44 zero
+statuses: two builds and 42 run entries (33 SQLite compiles, three aggregate
+`perf stat -r 5` commands, and six self-source compiles). The perf entries do
+not retain a separate exit status for each of their five children. The holder
+snapshots do not establish whether another session waited for the lock.
 
 ## Results
 
-The `--time-stages` medians of 11 rounds, in ms, with the fastest and the slowest:
+The internal `--time-stages` medians of 11 rounds, in ms, with the fastest and
+the slowest. The difference is between separately calculated medians, not a
+median of paired differences or a whole-process wall-time result:
 
 | stage | `pre1049` | `rbase` | `rhead` | `rhead` − `rbase` |
 | --- | ---: | ---: | ---: | ---: |
@@ -49,7 +66,7 @@ The `--time-stages` medians of 11 rounds, in ms, with the fastest and the slowes
 | check-expressions | 10.248 | 10.241 | 10.216 | −0.03 |
 | total | 105.929 (105.644 .. 106.747) | 138.989 (138.683 .. 139.288) | 129.997 (129.349 .. 130.378) | −8.992 (−6.5%) |
 
-The perf stat means of 5 runs:
+The separate `perf stat -r 5` **means**, not medians of the 11 stage rounds:
 
 | | `pre1049` | `rbase` | `rhead` |
 | --- | ---: | ---: | ---: |
@@ -66,22 +83,27 @@ For the compiler's own main.c (`self-syn`), the medians of 3 rounds are:
 | check-input | 1,191.7 ms | 1,110.6 ms (−6.8%) |
 | total | 1,958.1 ms | 1,885.3 ms (−3.7%) |
 
-The pull request recovers 8.8 ms of `check-input`'s 14.2 ms growth over `pre1049`. The other stages are unchanged.
-The one diagnostic sqlite3.c gets on the vector path (#1339) costs the same on both builds.
+At these measured placements, the `rhead` stage median is 8.8 ms below `rbase`
+and 5.4 ms above `pre1049`. These are exploratory differences; the displayed
+stage medians do not establish that other stages or warning costs are unchanged.
 
 ## Outputs
 
 `record/outputs.txt` has SHA-256s of each build's sqlite3.c object and of the diagnostics both workloads printed,
 with the `--time-stages` lines removed.
 
-- The three builds' objects are the same bytes.
-- `rbase` and `rhead` print the same diagnostics on both workloads.
+- The three retained object SHA-256s match; the objects themselves and a direct
+  byte-comparison receipt are not retained here.
+- The normalized diagnostic SHA-256s for `rbase` and `rhead` match for round 0
+  of each workload; the other rounds were not compared in this receipt.
 - `pre1049`'s sqlite3.c diagnostics differ: it predates #1049's warning (#1339).
 
 ## Exploration: where the growth was
 
-`scripts/prof.sh` profiled each tree with `cycles:u`, `-c 50021`, over 8 compiles of the same sqlite3.c workload on
-CPU 2, under the lock. These trees were archived from local commits made before the branch was rebased onto
+[`scripts/prof.historical.txt`](scripts/prof.historical.txt) records profiling
+each tree with `cycles:u`, `-c 50021`, over 8 compiles under one shared-lock
+lease, contrary to the per-run policy. The profiles are exploratory, not
+qualification. These trees were archived from local commits made before the branch was rebased onto
 `rbase`:
 
 - `exploration/profiles/base.*` is main `8b1e14b0` with a one-line fix for its build, the same lookup that #1529
@@ -89,7 +111,10 @@ CPU 2, under the lock. These trees were archived from local commits made before 
 - `exploration/profiles/v4.*` is that tree with the pull request's first three commits. Their diffs are the same as
   `d6109cb3`, `924e8d12` and `8217031f` on `rbase`; only the line offsets differ.
 
-`exploration/ab/` has the A/B medians of those trees, run with `scripts/ab.sh` in 11 rotated rounds each:
+`exploration/ab/` has A/B medians of those trees, run with the retained
+[`scripts/ab.historical.txt`](scripts/ab.historical.txt) in 11 rotated rounds
+with multiple compiles per lock lease. Only the summaries are retained here;
+their individual logs and statuses are not part of this record:
 
 | tree | check-input |
 | --- | ---: |
@@ -100,6 +125,10 @@ CPU 2, under the lock. These trees were archived from local commits made before 
 Against #1340's `pre1049` profile (buster-performance#271's
 `zen5-9700x/profiles/pre1049-znver5.samples.txt`), the base tree's added check-input samples were:
 
+Only symbol summaries are retained here, not the raw perf captures or
+source-line reports. The following attributions are the original investigator's
+interpretations and cannot all be independently reconstructed from this record.
+
 - **The deprecated-use pass.** About 4,000 samples were its two per-token walks, inlined into `check_input_run`.
   There were 278 more in `check_input_deprecated_key`, plus its four 2.86 MB clears.
 - **#823's unused-declaration facts.** `check_input_binding_answers` and `check_input_binding_answer` went from 696
@@ -109,8 +138,9 @@ Against #1340's `pre1049` profile (buster-performance#271's
 
 In `v4`, `check_input_run` has 2,285 samples against `pre1049`'s 2,502. `memcmp` has 216 and `__strlen_evex512` 21.
 
-The remaining growth in the `check_input_*` functions is about 5.5 ms. The largest parts are these, by v4's
-samples against `pre1049`'s:
+The stage medians differ by about 5.4 ms between `rhead` and `pre1049`.
+The following sampled symbol differences are exploratory leads; the profiles
+do not apportion that elapsed-time difference among functions or prove causes:
 
 - the expressions' coded walk (`check_input_expressions_coded_range`, `check_input_expression_flush`), net about
   +930 (#1038's area);
@@ -127,3 +157,6 @@ samples against `pre1049`'s:
 - **Two workloads.** The record measures sqlite3.c and the compiler's own main.c. Units without a deprecated or
   unavailable attribute don't run the deprecated-use pass at all.
 - **Shared inputs.** `pre1049` is #1340's record's binary, identified by its SHA-256. This record didn't build it.
+- **Lock policy and revision.** The grouped historical runs are nonqualifying;
+  the current compiler head needs a new per-run-lock campaign and its own
+  correctness qualification. None of these observations establishes that.
