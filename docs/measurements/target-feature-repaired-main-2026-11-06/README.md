@@ -8,6 +8,8 @@ For SQLite whole compilation (`-c`), seven alternating-order base/integration pa
 
 Four alternating-order preprocessing-only (`-E`) pair deltas were **−38, −40, −38, −40** instructions; within-binary A/A differences were 1 and 2 instructions. All 12 preprocessed output hashes matched. The preprocessing-only result does not explain the whole-compile increase in this build. It does not prove which later stage or binary-layout effect causes the difference. The preprocessed input has no target-attribute spelling or `__builtin_ia32`, `__builtin_cpu`, or `__builtin_x86` spelling by text search; this is not proof that the feature-pass gate is never reached.
 
+Four alternating syntax-only (`-fsyntax-only`) pairs differed by **+17,644, +17,639, +17,647, +17,664** instructions (median **+17,645.5**); within-binary A/A differences were 34 and 31. All 12 normalized diagnostics matched and all perf events ran 100%. Nearly all the whole-compile delta appears within the syntax-only workload in this experiment, but this does not identify an internal stage or explain the cause.
+
 Only this host, compiler build and frozen SQLite input were measured; counts are not timings and no broader performance or correctness conclusion follows. The PR still needs its acceptance condition and remaining CI and review gates.
 
 Collector: OpenAI / GPT-6, Codex thread `01a1b0e0-d979-7e63-94ff-ff91f3213a51`; parent session `01a1b0e0-a314-7252-9c29-d958f2e64d73` (no share URL exposed).
