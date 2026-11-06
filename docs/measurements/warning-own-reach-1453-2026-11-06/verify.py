@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 """Verify preserved counters and recorded receipts, not build provenance."""
+from datetime import datetime
 import hashlib
 from pathlib import Path
 import sys
@@ -22,6 +23,7 @@ samples = {
 }
 empty_hash = hashlib.sha256(b'').hexdigest()
 error_hash = '8fdc9c0a66cb58dbf305ab63c97a595c36f2661ef1d74d29df63ad439a40cf35'
+times = {}
 for version, (compiler, pairs) in samples.items():
     for number, pair in enumerate(pairs, 1):
         prefix = root / f'{version}-c11-paired-{number}'
@@ -41,6 +43,11 @@ for version, (compiler, pairs) in samples.items():
         assert lines[0] == 'held=1' and lines[-1].split()[0] == compiler
         after_lines = after.splitlines()
         assert lines[1:-1] == after_lines[:-2] and 'codex-1453' in lines[1]
+        assert any(f'title: PR 1453 {version} own conversion reach sample {number}' in line for line in lines[1:-1])
+        assert any(f' -- {version} {number} ' in line for line in lines[1:-1])
+        times[(version, number)] = datetime.fromisoformat(lines[1].split()[0])
         assert after_lines[-2].split()[0] == empty_hash and after_lines[-2].endswith(prefix.name + '.out')
         assert after_lines[-1].split()[0] == error_hash and after_lines[-1].endswith(prefix.name + '.err')
+order = (('currenthead', 1), ('candidate11', 1), ('candidate11', 2), ('currenthead', 2), ('currenthead', 3), ('candidate11', 3))
+assert [times[key] for key in order] == sorted(times.values())
 print('Archived hashes, counters, outputs and recorded receipts verified; build provenance is not established.')
