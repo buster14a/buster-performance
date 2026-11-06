@@ -19,6 +19,8 @@ the runner now requires a later compiler with that option and its diagnostic
 The [d944 rehearsal](rehearsal-2026-11-06/README.md) retains native
 correctness, real-driver interface checks and a separately traced SQLite
 diagnostic. It contains no accepted scaling curves or pinned-lane evidence.
+The separate [wait-diagnostic prototype](wait-diagnostic-prototype-2026-11-06/README.md)
+has only provisional local validation and requires a later reviewed rebase.
 
 ## Workloads
 

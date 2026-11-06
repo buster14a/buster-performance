@@ -1,0 +1,412 @@
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 1728ea29..76f7fdc5 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -1008,0 +1009,23 @@ typedef struct ThreadContext ThreadContext;
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++// Diagnostic-only wall intervals, never enabled in the compiler used for timing curves.
++enum { BUSTER_WAIT_SPIN, BUSTER_WAIT_MWAITX, BUSTER_WAIT_FALLBACK_SPIN, BUSTER_WAIT_BARRIER_FUTEX, BUSTER_WAIT_PARK_FUTEX, BUSTER_WAIT_CLASSES, BUSTER_WAIT_BUCKETS = 8 };
++enum { BUSTER_WAIT_COMPLETED, BUSTER_WAIT_EAGAIN, BUSTER_WAIT_INTERRUPTED, BUSTER_WAIT_OTHER, BUSTER_WAIT_OUTCOMES };
++typedef struct LaneWaitDuration LaneWaitDuration;
++struct LaneWaitDuration
++{
++    uint64_t calls, clock_errors;
++    uint64_t elapsed_ns, max_ns, buckets[BUSTER_WAIT_BUCKETS];
++};
++typedef struct LaneWaitMetric LaneWaitMetric;
++struct LaneWaitMetric
++{
++    LaneWaitDuration outcomes[BUSTER_WAIT_OUTCOMES];
++};
++typedef struct LaneWaitDiagnostic LaneWaitDiagnostic;
++struct LaneWaitDiagnostic
++{
++    LaneWaitMetric metrics[BUSTER_WAIT_CLASSES];
++    uint32_t index, expected_cpu;
++    bool active, barrier_futex;
++};
++#endif
+@@ -1029,0 +1053,3 @@ struct ThreadContext
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    LaneWaitDiagnostic wait_diagnostic;
++#endif
+@@ -1050,0 +1077,111 @@ static _Thread_local ThreadContext thread_context = {
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++// UINT64_MAX denotes a failed clock read; preserve errno because these observations are not compiler behavior.
++static uint64_t lane_diagnostic_now(void)
++{
++    struct timespec time;
++    const int previous = errno;
++    const bool ok = clock_gettime(CLOCK_MONOTONIC_RAW, &time) == 0 && time.tv_sec >= 0 && time.tv_nsec >= 0 && time.tv_nsec < 1000000000;
++    const uint64_t value = ok ? (uint64_t)time.tv_sec * 1000000000ull + (uint64_t)time.tv_nsec : UINT64_MAX;
++    errno = previous;
++    return value;
++}
++
++static void lane_diagnostic_record(LaneWaitMetric* metric, uint64_t begin, uint64_t end, long result, int error)
++{
++    const unsigned outcome = result == 0 ? BUSTER_WAIT_COMPLETED : error == EAGAIN ? BUSTER_WAIT_EAGAIN :
++                             error == EINTR ? BUSTER_WAIT_INTERRUPTED : BUSTER_WAIT_OTHER;
++    LaneWaitDuration* duration = &metric->outcomes[outcome];
++    duration->calls += 1;
++    if (begin == UINT64_MAX || end == UINT64_MAX || end < begin)
++    {
++        duration->clock_errors += 1;
++    }
++    else
++    {
++        const uint64_t elapsed = end - begin;
++        static const uint64_t boundaries[] = { 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000 };
++        size_t bucket = 0;
++        while (bucket < sizeof(boundaries) / sizeof(boundaries[0]) && elapsed >= boundaries[bucket])
++        {
++            bucket += 1;
++        }
++        duration->buckets[bucket] += 1;
++        duration->elapsed_ns += elapsed;
++        duration->max_ns = elapsed > duration->max_ns ? elapsed : duration->max_ns;
++    }
++}
++
++static long lane_diagnostic_futex(uint32_t* word, uint32_t value, unsigned kind)
++{
++    LaneWaitDiagnostic* diagnostic = &thread_context.wait_diagnostic;
++    const uint64_t begin = diagnostic->active ? lane_diagnostic_now() : UINT64_MAX;
++    const long result = syscall(SYS_futex, word, FUTEX_WAIT_PRIVATE, value, 0, 0, 0);
++    const int error = errno;
++    if (diagnostic->active)
++    {
++        lane_diagnostic_record(&diagnostic->metrics[kind], begin, lane_diagnostic_now(), result, error);
++    }
++    errno = error;
++    return result;
++}
++
++static void lane_diagnostic_begin(uint32_t index, uint32_t expected_cpu, bool enabled)
++{
++    thread_context.wait_diagnostic = (LaneWaitDiagnostic){ .index = index, .expected_cpu = expected_cpu, .active = enabled };
++}
++
++static void lane_diagnostic_finish(void)
++{
++    LaneWaitDiagnostic* diagnostic = &thread_context.wait_diagnostic;
++    if (diagnostic->active)
++    {
++        const int saved_errno = errno;
++        // A thousand clock pairs, after the flow, record instrumentation cost without mixing it into the wait counts.
++        uint64_t minimum = UINT64_MAX, maximum = 0, total = 0, failures = 0;
++        for (unsigned i = 0; i < 1000; i += 1)
++        {
++            const uint64_t begin = lane_diagnostic_now();
++            const uint64_t end = lane_diagnostic_now();
++            if (begin == UINT64_MAX || end == UINT64_MAX || end < begin)
++            {
++                failures += 1;
++            }
++            else
++            {
++                const uint64_t elapsed = end - begin;
++                minimum = elapsed < minimum ? elapsed : minimum;
++                maximum = elapsed > maximum ? elapsed : maximum;
++                total += elapsed;
++            }
++        }
++        unsigned observed = UINT_MAX;
++        const long cpu_status = syscall(SYS_getcpu, &observed, NULL, NULL);
++        static const char* const names[] = { "initial-spin", "mwaitx", "fallback-spin", "barrier-futex", "other-futex" };
++        static const char* const outcomes[] = { "completed", "eagain", "eintr", "other" };
++        flockfile(stderr);
++        fprintf(stderr, "wait-diagnostic\tlane=%u\ttid=%ld\texpected-cpu=%u\tobserved-cpu=%u\tcpu-status=%ld\tscope=start-through-flow\tend-policy=forced-join\n",
++                diagnostic->index, syscall(SYS_gettid), diagnostic->expected_cpu, observed, cpu_status);
++        for (unsigned kind = 0; kind < BUSTER_WAIT_CLASSES; kind += 1)
++        {
++            for (unsigned outcome = 0; outcome < BUSTER_WAIT_OUTCOMES; outcome += 1)
++            {
++                const LaneWaitDuration* duration = &diagnostic->metrics[kind].outcomes[outcome];
++                fprintf(stderr, "wait-diagnostic-metric\tlane=%u\tkind=%s\toutcome=%s\tcalls=%lu\tclock-errors=%lu\telapsed-ns=%lu\tmax-ns=%lu\tbuckets=",
++                        diagnostic->index, names[kind], outcomes[outcome], (unsigned long)duration->calls, (unsigned long)duration->clock_errors,
++                        (unsigned long)duration->elapsed_ns, (unsigned long)duration->max_ns);
++                for (unsigned i = 0; i < BUSTER_WAIT_BUCKETS; i += 1)
++                {
++                    fprintf(stderr, "%s%lu", i == 0 ? "" : ",", (unsigned long)duration->buckets[i]);
++                }
++                fputc('\n', stderr);
++            }
++        }
++        fprintf(stderr, "wait-diagnostic-calibration\tlane=%u\tpairs=1000\tfailures=%lu\tmin-ns=%lu\tmax-ns=%lu\ttotal-ns=%lu\n",
++                diagnostic->index, (unsigned long)failures, (unsigned long)(minimum == UINT64_MAX ? 0 : minimum), (unsigned long)maximum, (unsigned long)total);
++        funlockfile(stderr);
++        diagnostic->active = false;
++        errno = saved_errno;
++    }
++}
++#endif
++
+@@ -1285,0 +1423,3 @@ struct LaneSession
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    bool wait_diagnostic;
++#endif
+@@ -1420,0 +1561,3 @@ static uint32_t lane_sleep(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++            lane_diagnostic_futex(word, current, thread_context.wait_diagnostic.barrier_futex ? BUSTER_WAIT_BARRIER_FUTEX : BUSTER_WAIT_PARK_FUTEX);
++#else
+@@ -1421,0 +1565 @@ static uint32_t lane_sleep(uint32_t* word, uint32_t value)
++#endif
+@@ -1433,0 +1578,12 @@ static uint32_t lane_sleep(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC && defined(__MWAITX__)
++static void lane_diagnostic_mwait(uint32_t ticks)
++{
++    LaneWaitDiagnostic* diagnostic = &thread_context.wait_diagnostic;
++    const uint64_t begin = diagnostic->active ? lane_diagnostic_now() : UINT64_MAX;
++    _mm_mwaitx(BUSTER_LANE_MWAITX_TIMER, BUSTER_LANE_MWAITX_C1, ticks);
++    if (diagnostic->active)
++    {
++        lane_diagnostic_record(&diagnostic->metrics[BUSTER_WAIT_MWAITX], begin, lane_diagnostic_now(), 0, 0);
++    }
++}
++#endif
+@@ -1436,0 +1593,5 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    const bool diagnostic_active = thread_context.wait_diagnostic.active;
++    const uint64_t spin_begin = diagnostic_active && (current & ~1u) == value ? lane_diagnostic_now() : UINT64_MAX;
++    uint32_t diagnostic_spins = 0;
++#endif
+@@ -1440,0 +1602,8 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++        diagnostic_spins += 1;
++#endif
++    }
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    if (diagnostic_active && diagnostic_spins != 0)
++    {
++        lane_diagnostic_record(&thread_context.wait_diagnostic.metrics[BUSTER_WAIT_SPIN], spin_begin, lane_diagnostic_now(), 0, 0);
+@@ -1441,0 +1611 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#endif
+@@ -1458,0 +1629,3 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++                lane_diagnostic_mwait((uint32_t)(budget - waited));
++#else
+@@ -1459,0 +1633 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#endif
+@@ -1465,0 +1640,3 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++            const uint64_t fallback_begin = diagnostic_active ? lane_diagnostic_now() : UINT64_MAX;
++#endif
+@@ -1467,0 +1645,6 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++            if (diagnostic_active)
++            {
++                lane_diagnostic_record(&thread_context.wait_diagnostic.metrics[BUSTER_WAIT_FALLBACK_SPIN], fallback_begin, lane_diagnostic_now(), 0, 0);
++            }
++#endif
+@@ -1471,0 +1655,10 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    if ((current & ~1u) == value)
++    {
++        thread_context.wait_diagnostic.barrier_futex = true;
++        const uint32_t result = lane_sleep(word, value);
++        thread_context.wait_diagnostic.barrier_futex = false;
++        return result;
++    }
++    return current & ~1u;
++#else
+@@ -1472,0 +1666 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
++#endif
+@@ -2079,0 +2274,3 @@ static uint32_t lane_team_wait(uint32_t* word, uint32_t value)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++            lane_diagnostic_futex(word, current, BUSTER_WAIT_PARK_FUTEX);
++#else
+@@ -2080,0 +2278 @@ static uint32_t lane_team_wait(uint32_t* word, uint32_t value)
++#endif
+@@ -2530,0 +2729,3 @@ static void* lane_session_thread_main(void* parameter)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    lane_diagnostic_begin(start->index, session->has_cpus ? session->cpus[start->index] : UINT_MAX, session->wait_diagnostic);
++#endif
+@@ -2564,0 +2766,3 @@ static void* lane_session_thread_main(void* parameter)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++        lane_diagnostic_finish();
++#endif
+@@ -2574,0 +2779,4 @@ static void* lane_session_thread_main(void* parameter)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++    // Also report an attempted session that was cancelled before its flow started.
++    lane_diagnostic_finish();
++#endif
+@@ -2603,0 +2812,8 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++        const char* trace = getenv("BUSTER_WAIT_TRACE");
++        session->wait_diagnostic = cpus != 0 && trace != 0 && strcmp(trace, "1") == 0;
++        // A terminal command normally parks workers until process exit. Join in this perturbed diagnostic build so
++        // every worker can emit its snapshot before the process exits. This is deliberately not a timing run.
++        session->park_at_end = session->wait_diagnostic ? false : session->park_at_end;
++        lane_diagnostic_begin(0, cpus != 0 ? cpus[0] : UINT_MAX, session->wait_diagnostic);
++#endif
+@@ -2680,0 +2897,3 @@ static uint32_t lane_session_run(LaneSession* session, uint32_t capacity, const
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++        lane_diagnostic_finish();
++#endif
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index 9c26de8e..fa2c6d38 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -3411,0 +3412,157 @@ static uint64_t lane_test_sessions(void)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++typedef struct LaneDiagnosticTest LaneDiagnosticTest;
++struct LaneDiagnosticTest
++{
++    uint32_t word, ready, finished;
++    LaneWaitDiagnostic diagnostic;
++    long result;
++    int error;
++    bool signal_unblocked;
++};
++
++static void* lane_diagnostic_test_worker(void* argument)
++{
++    LaneDiagnosticTest* test = argument;
++    lane_diagnostic_begin(7, 2, true);
++    sigset_t unblocked;
++    sigemptyset(&unblocked);
++    sigaddset(&unblocked, SIGUSR2);
++    test->signal_unblocked = pthread_sigmask(SIG_UNBLOCK, &unblocked, 0) == 0;
++    __atomic_store_n(&test->ready, 1, __ATOMIC_RELEASE);
++    test->result = lane_diagnostic_futex(&test->word, 0, BUSTER_WAIT_PARK_FUTEX);
++    test->error = errno;
++    test->diagnostic = thread_context.wait_diagnostic;
++    __atomic_store_n(&test->finished, 1, __ATOMIC_RELEASE);
++    thread_context.wait_diagnostic.active = false;
++    return 0;
++}
++
++static void lane_diagnostic_test_signal(int number)
++{
++    (void)number;
++}
++
++static bool lane_diagnostic_test(void)
++{
++    uint32_t failures = 0;
++    LaneWaitMetric metric = { 0 };
++    lane_diagnostic_record(&metric, 10, 30, 0, 0);
++    lane_diagnostic_record(&metric, 10, 30, -1, EAGAIN);
++    lane_diagnostic_record(&metric, 10, 30, -1, EINTR);
++    lane_diagnostic_record(&metric, 10, 30, -1, EINVAL);
++    lane_diagnostic_record(&metric, UINT64_MAX, 30, 0, 0);
++    const LaneWaitDuration* completed = &metric.outcomes[BUSTER_WAIT_COMPLETED];
++    failures += completed->calls != 2 || completed->clock_errors != 1 || completed->elapsed_ns != 20 || completed->max_ns != 20 || completed->buckets[0] != 1 ||
++                metric.outcomes[BUSTER_WAIT_EAGAIN].calls != 1 || metric.outcomes[BUSTER_WAIT_EAGAIN].elapsed_ns != 20 ||
++                metric.outcomes[BUSTER_WAIT_INTERRUPTED].calls != 1 || metric.outcomes[BUSTER_WAIT_INTERRUPTED].elapsed_ns != 20 ||
++                metric.outcomes[BUSTER_WAIT_OTHER].calls != 1 || metric.outcomes[BUSTER_WAIT_OTHER].elapsed_ns != 20;
++
++    errno = EDOM;
++    const uint64_t begin = lane_diagnostic_now();
++    const uint64_t end = lane_diagnostic_now();
++    failures += begin == UINT64_MAX || end == UINT64_MAX || end < begin || errno != EDOM;
++    uint64_t clock_min = UINT64_MAX, clock_max = 0;
++    for (unsigned i = 0; i < 1000; i += 1)
++    {
++        const uint64_t first = lane_diagnostic_now();
++        const uint64_t last = lane_diagnostic_now();
++        if (first == UINT64_MAX || last == UINT64_MAX || last < first)
++        {
++            failures += 1;
++        }
++        else
++        {
++            const uint64_t elapsed = last - first;
++            clock_min = elapsed < clock_min ? elapsed : clock_min;
++            clock_max = elapsed > clock_max ? elapsed : clock_max;
++        }
++    }
++    printf("wait diagnostic: 1000 clock pairs, min %lu ns, max %lu ns\n", (unsigned long)clock_min, (unsigned long)clock_max);
++
++    uint32_t wrong = 0;
++    lane_diagnostic_begin(3, 5, true);
++    errno = 0;
++    const long refused = lane_diagnostic_futex(&wrong, 1, BUSTER_WAIT_BARRIER_FUTEX);
++    failures += refused != -1 || errno != EAGAIN || thread_context.wait_diagnostic.index != 3 ||
++                thread_context.wait_diagnostic.expected_cpu != 5 ||
++                thread_context.wait_diagnostic.metrics[BUSTER_WAIT_BARRIER_FUTEX].outcomes[BUSTER_WAIT_EAGAIN].calls != 1;
++#if defined(__MWAITX__)
++    unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
++    const bool mwaitx = __get_cpuid(0x80000001u, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 29)) != 0;
++    if (mwaitx)
++    {
++        _mm_monitorx(&wrong, 0, 0);
++        lane_diagnostic_mwait(10000);
++        const LaneWaitDuration* observed = &thread_context.wait_diagnostic.metrics[BUSTER_WAIT_MWAITX].outcomes[BUSTER_WAIT_COMPLETED];
++        failures += observed->calls != 1 || observed->clock_errors != 0;
++    }
++    else
++    {
++        printf("wait diagnostic: MWAITX execution skipped (not available on this CPU)\n");
++    }
++#endif
++    thread_context.wait_diagnostic.active = false;
++
++    LaneDiagnosticTest test = { 0 };
++    pthread_t worker;
++    const bool created = pthread_create(&worker, 0, lane_diagnostic_test_worker, &test) == 0;
++    bool woke = false;
++    if (created)
++    {
++        const struct timespec pause = { .tv_nsec = 1000000 };
++        for (unsigned i = 0; i < 5000 && !woke; i += 1)
++        {
++            if (__atomic_load_n(&test.ready, __ATOMIC_ACQUIRE) != 0)
++            {
++                woke = syscall(SYS_futex, &test.word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0) == 1;
++            }
++            if (!woke)
++            {
++                nanosleep(&pause, 0);
++            }
++        }
++        if (!woke)
++        {
++            __atomic_store_n(&test.word, 1, __ATOMIC_RELEASE);
++            syscall(SYS_futex, &test.word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
++        }
++        pthread_join(worker, 0);
++    }
++    failures += !created || !woke || test.result != 0 || test.diagnostic.index != 7 || test.diagnostic.expected_cpu != 2 ||
++                test.diagnostic.metrics[BUSTER_WAIT_PARK_FUTEX].outcomes[BUSTER_WAIT_COMPLETED].calls != 1 ||
++                test.diagnostic.metrics[BUSTER_WAIT_PARK_FUTEX].outcomes[BUSTER_WAIT_COMPLETED].clock_errors != 0;
++    struct sigaction action = { 0 }, previous = { 0 };
++    action.sa_handler = lane_diagnostic_test_signal;
++    sigemptyset(&action.sa_mask);
++    const bool installed = sigaction(SIGUSR2, &action, &previous) == 0;
++    LaneDiagnosticTest interrupted = { 0 };
++    const bool signal_worker = installed && pthread_create(&worker, 0, lane_diagnostic_test_worker, &interrupted) == 0;
++    if (signal_worker)
++    {
++        const struct timespec pause = { .tv_nsec = 1000000 };
++        for (unsigned i = 0; i < 5000 && __atomic_load_n(&interrupted.finished, __ATOMIC_ACQUIRE) == 0; i += 1)
++        {
++            if (__atomic_load_n(&interrupted.ready, __ATOMIC_ACQUIRE) != 0)
++            {
++                pthread_kill(worker, SIGUSR2);
++            }
++            nanosleep(&pause, 0);
++        }
++        if (__atomic_load_n(&interrupted.finished, __ATOMIC_ACQUIRE) == 0)
++        {
++            __atomic_store_n(&interrupted.word, 1, __ATOMIC_RELEASE);
++            syscall(SYS_futex, &interrupted.word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
++        }
++        pthread_join(worker, 0);
++    }
++    failures += !signal_worker || !interrupted.signal_unblocked || interrupted.result != -1 || interrupted.error != EINTR ||
++                interrupted.diagnostic.metrics[BUSTER_WAIT_PARK_FUTEX].outcomes[BUSTER_WAIT_INTERRUPTED].calls != 1;
++    if (installed)
++    {
++        failures += sigaction(SIGUSR2, &previous, 0) != 0;
++    }
++    printf("wait diagnostic: actual futex wake/EAGAIN, timer, lane identity, accounting and MWAITX where supported: %u wrong\n", failures);
++    return failures == 0;
++}
++#endif
++
+@@ -3483,0 +3641,3 @@ static int run_lane_tests(int argc, char** argv)
++#if defined(BUSTER_LANE_WAIT_DIAGNOSTIC) && BUSTER_LANE_WAIT_DIAGNOSTIC
++        passed = lane_diagnostic_test() && passed;
++#endif
