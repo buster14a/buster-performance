@@ -11,7 +11,7 @@ On the Ryzen 7 9700X, with CPU 2 pinned, each compiler ran preprocessing on the 
 | 10,000 generated declarations, `-E` | 6,823,365 | 6,821,088 | −2,277 |
 | Previously preprocessed SQLite, `-E -x c` | 95,120,697 | 95,117,925 | −2,772 |
 
-The previous same-path original-SQLite `-E` pair had a **+12,343** head-minus-base difference. The sign and size differ on these other inputs, so that earlier difference is not explained solely by a fixed positive startup offset. The inputs, options, and processing paths differ, and each row is a single pair; these observations do not locate the cause, distinguish source changes from binary layout, or establish the whole-compile instruction difference. The preprocessed SQLite control uses the earlier saved `sqlite.i`, not the original source and include expansion, so it is not a direct replacement for the requested SQLite `-c` comparison.
+The previous same-path original-SQLite `-E` pair had a **+12,343** head-minus-base difference. The sign and size differ on these other inputs, which is inconsistent with a fixed positive startup offset as the sole explanation, subject to single-pair variation. The inputs, options, and processing paths differ, and each row is a single pair; these observations do not locate the cause, distinguish source changes from binary layout, or establish the whole-compile instruction difference. The preprocessed SQLite control uses the earlier saved `sqlite.i`, not the original source and include expansion, so it is not a direct replacement for the requested SQLite `-c` comparison.
 
 ## Identities and method
 
