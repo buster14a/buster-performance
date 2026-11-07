@@ -1,0 +1,448 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index b1673084..46f288ca 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -2671,10 +2671,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+     uint32_t worked = 0;
+     if (valid && count != 0)
+     {
+-        memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
+         // The lanes' run, or the calling thread's alone; lanes that couldn't start, or a part that ran out of room, go
+         // again on the calling thread alone, from the arenas as they were (each body sets what it reads of the shared
+-        // tables before it reads it, and puts local_map's entries back).
++        // tables before it reads it, and puts local_map's entries back). The run alone writes every field of lane 0's
++        // state (check_program_emit_alone), and the lanes' start from zero (#1629).
+         const uint64_t output_before = output->length;
+         const uint64_t bytes_before = bytes->length;
+         const uint64_t scratch_before = scratch->length;
+@@ -2682,6 +2682,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+         const bool laned = active > 1 || growing;
+         if (laned)
+         {
++            memset(run.lane_states, 0, (uint64_t)states * sizeof(CheckEmitLane));
+             if (growing)
+             {
+                 active = check_program_emit_growing(lanes->flow, &run, &growth, room, active, lanes->budget, leases, &lease_count);
+@@ -2736,7 +2737,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+             arena_pop_to(bytes, bytes_before);
+             arena_pop_to(scratch, scratch_before);
+             arena_pop_to(columns, columns_before);
+-            memset(run.lane_states, 0, sizeof(CheckEmitLane));
+             if (run.tier1_outcomes != NULL)
+             {
+                 memset(run.tier1_outcomes, 0, (uint64_t)count * sizeof(CheckTier1Outcome));
+diff --git a/src/buster/compiler/c_check_program_helpers.c b/src/buster/compiler/c_check_program_helpers.c
+index 03cee2cf..7ed00428 100644
+--- a/src/buster/compiler/c_check_program_helpers.c
++++ b/src/buster/compiler/c_check_program_helpers.c
+@@ -884,7 +884,6 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
+             implicit_node = effect->node;
+         }
+     }
+-    uint32_t keys[BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES] = { 0 };
+     // String-comparison leaves have a distinct body for each imm8. Their dense key table is allocated only for a
+     // unit that reaches one, keeping ordinary units' fixed-key initialization unchanged.
+     uint32_t* immediate_keys = NULL;
+@@ -892,10 +891,17 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
+     const uint64_t candidates = valid ? (uint64_t)program->builtin_count + (uint32_t)__builtin_popcount(implicit_widths) * 3 : 0;
+     const uint32_t maximum = BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES + BUSTER_CHECK_PROGRAM_HELPER_IMMEDIATES;
+     const uint32_t signatures = candidates < maximum ? (uint32_t)candidates : maximum;
++    // Each fixed key's helper, 1 + its index, 0 for none: made and cleared only for a unit with candidates, which alone
++    // read it (#1629: every unit cleared its 3 KB on the stack).
++    uint32_t* keys = signatures != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES) : 0;
++    if (keys != 0)
++    {
++        memset(keys, 0, BUSTER_CHECK_PROGRAM_HELPER_SIGNATURES * sizeof(uint32_t));
++    }
+     CheckProgramHelperUse* uses = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelperUse, program->builtin_count) : 0;
+     CheckProgramHelper* planned = signatures != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramHelper, signatures) : 0;
+     uint32_t* first_nodes = planned != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, signatures) : 0;
+-    if (valid && ((program->builtin_count != 0 && uses == NULL) || (signatures != 0 && first_nodes == NULL)))
++    if (valid && ((program->builtin_count != 0 && uses == NULL) || (signatures != 0 && (keys == NULL || first_nodes == NULL))))
+     {
+         result->status = CHECK_PROGRAM_RESOURCE;
+     }
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index de6d46e5..1180e8b6 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -243,6 +243,25 @@ static BUSTER_BAKED_UNIT uint64_t check_lower_runtime_hashes[CHECK_LOWER_RUNTIME
+ static BUSTER_BAKED_UNIT uint8_t check_lower_runtime_lengths[CHECK_LOWER_RUNTIMES];
+ static BUSTER_BAKED_UNIT bool check_lower_runtime_names_ready;
+ 
++// The first runtime function from `from` on whose name a unit's lowering looks up: each one's before the library's, and
++// of the library's those whose bits `called` has (the x86 builtins' calls); CHECK_LOWER_RUNTIMES past the last. The
++// library's are found a word of bits at a time.
++static uint32_t check_lower_runtime_called_next(const uint64_t* called, uint32_t from)
++{
++    uint32_t next = from;
++    if (from >= CHECK_LOWER_RUNTIME_LIBRARY)
++    {
++        next = CHECK_LOWER_RUNTIMES;
++        for (uint32_t word = from >> 6; next == CHECK_LOWER_RUNTIMES && word < (CHECK_LOWER_RUNTIMES + 63) / 64; word += 1)
++        {
++            const uint64_t bits = called[word] & (word == from >> 6 ? ~UINT64_C(0) << (from & 63) : ~UINT64_C(0));
++            next = bits != 0 ? word * 64 + (uint32_t)__builtin_ctzll(bits) : next;
++        }
++        next = next < CHECK_LOWER_RUNTIMES ? next : CHECK_LOWER_RUNTIMES;
++    }
++    return next;
++}
++
+ // Makes check_lower_runtime_hashes and check_lower_runtime_lengths, once: before any lane may read them.
+ static bool check_lower_runtime_names_initialize(void)
+ {
+@@ -332,11 +351,6 @@ struct CheckProgramLowered
+     CheckLowerInitializers initializers;
+     SymbolId errno_symbol;
+     TypeId errno_pointer_type;
+-    // The runtime's functions the lowering calls (CHECK_LOWER_RUNTIME_*): each one's SymbolId, 0 while nothing calls it,
+-    // a declaration's of the unit where its program has a symbol of the name with linkage, else one of the lowering's own
+-    // after the program's and the helpers': `runtime_symbol_count` of those, which `runtime_order` names in their order.
+-    SymbolId runtime_symbols[CHECK_LOWER_RUNTIMES];
+-    uint16_t runtime_order[CHECK_LOWER_RUNTIMES];
+     // Each function's entries' source tokens (the parser's), when check_program_lower is asked for them: entry e's, the
+     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
+     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
+@@ -378,6 +392,12 @@ struct CheckProgramLowered
+     uint32_t table_count;
+     uint32_t case_symbol_count;
+     SymbolId case_symbol_base;
++    // The runtime's functions the lowering calls (CHECK_LOWER_RUNTIME_*): each one's SymbolId, 0 while nothing calls it,
++    // a declaration's of the unit where its program has a symbol of the name with linkage, else one of the lowering's own
++    // after the program's and the helpers': `runtime_symbol_count` of those, which `runtime_order` names in their order.
++    // The last fields: a lane's copy (check_lower_writer_begin) leaves them unwritten.
++    SymbolId runtime_symbols[CHECK_LOWER_RUNTIMES];
++    uint16_t runtime_order[CHECK_LOWER_RUNTIMES];
+ };
+ 
+ typedef enum CheckLowerTaskKind
+@@ -827,13 +847,13 @@ struct CheckLowerWriter
+     uint32_t label_symbol_used;
+     // The runtime's functions (check_lower_runtime): each one's symbol where the unit declares it, 0 for none
+     // (CheckLowerShared.declared_runtimes); the first of the provisional symbols that a call of one of the lowering's own
+-    // takes; and the ones the writer's part calls first, in the order it does (`runtimes`, `runtime_mask` their bits in
+-    // words), which check_lower_finish numbers in source order's order (#151).
++    // takes; and the ones the writer's part calls first, in the order it does (`runtimes`, a column of room for every one,
++    // `runtime_mask` their bits in words), which check_lower_finish numbers in source order's order (#151).
+     const SymbolId* declared_runtimes;
+     SymbolId provisional_runtimes;
+     uint64_t runtime_mask[(CHECK_LOWER_RUNTIMES + 63) / 64];
+     uint32_t runtime_count;
+-    uint16_t runtimes[CHECK_LOWER_RUNTIMES];
++    uint16_t* runtimes;
+     // The first token where clang's code may classify a function's type (check_lower_first_classification), plus one: 0
+     // until the writer first asks.
+     uint64_t first_classification;
+@@ -14006,20 +14026,28 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+         uint16_t spelled_runtimes[CHECK_LOWER_RUNTIMES];
+         uint32_t spelled = 0;
+         // The names' lengths and hashes, made once (check_lower_runtime_names_ready), so that a unit's lookups are its
+-        // table's probes alone.
++        // table's probes alone: every runtime function's before the library's, then the library functions the x86 builtins
++        // call, from the set bits of `called` (#1629: the test of each of the library's 394 entries in turn took as long
++        // as the probes of a unit that calls none).
+         const bool hashed = check_lower_runtime_names_ready;
+-        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; program->parser != NULL && program->identifiers != NULL && r < CHECK_LOWER_RUNTIMES; r += 1)
+-        {
+-            if (r < CHECK_LOWER_RUNTIME_LIBRARY || (called[r >> 6] & (UINT64_C(1) << (r & 63))) != 0)
+-            {
+-                const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
+-                const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
+-                const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
+-                const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
+-                identifiers[spelled] = identifier;
+-                spelled_runtimes[spelled] = (uint16_t)r;
+-                spelled += identifier != 0;
+-            }
++        const bool spelling = program->parser != NULL && program->identifiers != NULL;
++        for (uint32_t r = CHECK_LOWER_RUNTIME_ERRNO + 1; spelling && r < CHECK_LOWER_RUNTIMES;)
++        {
++            const uint8_t* name = (const uint8_t*)check_lower_runtime_names[r];
++            const uint32_t length = hashed ? check_lower_runtime_lengths[r] : (uint32_t)strlen((const char*)name);
++            const uint64_t hash = hashed ? check_lower_runtime_hashes[r] : intern_hash_bytes(name, length);
++#if BUSTER_HOST_VECTOR
++            // Most names' home buckets decide them, without a branch, so that their loads overlap (#1629).
++            const IdentId home = BUSTER_SCALAR_PATH(scalar) ? BUSTER_INTERN_UNDECIDED :
++                                                              intern_find_home(program->identifiers, intern_bucket_key(intern_first_bytes(name, length)), length, hash);
++            const IdentId identifier = home != BUSTER_INTERN_UNDECIDED ? home : intern_find_hashed(program->identifiers, name, length, hash);
++#else
++            const IdentId identifier = intern_find_hashed(program->identifiers, name, length, hash);
++#endif
++            identifiers[spelled] = identifier;
++            spelled_runtimes[spelled] = (uint16_t)r;
++            spelled += identifier != 0;
++            r = check_lower_runtime_called_next(called, r + 1);
+         }
+         // On the vector path, the runtimes' declarations are found in the locals' first pass below, which loads the same
+         // declaring tokens' columns (#1048: 0.02 ms of sqlite3.c's preparation on the 9700X); the scalar path's own pass
+@@ -14123,14 +14151,15 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
+     const uint32_t argument_capacity = shared->argument_capacity;
+     const bool track = program->region_count != 0 || shared->terminal;
+     bool valid = true;
+-    *status = (CheckProgramLowered){
+-        .helpers = shared->lowered->helpers,
+-        .asms = shared->lowered->asms,
+-        .initializers = shared->lowered->initializers,
+-        .errno_symbol = shared->lowered->errno_symbol,
+-        .errno_pointer_type = shared->lowered->errno_pointer_type,
+-        .token = BUSTER_CHECK_NONE,
+-    };
++    // The lane's copy of the lowering, but its runtime_symbols and runtime_order, which only the program's numbers
++    // (check_lower_finish): 3.5 KB of its 3.8 KB, which each emission's writer cleared before (#1629).
++    memset(status, 0, __builtin_offsetof(CheckProgramLowered, runtime_symbols));
++    status->helpers = shared->lowered->helpers;
++    status->asms = shared->lowered->asms;
++    status->initializers = shared->lowered->initializers;
++    status->errno_symbol = shared->lowered->errno_symbol;
++    status->errno_pointer_type = shared->lowered->errno_pointer_type;
++    status->token = BUSTER_CHECK_NONE;
+     *abi = (CheckLowerAbi){ .capacity = abi_capacity, .argument_capacity = argument_capacity };
+ #define BUSTER_CHECK_LOWER_ABI(field, type, length) abi->field = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, type, length) : 0; valid &= abi->field != 0
+     BUSTER_CHECK_LOWER_ABI(results, TypeId, abi_capacity);
+@@ -14218,6 +14247,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
+     BUSTER_CHECK_LOWER_COLUMN(table_jumps, uint32_t, (uint64_t)shared->lowered->table_count + 1);
+     BUSTER_CHECK_LOWER_COLUMN(lifetime_entries, uint32_t, (uint64_t)program->lifetime_event_count + 1);
+     BUSTER_CHECK_LOWER_COLUMN(lifetime_locals, uint32_t, (uint64_t)program->lifetime_event_count + 1);
++    BUSTER_CHECK_LOWER_COLUMN(runtimes, uint16_t, CHECK_LOWER_RUNTIMES);
+     // #1048's node templates (c_check_program_templates.c): columns for a body's range of nodes, at most
+     // BUSTER_CHECK_LOWER_TEMPLATE_NODES of them, and its scratch entries. Address space alone until a body touches it.
+     writer->templates = valid && shared->templates;
+diff --git a/src/buster/compiler/c_check_program_select.c b/src/buster/compiler/c_check_program_select.c
+index c2c3ba89..556c9988 100644
+--- a/src/buster/compiler/c_check_program_select.c
++++ b/src/buster/compiler/c_check_program_select.c
+@@ -320,6 +320,49 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
+     return body;
+ }
+ 
++// check_program_token_body for tokens asked mostly in increasing order, as the definitions' are (in token order): from the
++// bodies counted for the last token asked (`last`, its token and how many bodies open at or before it), forward, so that
++// a loop's asks take the bodies once rather than a search each (#1629: 2,000 block-scope statics' bodies, 11 steps each);
++// a token before the last one asked searches, as check_program_token_body does.
++typedef struct CheckProgramBodyCursor CheckProgramBodyCursor;
++struct CheckProgramBodyCursor
++{
++    uint32_t token;
++    uint32_t opened;
++};
++
++static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
++{
++    uint32_t opened = 0;
++    if (token >= last->token)
++    {
++        opened = last->opened;
++        while (opened < program->body_count && program->bodies[opened].opening <= token)
++        {
++            opened += 1;
++        }
++    }
++    else
++    {
++        uint32_t high = program->body_count;
++        while (opened < high)
++        {
++            const uint32_t middle = opened + (high - opened) / 2;
++            if (program->bodies[middle].opening <= token)
++            {
++                opened = middle + 1;
++            }
++            else
++            {
++                high = middle;
++            }
++        }
++    }
++    *last = (CheckProgramBodyCursor){ .token = token, .opened = opened };
++    const uint32_t body = opened != 0 && token <= program->parser->tree.parents[program->bodies[opened - 1].opening] ? opened : 0;
++    return body;
++}
++
+ // Whether `token` is in one of the ranges the program's writer left out (CheckProgram.dropped_ranges, in token order and
+ // apart): the last to start at or before it, if it ends at or after it.
+ static bool check_program_token_dropped(const CheckProgram* program, uint32_t token)
+@@ -360,6 +403,32 @@ static bool check_program_token_emitted(const CheckProgram* program, uint32_t to
+     return emitted;
+ }
+ 
++// Each of the data's declared objects' index among them (CheckDataPrepared.declared_objects), written at the object in
++// `declared_at`, which has room for `objects`, from the last to the first, so that a repeated object keeps its first
++// index, as check_data_declared_index finds it. Only those entries are written: check_program_declared_at checks what it
++// reads, so no pass clears the object-sized column (#877's way). Each definition then finds its object's place in one
++// load, where the search took a dependent load a step, 12 for 4,000 static objects (#1629).
++static void check_program_declared_fill(const CheckDataPrepared* data, uint32_t objects, uint32_t* declared_at)
++{
++    for (uint32_t i = data->declared_count; i != 0; i -= 1)
++    {
++        const uint32_t object = data->declared_objects[i - 1];
++        if (object < objects)
++        {
++            declared_at[object] = i - 1;
++        }
++    }
++}
++
++// Where `object`, below the column's `objects`, is among the data's declared objects, or declared_count where it isn't one:
++// check_data_declared_index's answer, from check_program_declared_fill's column, whose other entries hold whatever they
++// held, which the check of the declared object at the place read turns down.
++static uint32_t check_program_declared_at(const CheckDataPrepared* data, const uint32_t* declared_at, uint32_t object)
++{
++    const uint32_t place = declared_at[object];
++    return place < data->declared_count && data->declared_objects[place] == object ? place : data->declared_count;
++}
++
+ // Whether the program's bodies are in token order and apart, as check_program_token_body needs them.
+ static bool check_program_bodies_ordered(const CheckProgram* program)
+ {
+@@ -485,11 +554,13 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
+     uint32_t* sources = body_map != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
+     uint32_t* targets = sources != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
+     uint32_t* kinds = targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
++    // Each static object's place among the data's declared ones, at the object (check_program_declared_at).
++    uint32_t* declared_at = kinds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, objects) : 0;
+     if (valid)
+     {
+         candidate.status = CHECK_PROGRAM_RESOURCE;
+     }
+-    valid &= kinds != 0;
++    valid &= declared_at != 0;
+     uint32_t edges = 0;
+     uint32_t body_references = 0;
+     uint32_t data_references = 0;
+@@ -500,6 +571,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
+         memset(roots, 0, ((uint64_t)data->declared_count + 1) * sizeof(uint32_t));
+         memset(inline_rules, 1, (uint64_t)data->declared_count + 1);
+         memset(needed, 0, objects);
++        check_program_declared_fill(data, objects, declared_at);
+         memset(body_selected, 0, (uint64_t)full->body_count + 1);
+         memset(data_selected, 0, (uint64_t)data->count + 1);
+         memset(body_map, 0xff, ((uint64_t)full->body_count + 1) * sizeof(uint32_t));
+@@ -555,8 +627,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
+             valid = object != 0 && object < objects;
+             if (valid)
+             {
+-                // The definition's object among the static objects, or past them (check_data_declared_index).
+-                const uint32_t declared = check_data_declared_index(data, object);
++                // The definition's object among the static objects, or past them (check_data_declared_index's answer).
++                const uint32_t declared = check_program_declared_at(data, declared_at, object);
+                 uint32_t flags = (function ? BUSTER_C_LOWERING_FUNCTION : BUSTER_C_LOWERING_OBJECT) | roots[declared];
+                 // An object made only for what references it (CheckDataObject.optional: a constant CFString's record, #148).
+                 flags |= !function && data->objects[raw - full->body_count].optional ? BUSTER_C_LOWERING_OPTIONAL : 0;
+@@ -634,6 +706,8 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
+             }
+         }
+         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
++        // The block-scope statics' bodies, asked in the definitions' token order (check_program_token_body_next).
++        CheckProgramBodyCursor static_bodies = { 0 };
+         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
+         {
+             const uint32_t raw = (uint32_t)order[definition];
+@@ -668,7 +742,7 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
+             const uint32_t body = declaration < input->token_count && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE &&
+                                   check_input_linkage(input->declaration_bits, declaration) == 0 &&
+                                   !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) && check_program_token_emitted(full, declaration) ?
+-                                  check_program_token_body(full, declaration) : 0;
++                                  check_program_token_body_next(full, declaration, &static_bodies) : 0;
+             if (valid && body != 0)
+             {
+                 const uint32_t source = object_definitions[full->bodies[body - 1].object];
+diff --git a/src/buster/compiler/c_intern.c b/src/buster/compiler/c_intern.c
+index 98ca4520..7718627f 100644
+--- a/src/buster/compiler/c_intern.c
++++ b/src/buster/compiler/c_intern.c
+@@ -853,6 +853,28 @@ static IdentId intern_find_hashed(const InternTable* table, const uint8_t* bytes
+ #endif
+ }
+ 
++#if BUSTER_HOST_VECTOR
++// What intern_find_home returns where its spelling's home bucket alone doesn't decide it.
++#define BUSTER_INTERN_UNDECIDED UINT32_MAX
++
++// intern_find_hashed's lookup where the spelling's home bucket decides it, from that bucket alone and without a branch:
++// a short spelling's prefix match there (its id), or no match where the bucket has an empty slot (0). Otherwise
++// BUSTER_INTERN_UNDECIDED, for intern_find_hashed: a long spelling's match, which its bytes' compare decides, or a full
++// bucket without one. `key` is the spelling's intern_bucket_key. For a batch of lookups whose buckets' loads overlap, as
++// they don't across intern_find_hashed's loop exits (#1629: the runtime functions' names, check_lower_prepare).
++BUSTER_INLINE IdentId intern_find_home(const InternTable* table, __m512i key, uint32_t length, uint64_t hash)
++{
++    const uint8_t* bucket_bytes = table->buckets + (hash & table->bucket_mask) * BUSTER_INTERN_BUCKET_BYTES;
++    const __m512i slots = _mm512_load_si512(bucket_bytes);
++    const uint32_t matches = intern_bucket_matches(slots, key);
++    const uint32_t empties = intern_bucket_empties(slots);
++    // The first match's id, or slot 3's where none matches, which isn't taken.
++    const IdentId first = intern_slot_id(bucket_bytes, (uint32_t)__builtin_ctz(matches | 0x8000u));
++    const bool decided = matches != 0 ? length <= BUSTER_INTERN_SHORT_LENGTH : empties != 0;
++    return decided ? (matches != 0 ? first : 0) : BUSTER_INTERN_UNDECIDED;
++}
++#endif
++
+ // The id of a spelling with `hash` (intern_hash_bytes's), which is added if it is new. Returns 0 if a new spelling
+ // doesn't fit.
+ static IdentId intern_find_or_add_hashed(InternTable* table, const uint8_t* bytes, uint32_t length, uint64_t hash)
+diff --git a/src/buster/compiler/c_refine_test.c b/src/buster/compiler/c_refine_test.c
+index e646f066..76fc8cd8 100644
+--- a/src/buster/compiler/c_refine_test.c
++++ b/src/buster/compiler/c_refine_test.c
+@@ -900,6 +900,8 @@ static bool refine_check_table(uint64_t* random)
+     static IdentId ids[BUSTER_REFINE_TEST_TABLE_SPELLINGS];
+     bool result = intern_initialize(&table);
+     uint64_t failures = 0;
++    // The home buckets' lookups (intern_find_home) that decided, each the same as the whole lookup's.
++    uint64_t decided = 0;
+     if (result)
+     {
+         uint64_t sequence = *random;
+@@ -921,6 +923,11 @@ static bool refine_check_table(uint64_t* random)
+             const IdentId id = intern_find(&table, spelling, length);
+             failures += id != ids[i] || intern_find_or_add(&table, spelling, length) != id || intern_length(&table, id) != length ||
+                         memcmp(intern_bytes(&table, id), spelling, length) != 0;
++#if BUSTER_HOST_VECTOR
++            const IdentId home = intern_find_home(&table, intern_bucket_key(intern_first_bytes(spelling, length)), length, intern_hash_bytes(spelling, length));
++            failures += home != BUSTER_INTERN_UNDECIDED && home != id;
++            decided += home != BUSTER_INTERN_UNDECIDED;
++#endif
+         }
+         // Spellings with characters the others don't have are absent.
+         for (uint32_t i = 0; i < 10000; i += 1)
+@@ -928,9 +935,14 @@ static bool refine_check_table(uint64_t* random)
+             const uint32_t length = refine_test_random_spelling(random, spelling);
+             spelling[0] = '#';
+             failures += intern_find(&table, spelling, length) != 0;
++#if BUSTER_HOST_VECTOR
++            const IdentId home = intern_find_home(&table, intern_bucket_key(intern_first_bytes(spelling, length)), length, intern_hash_bytes(spelling, length));
++            failures += home != BUSTER_INTERN_UNDECIDED && home != 0;
++            decided += home != BUSTER_INTERN_UNDECIDED;
++#endif
+         }
+-        printf("table: %lu failures in %u spellings (%u ids, %lu buckets)\n", (unsigned long)failures, BUSTER_REFINE_TEST_TABLE_SPELLINGS, table.count,
+-               (unsigned long)(table.bucket_mask + 1));
++        printf("table: %lu failures in %u spellings (%u ids, %lu buckets; %lu lookups decided by their home buckets)\n", (unsigned long)failures,
++               BUSTER_REFINE_TEST_TABLE_SPELLINGS, table.count, (unsigned long)(table.bucket_mask + 1), (unsigned long)decided);
+         intern_release(&table);
+     }
+     else
+diff --git a/src/buster/compiler/object_writer.c b/src/buster/compiler/object_writer.c
+index 9510dae2..a1d634e3 100644
+--- a/src/buster/compiler/object_writer.c
++++ b/src/buster/compiler/object_writer.c
+@@ -964,7 +964,9 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
+     {
+         const uint32_t begin = units->atom_begin[key + class] - unit_begin;
+         const uint32_t end = units->atom_begin[key + class + 1] - unit_begin;
+-        uint32_t groups = 1;
++        // A class without atoms has no sections, which its groups' pass would only confirm: with descriptors, as every -c
++        // compile's (check_program_sections), most of a small unit's classes (#1629).
++        uint32_t groups = begin != end ? 1 : 0;
+         for (uint32_t i = begin; result && builder->options.atom_sections != 0 && i < end; i += 1)
+         {
+             const AtomId atom = units->atoms[unit_begin + i];
+@@ -972,7 +974,7 @@ static bool object_count_sections(ObjectBuilder* builder, Arena* scratch)
+             const bool grouped = builder->link->groups.count != 0 && builder->link->groups.atom_groups[atom] != 0;
+             result = object_section_valid(descriptor, class) && ((descriptor->flags & SHF_GROUP) == 0 || grouped);
+         }
+-        if (result && described)
++        if (result && described && begin != end)
+         {
+             memory = object_group_atoms(builder, class, units->atoms + unit_begin, begin, end, order, firsts, descriptors, section_groups, &groups, scratch);
+             result = memory;
