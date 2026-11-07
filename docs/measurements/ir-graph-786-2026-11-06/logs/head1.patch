@@ -1,0 +1,517 @@
+diff --git a/src/buster/compiler/ir.c b/src/buster/compiler/ir.c
+index a8dae7b5..024ae392 100644
+--- a/src/buster/compiler/ir.c
++++ b/src/buster/compiler/ir.c
+@@ -1941,44 +1941,148 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool
+     return check;
+ }
+ 
++// The exact check of instruction i's operands, in ir_operand's order: each defined before its use within a block and,
++// with a dominator tree, in a block that dominates the use's. A phi's incoming value is used at its predecessor's end.
++// The scalar twin checks every instruction so, and the vector path the lanes its batch leaves to it.
++static IrCheck ir_check_operands(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t i)
++{
++    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
++    const uint64_t count = ir_operand_count(f, i);
++    const bool phi = f->op[i] == IR_PHI;
++    for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
++    {
++        const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
++        const uint32_t definition = cfg->instruction_blocks[operand.value];
++        const uint32_t position = phi ? f->block_offsets[operand.block + 1] - 1 : i;
++        bool invalid = operand.value >= position;
++        if (definition != operand.block)
++        {
++            invalid = dominance != 0 && (dominance->leave[definition] == 0 || dominance->leave[operand.block] == 0 || dominance->enter[definition] > dominance->enter[operand.block] || dominance->leave[definition] < dominance->leave[operand.block]);
++        }
++        if (invalid)
++        {
++            check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
++        }
++    }
++    return check;
++}
++
++// The lanes of one operand column whose value is defined in an earlier block (`earlier`) and whose definition's block
++// doesn't dominate the use's: its block and its tree interval are gathered, the use's are the lanes' own.
++static __mmask16 ir_dominance_earlier(const IrCfg* cfg, const IrDominance* dominance, __mmask16 earlier, __m512i value, __m512i use_enter, __m512i use_leave)
++{
++    __mmask16 bad = 0;
++    if (earlier != 0)
++    {
++        const __m512i zero = _mm512_setzero_si512();
++        const __m512i block = _mm512_mask_i32gather_epi32(zero, earlier, value, cfg->instruction_blocks, 4);
++        const __m512i enter = _mm512_mask_i32gather_epi32(zero, earlier, block, dominance->enter, 4);
++        const __m512i leave = _mm512_mask_i32gather_epi32(zero, earlier, block, dominance->leave, 4);
++        bad = _mm512_cmpeq_epi32_mask(leave, zero) | _mm512_cmpeq_epi32_mask(use_leave, zero) | _mm512_cmpgt_epu32_mask(enter, use_enter) | _mm512_cmplt_epu32_mask(leave, use_leave);
++        bad &= earlier;
++    }
++    return bad;
++}
++
++// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's and a call's, whose
++// operands are in extra; a use of a value at or after its own instruction, which is an error within the block; and,
++// with a dominator tree, a use of an earlier block's value whose block doesn't dominate the use's. Any other use is of
++// an earlier value of its own block, which needs nothing more (#786).
++static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t first, uint32_t count)
++{
++    const __mmask16 active = (__mmask16)((1u << count) - 1u);
++    const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
++    const __m512i operands = ir_lookup_bytes(_mm512_loadu_si512(ir_operand_table), op);
++    const __m512i optional = ir_lookup_bytes(_mm512_loadu_si512(ir_optional_table), op);
++    const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
++    const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
++    const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
++    const __m512i none = _mm512_set1_epi32(-1);
++    const __m512i one = _mm512_set1_epi32(1);
++    const __m512i two = _mm512_set1_epi32(2);
++    const __m512i four = _mm512_set1_epi32(4);
++    const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
++    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT));
++    const __mmask16 direct = active & ~extra;
++    const __mmask16 use_a = direct & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
++    const __mmask16 use_b = direct & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
++    const __mmask16 use_c = direct & (_mm512_test_epi32_mask(operands, four) | (_mm512_test_epi32_mask(optional, four) & _mm512_cmpneq_epi32_mask(c, none)));
++    __mmask16 pending = extra | (use_a & _mm512_cmpge_epu32_mask(a, index)) | (use_b & _mm512_cmpge_epu32_mask(b, index)) | (use_c & _mm512_cmpge_epu32_mask(c, index));
++    if (dominance != 0)
++    {
++        // Sixteen instructions are in at most sixteen consecutive blocks from the first's: their starts and tree
++        // intervals are one load each, which each lane's block picks by a permute.
++        const uint32_t base = cfg->instruction_blocks[first];
++        const uint32_t span = f->block_count - base;
++        const __mmask16 held = span >= BUSTER_IR_VECTOR_COUNT ? (__mmask16)0xffff : (__mmask16)((1u << span) - 1u);
++        const __m512i local = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(active, cfg->instruction_blocks + first), _mm512_set1_epi32((int)base));
++        const __m512i start = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, f->block_offsets + base));
++        const __m512i use_enter = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, dominance->enter + base));
++        const __m512i use_leave = _mm512_permutexvar_epi32(local, _mm512_maskz_loadu_epi32(held, dominance->leave + base));
++        pending |= ir_dominance_earlier(cfg, dominance, use_a & _mm512_cmplt_epu32_mask(a, start), a, use_enter, use_leave);
++        pending |= ir_dominance_earlier(cfg, dominance, use_b & _mm512_cmplt_epu32_mask(b, start), b, use_enter, use_leave);
++        pending |= ir_dominance_earlier(cfg, dominance, use_c & _mm512_cmplt_epu32_mask(c, start), c, use_enter, use_leave);
++    }
++    return pending;
++}
++
+ static __attribute__((noinline, aligned(64))) IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
+ {
+     (void)vector;
+ 
+     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+-    IrUseBatch batch = { 0 };
+-    for (uint32_t i = 0; check.error == IR_OK && i < f->instruction_count; i += 1)
++    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? BUSTER_IR_VECTOR_COUNT : 1;
++    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
+     {
+-        const uint64_t count = ir_operand_count(f, i);
+-        for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
++        const uint32_t remaining = f->instruction_count - first;
++        uint32_t pending = 1;
++        if (BUSTER_VECTOR_PATH(vector))
++        {
++            pending = ir_dominance_batch(f, cfg, dominance, first, remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT);
++        }
++        while (check.error == IR_OK && pending != 0)
++        {
++            const uint32_t lane = (uint32_t)__builtin_ctz(pending);
++            pending &= pending - 1;
++            check = ir_check_operands(f, cfg, dominance, first + lane);
++        }
++    }
++    return check;
++}
++
++// A phi's and a switch's own rules. Phis start a block other than the entry, one incoming value per predecessor, each
++// from a distinct predecessor and of the phi's type; a switch's cases are distinct. A phi after a non-phi of its block
++// is the first misplaced one, since one after a misplaced phi comes after that phi's error.
++static IrCheck ir_check_join(const IrFunction* f, const IrCfg* cfg, Arena* scratch, uint32_t* seen, uint32_t i)
++{
++    IrCheck check = ir_check(IR_OK, i, 0);
++    if (f->op[i] == IR_PHI)
++    {
++        const uint32_t b = cfg->instruction_blocks[i];
++        const bool misplaced = i != f->block_offsets[b] && f->op[i - 1] != IR_PHI;
++        // Initial function entry has no predecessor from which a phi can select a value. A producer needing a loop at
++        // entry must add a real preheader with an explicit initial value before introducing phis.
++        if (b == 0 || misplaced || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
++        {
++            check = ir_check(IR_ERROR_PHI, i, 0);
++        }
++        for (uint32_t p = 0; check.error == IR_OK && p < f->b[i]; p += 1)
+         {
+-            const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
+-            const uint32_t definition_block = cfg->instruction_blocks[operand.value];
+-            const uint32_t lane = batch.count;
+-            batch.definitions[lane] = operand.value;
+-            batch.positions[lane] = f->op[i] == IR_PHI ? f->block_offsets[operand.block + 1] - 1 : i;
+-            batch.definition_blocks[lane] = definition_block;
+-            batch.use_blocks[lane] = operand.block;
+-            batch.instructions[lane] = i;
+-            batch.operands[lane] = operand.position;
+-            if (dominance != 0)
++            const uint32_t predecessor = f->extra[f->a[i] + p * 2];
++            const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
++            if (predecessor >= f->block_count || !ir_predecessor(cfg, b, predecessor) || seen[predecessor] == i || value >= f->instruction_count || f->type[value] != f->type[i])
+             {
+-                batch.definition_enter[lane] = dominance->enter[definition_block];
+-                batch.definition_leave[lane] = dominance->leave[definition_block];
+-                batch.use_enter[lane] = dominance->enter[operand.block];
+-                batch.use_leave[lane] = dominance->leave[operand.block];
++                check = ir_check(IR_ERROR_PHI, i, p);
+             }
+-            batch.count += 1;
+-            if (batch.count == BUSTER_IR_VECTOR_COUNT)
++            else
+             {
+-                check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
+-                batch.count = 0;
++                seen[predecessor] = i;
+             }
+         }
+     }
+-    if (check.error == IR_OK && batch.count != 0)
++    else
+     {
+-        check = ir_check_use_batch(&batch, dominance != 0, BUSTER_VECTOR_PATH(vector));
++        check = ir_check(ir_switch_unique(f, i, scratch), i, 0);
+     }
+     return check;
+ }
+@@ -2009,41 +2113,27 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
+             check = ir_check(IR_ERROR_DOMINANCE, BUSTER_IR_NONE, b);
+         }
+     }
+-    for (uint32_t b = 0; check.error == IR_OK && b < f->block_count; b += 1)
++    // The phis and switches, which the vector path finds 64 operations at a time.
++    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? 64 : 1;
++    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
+     {
+-        bool past_phis = false;
+-        for (uint32_t i = f->block_offsets[b]; check.error == IR_OK && i < f->block_offsets[b + 1]; i += 1)
++        const uint32_t remaining = f->instruction_count - first;
++        uint64_t pending = 0;
++        if (BUSTER_VECTOR_PATH(vector))
+         {
+-            if (f->op[i] == IR_PHI)
+-            {
+-                // Initial function entry has no predecessor from which a phi can select a value. A producer needing
+-                // a loop at entry must add a real preheader with an explicit initial value before introducing phis.
+-                if (b == 0 || past_phis || f->b[i] != cfg->predecessor_offsets[b + 1] - cfg->predecessor_offsets[b])
+-                {
+-                    check = ir_check(IR_ERROR_PHI, i, 0);
+-                }
+-                for (uint32_t p = 0; check.error == IR_OK && p < f->b[i]; p += 1)
+-                {
+-                    const uint32_t predecessor = f->extra[f->a[i] + p * 2];
+-                    const uint32_t value = f->extra[f->a[i] + p * 2 + 1];
+-                    if (predecessor >= f->block_count || !ir_predecessor(cfg, b, predecessor) || seen[predecessor] == i || value >= f->instruction_count || f->type[value] != f->type[i])
+-                    {
+-                        check = ir_check(IR_ERROR_PHI, i, p);
+-                    }
+-                    else
+-                    {
+-                        seen[predecessor] = i;
+-                    }
+-                }
+-            }
+-            else
+-            {
+-                past_phis = true;
+-            }
+-            if (check.error == IR_OK && f->op[i] == IR_SWITCH)
+-            {
+-                check = ir_check(ir_switch_unique(f, i, scratch), i, 0);
+-            }
++            const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
++            const __m512i op = _mm512_maskz_loadu_epi8(active, f->op + first);
++            pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH));
++        }
++        else
++        {
++            pending = f->op[first] == IR_PHI || f->op[first] == IR_SWITCH;
++        }
++        while (check.error == IR_OK && pending != 0)
++        {
++            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
++            pending &= pending - 1;
++            check = ir_check_join(f, cfg, scratch, seen, first + lane);
+         }
+     }
+     if (check.error == IR_OK)
+diff --git a/src/buster/compiler/ir_test.c b/src/buster/compiler/ir_test.c
+index 7580683d..bbb50b06 100644
+--- a/src/buster/compiler/ir_test.c
++++ b/src/buster/compiler/ir_test.c
+@@ -1620,6 +1620,266 @@ static void ir_test_dominance_tails(IrTestTally* tally, Arena* memory, Arena* sc
+     }
+ }
+ 
++// A generated value of `type` for an operand of instruction `use` in the block starting at `start`: mostly an earlier
++// value of the block, then any earlier value, then, in `forward` samples, any value at all.
++static uint32_t ir_test_value(uint64_t* state, const uint32_t* values, uint32_t count, uint32_t start, uint32_t use, bool forward)
++{
++    uint32_t local = 0;
++    uint32_t earlier = 0;
++    for (uint32_t k = 0; k < count; k += 1)
++    {
++        local += values[k] >= start && values[k] < use;
++        earlier += values[k] < use;
++    }
++    const uint32_t roll = (uint32_t)(ir_test_random(state) % 100);
++    uint32_t result = values[ir_test_random(state) % count];
++    if (roll < 75 && local != 0)
++    {
++        uint32_t pick = (uint32_t)(ir_test_random(state) % local);
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            if (values[k] >= start && values[k] < use)
++            {
++                result = pick == 0 ? values[k] : result;
++                pick -= 1;
++            }
++        }
++    }
++    else if ((roll < 97 || !forward) && earlier != 0)
++    {
++        result = values[ir_test_random(state) % earlier];
++    }
++    return result;
++}
++
++// #786's vector dominance check, and its scalar twin, against an independent oracle: generated functions of up to 40
++// blocks, whose terminators, phis, types and metadata are valid, so that where each value is used decides the result.
++// Operands are mostly earlier values of their block, some of earlier blocks and, in half the samples, some of any
++// instruction; the dominator view is none, a chain in which each block dominates the later ones (some unreachable), or
++// random intervals. The oracle enumerates each operation's operands from its own list, not the IR's tables: a, b and c
++// where it reads them (an address's index where it has one), a phi's incoming values at their predecessors' ends.
++static void ir_test_dominance_generated(IrTestTally* tally, Arena* memory, Arena* scratch, uint64_t count)
++{
++    uint64_t state = (tally->seed != 0 ? tally->seed : 1) * 786u + 1;
++    for (uint64_t sample = 0; sample < count * 4; sample += 1)
++    {
++        const uint64_t mark = memory->length;
++        const uint32_t blocks = 1 + (uint32_t)(ir_test_random(&state) % (sample % 4 == 3 ? 40 : 12));
++        const bool forward = (sample & 1) != 0;
++        uint8_t kinds[40];
++        uint32_t targets[40][2];
++        uint32_t bodies[40];
++        uint32_t phis[40] = { 0 };
++        uint32_t preds[40][40];
++        uint32_t instructions = 0;
++        uint32_t extras = 0;
++        for (uint32_t b = 0; b < blocks; b += 1)
++        {
++            kinds[b] = (uint8_t)(ir_test_random(&state) % 3);
++            targets[b][0] = (uint32_t)(ir_test_random(&state) % blocks);
++            targets[b][1] = (uint32_t)(ir_test_random(&state) % blocks);
++            bodies[b] = (b == 0 ? 3 : 0) + 1 + (uint32_t)(ir_test_random(&state) % (sample % 8 == 7 ? 64 : 12));
++        }
++        for (uint32_t b = 0; b < blocks; b += 1)
++        {
++            for (uint32_t edge = 0; edge < (kinds[b] == 0 ? 1u : kinds[b] == 1 ? 2u : 0u); edge += 1)
++            {
++                const uint32_t target = targets[b][edge];
++                if (target != 0 && (phis[target] == 0 || preds[target][phis[target] - 1] != b))
++                {
++                    preds[target][phis[target]] = b;
++                    phis[target] += 1;
++                }
++            }
++        }
++        for (uint32_t b = 0; b < blocks; b += 1)
++        {
++            instructions += phis[b] + bodies[b] + 1;
++            extras += phis[b] * phis[b] * 2;
++        }
++        const IrSizes sizes = {
++            .instruction_count = instructions,
++            .block_count = blocks,
++            .extra_count = extras,
++            .constant_count = 1,
++            .address_count = 1,
++            .parameter_count = 1,
++        };
++        IrFunction function = { 0 };
++        const bool created = ir_create(memory, &sizes, &function) == IR_OK;
++        uint32_t* block_of = arena_push_array(memory, instructions, 4, 64);
++        uint32_t* by_type = arena_push_array(memory, (uint64_t)instructions * 3, 4, 64);
++        ir_test_expect(tally, created && block_of != 0 && by_type != 0, "generated dominance fixture allocation failed");
++        if (created && block_of != 0 && by_type != 0)
++        {
++            function.result_type = IR_I64;
++            function.parameter_types[0] = IR_PTR;
++            function.addresses[0].scale = 1;
++            uint32_t* const values[3] = {
++                by_type,
++                by_type + instructions,
++                by_type + (uint64_t)instructions * 2,
++            };
++            uint32_t value_counts[3] = { 0 };
++            // First the operations and their types, so that operands may name any value of theirs, then the operands.
++            uint32_t id = 0;
++            for (uint32_t b = 0; b < blocks; b += 1)
++            {
++                function.block_offsets[b] = id;
++                for (uint32_t k = 0; k < phis[b] + bodies[b] + 1; k += 1)
++                {
++                    const uint32_t body = k - phis[b];
++                    IrOp op = IR_PHI;
++                    if (k >= phis[b] + bodies[b])
++                    {
++                        op = kinds[b] == 0 ? IR_BR : kinds[b] == 1 ? IR_CBR : IR_RET;
++                    }
++                    else if (k >= phis[b])
++                    {
++                        const IrOp operations[] = {
++                            IR_ADD,
++                            IR_COPY,
++                            IR_ICMP,
++                            IR_SELECT,
++                            IR_STORE,
++                            IR_ADDRESS,
++                            IR_ADD,
++                            IR_SUB,
++                        };
++                        op = operations[ir_test_random(&state) % 8];
++                        op = b != 0 || body > 2 ? op : body == 0 ? IR_PARAM : body == 1 ? IR_CONST : IR_ICMP;
++                    }
++                    const IrType type = op == IR_ICMP ? IR_I1 : op == IR_PARAM || op == IR_ADDRESS ? IR_PTR : op == IR_STORE || op == IR_BR || op == IR_CBR || op == IR_RET ? IR_VOID : IR_I64;
++                    function.op[id] = (uint8_t)op;
++                    function.type[id] = (uint8_t)type;
++                    block_of[id] = b;
++                    const uint32_t list = type == IR_I64 ? 0 : type == IR_I1 ? 1 : 2;
++                    if (type != IR_VOID)
++                    {
++                        values[list][value_counts[list]] = id;
++                        value_counts[list] += 1;
++                    }
++                    id += 1;
++                }
++            }
++            function.block_offsets[blocks] = instructions;
++            uint32_t extra = 0;
++            for (uint32_t i = 0; i < instructions; i += 1)
++            {
++                const uint32_t b = block_of[i];
++                const uint32_t start = function.block_offsets[b];
++                const uint32_t op = function.op[i];
++                uint32_t a = BUSTER_IR_NONE;
++                uint32_t second = BUSTER_IR_NONE;
++                uint32_t third = BUSTER_IR_NONE;
++                if (op == IR_PHI)
++                {
++                    a = extra;
++                    second = phis[b];
++                    for (uint32_t p = 0; p < phis[b]; p += 1)
++                    {
++                        function.extra[extra] = preds[b][p];
++                        const uint32_t predecessor = preds[b][p];
++                        function.extra[extra + 1] = ir_test_value(&state, values[0], value_counts[0], function.block_offsets[predecessor], function.block_offsets[predecessor + 1] - 1, forward);
++                        extra += 2;
++                    }
++                }
++                else if (op == IR_PARAM || op == IR_CONST)
++                {
++                    a = 0;
++                }
++                else if (op == IR_BR)
++                {
++                    a = targets[b][0];
++                }
++                else if (op == IR_CBR)
++                {
++                    a = ir_test_value(&state, values[1], value_counts[1], start, i, forward);
++                    second = targets[b][0];
++                    third = targets[b][1];
++                }
++                else if (op == IR_ADDRESS)
++                {
++                    a = ir_test_value(&state, values[2], value_counts[2], start, i, forward);
++                    second = ir_test_random(&state) % 2 == 0 ? BUSTER_IR_NONE : ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                    third = 0;
++                }
++                else if (op == IR_STORE)
++                {
++                    a = ir_test_value(&state, values[2], value_counts[2], start, i, forward);
++                    second = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                }
++                else if (op == IR_SELECT)
++                {
++                    a = ir_test_value(&state, values[1], value_counts[1], start, i, forward);
++                    second = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                    third = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                }
++                else if (op == IR_ICMP)
++                {
++                    a = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                    second = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                    third = IR_EQ;
++                }
++                else
++                {
++                    a = ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                    second = op == IR_COPY || op == IR_RET ? BUSTER_IR_NONE : ir_test_value(&state, values[0], value_counts[0], start, i, forward);
++                }
++                function.a[i] = a;
++                function.b[i] = second;
++                function.c[i] = third;
++            }
++            uint32_t enter[40] = { 0 };
++            uint32_t leave[40] = { 0 };
++            const uint32_t view = (uint32_t)(sample % 3);
++            for (uint32_t b = 0; b < blocks; b += 1)
++            {
++                const bool unreachable = b != 0 && ir_test_random(&state) % (view == 1 ? 32 : 8) == 0;
++                enter[b] = view == 1 ? b : (uint32_t)(ir_test_random(&state) % 64);
++                leave[b] = view == 1 ? 2 * blocks - b : enter[b] + 1 + (uint32_t)(ir_test_random(&state) % 64);
++                enter[b] = unreachable ? 0 : enter[b];
++                leave[b] = unreachable ? 0 : leave[b];
++            }
++            const IrDominance tree = {
++                .enter = enter,
++                .leave = leave,
++                .block_count = blocks,
++            };
++            const IrDominance* dominance = view == 0 ? 0 : &tree;
++            IrCheck expected = ir_check(IR_OK, BUSTER_IR_NONE, 0);
++            for (uint32_t i = 0; expected.error == IR_OK && i < instructions; i += 1)
++            {
++                const uint32_t op = function.op[i];
++                const uint32_t uses = op == IR_PHI ? function.b[i] : op == IR_SELECT ? 3 : op == IR_ADD || op == IR_SUB || op == IR_ICMP || op == IR_STORE ? 2 : op == IR_ADDRESS ? 1 + (function.b[i] != BUSTER_IR_NONE) : op == IR_COPY || op == IR_CBR || op == IR_RET ? 1 : 0;
++                for (uint32_t p = 0; expected.error == IR_OK && p < uses; p += 1)
++                {
++                    const uint32_t value = op == IR_PHI ? function.extra[function.a[i] + p * 2 + 1] : p == 0 ? function.a[i] : p == 1 ? function.b[i] : function.c[i];
++                    const uint32_t use_block = op == IR_PHI ? function.extra[function.a[i] + p * 2] : block_of[i];
++                    const uint32_t position = op == IR_PHI ? function.block_offsets[use_block + 1] - 1 : i;
++                    const uint32_t definition = block_of[value];
++                    bool invalid = value >= position;
++                    if (definition != use_block)
++                    {
++                        invalid = dominance != 0 && (leave[definition] == 0 || leave[use_block] == 0 || enter[definition] > enter[use_block] || leave[definition] < leave[use_block]);
++                    }
++                    if (invalid)
++                    {
++                        expected = ir_check(IR_ERROR_DOMINANCE, i, op == IR_PHI ? 3 + p : p);
++                    }
++                }
++            }
++            const IrCheck vector = ir_verify(&function, scratch, dominance);
++            const IrCheck scalar = ir_verify_scalar(&function, scratch, dominance);
++            const bool vector_valid = vector.error == expected.error && vector.instruction == expected.instruction && vector.detail == expected.detail && vector.dominance_checked == (expected.error == IR_OK && dominance != 0);
++            const bool scalar_valid = scalar.error == expected.error && scalar.instruction == expected.instruction && scalar.detail == expected.detail && scalar.dominance_checked == (expected.error == IR_OK && dominance != 0);
++            ir_test_expect(tally, vector_valid, "vector dominance check disagreed with the oracle on a generated function");
++            ir_test_expect(tally, scalar_valid, "scalar dominance check disagreed with the oracle on a generated function");
++        }
++        arena_pop_to(memory, mark);
++    }
++}
++
+ // ir_operand's order (#786): its table of a mask's places against the loop it replaced, and on a function of every kind
+ // of operand (a and b, a compare's, a select's three, a store's, an address's optional index, a call's 18 arguments, an
+ // indirect call's callee and arguments, a branch's condition, a phi's incoming values and a return's value), each
+@@ -1998,6 +2258,7 @@ static int run_ir_tests(int argc, char** argv)
+             ir_test_dominance_tails(&tally, &memory, &scratch);
+             ir_test_operand_order(&tally, &memory, &scratch);
+             ir_test_generated(&tally, &memory, &scratch, count);
++            ir_test_dominance_generated(&tally, &memory, &scratch, count);
+             bool preserved = scratch.length == 19;
+             for (uint32_t byte = 0; byte < 19; byte += 1)
+             {
