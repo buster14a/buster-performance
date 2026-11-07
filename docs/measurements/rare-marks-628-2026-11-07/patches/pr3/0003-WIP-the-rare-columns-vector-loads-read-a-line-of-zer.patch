@@ -1,0 +1,85 @@
+From a139719f3e788719e29bad55794a5d312ccc83e7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 15:40:53 +0000
+Subject: [PATCH 3/3] WIP: the rare columns' vector loads read a line of zeros
+ where no write claimed (#628)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQwDnVuEpjsYvVE2CKz
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/c_check_input.c | 30 +++++++++++++++++------------
+ 1 file changed, 18 insertions(+), 12 deletions(-)
+
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 875a53e7..56ab411e 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1934,8 +1934,17 @@ static inline __attribute__((always_inline)) uint64_t check_input_rare_mask(cons
+         (__typeof__((reader)->field[0]))((uintptr_t)(reader)->field[(token) & (uint32_t)check_rare_mask] & (uintptr_t)check_rare_mask); \
+     })
+ 
+-// The mask `lanes` of a vector load of the rare columns' 64 bytes at `entry`, or none where no write claimed them.
+-#define BUSTER_CHECK_RARE_LANES(reader, entry, lanes) ((lanes) & (0 - (__typeof__(lanes))check_input_rare_marked((reader), (entry))))
++// A line of zeros, which a vector load of the rare columns reads in place of 64 bytes no write claimed.
++static const uint8_t check_input_rare_zeros[64] __attribute__((aligned(64)));
++
++// The address of a vector load of the rare columns' 64 bytes at `entry`: `entry` where a write may have claimed them
++// (check_input_rare_marked), else check_input_rare_zeros, by a mask rather than a branch: a load masked to no lanes gives the zeros too, but at a
++// base page that no write or read had touched yet it cost the 9700X far more than a load (#628).
++static inline __attribute__((always_inline)) const void* check_input_rare_line(const CheckInputReader* reader, const void* entry)
++{
++    const uintptr_t mask = (uintptr_t)check_input_rare_mask(reader, entry);
++    return (const void*)(((uintptr_t)entry & mask) | ((uintptr_t)check_input_rare_zeros & ~mask));
++}
+ 
+ static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* reader, const CheckWarningEvent* event,
+                                                             const CheckWarningNote* notes, uint32_t note_count)
+@@ -9785,9 +9794,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+         // tokens and intrinsics' calls, from the columns the reader wrote before the walk.
+         const __mmask32 low = (__mmask32)lanes;
+         const __mmask32 high = (__mmask32)(lanes >> 32);
+-        // The rare columns' loads leave out what no write claimed (BUSTER_CHECK_RARE_LANES).
+-        const __m512i builtins_low = _mm512_maskz_loadu_epi16(BUSTER_CHECK_RARE_LANES(reader, reader->builtins + token, low), reader->builtins + token);
+-        const __m512i builtins_high = _mm512_maskz_loadu_epi16(BUSTER_CHECK_RARE_LANES(reader, reader->builtins + token + 32, high), reader->builtins + token + 32);
++        // The rare columns' loads read zeros for what no write claimed (check_input_rare_line).
++        const __m512i builtins_low = _mm512_maskz_loadu_epi16(low, check_input_rare_line(reader, reader->builtins + token));
++        const __m512i builtins_high = _mm512_maskz_loadu_epi16(high, check_input_rare_line(reader, reader->builtins + token + 32));
+         const uint64_t builtin = (uint64_t)_mm512_test_epi16_mask(builtins_low, builtins_low) | (uint64_t)_mm512_test_epi16_mask(builtins_high, builtins_high) << 32;
+         const __m512i commas = _mm512_maskz_loadu_epi8(lanes, reader->expression_commas + token);
+         const __m512i initializers = _mm512_maskz_loadu_epi8(lanes, reader->initializers + token);
+@@ -9802,10 +9811,8 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+             const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
+             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
+             // The type queries that finish at the tokens, 8 pointers at a time.
+-            const __mmask8 jobs_lanes_low = BUSTER_CHECK_RARE_LANES(reader, reader->specifier_finishes + at, (__mmask8)parts);
+-            const __mmask8 jobs_lanes_high = BUSTER_CHECK_RARE_LANES(reader, reader->specifier_finishes + at + 8, (__mmask8)(parts >> 8));
+-            const __m512i jobs_low = _mm512_maskz_loadu_epi64(jobs_lanes_low, reader->specifier_finishes + at);
+-            const __m512i jobs_high = _mm512_maskz_loadu_epi64(jobs_lanes_high, reader->specifier_finishes + at + 8);
++            const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, check_input_rare_line(reader, reader->specifier_finishes + at));
++            const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), check_input_rare_line(reader, reader->specifier_finishes + at + 8));
+             const uint32_t part_specified = (uint32_t)_mm512_test_epi64_mask(jobs_low, jobs_low) | (uint32_t)_mm512_test_epi64_mask(jobs_high, jobs_high) << 8;
+             acts |= (uint64_t)part_acts << part;
+             specified |= (uint64_t)part_specified << part;
+@@ -10881,7 +10888,7 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
+ 
+ // The graph's builtin call records the reader's `builtins` (a builtin per token of `count`, 0 for none) need. Nearly
+ // every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin, and with
+-// `reader` (null for none) none of 64 bytes no write claimed (BUSTER_CHECK_RARE_LANES); the scalar path, its twin, reads
++// `reader` (null for none) none of 64 bytes no write claimed (check_input_rare_line); the scalar path, its twin, reads
+ // every token's.
+ static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, const uint16_t* builtins, uint32_t count, bool scalar)
+ {
+@@ -10892,8 +10899,7 @@ static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, con
+     for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 32)
+     {
+         const __mmask32 all = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
+-        const __mmask32 lanes = reader == NULL ? all : BUSTER_CHECK_RARE_LANES(reader, builtins + token, all);
+-        const __m512i ids = _mm512_maskz_loadu_epi16(lanes, builtins + token);
++        const __m512i ids = _mm512_maskz_loadu_epi16(all, reader == NULL ? builtins + token : check_input_rare_line(reader, builtins + token));
+         uint32_t present = (uint32_t)_mm512_test_epi16_mask(ids, ids);
+         while (present != 0)
+         {
+-- 
+2.43.0
+

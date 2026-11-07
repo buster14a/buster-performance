@@ -1,0 +1,603 @@
+From 31bf2e97c93d32f19501188bb8bbf74409efb211 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 14:33:48 +0000
+Subject: [PATCH 2/2] Checker: the rare columns in base pages, read only where
+ written (#628)
+
+A reading in source order's token columns of rare columns are written
+at few tokens but read at most: the expressions' classes load the
+specifier finishes and the builtins at every token, and each
+declaration reads its first token's flags, storage, bases and jobs. In
+huge pages the writes, spread over the columns, took 20 MB at the
+reader's end, the compile's peak once the scratch is given back. In
+base pages the reads would map the zero page at every page they reach,
+5,985 of sqlite3.c's 6,673, which a populate made 2 M kernel cycles
+dearer than the huge pages.
+
+The reader now keeps a bit per 64 bytes of the columns
+(CheckInputReader.rare_marks), which every write's claim sets
+(check_input_rare_claim), and its vector path's hot reads give 0 where
+no bit is set without touching the page (check_input_rare_written,
+BUSTER_CHECK_RARE). The columns are base pages, which only their writes
+fault in. The scalar path, the twin, reads every entry and counts the
+bytes that a mark misses in CheckInput.visit_misses
+(check_input_rare_verify); with a claim left out on purpose,
+test-checker finds 212.
+
+On the VM, -c sqlite3.c's peak falls from 255,160 to 249,208 KiB, for
+893 more faults, with the objects the same bytes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQwDnVuEpjsYvVE2CKz
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/c-checker.md                             |  17 ++
+ docs/c-deferred-bodies.md                     |  12 +-
+ src/buster/compiler/c_check_binding.c         |   2 +-
+ src/buster/compiler/c_check_constant.c        |   8 +-
+ .../compiler/c_check_expression_input.c       |   2 +-
+ src/buster/compiler/c_check_input.c           | 159 ++++++++++++++----
+ .../compiler/c_check_input_initializer.c      |   6 +-
+ src/buster/compiler/c_check_vla_input.c       |   3 +-
+ src/buster/compiler/c_checker_test.c          |   4 +-
+ 9 files changed, 159 insertions(+), 54 deletions(-)
+
+diff --git a/docs/c-checker.md b/docs/c-checker.md
+index 7512c16b..35e4793c 100644
+--- a/docs/c-checker.md
++++ b/docs/c-checker.md
+@@ -4459,6 +4459,23 @@ tokens it may act at, and tests there only what may make it act. On SQLite
+   the reader's arena of rare columns. It skips the tokens it doesn't act
+   at, whose first values, `NONE`, the pass writes, and tests the sparse
+   columns only of the tokens that have an entry.
++- **The rare columns' pages** (#628): the token columns of the reader's
++  arena of rare columns (the specifier jobs, the declarations' bases,
++  storage, flags and ABIs, the builtins and the rest of
++  `BUSTER_CHECK_SPARSE_COLUMNS`) are written at few tokens and read at most:
++  the classes above load the specifier finishes and the builtins at every
++  token, and each declaration reads its first token's. A reading in source
++  order keeps a bit per 64 bytes of them (`CheckInputReader.rare_marks`,
++  `BUSTER_CHECK_RARE_GRANULE_SHIFT`), which every write's claim sets
++  (`check_input_rare_claim`), and its vector path's hot reads give 0 for
++  bytes with no bit without touching their page (`check_input_rare_written`,
++  `BUSTER_CHECK_RARE`). So the columns are base pages that only their writes
++  fault in: of `sqlite3.c`'s 6,673 pages the walks write 688, which in huge
++  pages, spread over the columns, had taken 20 MB at the reader's end. The
++  scalar path, the twin, reads every entry, and counts the 64 bytes with a
++  byte other than 0 and no bit in `CheckInput.visit_misses`
++  (`check_input_rare_verify`), which a small fixture's columns, sharing a
++  page, would hide in a page's bit.
+ - **Deferred bodies** (#113) need no marks of their own: each starts at an
+   `OPEN_BODY`, which the walk tests, and the walk jumps over the body from
+   there. Lanes share the column, each writing only its own body's tokens.
+diff --git a/docs/c-deferred-bodies.md b/docs/c-deferred-bodies.md
+index 94aebc42..5c05f64c 100644
+--- a/docs/c-deferred-bodies.md
++++ b/docs/c-deferred-bodies.md
+@@ -152,8 +152,9 @@ serial finishing. Success and retry return it exactly once.
+    ("The rare columns' pages by the unit's size (#847)", below). The reader
+    works out the rule's lanes from the parser's tree before its top level's walk
+    (`CheckDeferred.planned`), and `check_deferred_bodies` works them out again
+-   from the top level's cuts. A reading on one lane keeps the huge pages, as
+-   source order does.
++   from the top level's cuts. A reading on one lane keeps the huge pages.
++   Source order's are base pages, whose vector path reads none that no write
++   claimed (`CheckInputReader.rare_marks`, #628; `docs/c-checker.md`).
+ 4. **A body** (`check_deferred_body`). The lane sets its reader to what source
+    order's is at the body's opening, the position checks:
+    - each name the body and its parameters spell, once (a stamp per name),
+@@ -364,9 +365,10 @@ passes every checker test.
+   be copied by one of them at least and by no more (`CheckDeferred.copies`),
+   and its bodies' tokens that pay for a lane (`CheckDeferred.lane_tokens`) be
+   the rule's, worked out again from the unit's tokens outside its bodies and
+-  its size. Its arena of rare columns must be base pages throughout exactly
+-  where those lanes are more than one in a large unit, and source order's
+-  never (`CheckInput.rare_columns_shared`, #764), and its lanes must claim
++  its size. Its arena of rare columns must be shared, in base pages
++  throughout, exactly where those lanes are more than one in a large unit,
++  and source order's never (`CheckInput.rare_columns_shared`, #764; source
++  order's are base pages of its own, #628), and its lanes must claim
+   its regions exactly where they are more than one in a smaller one
+   (`CheckDeferred.claiming`, #847), those of the many bodies, which declare
+   locals, a region at least (`CheckDeferred.claimed`); the rule's fixtures
+diff --git a/src/buster/compiler/c_check_binding.c b/src/buster/compiler/c_check_binding.c
+index fc4343c4..6bb33480 100644
+--- a/src/buster/compiler/c_check_binding.c
++++ b/src/buster/compiler/c_check_binding.c
+@@ -44,7 +44,7 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
+ // declarations haven't, so that a use reads the initializer's end alone where there is one (#1489).
+ static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
+ {
+-    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? reader->incomplete_array_types[declaration] : 0;
++    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? BUSTER_CHECK_RARE(reader, incomplete_array_types, declaration) : 0;
+     return incomplete != 0 && token < check_sparse_get(reader->output->initializer_ends, declaration) ? incomplete : 0;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_constant.c b/src/buster/compiler/c_check_constant.c
+index bc77845c..d4af2eee 100644
+--- a/src/buster/compiler/c_check_constant.c
++++ b/src/buster/compiler/c_check_constant.c
+@@ -2670,7 +2670,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
+         };
+         for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+         {
+-            if (input->cached && reader->specifier_finishes[token] != 0 && child < token)
++            if (input->cached && BUSTER_CHECK_RARE(reader, specifier_finishes, token) != 0 && child < token)
+             {
+                 continue;
+             }
+@@ -2796,7 +2796,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
+                 const bool enumeration = reader->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+                 // A constexpr object's value is the constant its initializer's finish read (#793): an integer or a
+                 // floating constant, or a null pointer, as an lvalue whose object is still the declaration's.
+-                const CheckConstexprValue* constant = (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
++                const CheckConstexprValue* constant = (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0 ?
+                     check_input_constexpr_find(reader, declaration) : 0;
+                 input->values[index] = constant != 0 ? constant->value : (CheckValue)
+                 {
+@@ -3052,7 +3052,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
+         }
+         else if (role == PARSE_ROLE_CLOSE_KEYWORD)
+         {
+-            if (reader->builtins[token] == CBUILTIN_CONVERTVECTOR || reader->builtins[token] == CBUILTIN_BIT_CAST)
++            if (BUSTER_CHECK_RARE(reader, builtins, token) == CBUILTIN_CONVERTVECTOR || BUSTER_CHECK_RARE(reader, builtins, token) == CBUILTIN_BIT_CAST)
+             {
+                 const uint16_t builtin = reader->builtins[token];
+                 const uint32_t type_first = input->type_begin[index];
+@@ -3071,7 +3071,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
+                 valid = check_constant_source_builtin(input, token, count, action.operands, &input->values[index]);
+                 proof = input->values[index];
+             }
+-            else if (reader->builtins[token] == CBUILTIN_AVAILABLE)
++            else if (BUSTER_CHECK_RARE(reader, builtins, token) == CBUILTIN_AVAILABLE)
+             {
+                 valid = count == 0 && check_constant_call(input, reader->first_child[token], token, CBUILTIN_AVAILABLE, 0, action.operands, 0, &input->values[index]);
+                 proof = input->values[index];
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index c52b2358..24935b01 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -379,7 +379,7 @@ static void check_input_expression_list(CheckInputReader* reader, CheckInputBatc
+     reader->first_value[token] = values.first;
+     reader->last_value[token] = values.last;
+     reader->value_counts[token] = values.count;
+-    if (reader->static_initializers[token])
++    if (BUSTER_CHECK_RARE(reader, static_initializers, token))
+     {
+         // A braced static initializer's elements are constant expressions, which initializer planning diagnoses:
+         // the same constant evaluation its scalar form's INITIALIZE gets (check_input_expression_act's list).
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 956e7fd7..32c6bca5 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1686,6 +1686,13 @@ struct CheckInputReader
+     uint8_t* rare_begin;
+     uint8_t* rare_end;
+     uint32_t* rare_claims;
++    // For a reading in source order, whose token columns of rare columns are base pages: a bit per 64 bytes of them
++    // (BUSTER_CHECK_RARE_GRANULE_SHIFT), from rare_begin's, that a write's claim sets (check_input_rare_claim). Bytes
++    // whose bit is clear are all zero, and the vector path's reads give 0 for them without touching their page
++    // (check_input_rare_written, `rare_gated`); the scalar path, their twin, reads every entry, and counts the 64 bytes
++    // whose bit a nonzero byte contradicts (CheckInput.visit_misses, check_input_rare_verify). Null otherwise (#628).
++    uint64_t* rare_marks;
++    bool rare_gated;
+     // The tree's traversal (#186, #544): the postorder and the tree's columns (Parser.positions, ends, first_children
+     // and next_siblings: each token's position in the postorder, its subtree's last token, its first child and its next
+     // sibling). The parser's where it derived them; otherwise the reader's own, which check_input_run derives into its
+@@ -1849,15 +1856,27 @@ static bool check_input_use_shadowed(const CheckInputReader* reader, uint32_t to
+     return handle != 0 && check_input_use_point(reader, token) != token && reader->bindings.declaration[handle - 1] > token;
+ }
+ 
++// The bytes of the rare columns' token columns that a bit of CheckInputReader.rare_marks stands for, as a shift: 64, a
++// cache line, which a vector load of them takes at once. A page's bit would do for the reads, but a small unit's
++// columns share a page or two, where one column's write would hide another's missing mark from the scalar path's
++// check; in 64 bytes, the tests' small fixtures find it too.
++#define BUSTER_CHECK_RARE_GRANULE_SHIFT 6
++
+ // Before a write into the token columns of the arena of rare columns at `entry`: where more than one lane writes them
+ // in huge pages (CheckInputReader.rare_claims), the first lane to write a 2 MB region claims it (0: unclaimed, 1: being
+ // faulted in, 2: in place), faults it in with a store of the byte the lane is about to write, and every other lane that
+ // writes the region waits for that, so that no two lanes clear a huge page for it at once (#764, #847). A region holds
+ // a page once the top level's walk wrote it, and its claim then costs a store; a region no lane writes is never faulted
+ // in, and its reads take the huge zero page. Anywhere else (source order, one lane, base pages, a column in the arena's
+-// base pages) it does nothing.
++// base pages) it claims nothing. In source order it marks the entry's 64 bytes written (CheckInputReader.rare_marks).
+ static void check_input_rare_claim(const CheckInputReader* reader, const void* entry)
+ {
++    uint64_t* const marks = reader->rare_marks;
++    if (marks != NULL && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry < reader->rare_end)
++    {
++        const uint64_t granule = ((uintptr_t)entry >> BUSTER_CHECK_RARE_GRANULE_SHIFT) - ((uintptr_t)reader->rare_begin >> BUSTER_CHECK_RARE_GRANULE_SHIFT);
++        marks[granule >> 6] |= UINT64_C(1) << (granule & 63);
++    }
+     uint32_t* const claims = reader->rare_claims;
+     if (claims != 0 && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry < reader->rare_end)
+     {
+@@ -1878,6 +1897,27 @@ static void check_input_rare_claim(const CheckInputReader* reader, const void* e
+     }
+ }
+ 
++// Whether the `bytes` of the rare columns' token columns at `entry` may be other than zero: on the vector path of a reading
++// in source order, 64 bytes no write claimed are all zero (CheckInputReader.rare_marks), so that a read of them can give
++// 0 without touching their page, which in base pages would map the zero page there (#628: of sqlite3.c's 6,673 pages,
++// the walks write 688 and read nearly all). Anywhere else, and outside the token columns, true.
++static inline __attribute__((always_inline)) bool check_input_rare_written(const CheckInputReader* reader, const void* entry, uint64_t bytes)
++{
++    bool result = true;
++    if (reader->rare_gated && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry + bytes <= reader->rare_end)
++    {
++        const uint64_t base = (uintptr_t)reader->rare_begin >> BUSTER_CHECK_RARE_GRANULE_SHIFT;
++        const uint64_t first = ((uintptr_t)entry >> BUSTER_CHECK_RARE_GRANULE_SHIFT) - base;
++        const uint64_t last = (((uintptr_t)entry + bytes - 1) >> BUSTER_CHECK_RARE_GRANULE_SHIFT) - base;
++        result = ((reader->rare_marks[first >> 6] >> (first & 63)) & 1) != 0 || ((reader->rare_marks[last >> 6] >> (last & 63)) & 1) != 0;
++    }
++    return result;
++}
++
++// A rare column's entry at `token`, 0 where no write claimed its 64 bytes (check_input_rare_written).
++#define BUSTER_CHECK_RARE(reader, field, token) \
++    (check_input_rare_written((reader), &(reader)->field[token], sizeof((reader)->field[0])) ? (reader)->field[token] : 0)
++
+ static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* reader, const CheckWarningEvent* event,
+                                                             const CheckWarningNote* notes, uint32_t note_count)
+ {
+@@ -3616,7 +3656,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
+ {
+     const Parser* parser = reader->parser;
+     const uint32_t first = *cursor;
+-    CheckInputSpecifierJob* job = reader->specifier_jobs[first];
++    CheckInputSpecifierJob* job = BUSTER_CHECK_RARE(reader, specifier_jobs, first);
+     uint32_t i = *cursor;
+     uint32_t qualifiers = 0;
+     uint32_t longs = 0;
+@@ -7269,7 +7309,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+     {
+         // A retained, unsupported pragma can alter a declaration's type or layout. Prepare only declarations
+         // whose specifiers and declarator finish before it; a function body or initializer is visited later.
+-        uint32_t cursor = first + (reader->declaration_bases[first] != 0);
++        uint32_t cursor = first + (BUSTER_CHECK_RARE(reader, declaration_bases, first) != 0);
+         while (cursor < reader->resolve_limit)
+         {
+             const uint8_t kind = parser->tokens.kinds[cursor];
+@@ -7296,26 +7336,26 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+             return;
+         }
+     }
+-    const bool continuation = reader->declaration_bases[first] != 0;
++    const bool continuation = BUSTER_CHECK_RARE(reader, declaration_bases, first) != 0;
+     // C23's inferred auto and constexpr (#793), from the specifiers or, for a later declarator, the comma's flags. The
+     // specifier token its declarators share keys the group's first deduced type (declaration_deduced).
+     const uint32_t declaration_group = continuation ? reader->declaration_specifiers[first] : first;
+-    bool c23_auto = continuation && (reader->declaration_flags[first] & BUSTER_CHECK_DECLARATION_AUTO_GROUP) != 0;
+-    bool constexpr_decl = continuation && (reader->declaration_flags[first] & BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP) != 0;
++    bool c23_auto = continuation && (BUSTER_CHECK_RARE(reader, declaration_flags, first) & BUSTER_CHECK_DECLARATION_AUTO_GROUP) != 0;
++    bool constexpr_decl = continuation && (BUSTER_CHECK_RARE(reader, declaration_flags, first) & BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP) != 0;
+     uint32_t constexpr_token = continuation ? first : BUSTER_CHECK_NONE;
+-    const CheckInputSpecifierJob* specifier_job = reader->specifier_jobs[first];
++    const CheckInputSpecifierJob* specifier_job = BUSTER_CHECK_RARE(reader, specifier_jobs, first);
+     const uint32_t vla_begin = specifier_job != 0 ? specifier_job->vla_begin : reader->output->vla_count;
+     const uint32_t definition = continuation ? BUSTER_CHECK_NONE : check_input_specifier_definition(reader, first, count);
+     const bool prepared = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, count);
+     uint32_t i = first + continuation;
+-    bool is_typedef = (reader->declaration_flags[first] & 1) != 0;
+-    bool is_inline = (reader->declaration_flags[first] & 2) != 0;
+-    uint32_t storage = reader->declaration_storage[first];
++    bool is_typedef = (BUSTER_CHECK_RARE(reader, declaration_flags, first) & 1) != 0;
++    bool is_inline = (BUSTER_CHECK_RARE(reader, declaration_flags, first) & 2) != 0;
++    uint32_t storage = BUSTER_CHECK_RARE(reader, declaration_storage, first);
+     reader->specifier_owner = first;
+     reader->specifier_pending = false;
+     const bool free_standing = !continuation && check_input_free_standing(parser, first, count);
+     reader->specifier_free_standing = free_standing;
+-    const TypeId base = !prepared ? 0 : continuation ? reader->declaration_bases[first] : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
++    const TypeId base = !prepared ? 0 : continuation ? BUSTER_CHECK_RARE(reader, declaration_bases, first) : check_input_specifiers(reader, &i, count, &is_typedef, &storage, &is_inline, false);
+     reader->specifier_free_standing = false;
+     reader->specifier_owner = BUSTER_CHECK_NONE;
+     if (reader->specifier_pending)
+@@ -7330,10 +7370,10 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+         constexpr_decl = reader->specifier_constexpr != BUSTER_CHECK_NONE;
+         constexpr_token = reader->specifier_constexpr;
+     }
+-    CheckInputAttributes* common_attributes = continuation ? reader->attribute_bases[first] : reader->specifier_attributes;
+-    const uint8_t base_abi = continuation ? reader->declaration_abis[first] : reader->specifier_abi_origin;
++    CheckInputAttributes* common_attributes = continuation ? BUSTER_CHECK_RARE(reader, attribute_bases, first) : reader->specifier_attributes;
++    const uint8_t base_abi = continuation ? BUSTER_CHECK_RARE(reader, declaration_abis, first) : reader->specifier_abi_origin;
+     const CheckNoderefType* base_noderef = continuation ? check_input_noderef_at(reader->output, first) : reader->specifier_noderef;
+-    const bool thread_local = continuation ? (reader->declaration_flags[first] & 4) != 0 : reader->specifier_thread_local;
++    const bool thread_local = continuation ? (BUSTER_CHECK_RARE(reader, declaration_flags, first) & 4) != 0 : reader->specifier_thread_local;
+     const bool is_static = storage == C_NAME_STATIC;
+     bool valid = base != 0;
+     // A declaration of no declarator declares its tag, or nothing, as clang takes it whatever its storage class, typedef,
+@@ -7978,23 +8018,23 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+                     const uint8_t flags = (uint8_t)(is_typedef | (is_inline << 1) | (thread_local << 2) |
+                                                     (c23_auto ? BUSTER_CHECK_DECLARATION_AUTO_GROUP : 0) |
+                                                     (constexpr_decl ? BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP : 0));
+-                    if (reader->declaration_storage[i] != storage)
++                    if (BUSTER_CHECK_RARE(reader, declaration_storage, i) != storage)
+                     {
+                         check_input_rare_claim(reader, &reader->declaration_storage[i]);
+                         reader->declaration_storage[i] = storage;
+                     }
+-                    if (reader->declaration_flags[i] != flags)
++                    if (BUSTER_CHECK_RARE(reader, declaration_flags, i) != flags)
+                     {
+                         check_input_rare_claim(reader, &reader->declaration_flags[i]);
+                         reader->declaration_flags[i] = flags;
+                     }
+-                    if (reader->declaration_abis[i] != base_abi)
++                    if (BUSTER_CHECK_RARE(reader, declaration_abis, i) != base_abi)
+                     {
+                         check_input_rare_claim(reader, &reader->declaration_abis[i]);
+                         reader->declaration_abis[i] = base_abi;
+                     }
+                     check_input_noderef_set(reader->output, i, base_noderef);
+-                    if (reader->attribute_bases[i] != common_attributes)
++                    if (BUSTER_CHECK_RARE(reader, attribute_bases, i) != common_attributes)
+                     {
+                         check_input_rare_claim(reader, &reader->attribute_bases[i]);
+                         reader->attribute_bases[i] = common_attributes;
+@@ -8774,11 +8814,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin,
+             i = parser->tree.parents[i];
+             continue;
+         }
+-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->designator_valid[i] == 2 && !check_input_initializer_designator(reader, i))
++        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, designator_valid, i) == 2 && !check_input_initializer_designator(reader, i))
+         {
+             break;
+         }
+-        CheckInputSpecifierJob* job = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) ? reader->specifier_finishes[i] : 0;
++        CheckInputSpecifierJob* job = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) ? BUSTER_CHECK_RARE(reader, specifier_finishes, i) : 0;
+         if (__builtin_expect(job != 0, 0) && !job->ready)
+         {
+             CheckValue value = { 0 };
+@@ -8885,7 +8925,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin,
+                 }
+             }
+         }
+-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->selection_type_ends[i] != 0)
++        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, selection_type_ends, i) != 0)
+         {
+             check_input_selection_type(reader, i);
+         }
+@@ -8900,7 +8940,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin,
+         {
+             check_input_vararg_type(reader, i);
+         }
+-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->builtin_type_ends[i] != 0)
++        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, builtin_type_ends, i) != 0)
+         {
+             check_input_builtin_type(reader, i);
+         }
+@@ -8945,7 +8985,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin,
+             (__builtin_expect(kind == PARSE_KIND_EXTENSION, 0) && syntactic && !reader->ignored[i] && i + 1 < parser->tokens.count &&
+              (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)) ||
+             implicit ||
+-            (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && reader->declaration_bases[i] != 0))
++            (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && BUSTER_CHECK_RARE(reader, declaration_bases, i) != 0))
+         {
+             if (kind == PARSE_KIND_LABEL && !reader->ignored[i])
+             {
+@@ -9547,7 +9587,7 @@ static uint8_t check_input_expression_code(const CheckInputReader* reader, uint3
+                          kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
+                          kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
+     uint8_t code;
+-    if (sparse || reader->specifier_finishes[token] != 0)
++    if (sparse || BUSTER_CHECK_RARE(reader, specifier_finishes, token) != 0)
+     {
+         code = CHECK_INPUT_CODE_SCALAR;
+     }
+@@ -9726,8 +9766,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+         // tokens and intrinsics' calls, from the columns the reader wrote before the walk.
+         const __mmask32 low = (__mmask32)lanes;
+         const __mmask32 high = (__mmask32)(lanes >> 32);
+-        const __m512i builtins_low = _mm512_maskz_loadu_epi16(low, reader->builtins + token);
+-        const __m512i builtins_high = _mm512_maskz_loadu_epi16(high, reader->builtins + token + 32);
++        // The rare columns' loads leave out what no write claimed (check_input_rare_written).
++        const __m512i builtins_low = _mm512_maskz_loadu_epi16(check_input_rare_written(reader, reader->builtins + token, 64) ? low : 0, reader->builtins + token);
++        const __m512i builtins_high = _mm512_maskz_loadu_epi16(check_input_rare_written(reader, reader->builtins + token + 32, 64) ? high : 0, reader->builtins + token + 32);
+         const uint64_t builtin = (uint64_t)_mm512_test_epi16_mask(builtins_low, builtins_low) | (uint64_t)_mm512_test_epi16_mask(builtins_high, builtins_high) << 32;
+         const __m512i commas = _mm512_maskz_loadu_epi8(lanes, reader->expression_commas + token);
+         const __m512i initializers = _mm512_maskz_loadu_epi8(lanes, reader->initializers + token);
+@@ -9742,8 +9783,10 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+             const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
+             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
+             // The type queries that finish at the tokens, 8 pointers at a time.
+-            const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, reader->specifier_finishes + at);
+-            const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), reader->specifier_finishes + at + 8);
++            const __mmask8 jobs_lanes_low = check_input_rare_written(reader, reader->specifier_finishes + at, 64) ? (__mmask8)parts : 0;
++            const __mmask8 jobs_lanes_high = check_input_rare_written(reader, reader->specifier_finishes + at + 8, 64) ? (__mmask8)(parts >> 8) : 0;
++            const __m512i jobs_low = _mm512_maskz_loadu_epi64(jobs_lanes_low, reader->specifier_finishes + at);
++            const __m512i jobs_high = _mm512_maskz_loadu_epi64(jobs_lanes_high, reader->specifier_finishes + at + 8);
+             const uint32_t part_specified = (uint32_t)_mm512_test_epi64_mask(jobs_low, jobs_low) | (uint32_t)_mm512_test_epi64_mask(jobs_high, jobs_high) << 8;
+             acts |= (uint64_t)part_acts << part;
+             specified |= (uint64_t)part_specified << part;
+@@ -9809,7 +9852,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+     uint32_t count = 0;
+     // A typeof expression of variably modified type is evaluated, unlike a fixed-type one: its operand's value
+     // must reach the declaration as a discarded expression, which its initializer and other effects then run.
+-    const CheckInputSpecifierJob* specifier_job = reader->specifier_finishes[token];
++    const CheckInputSpecifierJob* specifier_job = BUSTER_CHECK_RARE(reader, specifier_finishes, token);
+     const bool evaluated_specifier = specifier_job != 0 &&
+                                      (specifier_job->variably_modified || check_input_vla_modified(reader->types, specifier_job->result));
+     for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+@@ -10377,7 +10420,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+         const bool arguments = check_graph_has_arguments(op) && op != CHECK_OP_CALL;
+         uint32_t left = arguments ? BUSTER_CHECK_NONE : op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF ?
+                         (reader->query_types[token] == 0 && count == 1 ? a : BUSTER_CHECK_NONE) : a;
+-        if (check_input_complex_builtin((CBuiltinId)reader->builtins[token]))
++        if (check_input_complex_builtin((CBuiltinId)BUSTER_CHECK_RARE(reader, builtins, token)))
+         {
+             left = check_input_add(reader, CHECK_OP_CONVERT, token, left, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+             if (left != BUSTER_CHECK_NONE)
+@@ -10427,7 +10470,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+                 const uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
+                 graph->members[node] = library != 0 ? library : graph->members[node];
+             }
+-            if (reader->builtins[token] != 0)
++            if (BUSTER_CHECK_RARE(reader, builtins, token) != 0)
+             {
+                 graph->members[node] = reader->builtins[token];
+             }
+@@ -10818,9 +10861,10 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
+ }
+ 
+ // The graph's builtin call records the reader's `builtins` (a builtin per token of `count`, 0 for none) need. Nearly
+-// every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin; the scalar path,
+-// its twin, reads every token's.
+-static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t count, bool scalar)
++// every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin, and with
++// `reader` (null for none) none of a page no write claimed (check_input_rare_written); the scalar path, its twin, reads
++// every token's.
++static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, const uint16_t* builtins, uint32_t count, bool scalar)
+ {
+     (void)scalar;
+ 
+@@ -10828,7 +10872,8 @@ static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t
+     uint32_t token = 0;
+     for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 32)
+     {
+-        const __mmask32 lanes = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
++        const bool written = reader == NULL || check_input_rare_written(reader, builtins + token, 64);
++        const __mmask32 lanes = written ? (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32) : 0;
+         const __m512i ids = _mm512_maskz_loadu_epi16(lanes, builtins + token);
+         uint32_t present = (uint32_t)_mm512_test_epi16_mask(ids, ids);
+         while (present != 0)
+@@ -11316,6 +11361,29 @@ static void check_input_target_table(TypeTable* types, const Preprocessor* pp)
+     types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
+ }
+ 
++// The scalar path's check of the marks its writes' claims left (CheckInputReader.rare_marks, #628): the 64 bytes of the
++// rare columns' token columns that hold a byte other than 0 but no mark, which the vector path would have read as zero.
++// Its writes are the vector path's, so that the tests' 0 holds of both.
++static uint32_t check_input_rare_verify(const CheckInputReader* reader)
++{
++    uint32_t result = 0;
++    const uint64_t granule = UINT64_C(1) << BUSTER_CHECK_RARE_GRANULE_SHIFT;
++    const uintptr_t base = (uintptr_t)reader->rare_begin & ~(uintptr_t)(granule - 1);
++    for (uintptr_t at = base; at < (uintptr_t)reader->rare_end; at += granule)
++    {
++        const uint8_t* first = (const uint8_t*)(at > (uintptr_t)reader->rare_begin ? at : (uintptr_t)reader->rare_begin);
++        const uint8_t* last = (const uint8_t*)(at + granule < (uintptr_t)reader->rare_end ? at + granule : (uintptr_t)reader->rare_end);
++        bool nonzero = false;
++        for (const uint8_t* byte = first; !nonzero && byte < last; byte += 1)
++        {
++            nonzero = *byte != 0;
++        }
++        const uint64_t index = (at - base) >> BUSTER_CHECK_RARE_GRANULE_SHIFT;
++        result += nonzero && ((reader->rare_marks[index >> 6] >> (index & 63)) & 1) == 0;
++    }
++    return result;
++}
++
+ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
+                             CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
+@@ -11663,7 +11731,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
+ #undef BUSTER_CHECK_SPARSE_BYTES
+     input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
+-    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
++    // A reading in source order's token columns are base pages too, which only its writes fault in: its vector path reads
++    // none that no write claimed (check_input_rare_written, #628).
++    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared || deferred == 0) : (Arena){ 0 };
+ #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
+     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+     reader.sparse_marks = valid ? arena_push_array(&sparse, mark_words, sizeof(uint64_t), 64) : 0;
+@@ -11677,6 +11747,17 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).
+     reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
+     reader.rare_end = valid ? (uint8_t*)(reader.warning_suppressed + count + 1) : 0;
++    if (valid && deferred == 0)
++    {
++        const uint64_t granules = ((uintptr_t)(reader.rare_end - 1) >> BUSTER_CHECK_RARE_GRANULE_SHIFT) - ((uintptr_t)reader.rare_begin >> BUSTER_CHECK_RARE_GRANULE_SHIFT) + 1;
++        reader.rare_marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (granules + 63) / 64);
++        valid = reader.rare_marks != NULL;
++        if (valid)
++        {
++            memset(reader.rare_marks, 0, (granules + 63) / 64 * sizeof(uint64_t));
++        }
++        reader.rare_gated = !BUSTER_SCALAR_PATH(parser->options.scalar);
++    }
+ #undef BUSTER_CHECK_SPARSE_COLUMNS
+ #undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
+     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
+@@ -12042,7 +12123,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+                         input->graph.transparent_unions = activations;
+                     }
+                 }
+-                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
++                input->graph.builtin_capacity += check_input_builtin_capacity(&reader, reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+                 if (input->graph.builtin_capacity != 0)
+                 {
+                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));
+@@ -12137,6 +12218,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+         input->constant_warnings = NULL;
+         input->constant_warning_ignored = NULL;
+     }
++    if (reader.rare_marks != NULL && !reader.rare_gated)
++    {
++        input->visit_misses += check_input_rare_verify(&reader);
++    }
+     arena_pop_to(scratch, mark);
+     arena_release(&sparse);
+     return valid;
+diff --git a/src/buster/compiler/c_check_input_initializer.c b/src/buster/compiler/c_check_input_initializer.c
+index 254aa594..43d96c02 100644
+--- a/src/buster/compiler/c_check_input_initializer.c
++++ b/src/buster/compiler/c_check_input_initializer.c
+@@ -109,7 +109,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
+     }
+     const bool incomplete = type_kind(reader->types, type) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+     if (valid && (incomplete || check_const_eligible(reader->types, type) || check_input_auto_type(type) ||
+-                  (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
++                  (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+     {
+         check_input_rare_claim(reader, &reader->incomplete_array_types[declaration]);
+         reader->incomplete_array_types[declaration] = incomplete ? type : 0;
+@@ -508,12 +508,12 @@ static bool check_input_initializer_finish(CheckInputReader* reader, uint32_t de
+     const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
+     TypeId type = reader->declared_types[declaration];
+     bool valid = begin < end && end <= parser->tokens.count;
+-    if (valid && (check_input_auto_type(type) || (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
++    if (valid && (check_input_auto_type(type) || (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0))
+     {
+         type = check_input_auto_type_finish(reader, declaration, begin, end, type);
+         valid = type != 0 && check_input_cleanup_deduced(reader, declaration, type);
+     }
+-    if (valid && (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0)
++    if (valid && (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0)
+     {
+         valid = check_input_constexpr_finish(reader, declaration, begin, end, &type);
+     }
+diff --git a/src/buster/compiler/c_check_vla_input.c b/src/buster/compiler/c_check_vla_input.c
+index d380ab75..c58d32d1 100644
+--- a/src/buster/compiler/c_check_vla_input.c
++++ b/src/buster/compiler/c_check_vla_input.c
+@@ -567,7 +567,8 @@ static void check_input_vla_finish(CheckInputReader* reader)
+     bool lifetimes = BUSTER_SCALAR_PATH(parser->options.scalar);
+     for (uint32_t first = 0; !lifetimes && first < parser->tokens.count; first += 16)
+     {
+-        lifetimes = check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
++        // A page of the column no write claimed is all zero (check_input_rare_written, #628).
++        lifetimes = check_input_rare_written(reader, reader->vla_scope_ends + first, 64) && check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
+     }
+     const uint32_t scanned = lifetimes ? parser->tokens.count : 0;
+     uint32_t depth = 0;
+diff --git a/src/buster/compiler/c_checker_test.c b/src/buster/compiler/c_checker_test.c
+index e67d90cf..ab87a86a 100644
+--- a/src/buster/compiler/c_checker_test.c
++++ b/src/buster/compiler/c_checker_test.c
+@@ -6287,8 +6287,8 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
+             builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
+             expected += draw < 2;
+         }
+-        const uint32_t vector = check_input_builtin_capacity(builtins, count, false);
+-        const uint32_t scalar = check_input_builtin_capacity(builtins, count, true);
++        const uint32_t vector = check_input_builtin_capacity(NULL, builtins, count, false);
++        const uint32_t scalar = check_input_builtin_capacity(NULL, builtins, count, true);
+         char description[160];
+         snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
+                  vector, scalar, expected);
+-- 
+2.43.0
+

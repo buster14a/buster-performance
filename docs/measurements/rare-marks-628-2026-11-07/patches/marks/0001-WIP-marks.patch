@@ -1,0 +1,486 @@
+From 7ffaaa4a40096331df3c700e4f7809b5f63ead2a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 13:49:28 +0000
+Subject: [PATCH 1/3] WIP marks
+
+---
+ src/buster/compiler/c_check_binding.c         |   2 +-
+ src/buster/compiler/c_check_common_warnings.c |   4 +
+ src/buster/compiler/c_check_constant.c        |   2 +-
+ src/buster/compiler/c_check_input.c           | 123 ++++++++++++++----
+ src/buster/compiler/c_check_vla_input.c       |   3 +-
+ src/buster/compiler/c_checker_driver.c        |  27 ++++
+ src/buster/compiler/c_checker_test.c          |   4 +-
+ src/buster/compiler/c_checker_units.c         |  16 ++-
+ src/buster/compiler/lane.c                    |  18 ++-
+ 9 files changed, 162 insertions(+), 37 deletions(-)
+
+diff --git a/src/buster/compiler/c_check_binding.c b/src/buster/compiler/c_check_binding.c
+index fc4343c4..6bb33480 100644
+--- a/src/buster/compiler/c_check_binding.c
++++ b/src/buster/compiler/c_check_binding.c
+@@ -44,7 +44,7 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
+ // declarations haven't, so that a use reads the initializer's end alone where there is one (#1489).
+ static TypeId check_input_binding_incomplete(const CheckInputReader* reader, uint32_t declaration, uint32_t token)
+ {
+-    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? reader->incomplete_array_types[declaration] : 0;
++    const TypeId incomplete = reader->incomplete_array_types != 0 && declaration < reader->parser->tokens.count ? BUSTER_CHECK_RARE(reader, incomplete_array_types, declaration) : 0;
+     return incomplete != 0 && token < check_sparse_get(reader->output->initializer_ends, declaration) ? incomplete : 0;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_common_warnings.c b/src/buster/compiler/c_check_common_warnings.c
+index a440782f..06c08611 100644
+--- a/src/buster/compiler/c_check_common_warnings.c
++++ b/src/buster/compiler/c_check_common_warnings.c
+@@ -5297,6 +5297,9 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
+     const char* fail_at = getenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
+     check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
+     check_common_resources.pushes = 0;
++    // What the passes push is theirs alone, and the scratch goes back to where it was after them, so that the backend's
++    // pushes reuse its pages rather than take others past them (#628: 21.7 MB of sqlite3.c's, through the backend's peak).
++    const uint64_t mark = scratch->length;
+     CheckWarningSpelling spell = { 0 };
+     const CheckCommonEnabled enabled =
+     {
+@@ -5321,4 +5324,5 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
+         check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
+     }
+     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
++    arena_pop_to(scratch, mark);
+ }
+diff --git a/src/buster/compiler/c_check_constant.c b/src/buster/compiler/c_check_constant.c
+index bc77845c..85586f87 100644
+--- a/src/buster/compiler/c_check_constant.c
++++ b/src/buster/compiler/c_check_constant.c
+@@ -2670,7 +2670,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
+         };
+         for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+         {
+-            if (input->cached && reader->specifier_finishes[token] != 0 && child < token)
++            if (input->cached && BUSTER_CHECK_RARE(reader, specifier_finishes, token) != 0 && child < token)
+             {
+                 continue;
+             }
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index fe78c53e..87f9d880 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1686,6 +1686,13 @@ struct CheckInputReader
+     uint8_t* rare_begin;
+     uint8_t* rare_end;
+     uint32_t* rare_claims;
++    // For a reading in source order, whose token columns of rare columns are base pages: a bit per page of them, from
++    // rare_begin's, that a write's claim sets (check_input_rare_claim). A page whose bit is clear is all zero, and the
++    // vector path's reads give 0 for it without touching it (check_input_rare_written, `rare_gated`); the scalar path,
++    // their twin, reads every entry, and counts each page whose bit a nonzero byte contradicts (CheckInput.visit_misses,
++    // check_input_rare_verify). Null otherwise (#628).
++    uint64_t* rare_pages;
++    bool rare_gated;
+     // The tree's traversal (#186, #544): the postorder and the tree's columns (Parser.positions, ends, first_children
+     // and next_siblings: each token's position in the postorder, its subtree's last token, its first child and its next
+     // sibling). The parser's where it derived them; otherwise the reader's own, which check_input_run derives into its
+@@ -1849,9 +1856,15 @@ static bool check_input_use_shadowed(const CheckInputReader* reader, uint32_t to
+ // writes the region waits for that, so that no two lanes clear a huge page for it at once (#764, #847). A region holds
+ // a page once the top level's walk wrote it, and its claim then costs a store; a region no lane writes is never faulted
+ // in, and its reads take the huge zero page. Anywhere else (source order, one lane, base pages, a column in the arena's
+-// base pages) it does nothing.
++// base pages) it claims nothing. In source order it marks the entry's page written (CheckInputReader.rare_pages).
+ static void check_input_rare_claim(const CheckInputReader* reader, const void* entry)
+ {
++    uint64_t* const pages = reader->rare_pages;
++    if (pages != NULL && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry < reader->rare_end)
++    {
++        const uint64_t page = ((uintptr_t)entry >> 12) - ((uintptr_t)reader->rare_begin >> 12);
++        pages[page >> 6] |= UINT64_C(1) << (page & 63);
++    }
+     uint32_t* const claims = reader->rare_claims;
+     if (claims != 0 && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry < reader->rare_end)
+     {
+@@ -1872,6 +1885,26 @@ static void check_input_rare_claim(const CheckInputReader* reader, const void* e
+     }
+ }
+ 
++// Whether the `bytes` of the rare columns' token columns at `entry` may be other than zero: on the vector path of a reading
++// in source order, a page no write claimed is all zero (CheckInputReader.rare_pages), so that a read of it can give 0
++// without touching it, which in base pages would map the zero page there (#628: of sqlite3.c's 6,673 pages, the walks
++// write 688 and read nearly all). Anywhere else, and outside the token columns, true.
++static inline __attribute__((always_inline)) bool check_input_rare_written(const CheckInputReader* reader, const void* entry, uint64_t bytes)
++{
++    bool result = true;
++    if (reader->rare_gated && (const uint8_t*)entry >= reader->rare_begin && (const uint8_t*)entry + bytes <= reader->rare_end)
++    {
++        const uint64_t first = ((uintptr_t)entry >> 12) - ((uintptr_t)reader->rare_begin >> 12);
++        const uint64_t last = (((uintptr_t)entry + bytes - 1) >> 12) - ((uintptr_t)reader->rare_begin >> 12);
++        result = ((reader->rare_pages[first >> 6] >> (first & 63)) & 1) != 0 || ((reader->rare_pages[last >> 6] >> (last & 63)) & 1) != 0;
++    }
++    return result;
++}
++
++// A rare column's entry at `token`, 0 where its page is unwritten (check_input_rare_written).
++#define BUSTER_CHECK_RARE(reader, field, token) \
++    (check_input_rare_written((reader), &(reader)->field[token], sizeof((reader)->field[0])) ? (reader)->field[token] : 0)
++
+ static __attribute__((unused)) bool check_input_warning_event(CheckInputReader* reader, const CheckWarningEvent* event,
+                                                             const CheckWarningNote* notes, uint32_t note_count)
+ {
+@@ -3610,7 +3643,7 @@ static TypeId check_input_specifiers(CheckInputReader* reader, uint32_t* cursor,
+ {
+     const Parser* parser = reader->parser;
+     const uint32_t first = *cursor;
+-    CheckInputSpecifierJob* job = reader->specifier_jobs[first];
++    CheckInputSpecifierJob* job = BUSTER_CHECK_RARE(reader, specifier_jobs, first);
+     uint32_t i = *cursor;
+     uint32_t qualifiers = 0;
+     uint32_t longs = 0;
+@@ -7294,17 +7327,17 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+     // C23's inferred auto and constexpr (#793), from the specifiers or, for a later declarator, the comma's flags. The
+     // specifier token its declarators share keys the group's first deduced type (declaration_deduced).
+     const uint32_t declaration_group = continuation ? reader->declaration_specifiers[first] : first;
+-    bool c23_auto = continuation && (reader->declaration_flags[first] & BUSTER_CHECK_DECLARATION_AUTO_GROUP) != 0;
+-    bool constexpr_decl = continuation && (reader->declaration_flags[first] & BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP) != 0;
++    bool c23_auto = continuation && (BUSTER_CHECK_RARE(reader, declaration_flags, first) & BUSTER_CHECK_DECLARATION_AUTO_GROUP) != 0;
++    bool constexpr_decl = continuation && (BUSTER_CHECK_RARE(reader, declaration_flags, first) & BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP) != 0;
+     uint32_t constexpr_token = continuation ? first : BUSTER_CHECK_NONE;
+-    const CheckInputSpecifierJob* specifier_job = reader->specifier_jobs[first];
++    const CheckInputSpecifierJob* specifier_job = BUSTER_CHECK_RARE(reader, specifier_jobs, first);
+     const uint32_t vla_begin = specifier_job != 0 ? specifier_job->vla_begin : reader->output->vla_count;
+     const uint32_t definition = continuation ? BUSTER_CHECK_NONE : check_input_specifier_definition(reader, first, count);
+     const bool prepared = definition == BUSTER_CHECK_NONE || check_input_tag_definition(reader, definition, count);
+     uint32_t i = first + continuation;
+-    bool is_typedef = (reader->declaration_flags[first] & 1) != 0;
+-    bool is_inline = (reader->declaration_flags[first] & 2) != 0;
+-    uint32_t storage = reader->declaration_storage[first];
++    bool is_typedef = (BUSTER_CHECK_RARE(reader, declaration_flags, first) & 1) != 0;
++    bool is_inline = (BUSTER_CHECK_RARE(reader, declaration_flags, first) & 2) != 0;
++    uint32_t storage = BUSTER_CHECK_RARE(reader, declaration_storage, first);
+     reader->specifier_owner = first;
+     reader->specifier_pending = false;
+     const bool free_standing = !continuation && check_input_free_standing(parser, first, count);
+@@ -7327,7 +7360,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+     CheckInputAttributes* common_attributes = continuation ? reader->attribute_bases[first] : reader->specifier_attributes;
+     const uint8_t base_abi = continuation ? reader->declaration_abis[first] : reader->specifier_abi_origin;
+     const CheckNoderefType* base_noderef = continuation ? check_input_noderef_at(reader->output, first) : reader->specifier_noderef;
+-    const bool thread_local = continuation ? (reader->declaration_flags[first] & 4) != 0 : reader->specifier_thread_local;
++    const bool thread_local = continuation ? (BUSTER_CHECK_RARE(reader, declaration_flags, first) & 4) != 0 : reader->specifier_thread_local;
+     const bool is_static = storage == C_NAME_STATIC;
+     bool valid = base != 0;
+     // A declaration of no declarator declares its tag, or nothing, as clang takes it whatever its storage class, typedef,
+@@ -7972,23 +8005,23 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+                     const uint8_t flags = (uint8_t)(is_typedef | (is_inline << 1) | (thread_local << 2) |
+                                                     (c23_auto ? BUSTER_CHECK_DECLARATION_AUTO_GROUP : 0) |
+                                                     (constexpr_decl ? BUSTER_CHECK_DECLARATION_CONSTEXPR_GROUP : 0));
+-                    if (reader->declaration_storage[i] != storage)
++                    if (BUSTER_CHECK_RARE(reader, declaration_storage, i) != storage)
+                     {
+                         check_input_rare_claim(reader, &reader->declaration_storage[i]);
+                         reader->declaration_storage[i] = storage;
+                     }
+-                    if (reader->declaration_flags[i] != flags)
++                    if (BUSTER_CHECK_RARE(reader, declaration_flags, i) != flags)
+                     {
+                         check_input_rare_claim(reader, &reader->declaration_flags[i]);
+                         reader->declaration_flags[i] = flags;
+                     }
+-                    if (reader->declaration_abis[i] != base_abi)
++                    if (BUSTER_CHECK_RARE(reader, declaration_abis, i) != base_abi)
+                     {
+                         check_input_rare_claim(reader, &reader->declaration_abis[i]);
+                         reader->declaration_abis[i] = base_abi;
+                     }
+                     check_input_noderef_set(reader->output, i, base_noderef);
+-                    if (reader->attribute_bases[i] != common_attributes)
++                    if (BUSTER_CHECK_RARE(reader, attribute_bases, i) != common_attributes)
+                     {
+                         check_input_rare_claim(reader, &reader->attribute_bases[i]);
+                         reader->attribute_bases[i] = common_attributes;
+@@ -9716,8 +9749,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+         // tokens and intrinsics' calls, from the columns the reader wrote before the walk.
+         const __mmask32 low = (__mmask32)lanes;
+         const __mmask32 high = (__mmask32)(lanes >> 32);
+-        const __m512i builtins_low = _mm512_maskz_loadu_epi16(low, reader->builtins + token);
+-        const __m512i builtins_high = _mm512_maskz_loadu_epi16(high, reader->builtins + token + 32);
++        // The rare columns' loads leave out what no write claimed (check_input_rare_written).
++        const __m512i builtins_low = _mm512_maskz_loadu_epi16(check_input_rare_written(reader, reader->builtins + token, 64) ? low : 0, reader->builtins + token);
++        const __m512i builtins_high = _mm512_maskz_loadu_epi16(check_input_rare_written(reader, reader->builtins + token + 32, 64) ? high : 0, reader->builtins + token + 32);
+         const uint64_t builtin = (uint64_t)_mm512_test_epi16_mask(builtins_low, builtins_low) | (uint64_t)_mm512_test_epi16_mask(builtins_high, builtins_high) << 32;
+         const __m512i commas = _mm512_maskz_loadu_epi8(lanes, reader->expression_commas + token);
+         const __m512i initializers = _mm512_maskz_loadu_epi8(lanes, reader->initializers + token);
+@@ -9732,8 +9766,10 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+             const __mmask16 part_acts = children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part);
+             _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
+             // The type queries that finish at the tokens, 8 pointers at a time.
+-            const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, reader->specifier_finishes + at);
+-            const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), reader->specifier_finishes + at + 8);
++            const __mmask8 jobs_lanes_low = check_input_rare_written(reader, reader->specifier_finishes + at, 64) ? (__mmask8)parts : 0;
++            const __mmask8 jobs_lanes_high = check_input_rare_written(reader, reader->specifier_finishes + at + 8, 64) ? (__mmask8)(parts >> 8) : 0;
++            const __m512i jobs_low = _mm512_maskz_loadu_epi64(jobs_lanes_low, reader->specifier_finishes + at);
++            const __m512i jobs_high = _mm512_maskz_loadu_epi64(jobs_lanes_high, reader->specifier_finishes + at + 8);
+             const uint32_t part_specified = (uint32_t)_mm512_test_epi64_mask(jobs_low, jobs_low) | (uint32_t)_mm512_test_epi64_mask(jobs_high, jobs_high) << 8;
+             acts |= (uint64_t)part_acts << part;
+             specified |= (uint64_t)part_specified << part;
+@@ -10792,9 +10828,10 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
+ }
+ 
+ // The graph's builtin call records the reader's `builtins` (a builtin per token of `count`, 0 for none) need. Nearly
+-// every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin; the scalar path,
+-// its twin, reads every token's.
+-static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t count, bool scalar)
++// every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin, and with
++// `reader` (null for none) none of a page no write claimed (check_input_rare_written); the scalar path, its twin, reads
++// every token's.
++static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, const uint16_t* builtins, uint32_t count, bool scalar)
+ {
+     (void)scalar;
+ 
+@@ -10802,7 +10839,8 @@ static uint32_t check_input_builtin_capacity(const uint16_t* builtins, uint32_t
+     uint32_t token = 0;
+     for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 32)
+     {
+-        const __mmask32 lanes = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
++        const bool written = reader == NULL || check_input_rare_written(reader, builtins + token, 64);
++        const __mmask32 lanes = written ? (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32) : 0;
+         const __m512i ids = _mm512_maskz_loadu_epi16(lanes, builtins + token);
+         uint32_t present = (uint32_t)_mm512_test_epi16_mask(ids, ids);
+         while (present != 0)
+@@ -11290,6 +11328,28 @@ static void check_input_target_table(TypeTable* types, const Preprocessor* pp)
+     types->atomic_inline_16 = (pp->options.target.features & BUSTER_X86_FEATURE(CX16)) != 0;
+ }
+ 
++// The scalar path's check of the marks its writes' claims left (CheckInputReader.rare_pages, #628): the pages of the rare
++// columns' token columns that hold a byte other than 0 but no mark, which the vector path would have read as zero. Its
++// writes are the vector path's, so that the tests' 0 holds of both.
++static uint32_t check_input_rare_verify(const CheckInputReader* reader)
++{
++    uint32_t result = 0;
++    const uintptr_t base = (uintptr_t)reader->rare_begin & ~(uintptr_t)4095;
++    for (uintptr_t page = base; page < (uintptr_t)reader->rare_end; page += 4096)
++    {
++        const uint8_t* first = (const uint8_t*)(page > (uintptr_t)reader->rare_begin ? page : (uintptr_t)reader->rare_begin);
++        const uint8_t* last = (const uint8_t*)(page + 4096 < (uintptr_t)reader->rare_end ? page + 4096 : (uintptr_t)reader->rare_end);
++        bool nonzero = false;
++        for (const uint8_t* byte = first; !nonzero && byte < last; byte += 1)
++        {
++            nonzero = *byte != 0;
++        }
++        const uint64_t index = (page - base) >> 12;
++        result += nonzero && ((reader->rare_pages[index >> 6] >> (index & 63)) & 1) == 0;
++    }
++    return result;
++}
++
+ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
+                             CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
+@@ -11629,7 +11689,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
+ #undef BUSTER_CHECK_SPARSE_BYTES
+     input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
+-    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
++    // A reading in source order's token columns are base pages too, which only its writes fault in: its vector path reads
++    // none that no write claimed (check_input_rare_written, #628).
++    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared || deferred == 0) : (Arena){ 0 };
+ #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
+     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+     reader.sparse_marks = valid ? arena_push_array(&sparse, mark_words, sizeof(uint64_t), 64) : 0;
+@@ -11643,6 +11705,17 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).
+     reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
+     reader.rare_end = valid ? (uint8_t*)(reader.warning_suppressed + count + 1) : 0;
++    if (valid && deferred == 0)
++    {
++        const uint64_t pages = ((uintptr_t)(reader.rare_end - 1) >> 12) - ((uintptr_t)reader.rare_begin >> 12) + 1;
++        reader.rare_pages = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (pages + 63) / 64);
++        valid = reader.rare_pages != NULL;
++        if (valid)
++        {
++            memset(reader.rare_pages, 0, (pages + 63) / 64 * sizeof(uint64_t));
++        }
++        reader.rare_gated = !BUSTER_SCALAR_PATH(parser->options.scalar);
++    }
+ #undef BUSTER_CHECK_SPARSE_COLUMNS
+ #undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
+     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
+@@ -12008,7 +12081,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+                         input->graph.transparent_unions = activations;
+                     }
+                 }
+-                input->graph.builtin_capacity += check_input_builtin_capacity(reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
++                input->graph.builtin_capacity += check_input_builtin_capacity(&reader, reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+                 if (input->graph.builtin_capacity != 0)
+                 {
+                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));
+@@ -12103,6 +12176,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+         input->constant_warnings = NULL;
+         input->constant_warning_ignored = NULL;
+     }
++    if (reader.rare_pages != NULL && !reader.rare_gated)
++    {
++        input->visit_misses += check_input_rare_verify(&reader);
++    }
+     arena_pop_to(scratch, mark);
+     arena_release(&sparse);
+     return valid;
+diff --git a/src/buster/compiler/c_check_vla_input.c b/src/buster/compiler/c_check_vla_input.c
+index d380ab75..c58d32d1 100644
+--- a/src/buster/compiler/c_check_vla_input.c
++++ b/src/buster/compiler/c_check_vla_input.c
+@@ -567,7 +567,8 @@ static void check_input_vla_finish(CheckInputReader* reader)
+     bool lifetimes = BUSTER_SCALAR_PATH(parser->options.scalar);
+     for (uint32_t first = 0; !lifetimes && first < parser->tokens.count; first += 16)
+     {
+-        lifetimes = check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
++        // A page of the column no write claimed is all zero (check_input_rare_written, #628).
++        lifetimes = check_input_rare_written(reader, reader->vla_scope_ends + first, 64) && check_input_scan_nonzero32(reader->vla_scope_ends, first, parser->tokens.count) != 0;
+     }
+     const uint32_t scanned = lifetimes ? parser->tokens.count : 0;
+     uint32_t depth = 0;
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 831ed532..fee7b419 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -3908,6 +3908,7 @@ typedef struct CheckUnitsKept CheckUnitsKept;
+ static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
+ static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
+ static bool check_units_discard_huge(struct CheckUnitsLane* lane);
++static bool check_units_unit_left(const struct CheckUnitsLane* lane);
+ 
+ // A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
+ // worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
+@@ -4013,6 +4014,28 @@ static void check_driver_deferred_give_back(void* context)
+ // If `fatal` is nonnull, retain the publication's fatal state before releasing the preprocessor: a multi-unit caller
+ // uses that state to publish the canonical prefix, independently of which lane finishes first.
+ // Returns the command's exit status: 0 for a unit without errors whose outputs were written.
++// The bytes a token of the scratch that check-expressions, check-declarations, static-data and check_program push
++// before check_program gives its pages back (#628): about 64 MB of sqlite3.c's 716,157 tokens. The discard after the
++// reader keeps that many past the scratch's length, which they then find resident rather than fault in again, cleared.
++#define BUSTER_CHECK_DRIVER_SCRATCH_REUSE 96
++
++// Gives the kernel back the scratch's pages past its length (arena_discard, #628): those of a pass whose pushes are over,
++// which the passes after it, pushing fewer, would otherwise hold through the compile's peak. A lane of several units
++// with another to compile (check_units_unit_left) gives them back in whole huge pages, as check_program does
++// (CheckProgramOptions.discard_huge, #777): the huge page a discard frees part of is split, and the next unit would
++// fault it in a base page at a time.
++static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lanes, uint64_t kept)
++{
++    if (lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane))
++    {
++        arena_discard_huge(scratch);
++    }
++    else
++    {
++        arena_discard_past(scratch, kept);
++    }
++}
++
+ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
+                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
+                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+@@ -4211,6 +4234,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                                                   repairing ? repair.original_end : checking->tokens.count, selected);
+             }
+             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
++            // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
++            // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
++            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE).
++            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)checking->tokens.count);
+             if (stage_clock != NULL && deferring)
+             {
+                 stage_clock->deferred = true;
+diff --git a/src/buster/compiler/c_checker_test.c b/src/buster/compiler/c_checker_test.c
+index 65bf765d..6503bd37 100644
+--- a/src/buster/compiler/c_checker_test.c
++++ b/src/buster/compiler/c_checker_test.c
+@@ -6287,8 +6287,8 @@ static __attribute__((noinline)) void check_test_builtin_capacity(CheckTest* tes
+             builtins[i] = draw < 2 ? recorded[pick % BUSTER_ARRAY_LENGTH(recorded)] : draw < 4 ? unrecorded[pick % BUSTER_ARRAY_LENGTH(unrecorded)] : 0;
+             expected += draw < 2;
+         }
+-        const uint32_t vector = check_input_builtin_capacity(builtins, count, false);
+-        const uint32_t scalar = check_input_builtin_capacity(builtins, count, true);
++        const uint32_t vector = check_input_builtin_capacity(NULL, builtins, count, false);
++        const uint32_t scalar = check_input_builtin_capacity(NULL, builtins, count, true);
+         char description[160];
+         snprintf(description, sizeof(description), "builtin call records of %u tokens: %u by the vector path and %u by the scalar one, for %u", count,
+                  vector, scalar, expected);
+diff --git a/src/buster/compiler/c_checker_units.c b/src/buster/compiler/c_checker_units.c
+index c2dcf57e..11babd34 100644
+--- a/src/buster/compiler/c_checker_units.c
++++ b/src/buster/compiler/c_checker_units.c
+@@ -173,13 +173,19 @@ struct CheckUnitsRun
+     uint32_t started;
+ };
+ 
+-// Whether `lane`'s unit gives its scratch's pages back in whole huge pages (CheckProgramOptions.discard_huge, #777),
+-// counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
+-// likely this one, pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in
+-// whole huge pages where none was left to take.
++// Whether a unit of `lane`'s run is still to be taken, which a lane that finishes its unit takes next, likely this one,
++// pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in whole huge pages
++// where none was left to take.
++static bool check_units_unit_left(const CheckUnitsLane* lane)
++{
++    return lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
++}
++
++// Whether `lane`'s unit gives its scratch's pages back in whole huge pages after check_program
++// (CheckProgramOptions.discard_huge, #777), counted on the lane: when a unit is left (check_units_unit_left).
+ static bool check_units_discard_huge(CheckUnitsLane* lane)
+ {
+-    const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
++    const bool result = check_units_unit_left(lane);
+     lane->discarded_huge += result ? 1 : 0;
+     return result;
+ }
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index c67f50a5..b6114afd 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -291,6 +291,10 @@ static __attribute__((unused)) void arena_discard(Arena* arena);
+ // kept, at most 2 MB: freeing it whole made each unit take a fresh one, cleared by the kernel, and synth's link by 8
+ // lanes took 4.3% longer than with arena_discard, where keeping it took 2.2% less.
+ static __attribute__((unused)) void arena_discard_huge(Arena* arena);
++// arena_discard of the pages past `kept` bytes from the arena's start, or past its length if that is further: for an
++// arena whose next users push about `kept` bytes into it again, which they then find resident rather than fault in
++// again, cleared (#628: the C driver's scratch after the reader).
++static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t kept);
+ // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
+ // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
+ // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
+@@ -1011,12 +1015,13 @@ static bool arena_untouched(const Arena* arena)
+ 
+ // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
+ // with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
+-static void arena_discard_to(Arena* arena, bool whole)
++static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
+ {
+     if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
+     {
+         const uintptr_t base = (uintptr_t)arena->base;
+-        const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++        const uint64_t kept = from > arena->length ? from : arena->length;
++        const uintptr_t begin = (base + kept + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+         const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
+         const uintptr_t last = base + (arena->peak < written ? arena->peak : written);
+         const uintptr_t end = whole ? last & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1) :
+@@ -1030,12 +1035,17 @@ static void arena_discard_to(Arena* arena, bool whole)
+ 
+ static void arena_discard(Arena* arena)
+ {
+-    arena_discard_to(arena, false);
++    arena_discard_to(arena, 0, false);
++}
++
++static void arena_discard_past(Arena* arena, uint64_t kept)
++{
++    arena_discard_to(arena, kept, false);
+ }
+ 
+ static void arena_discard_huge(Arena* arena)
+ {
+-    arena_discard_to(arena, true);
++    arena_discard_to(arena, 0, true);
+ }
+ 
+ static void arena_static_base_pages(void)
+-- 
+2.43.0
+
