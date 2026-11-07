@@ -20,6 +20,19 @@ Every measured object had SHA-256 `191eae04d79d452b48af6f49907eefb8dac4709f935f4
 
 **Limits:** whole-process numerical equality was not observed. This is no observed instruction regression on the specified no-target-attribute input, not a general throughput or speedup claim. The isolated head also counts more instructions than the original PR integrated with the same main; isolation is not claimed as a speedup. The checker string pools have identical string multisets but different byte ordering, confirmed by an independent hosted artifact inspection; their hashes differ. Binary/data placement can change unrelated executed library paths. These observations do not attribute every residual.
 
+## Gated-walk audit
+
+A separate [9700X GDB audit](https://github.com/buster14a/buster/actions/runs/42373978941/job/128407705526) used the unchanged current-head executable (SHA-256 checked before and after). Breakpoints covered `check_target_feature_columns`, `check_target_feature_emission_prepare`, and `check_target_feature_label_roots`.
+
+| Input | Combined breakpoint hits | Result |
+| --- | ---: | --- |
+| Frozen no-target-attribute SQLite | **0** | Normal exit; the object retained SHA-256 `191eae04d79d452b48af6f49907eefb8dac4709f935f49fc2ae63a6a7fe4cb33` |
+| Nested-case target-bearing positive control | **4** | Expected three located AVX2 target-feature errors |
+
+This confirms that the measured plain unit does not enter the gated emission analysis, while the positive control demonstrates working breakpoints and an active analysis. It is an instrumented control, separate from the uninstrumented instruction counts, and does not claim whole-process numerical equality.
+
+The source, exact GDB command generation and full log are retained as [gated-walk.sh](harness/gated-walk.sh), [gated-walk.yml](harness/gated-walk.yml), and [gated-walk.log](raw/gated-walk.log). The immutable Buster diagnostic workflow commit is `68c48a897ba2cfa9f6cbcf60b49eaf036bd768d0`.
+
 ## Inputs and identities
 
 - Frozen SQLite: `/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c`, SHA-256 `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`.
