@@ -73,3 +73,28 @@ this record's owner line and `status=0`. `r2` passes the same off-host checks (`
 
 **The objects** are the same bytes (`ab/after-1692/objects.sha`). In the builds' own profiles,
 `check_graph_record_nodes` goes from 1.03% of the cycles to below 0.1%, and the flush from 1.05% to 1.79%.
+
+### A refinement that didn't pay (`ab/refined-*`, `raw/r3`)
+
+In `r2`'s profile, the recording's gathers were most of the flush's samples:
+- a leaf's type and overload head from its record;
+- three operands' purity from `recorded_pure`.
+
+`r3` (`65e6d83b901294b9e37033a5f79df472c6115fc0`, `scripts/run5.sh`) replaced them:
+- **Leaves.** It kept a leaf's purity as a batch byte, written with the leaf.
+- **Operands.** It took their purity lane by lane in node order, as the vector validator does.
+
+It gives the same objects, passes the same checks, and its recording equals the validation on `sqlite3.c`
+(`raw/local-checks.txt`). It was measured twice, every run with `held=1` and `status=0`:
+
+| A/B | wall | user cycles | user instructions | `check-input`, each way |
+| --- | ---: | ---: | ---: | --- |
+| `m2` against `r3` | −0.68% (8 of 8) | −0.77% | −0.28% | 44.021 → 43.318 ms |
+| `r2` against `r3` | −0.30% (5 of 8) | −0.27% | +0.41% | 43.122 / 43.113 ms |
+
+Against `r2` it is no faster:
+- **`check-input`** is the same both ways;
+- **The rounds' cycles** overlap (573.8–579.9 M against 573.1–577.9 M);
+- **The flush** fell from 1.79% to 1.31% of the cycles, but the removed gathers had overlapped with the flush's other work, and the loop added instructions.
+
+So the branch reverted it, and the change is `r2`.
