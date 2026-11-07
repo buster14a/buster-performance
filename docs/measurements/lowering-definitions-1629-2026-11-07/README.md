@@ -18,16 +18,17 @@ section's times the path after checking alone, checking outside the time.
 | --- | --- | --- |
 | `main418` | `3bfb4a72a51f4a7872090905d52f92b95b3e1375` | main just before #418's merge: #442's tree and executable, reused |
 | `main` | `53854a7c2e5f9b2d48d73c967329597650943a42` | main on 2026-11-07, the branch's base |
-| `c1` | `main` with `patches/c1.patch` | the selection's two indexes, the library loop and the emission's clears (a428ee56, fffdcdbc, be1a06bb) |
+| `c1` | `main` with `patches/c1.patch` | the selection's two indexes, the library loop and the emission's clears |
 | `c2` | `main` with `patches/c2.patch` | `c1`, and the runtime names' lookups by their home buckets without a branch (not kept) |
 | `c3` | `main` with `patches/c3.patch` | `c2`, the object writer's classes without atoms and the helpers' key table made on demand |
 | `c4` | `main` with `patches/c4.patch` | `c3`, and the runtime names' home buckets prefetched before the lookups (not kept) |
 | `c5` | `main` with `patches/c5.patch` | `c4` without `c2`'s lookups |
-| `c6` | `main` with `patches/c6.patch` | `c1` and the object writer's classes without atoms: **the branch as proposed** (3d129eac) |
+| `c6` | `main` with `patches/c6.patch` | `c1` and the object writer's classes without atoms: **the branch as proposed** |
 
-Each patch is `git diff 53854a7c` of the tree's state on buster14a/buster's branch `claude/confident-hypatia-i2myfn`;
-`c6.patch` is `git diff 53854a7c 3d129eac`, the branch's code (its later commit changes documentation alone). `c2` to
-`c5`'s commits were not kept, so their patches are their source. Each tree is `git archive` of `main` with its patch
+Each patch is `git diff 53854a7c` of the tree's state on buster14a/buster's branch `claude/confident-hypatia-i2myfn`
+before it was rebased: `c1.patch` its first three commits, `c6.patch` its four code commits. Rebased onto main at
+`32f473bb` for its pull request, the same four commits are `efdac1b3`, `6be49869`, `4540092c` and `9db4b5dd` (the next
+changes documentation alone). `c2` to `c5`'s commits were not kept, so their patches are their source. Each tree is `git archive` of `main` with its patch
 applied and #442's stage-split harness added and registered (`scripts/build-trees.sh`, `scripts/emit_ab_now.c`,
 `scripts/register_now.py`, as in #442's record), built with `BUSTER_DEBUG_INFO=0 ./build.sh` (clang 23.1.1), each build
 in a lock hold of its own (`9700x/builds/`). `manifests/source-*.sha256` lists every file of each tree as built,
@@ -139,9 +140,9 @@ No change shows there: the path after checking saves about 35 µs of the 220 pro
 
 ## Correctness
 
-On the Xeon VM, at the branch's head (`c6`'s source): every c-testsuite program's and synthetic unit's object by `-c`,
-`-c -g`, `-c --scalar` and `-c -funsigned-char` (912 objects, `scripts/objects.sh`), and `main.c`'s by `-c`, byte for
-byte `main`'s; `test-checker` (803,612 checks), `test-check-lanes`, `test-check-units`, `test-tier0 --cross-check`,
+On the Xeon VM, at `c6`'s source and again after the rebase onto `32f473bb` (against that main): every c-testsuite
+program's and synthetic unit's object by `-c`, `-c -g`, `-c --scalar` and `-c -funsigned-char` (912 objects,
+`scripts/objects.sh`), and `main.c`'s by `-c`, byte for byte main's; `test-checker` (803,612 checks), `test-check-lanes`, `test-check-units`, `test-tier0 --cross-check`,
 `test-check-debug --cross-check`, `test-emission-metadata`, `test-calling-convention`, `test-baked-tables`,
 `test-refinement`, `test-object-writer`, `test-link` and `test-c-testsuite --cross-check` (220 of 220). On the 9700X,
 the PR's CI.
