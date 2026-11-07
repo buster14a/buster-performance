@@ -1,0 +1,113 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index 58a56391..66382832 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -215,6 +215,9 @@ struct CheckClock
+     // command that never reached its flow).
+     uint32_t lanes_asked;
+     uint32_t lanes;
++    // Whether the process's huge pages were off because the host was busy when it started (#672: lane.c's
++    // arena_pages_busy), which the driver copies in; the report says `busy` for them rather than `off`.
++    bool pages_busy;
+     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
+     // #1038), which the report gives on a `time-check` line; its parts' (CheckInput.expression_part_ticks, in
+     // check_clock_walk_parts' order), each on a `time-check expressions.PART` line; and the minor faults and system
+@@ -444,7 +447,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
+     // Whether transparent huge pages were off for the process (#1109, arena_page_policy), off because the host was busy
+     // when it started (#672), or as the system has them.
+     const bool pages_off = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1;
+-    fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off && arena_pages_busy ? "busy" : pages_off ? "off" : "system");
++    fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off && stage_clock->pages_busy ? "busy" : pages_off ? "off" : "system");
+     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
+     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
+     fprintf(stream, "time-process\tstage-system-status\t%s\n", stage_clock->usage_available ? "available" : "unavailable");
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index ab17f51a..0ccf0063 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -4805,6 +4805,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     if (time_stages)
+     {
+         check_clock_start(&clock_storage);
++        clock_storage.pages_busy = arena_pages_busy;
+     }
+     time_stages = false;
+     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 91f71cfa..2631bf56 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -696,13 +696,6 @@ static Arena arena_reserve(uint64_t capacity)
+ // are at least 1/BUSTER_ARENA_BUSY_SHARE of its CPUs online, and two or more.
+ #define BUSTER_ARENA_BUSY_SHARE 4
+ 
+-// Whether the host is busy: other processes run beside this one on enough of its cores that their memory traffic, not
+-// their faults, bounds what each does (#672). Independent compiles of the frozen sqlite3.c on the 9700X, one per core
+-// (8 cores, 15 CPUs online): on 8 they ran 15.6% faster with base pages than with huge pages (269.7 against 233.2 MB/s
+-// of source; 15% fewer user cycles, 6% fewer kernel cycles though 11 times the faults), as fast on 4, and slower on 2
+-// and 1 (11% and 16%). A huge page's first touch clears 2 MB at once, which an arena may use little of, and which the
+-// other cores' traffic evicts before the arena writes it; a base page is cleared as it is first written. Reads two small
+-// files, the second only where more than this process runs.
+ // The tasks runnable that `length` bytes of /proc/loadavg say ("LOAD1 LOAD5 LOAD15 RUNNABLE/TASKS LAST": the digits
+ // before the slash), at most UINT32_MAX; 0 for text that doesn't say.
+ static uint64_t arena_loadavg_runnable(const char* text, uint64_t length)
+@@ -722,6 +715,13 @@ static uint64_t arena_loadavg_runnable(const char* text, uint64_t length)
+     return runnable;
+ }
+ 
++// Whether the host is busy: other processes run beside this one on enough of its cores that their memory traffic, not
++// their faults, bounds what each does (#672). Independent compiles of the frozen sqlite3.c on the 9700X, one per core
++// (8 cores, 15 CPUs online): on 8 they ran 15.6% faster with base pages than with huge pages (269.7 against 233.2 MB/s
++// of source; 15% fewer user cycles, 6% fewer kernel cycles though 11 times the faults), as fast on 4, and slower on 2
++// and 1 (11% and 16%). A huge page's first touch clears 2 MB at once, which an arena may use little of, and which the
++// other cores' traffic can evict before the arena writes it; a base page is cleared as it is first written. Reads two
++// small files, the second only where more than this process runs.
+ static bool arena_host_busy(void)
+ {
+     bool result = false;
+@@ -1038,10 +1038,10 @@ static void arena_poison(Arena* arena, uint8_t value)
+ // from the other. Each is reserved when it is first used.
+ #define BUSTER_SCRATCH_ARENA_COUNT 2
+ #define BUSTER_SCRATCH_ARENA_CAPACITY (64ull << 30)
+-// The base pages each starts with (#672): the temporaries a thread takes are mostly a few kilobytes, and its larger ones
+-// mostly room of which it touches the start, as a large file's windowed preparation pushes three words for every 64 of
+-// its bytes (pp_prepare_windows), 3.5 MB for sqlite3.c's 9.5 MB, of which it touches about 250 KB at three places, which
+-// took two huge pages.
++// The base pages each starts with (#672). A thread's temporaries are mostly a few kilobytes, and its larger ones mostly
++// room of which it touches the start: a large file's windowed preparation (pp_prepare_windows) pushes three arrays of a
++// word for every 64 of its bytes, 3.5 MB for sqlite3.c's 9.5 MB, and touches each one's start. In huge pages those took
++// two, 4 MB; in base pages the C driver's scratch holds 1 MB at sqlite3.c's peak.
+ #define BUSTER_SCRATCH_ARENA_SMALL_BYTES (4ull << 20)
+ 
+ typedef struct LaneGroup LaneGroup;
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index 4f83d477..87846d2f 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -1670,11 +1670,6 @@ static int main_driver(int argc, char** argv)
+ {
+     // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
+     arena_page_policy(getenv("BUSTER_HUGE_PAGES"));
+-    {
+-        // EXPERIMENT ONLY (#672): every arena of the calling thread starts with N MB of base pages.
+-        const char* floor = getenv("BUSTER_EXP_FLOOR_MB");
+-        arena_small_floor = floor != 0 ? (uint64_t)strtoull(floor, 0, 10) << 20 : 0;
+-    }
+ #if BUSTER_SANITIZER_RESOURCES
+     const char* no_threads = getenv("BUSTER_TEST_NO_LANE_THREADS");
+     lane_test_resources.no_threads = no_threads != 0 && strcmp(no_threads, "1") == 0;
+diff --git a/tests/peak-rss.c b/tests/peak-rss.c
+index a549d650..606fd9cf 100644
+--- a/tests/peak-rss.c
++++ b/tests/peak-rss.c
+@@ -434,7 +434,9 @@ static void rss_compiler_tests(const char* compiler)
+         rss_expect(written, "original compiler fixture written");
+         RssReport reports[2] = { 0 };
+         size_t padding = 0;
+-        bool good = written;
++        // Both launches in base pages: without BUSTER_HUGE_PAGES, a compile takes base pages where it finds the host busy
++        // when it starts (#672), which one launch might and the other not, as on a host whose other jobs come and go.
++        bool good = written && setenv("BUSTER_HUGE_PAGES", "0", 1) == 0;
+         for (uint32_t p = 0; good && p < 2; p += 1)
+         {
+             char* const arguments[] = { (char*)compiler, "--time-stages", "--lanes", "1", "-c", source, "-o", objects[p], NULL };
