@@ -78,7 +78,60 @@ Accepted. Cycles were flat in #1413's own 11 rounds: +0.08% paired median, range
 
 ## Item 6: `-fstack-clash-protection` and Tier 0's `closures.lua`
 
-See `item6/README-results.md` (written when the runs finish).
+#177's record (`stack-clash-probes-177-2026-11-05`) timed Tier 0's `closures.lua` +4.59% slower with the option, in one
+layout per build. Its Lua executables were linked by the buster driver from head `903c464e`.
+
+### Where Tier 0's Lua touches the stack
+
+Lua 5.4.8 is built by the item's compiler (`out/item6/fix/`), from the branch before (`f619a215`) and after (`fcbc25d1`) its change to which frames under a page touch rsp.
+- The executables are byte-identical before and after, at Tier 0 and at `--tier1` (`executables-and-touches.txt`), so that change does not touch Lua.
+- With the option, Tier 0's executable has four `orb $0x0,(%rsp)` probes, two in each of two functions: `luaV_execute`, whose Tier 0 frame is 5,064 bytes, and `luaL_loadfilex`.
+- Every call of `luaV_execute` runs the one-page probe loop and the remainder's touch.
+- Tier 0 keeps no frame pointer by default, so no other function touches.
+
+### #177's own builds (`item6/profile.sh`, `out/item6/profile-*`)
+
+`closures.lua`, 5 alternating rounds, pinned to CPU 2:
+
+| Build | Cycles, median (range) | Instructions, median |
+| --- | ---: | ---: |
+| Tier 0 | 546.6M (527.9M to 560.5M) | 2,805.8M |
+| Tier 0, the option | 557.7M (552.9M to 562.1M) | 2,807.1M |
+| `--tier1` | 390.9M | 1,804.7M |
+| `--tier1`, the option | 393.0M | 1,813.0M |
+
+Instructions vary by ±1% from run to run: Lua 5.4 seeds its string hashes from addresses and time.
+
+One cycles profile of each Tier 0 build (period 200,000, `profile-t0-full.txt` and `profile-t0p-full.txt`) does not place the difference at the probe.
+- `luaV_execute`'s share falls from 26.6% to 23.5% with the option.
+- Other functions' shares rise, `luaD_precall`'s from 3.7% to 5.5%: a pattern of placement, not of the probe's work.
+
+### Over relative code layouts (`item6/layouts.sh`, `out/item6/layouts/`)
+
+This is `docs/commands/profiling.md`'s protocol.
+- **Objects:** Lua's 33 units are compiled once per build by `fcbc25d1`: Tier 0, Tier 0 with the option, `--tier1 -fno-asynchronous-unwind-tables`, and the same with the option.
+- **Layouts:** each build's fixed objects are linked by clang in the same 16 recorded orders (`orders.txt`). Order 0 is the normal order; orders 1 to 15 were shuffled with seed 1450 before any timing.
+- **Checks:** all 64 executables print clang -O0's `closures.lua` output (`compare.txt`). Object and executable hashes are in `objects.txt` and `executables.txt`.
+- **Timing:** one `time-runs`, 9 runs after a warm-up per executable, placements rotated, pinned to CPU 2 (`time-runs.txt`).
+
+Paired ratios by layout, with the option against without it, and a 95% interval over the 16 layouts (t, 15 degrees of freedom):
+
+| Tier | Wall time | 95% interval | Per layout | Layouts slower |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | −1.02% | −2.37% to +0.35% | −6.2% to +3.4% | 6 of 16 |
+| 1 | −1.37% | −3.75% to +1.07% | −15.0% to +5.7% | 6 of 16 |
+
+User cycles agree: Tier 0 −1.00% (−2.34% to +0.37%), Tier 1 −1.48% (−3.97% to +1.07%).
+
+Layout alone spreads Tier 0's `closures.lua` over 14% across the 16 orders. In the normal order the option is 6.2% *faster* at Tier 0, the opposite sign of #177's +4.59%. Instructions per layout rise by a median of +0.075% at Tier 0 (range −0.40% to +0.55%, Lua's seeding) and not at all at Tier 1.
+
+### Decision
+
+Measured as placement, the issue's second accepted outcome. The option's work at Tier 0 is two touches per `luaV_execute` call. Its effect on `closures.lua` over 16 layouts is indistinguishable from zero.
+
+A single layout's +4.59% was #177's measurement, and the issue's item 9 describes the same effect at Tier 1.
+
+`item6/fix.sh` was stopped after its builds, its output check (30 of 30 scripts as clang -O0's) and 19 of its 30 counter runs (`out/item6/fix/`). The layouts above answer what it was for.
 
 ## Limitations
 
