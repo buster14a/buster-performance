@@ -1,0 +1,208 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index 3524058a..f6bdaff1 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -312,10 +312,18 @@ static inline void check_clock_lower(CheckClock* stage_clock, CheckClockLower ph
+ }
+ 
+ // A lap that also charges the resource use since the last mark to `stage`; nothing without a clock.
++void peak_dump(const char* where);
+ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ {
+     check_clock_lap(stage_clock, stage);
+     if (stage_clock != NULL)
++    {
++        char where[64];
++        const char* full = getenv("BUSTER_PEAK_FULL");
++        snprintf(where, sizeof(where), "%sstage-%d", full != NULL && atoi(full) == (int)stage ? "" : "rss:", (int)stage);
++        peak_dump(where);
++    }
++    if (stage_clock != NULL)
+     {
+         uint64_t system_us = 0;
+         uint64_t minor_faults = 0;
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 57f85576..d1ea2919 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -11829,6 +11829,60 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
+     return result;
+ }
+ 
++#include <fcntl.h>
++__attribute__((weak)) void peak_dump(const char* where);
++__attribute__((weak)) void peak_dump(const char* where)
++{
++    if (getenv("BUSTER_PEAK_MAP") == NULL) return;
++    FILE* out = fopen(getenv("BUSTER_PEAK_MAP"), "a");
++    if (out == NULL) return;
++    char line[512];
++    FILE* status = fopen("/proc/self/status", "r");
++    while (status != NULL && fgets(line, sizeof(line), status)) if (strncmp(line, "VmHWM", 5) == 0 || strncmp(line, "VmRSS", 5) == 0) fprintf(out, "%s %s", where, line);
++    if (status) fclose(status);
++    if (strncmp(where, "rss:", 4) == 0) { fclose(out); return; }
++    FILE* smaps = fopen("/proc/self/smaps", "r");
++    char range[128] = { 0 };
++    while (smaps != NULL && fgets(line, sizeof(line), smaps))
++    {
++        unsigned long a, b;
++        if (sscanf(line, "%lx-%lx", &a, &b) == 2 && strchr(line, ':') != NULL && line[0] != ' ' && !strncmp(line + strcspn(line, " "), " ", 1)) { snprintf(range, sizeof(range), "%lx-%lx", a, b); }
++        unsigned long kb;
++        if (sscanf(line, "Rss: %lu kB", &kb) == 1 && kb >= 512) fprintf(out, "map %s rss %lu\n", range, kb);
++        if (sscanf(line, "AnonHugePages: %lu kB", &kb) == 1 && kb >= 2048) fprintf(out, "map %s huge %lu\n", range, kb);
++    }
++    if (smaps) fclose(smaps);
++    int pm = open("/proc/self/pagemap", O_RDONLY);
++    // latest push wins each page: walk from the last to the first, skipping pages already claimed.
++    static uintptr_t claimed_begin[65536];
++    static uintptr_t claimed_end[65536];
++    uint32_t claimed = 0;
++    for (int64_t i = (int64_t)(peak_push_count < 65536 ? peak_push_count : 65536) - 1; i >= 0; i -= 1)
++    {
++        const PeakPush* p = peak_pushes + i;
++        uintptr_t first = p->begin & ~(uintptr_t)4095;
++        uintptr_t last = (p->begin + p->bytes + 4095) & ~(uintptr_t)4095;
++        uint64_t present = 0, pages = 0;
++        for (uintptr_t page = first; page < last; page += 4096)
++        {
++            bool taken = false;
++            for (uint32_t c = 0; c < claimed && !taken; c += 1) taken = page >= claimed_begin[c] && page < claimed_end[c];
++            if (taken) continue;
++            pages += 1;
++            uint64_t entry = 0;
++            if (pread(pm, &entry, 8, (off_t)(page / 4096 * 8)) == 8 && (entry >> 63) != 0) present += 1;
++        }
++        if (claimed < 65536) { claimed_begin[claimed] = first; claimed_end[claimed] = last; claimed += 1; }
++        if (present == 0) continue;
++        fprintf(out, "push %ld %lx bytes %lu own_pages %lu present_kb %lu frames", (long)i, (unsigned long)p->begin, (unsigned long)p->bytes, (unsigned long)pages, (unsigned long)present * 4);
++        for (int f = 0; f < p->depth; f += 1) fprintf(out, " %p", p->frames[f]);
++        fprintf(out, "\n");
++    }
++    close(pm);
++    fprintf(out, "end %s\n", where);
++    fclose(out);
++}
++
+ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
+                             bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, CheckInputBindingMode binding_mode,
+                             CheckDeferred* deferred, bool environment, bool literal_tables, bool fresh_output)
+@@ -12672,8 +12726,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     {
+         input->visit_misses += check_input_rare_verify(&reader);
+     }
++    peak_dump("reader-end");
+     arena_pop_to(scratch, mark);
+     arena_release(&sparse);
++    peak_dump("rss:after-reader-release");
+     return valid;
+ }
+ 
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index b2184b95..4e672f9a 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -4382,6 +4382,26 @@ static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lane
+     arena_discard_past(scratch, kept, lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane));
+ }
+ 
++#include <ucontext.h>
++static void poison_handler(int sig, siginfo_t* info, void* context)
++{
++    (void)sig;
++    const ucontext_t* uc = context;
++    char line[160];
++    const int n = snprintf(line, sizeof(line), "poison-fault addr %p rip 0x%llx\n", info->si_addr, (unsigned long long)uc->uc_mcontext.gregs[16]);
++    write(2, line, (size_t)n);
++    void* frames[12];
++    const int depth = backtrace(frames, 12);
++    backtrace_symbols_fd(frames, depth, 2);
++    _exit(99);
++}
++static void poison_install(void)
++{
++    struct sigaction action = { 0 };
++    action.sa_sigaction = poison_handler;
++    action.sa_flags = SA_SIGINFO;
++    sigaction(SIGSEGV, &action, NULL);
++}
+ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
+                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
+                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+@@ -4897,6 +4917,34 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                     check_clock_mark(stage_clock, CHECK_STAGE_CHECK_PROGRAM);
+                     // -c's object, or a kept link (one of several units that link), are written alike: the unit's code and
+                     // data.
++                    // EXPERIMENT (#628): give the output's columns back before the backend.
++                    if (getenv("BUSTER_RELEASE_PP") != NULL)
++                    {
++                        arena_release(&pp->output.columns);
++                    }
++                    // EXPERIMENT (#628): make regions unreadable before the backend, to find what it reads.
++                    if (getenv("BUSTER_POISON") != NULL)
++                    {
++                        const char* which = getenv("BUSTER_POISON");
++                        if (strstr(which, "pp") != NULL)
++                        {
++                            Arena* a = &pp->output.columns;
++                            fprintf(stderr, "poison pp output %p +%llu\n", (void*)(a->base - a->mapping_offset), (unsigned long long)a->committed);
++                            mprotect(a->base - a->mapping_offset, a->committed, PROT_NONE);
++                        }
++                        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(checking->columns); c += 1)
++                        {
++                            char name[16];
++                            snprintf(name, sizeof(name), "parse%u,", c);
++                            const Arena* a = &checking->columns[c];
++                            if ((strstr(which, "parse,") != NULL || strstr(which, name) != NULL) && a->base != NULL && a->committed != 0)
++                            {
++                                fprintf(stderr, "poison parse column arena %u %p +%llu\n", c, (void*)(a->base - a->mapping_offset), (unsigned long long)a->committed);
++                                mprotect((void*)(a->base - a->mapping_offset), a->committed, PROT_NONE);
++                            }
++                        }
++                        poison_install();
++                    }
+                     if (result == 0 && (emit_object || kept != NULL) && !prefix_only)
+                     {
+                         CheckProgramSelection selected;
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index d15e10f8..71f3c0e5 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -966,7 +966,30 @@ static bool arena_commit(Arena* arena, uint64_t end)
+     return result;
+ }
+ 
++#include <execinfo.h>
++typedef struct { uintptr_t begin; uint64_t bytes; void* frames[6]; int depth; } PeakPush;
++__attribute__((weak)) PeakPush peak_pushes[65536];
++__attribute__((weak)) uint32_t peak_push_count;
++__attribute__((noinline)) static void peak_log(uintptr_t begin, uint64_t bytes)
++{
++    uint32_t slot = bytes >= 32768 ? __atomic_fetch_add(&peak_push_count, 1, __ATOMIC_RELAXED) : 65536;
++    if (slot < 65536)
++    {
++        PeakPush* p = peak_pushes + slot;
++        p->begin = begin;
++        p->bytes = bytes;
++        void* frames[8];
++        int depth = backtrace(frames, 8);
++        p->depth = depth > 2 ? (depth - 2 < 6 ? depth - 2 : 6) : 0;
++        for (int i = 0; i < p->depth; i += 1) p->frames[i] = frames[i + 2];
++    }
++}
++__attribute__((noinline)) static void* arena_push_logged(Arena* arena, uint64_t size, uint64_t alignment);
+ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
++{
++    return arena_push_logged(arena, size, alignment);
++}
++__attribute__((noinline)) static void* arena_push_logged(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+     void* result = 0;
+     const uintptr_t base = (uintptr_t)arena->base;
+@@ -982,6 +1005,7 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            peak_log(aligned, size);
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
