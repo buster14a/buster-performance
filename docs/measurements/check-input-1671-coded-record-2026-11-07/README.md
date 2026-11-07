@@ -55,3 +55,21 @@ profiles; the A/B below is the measurement.
 | `expressions.actions` | 10.269 ms | 9.546 ms | −0.72 ms |
 
 **The objects.** Both executables' objects are the same bytes (`ab/record/objects.sha`).
+
+### After #1692 merged (`ab/after-1692`, `raw/m2`, `raw/r2`)
+
+#1692, which inlines the coded walk's actions, merged to main while this change was open. So the branch was merged with
+main, as `r2` (`38152245a3de7bd58370703af35991f57899d6a8`), and measured again against that main, `m2`
+(`219e7e9bd4ed2d13fd82e28f6c5b275474b25ecc`), the same way (`scripts/run4.sh`). All 18 runs have `held=1`,
+this record's owner line and `status=0`. `r2` passes the same off-host checks (`raw/local-checks.txt`).
+
+| measure | main | head | difference |
+| --- | ---: | ---: | ---: |
+| wall time (`task-clock`), median of 8 rounds | 119.460 ms | 118.450 ms | −0.85% (round by round, median −0.88%, 8 of 8 lower) |
+| user cycles | 580.282 M | 575.560 M | −0.81% |
+| user instructions | 1,288.534 M | 1,279.602 M | −0.69% |
+| `check-input`, `measure-compile` | 43.966 ms | 43.183 ms | −0.78 ms |
+| `expressions.actions` | 9.660 ms | 8.868 ms | −0.79 ms |
+
+**The objects** are the same bytes (`ab/after-1692/objects.sha`). In the builds' own profiles,
+`check_graph_record_nodes` goes from 1.03% of the cycles to below 0.1%, and the flush from 1.05% to 1.79%.
