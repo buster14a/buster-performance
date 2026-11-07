@@ -1,0 +1,95 @@
+From f7f9f8de619c0ec6f56e7b212a1ebc6d2f561835 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 11:57:12 +0000
+Subject: [PATCH 2/2] Checker: a reading in source order's rare columns in base
+ pages, populated (#628)
+
+The reader writes its rare columns at few tokens but reads them at
+every token of a kind. On sqlite3.c, of their 6,673 pages it writes 688
+and reads 5,985 more. In huge pages the writes, spread over the
+columns, took 46 MB at the reader's end, the compile's peak once the
+scratch is discarded. In base pages they take 2.7 MB, and one
+MADV_POPULATE_READ maps the zero page at every page of the columns at
+once, so that only the written pages fault.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQwDnVuEpjsYvVE2CKz
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/c_check_input.c | 43 +++++++++++++++++++++++------
+ 1 file changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 3321926f..87378c79 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -11227,17 +11227,37 @@ static bool check_input_enum_records(CheckInputReader* reader, Arena* arena)
+     return valid;
+ }
+ 
++// Linux's MADV_POPULATE_READ (5.14), which the C library's headers may not name.
++#define BUSTER_CHECK_INPUT_MADV_POPULATE_READ 22
++
++// A reading in source order's rare columns in base pages (#628): the walk writes them at few tokens, but reads most of
++// them at every token of a kind, where nothing was written. On sqlite3.c, of their 6,673 pages it writes 688 and reads
++// 5,985 more. In huge pages the writes, spread over the columns, took 20 MB of them at the reader's end, and a read of
++// a region nothing wrote took the huge zero page; in base pages they take 2.7 MB, but each page a read reaches first is
++// a fault of its own, of the zero page. One MADV_POPULATE_READ maps the zero page at every page of the columns at
++// once, as the arena's pages are fresh (a released arena gives its pages back), so that only the written pages fault,
++// each when it is first written. Where the kernel refuses, the reads fault as they come.
++static void check_input_rare_populate(const uint8_t* begin, const uint8_t* end)
++{
++    const uintptr_t first = (uintptr_t)begin & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    const uintptr_t last = ((uintptr_t)end + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    if (begin != NULL && last > first)
++    {
++        madvise((void*)first, last - first, BUSTER_CHECK_INPUT_MADV_POPULATE_READ);
++    }
++}
++
+ // check_input_run's arena of rare columns: its first `small_bytes` (a multiple of BUSTER_ARENA_PAGE_BYTES) in base pages
+-// and the rest in huge pages, or with `shared` all of it in base pages. `shared` is for a deferred reading of a large
+-// unit whose bodies more than one lane reads (check_deferred_shared, #764, #847): the lanes write their bodies' entries
+-// of the arena's token columns at once, and lanes that write a 2 MB region of them which has no page yet, or the huge
+-// zero page, each allocate and clear a huge page for it, of which the kernel maps one. In a smaller unit, the lanes
+-// claim each region before their first write into it (check_input_rare_claim). A deferred reading on one lane, as
+-// source order, keeps the huge pages.
+-static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool shared)
++// and the rest in huge pages, or with `base` all of it in base pages. `base` is for a reading in source order
++// (check_input_rare_populate), and for a deferred reading of a large unit whose bodies more than one lane reads
++// (check_deferred_shared, #764, #847): the lanes write their bodies' entries of the arena's token columns at once, and
++// lanes that write a 2 MB region of them which has no page yet, or the huge zero page, each allocate and clear a huge
++// page for it, of which the kernel maps one. In a smaller unit, the lanes claim each region before their first write
++// into it (check_input_rare_claim). A deferred reading on one lane keeps the huge pages.
++static Arena check_input_sparse_arena(uint64_t bytes, uint64_t small_bytes, bool base)
+ {
+     const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+-    const uint64_t small = shared ? pages : small_bytes;
++    const uint64_t small = base ? pages : small_bytes;
+     return arena_reserve_small(bytes, small > BUSTER_ARENA_SMALL_BYTES ? small : BUSTER_ARENA_SMALL_BYTES);
+ }
+ 
+@@ -11593,7 +11613,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     const uint64_t sparse_bytes = sparse_small + (0 BUSTER_CHECK_SPARSE_COLUMNS(BUSTER_CHECK_SPARSE_BYTES));
+ #undef BUSTER_CHECK_SPARSE_BYTES
+     input->rare_columns_shared = deferred != 0 && check_deferred_shared(deferred);
+-    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, input->rare_columns_shared) : (Arena){ 0 };
++    const bool rare_base = input->rare_columns_shared || deferred == 0;
++    Arena sparse = valid ? check_input_sparse_arena(sparse_bytes, sparse_small, rare_base) : (Arena){ 0 };
+ #define BUSTER_CHECK_SPARSE_ARRAY(field, type) reader.field = valid ? arena_push_array(&sparse, (uint64_t)count + 1, sizeof(type), 64) : 0; valid &= reader.field != 0;
+     BUSTER_CHECK_SPARSE_SMALL_COLUMNS(BUSTER_CHECK_SPARSE_ARRAY)
+     reader.sparse_marks = valid ? arena_push_array(&sparse, mark_words, sizeof(uint64_t), 64) : 0;
+@@ -11607,6 +11628,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     // The huge pages' token columns, which a lane claims a region of before it writes there (check_input_rare_claim).
+     reader.rare_begin = valid ? (uint8_t*)reader.specifier_jobs : 0;
+     reader.rare_end = valid ? (uint8_t*)(reader.warning_suppressed + count + 1) : 0;
++    if (valid && deferred == 0)
++    {
++        check_input_rare_populate(reader.rare_begin, reader.rare_end);
++    }
+ #undef BUSTER_CHECK_SPARSE_COLUMNS
+ #undef BUSTER_CHECK_SPARSE_SMALL_COLUMNS
+     const uint32_t builtin_constants = counts.groups[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS];
+-- 
+2.43.0
+
