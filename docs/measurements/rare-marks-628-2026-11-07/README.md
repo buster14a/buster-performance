@@ -27,7 +27,8 @@ than main.
 | `pr4` | `ffb2cfaebbdc6c768958e127c2d328bd331053b3` | `pr3` on `main6`, the pull request's code (`patches/pr4`) |
 
 The commits reached the host as git bundles; `patches/` holds each as `git format-patch` made it. The pull request's
-commits are `pr4`'s with the measured numbers in the docs and the text of a comment, which build the same executable.
+commits are `pr4`'s with the measured numbers in the docs and the text of a comment: built on the VM, their `.text`,
+`.rodata` and `.data` are `pr4`'s bytes, and only the debug information's checksums of the sources differ.
 The receipts (`run/receipts10.txt` to `run/receipts13.txt`, and `run/receipts15.txt`; `chain14.sh` reran
 `chain13.sh`'s trees) have the host, kernel, CPU 2's governor and EPP, the transparent huge pages' setting, clang's and
 perf's versions, every executable's SHA-256 and the input's. The input is the frozen corpus's `sqlite3.c`, SHA-256
