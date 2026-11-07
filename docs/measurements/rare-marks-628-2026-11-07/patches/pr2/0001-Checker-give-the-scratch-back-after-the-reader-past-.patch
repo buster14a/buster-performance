@@ -1,0 +1,200 @@
+From dedf14d74d2825a92e66803d5e020f369638ea7f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 7 Nov 2026 14:33:48 +0000
+Subject: [PATCH 1/2] Checker: give the scratch back after the reader past what
+ the next stages push again (#628)
+
+After the reader the scratch holds the parse's and the reader's pages,
+dead, which check-expressions, check-declarations and static-data
+pushed too little to reuse, and held to static-data's end. The driver
+now gives them back after the reader (check_driver_discard_scratch),
+past 96 bytes a token beyond the scratch's length: those stages and
+check_program push about 64 MB of sqlite3.c's again before
+check_program gives the scratch back, which they would otherwise fault
+in again from cleared huge pages (15 M kernel cycles on the 9700X for a
+whole discard; buster-performance's scratch-rare-628-2026-11-07). A
+lane of several units with another to compile gives them back in whole
+huge pages, as check_program does (#777), asking check_units_unit_left,
+which check_units_discard_huge's count of check_program's discards
+doesn't count. The common warnings pop what they push, which the
+backend's pushes then reuse rather than push past.
+
+On the VM, static-data's end falls from 256.6 to 233.5 MB.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQwDnVuEpjsYvVE2CKz
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/translation-units.md                     |  7 +++++++
+ src/buster/compiler/c_check_common_warnings.c |  4 ++++
+ src/buster/compiler/c_checker_driver.c        | 20 +++++++++++++++++++
+ src/buster/compiler/c_checker_units.c         | 16 ++++++++++-----
+ src/buster/compiler/lane.c                    | 18 +++++++++++++----
+ 5 files changed, 56 insertions(+), 9 deletions(-)
+
+diff --git a/docs/translation-units.md b/docs/translation-units.md
+index 67a8b321..500e86cd 100644
+--- a/docs/translation-units.md
++++ b/docs/translation-units.md
+@@ -466,6 +466,13 @@ So a units lane does five things:
+   with none left after it, and a command of one file, discard as before.
+   `--shared-parts` reports how many units gave their pages back in whole huge
+   pages.
++  The driver gives the scratch's pages back after the reader too, past 96
++  bytes a token beyond its length (`check_driver_discard_scratch`,
++  `BUSTER_CHECK_DRIVER_SCRATCH_REUSE`, #628): the stages up to the checker's
++  last pass push that much of it again, and would fault it in again cleared,
++  where they find it resident; a unit whose lane has another to compile
++  gives them back in whole huge pages by the same test
++  (`check_units_unit_left`), which `--shared-parts` doesn't count.
+ - **It pools the arenas its units release** (`arena_pool`, which only the
+   units' lanes set): `arena_release` frees an arena's pages with
+   `MADV_DONTNEED`, which takes the address space's lock for reading and leaves
+diff --git a/src/buster/compiler/c_check_common_warnings.c b/src/buster/compiler/c_check_common_warnings.c
+index a440782f..06c08611 100644
+--- a/src/buster/compiler/c_check_common_warnings.c
++++ b/src/buster/compiler/c_check_common_warnings.c
+@@ -5297,6 +5297,9 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
+     const char* fail_at = getenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
+     check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
+     check_common_resources.pushes = 0;
++    // What the passes push is theirs alone, and the scratch goes back to where it was after them, so that the backend's
++    // pushes reuse its pages rather than take others past them (#628: 21.7 MB of sqlite3.c's, through the backend's peak).
++    const uint64_t mark = scratch->length;
+     CheckWarningSpelling spell = { 0 };
+     const CheckCommonEnabled enabled =
+     {
+@@ -5321,4 +5324,5 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
+         check_common_uninitialized(parser, pp, input, stream, types, &facts, scratch);
+     }
+     check_common_format(parser, pp, input, stream, types, &spell, program, scratch);
++    arena_pop_to(scratch, mark);
+ }
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 831ed532..7781475e 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -3908,6 +3908,7 @@ typedef struct CheckUnitsKept CheckUnitsKept;
+ static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
+ static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
+ static bool check_units_discard_huge(struct CheckUnitsLane* lane);
++static bool check_units_unit_left(const struct CheckUnitsLane* lane);
+ 
+ // A unit's deferred bodies' lanes in the command's flow (#151, CheckDeferredFlow): the emission's lanes (`lanes`), whose
+ // worker budget's slots the bodies take under a lease of their own, and whether giving them back failed.
+@@ -4013,6 +4014,21 @@ static void check_driver_deferred_give_back(void* context)
+ // If `fatal` is nonnull, retain the publication's fatal state before releasing the preprocessor: a multi-unit caller
+ // uses that state to publish the canonical prefix, independently of which lane finishes first.
+ // Returns the command's exit status: 0 for a unit without errors whose outputs were written.
++// The bytes a token of the scratch that check-expressions, check-declarations, static-data and check_program push
++// before check_program gives its pages back (#628): about 64 MB of sqlite3.c's 716,157 tokens. The discard after the
++// reader keeps that many past the scratch's length, which they then find resident rather than fault in again, cleared.
++#define BUSTER_CHECK_DRIVER_SCRATCH_REUSE 96
++
++// Gives the kernel back the scratch's pages past `kept` bytes from its start (arena_discard_past, #628): those of a pass
++// whose pushes are over, which the passes after it, pushing fewer, would otherwise hold through the compile's peak. A
++// lane of several units with another to compile (check_units_unit_left) gives them back in whole huge pages, as
++// check_program does (CheckProgramOptions.discard_huge, #777): the huge page a discard frees part of is split, and the
++// next unit would fault it in a base page at a time.
++static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lanes, uint64_t kept)
++{
++    arena_discard_past(scratch, kept, lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane));
++}
++
+ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
+                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
+                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+@@ -4211,6 +4227,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                                                   repairing ? repair.original_end : checking->tokens.count, selected);
+             }
+             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
++            // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
++            // check-declarations would otherwise hold to static-data's end (check_driver_discard_scratch, #628), but for
++            // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE).
++            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)checking->tokens.count);
+             if (stage_clock != NULL && deferring)
+             {
+                 stage_clock->deferred = true;
+diff --git a/src/buster/compiler/c_checker_units.c b/src/buster/compiler/c_checker_units.c
+index c2dcf57e..11babd34 100644
+--- a/src/buster/compiler/c_checker_units.c
++++ b/src/buster/compiler/c_checker_units.c
+@@ -173,13 +173,19 @@ struct CheckUnitsRun
+     uint32_t started;
+ };
+ 
+-// Whether `lane`'s unit gives its scratch's pages back in whole huge pages (CheckProgramOptions.discard_huge, #777),
+-// counted on the lane: when a unit of its run is still to be taken, which a lane that finishes its unit takes next,
+-// likely this one, pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in
+-// whole huge pages where none was left to take.
++// Whether a unit of `lane`'s run is still to be taken, which a lane that finishes its unit takes next, likely this one,
++// pushing as far into its scratch again. The count may lag a take, which only frees a unit's pages in whole huge pages
++// where none was left to take.
++static bool check_units_unit_left(const CheckUnitsLane* lane)
++{
++    return lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
++}
++
++// Whether `lane`'s unit gives its scratch's pages back in whole huge pages after check_program
++// (CheckProgramOptions.discard_huge, #777), counted on the lane: when a unit is left (check_units_unit_left).
+ static bool check_units_discard_huge(CheckUnitsLane* lane)
+ {
+-    const bool result = lane->run != NULL && __atomic_load_n(&lane->run->started, __ATOMIC_RELAXED) < lane->run->count;
++    const bool result = check_units_unit_left(lane);
+     lane->discarded_huge += result ? 1 : 0;
+     return result;
+ }
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index c67f50a5..d15e10f8 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -291,6 +291,10 @@ static __attribute__((unused)) void arena_discard(Arena* arena);
+ // kept, at most 2 MB: freeing it whole made each unit take a fresh one, cleared by the kernel, and synth's link by 8
+ // lanes took 4.3% longer than with arena_discard, where keeping it took 2.2% less.
+ static __attribute__((unused)) void arena_discard_huge(Arena* arena);
++// arena_discard, or with `whole` arena_discard_huge, of the pages past `kept` bytes from the arena's start, or past its
++// length if that is further: for an arena whose next users push about `kept` bytes into it again, which they then find
++// resident rather than fault in again, cleared (#628: the C driver's scratch after the reader).
++static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t kept, bool whole);
+ // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
+ // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
+ // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
+@@ -1011,12 +1015,13 @@ static bool arena_untouched(const Arena* arena)
+ 
+ // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
+ // with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
+-static void arena_discard_to(Arena* arena, bool whole)
++static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
+ {
+     if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
+     {
+         const uintptr_t base = (uintptr_t)arena->base;
+-        const uintptr_t begin = (base + arena->length + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++        const uint64_t kept = from > arena->length ? from : arena->length;
++        const uintptr_t begin = (base + kept + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+         const uint64_t written = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
+         const uintptr_t last = base + (arena->peak < written ? arena->peak : written);
+         const uintptr_t end = whole ? last & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1) :
+@@ -1030,12 +1035,17 @@ static void arena_discard_to(Arena* arena, bool whole)
+ 
+ static void arena_discard(Arena* arena)
+ {
+-    arena_discard_to(arena, false);
++    arena_discard_to(arena, 0, false);
++}
++
++static void arena_discard_past(Arena* arena, uint64_t kept, bool whole)
++{
++    arena_discard_to(arena, kept, whole);
+ }
+ 
+ static void arena_discard_huge(Arena* arena)
+ {
+-    arena_discard_to(arena, true);
++    arena_discard_to(arena, 0, true);
+ }
+ 
+ static void arena_static_base_pages(void)
+-- 
+2.43.0
+
