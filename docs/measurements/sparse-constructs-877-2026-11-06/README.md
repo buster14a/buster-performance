@@ -42,8 +42,9 @@ Everything was measured on the locked 9700X (`benchpress`), in `~/buster-fast-be
     `rep stosb`, a handful of instructions however large, so the removed fills hardly show in the instruction count,
     while every read of `local_map` gained a bitset test (`check_lower_local_of`).
 
-  So #1067's `local_map` bitset costs the lowering more than the 2.9 MB fill it replaced. The second campaign below
-  measures two ways out on current main.
+  So at #1067's merge, its `local_map` bitset cost the lowering more than the 2.9 MB fill it replaced.
+  [buster#1580](https://github.com/buster14a/buster/pull/1580) restored the fill. The second campaign (`v2/`, below)
+  measures that and another way out on the current main.
 - **Objects.** Each pair's 16 builds wrote the same `sqlite3.o`, byte for byte (`results/objects.txt`). It is in fact
   the same object for all four trees.
 
@@ -109,10 +110,51 @@ dropped often). So `chain.sh`, the first runner, was started four times, and `bu
 - **The measurements above** come from `scripts/run2.sh`, a single runner guarded by a lock file of its own. They
   ran from 22:55 to 23:54 UTC (`logs/holds.txt`).
 
+## The second campaign: `local_map` on current main (`v2/`)
+
+This campaign compares three versions of main `5fb062a4` over the same eight offsets of the checker's code. Main
+already has `BUSTER_CHECKER_OFFSET`, so nothing is backported. The three versions:
+
+- **main**, with #1067's bitset, which every read of `local_map` tests first.
+- **B**, which restores the fill and removes the bitset (`v2/scripts/variant-b.patch`). This is
+  [buster#1580](https://github.com/buster14a/buster/pull/1580), merged while this campaign ran.
+- **C**, which keeps the bitset but reads it branch-free: an index select into a sentinel entry past the last
+  object's, which is always none (`v2/scripts/variant-c.patch`).
+
+The builds and the method are the first campaign's, three trees at a time (`v2/scripts/v2-build.sh`). The runner was
+launched once, guarded by a lock file (`v2/scripts/v2-run.sh`). Its eight holds (`v2/scripts/v2-hold.sh`) were:
+
+- three of `measure-compile`, over all 24 executables;
+- five of `time-runs`, with main, B, C and main again, each over its offsets, from two fresh copies each.
+
+All 24 objects are main's at offset 0, byte for byte (`v2/results/objects.txt`). The holds ran from 01:04 to 01:36 UTC
+on 2026-11-07 (`v2/logs/holds.txt`).
+
+| against main | B (the fill) | C (branch-free bitset) | main again |
+| --- | --- | --- | --- |
+| wall, by round | −0.00%, −0.02%, −0.04%, −0.07%, −0.08% | −0.04%, +0.03%, −0.08%, +0.00%, +0.02% | −0.16%, −0.04%, +0.04%, −0.04%, −0.08% |
+| user cycles, by round | −0.01%, −0.08%, −0.05%, −0.13%, −0.11% | −0.00%, +0.03%, −0.08%, −0.07%, +0.03% | −0.19%, −0.04%, +0.07%, −0.08%, −0.02% |
+| instructions per process | −1.27 M (−0.08%) | +0.22 M (+0.01%) | 0 |
+| `lower` | 10.444 → 10.372 ms (−0.69%), below in 42 of 64 offset pairs | 10.490 ms (+0.44%), above in 38 of 64 | |
+| wall, `measure-compile` | 136.804 → 136.621 ms (−0.13%) | 136.697 ms (−0.08%) | |
+
+The instruction counts are per process, from 1,626.14 M on main.
+
+- **The lowering is cheaper on today's main.** Its `lower` stage takes 10.4 ms here, against 13.5 ms at #1067's merge,
+  so what `local_map`'s reads cost has shrunk with it.
+- **B** reads lower 0.07 ms faster, in all three rounds (−0.36%, −0.93%, −0.76%). It retires 1.27 M fewer
+  instructions, and it is simpler. The whole process is within main against itself, though, and over the offsets the
+  `lower` change is not separable from placement (42 of 64 pairs).
+- **C** gains nothing over main.
+
+So restoring the fill (B, buster#1580) costs nothing, and is the slightly cheaper and simpler choice. On today's main
+it isn't a measurable whole-process gain.
+
 ## Limitations
 
 - One machine and one unit. Lua's units and the corpora weren't measured.
 - **#1067's `lower` result** rests on eight offsets in each tree. Its range over offsets crosses zero, but the count of
-  offset pairs and the rounds agree, and the instruction count supports it. The second campaign tests it directly.
+  offset pairs and the rounds agree, and the instruction count supports it. On today's main the same difference is
+  smaller and within placement (the second campaign).
 - **Fresh copies of one executable** can differ by up to 0.6% from hold to hold (#1233). Each `time-runs` hold makes
   its own copies, and the five holds agree.
