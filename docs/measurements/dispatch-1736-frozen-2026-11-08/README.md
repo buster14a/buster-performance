@@ -28,8 +28,8 @@ The four `perf347-*.sha256` manifests are an independent **post-hoc** comparison
 
 The SQLite disassemblies were generated from SQLite 3.53.2 amalgamation `sqlite3.c` (`0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`, Fossil check-in `d6e03d8c777cfa2d35e3b60d8ec3e0187f3e`) and SQLite's `test/speedtest1.c` (`b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675`), combined using the project's small unity wrapper. The SQLite project describes its deliverable code as [dedicated to the public domain](https://sqlite.org/copyright.html). The amalgamation carries the author's copyright disclaimer and blessing:
 
-> May you do good and not evil.  
-> May you find forgiveness for yourself and forgive others.  
+> May you do good and not evil.
+> May you find forgiveness for yourself and forgive others.
 > May you share freely, never taking more than you give.
 
 Each hardware compile, verification, capture and count used the Benchpress shared lock. The evidence is a bounded experiment: it does not establish current-main behavior, complete semantic correctness, a general speedup, or issue acceptance.
