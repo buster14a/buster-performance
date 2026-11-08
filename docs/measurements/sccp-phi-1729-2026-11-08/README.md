@@ -75,12 +75,16 @@ head's run, within 0.5 ms of these):
 
 All 15 pairs of objects are byte-identical.
 
-`ir_optimize_visit`'s share of `cycles:u` at 16,000 (`results/profiles-dom-1c3a8859.txt`): ternary 66.3% → 0.75%,
-same 84.1% → 1.5%. What remains is `tier1_cfg_allocate_impl` and `dataflow_liveness_vector_rows` (#1384).
+`ir_optimize_visit`'s share of `cycles:u` at 16,000 (`results/profiles-dom-849db509.txt`, and the earlier head's in
+`results/profiles-dom-1c3a8859.txt`): ternary 66.3% → 0.75%, same 84.1% → 1.5% (earlier head's run). What remains is `tier1_cfg_allocate_impl` and `dataflow_liveness_vector_rows` (#1384).
 
 ## Limitations
 
 One executable placement per build; no A/A control. Each point's lock hold covers its 10 (or 14) compiles, not
-each compile. The profiles are of the earlier head's pair. sqlite3.c's instruction counts (7940HS, `perf stat -e instructions:u`, not on this host): main 5,079.89M,
+each compile.
+
+`stat.sh` (`results/stat-849db509.txt`, one lock hold, `perf stat -r 5`): sqlite3.c's `-c --tier1 --lanes 1` ran
+5,086.87M user instructions on main and 5,088.01M on the head (+0.02%), 2,143.7M and 2,151.7M cycles (±0.12% and
+±0.64% over the runs). sqlite3.c's instruction counts (7940HS, `perf stat -e instructions:u`, not on this host): main 5,079.89M,
 final head 5,081.03M (+0.02%); an intermediate form that routed phis in `enqueue_users` ran 5,090.75M (+0.21%) and
 took 0.57% longer here, which is why the final form defers at dequeue.
