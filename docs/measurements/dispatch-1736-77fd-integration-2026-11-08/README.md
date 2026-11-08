@@ -1,6 +1,6 @@
 # PR 1736: pinned 77fd integration, 2026-11-08
 
-This is an isolated integration comparison of base `77fd0f225ab83f479bf60234a750205df5683dd7` against the original [PR 1736](https://github.com/buster14a/buster/pull/1736) experiment applied on that base. The integration commit is `2310da7f7` (tree `323a486df651c031506c222f6d91d5c4d7010a8d`); `current-experiment.patch` has stable patch ID `02561f4b386eab6393397792dc9f4cdd92f746f3`, identical to the experiment's published delta. Its source archive SHA-256 is `d3dbcd00f5a661de74de3bfca2f43c07b83d8bec68d5222bc8260751fc80783b`. This integration is a measurement artifact, not the PR head and not current main: `95fb03f06` subsequently merged #1755's scale-selection change, which may change the generated workload.
+This is an isolated integration comparison of base `77fd0f225ab83f479bf60234a750205df5683dd7` against the original [PR 1736](https://github.com/buster14a/buster/pull/1736) experiment applied on that base. The integration commit is `2310da7f7` (tree `323a486df651c031506c222f6d91d5c4d7010a8d`); `current-experiment.patch.gz` decompresses to stable patch ID `02561f4b386eab6393397792dc9f4cdd92f746f3`, identical to the experiment's published delta. Its source archive SHA-256 is `d3dbcd00f5a661de74de3bfca2f43c07b83d8bec68d5222bc8260751fc80783b`. This integration is a measurement artifact, not the PR head and not current main: `95fb03f06` subsequently merged #1755's scale-selection change, which may change the generated workload.
 
 ## SQLite dynamic counts
 
