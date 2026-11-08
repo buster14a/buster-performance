@@ -16,7 +16,8 @@ Compiler issue: [#1729](https://github.com/buster14a/buster/issues/1729). Compil
 
 Each tree was built on the host with `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh`, one lock invocation
 per build (`run-all.sh`, `dom.sh`, `run-final.sh`). `identities.sha256` has the inputs' and the executables' SHA-256
-(`bin/base`, `bin/head` of the final head; `bin/dbase`, `bin/dhead` of `1c3a8859`'s pair).
+(`bin/base`, `bin/head` of the final head; `bin/dbase` and the first `bin/dhead` of `1c3a8859`'s pair, the last
+`bin/dhead` the final head's with #1730).
 
 ## Host and method
 
@@ -61,15 +62,18 @@ Final head against main (main's dominators), ms, medians (`results/main-849db509
 
 All 17 pairs of objects are byte-identical.
 
-With #1730's dominators, `1c3a8859` (`results/dom-1c3a8859.txt`):
+With #1730's dominators, the final head (`results/dom-849db509.txt`; `results/dom-1c3a8859.txt` has the earlier
+head's run, within 0.5 ms of these):
 
 | N | ifs | ternary | same |
 | ---: | ---: | ---: | ---: |
-| 1,000 | 5.9 → 5.3 | 6.2 → 5.3 | 5.3 → 4.3 |
-| 2,000 | 13.1 → 10.3 | 11.8 → 8.3 | 10.9 → 6.9 |
-| 4,000 | 28.0 → 17.4 | 32.1 → 17.8 | 29.5 → 13.8 |
-| 8,000 | 83.5 → 40.3 | 106.5 → 49.1 | 90.8 → 26.1 |
-| 16,000 | 297.1 → 112.9 | 394.9 → 146.6 | 333.5 → 60.7 |
+| 1,000 | 6.2 → 5.3 | 6.1 → 5.2 | 5.5 → 4.4 |
+| 2,000 | 12.9 → 10.2 | 12.2 → 8.5 | 10.9 → 7.2 |
+| 4,000 | 28.1 → 17.5 | 32.1 → 17.8 | 29.7 → 13.7 |
+| 8,000 | 83.9 → 40.4 | 107.3 → 48.8 | 90.1 → 25.8 |
+| 16,000 | 297.0 → 112.6 | 395.4 → 147.3 | 334.9 → 60.6 |
+
+All 15 pairs of objects are byte-identical.
 
 `ir_optimize_visit`'s share of `cycles:u` at 16,000 (`results/profiles-dom-1c3a8859.txt`): ternary 66.3% → 0.75%,
 same 84.1% → 1.5%. What remains is `tier1_cfg_allocate_impl` and `dataflow_liveness_vector_rows` (#1384).
@@ -77,7 +81,6 @@ same 84.1% → 1.5%. What remains is `tier1_cfg_allocate_impl` and `dataflow_liv
 ## Limitations
 
 One executable placement per build; no A/A control. Each point's lock hold covers its 10 (or 14) compiles, not
-each compile. The `dhead` numbers are of the earlier head; the final head's pair is listed in the PR when its run
-finishes. sqlite3.c's instruction counts (7940HS, `perf stat -e instructions:u`, not on this host): main 5,079.89M,
+each compile. The profiles are of the earlier head's pair. sqlite3.c's instruction counts (7940HS, `perf stat -e instructions:u`, not on this host): main 5,079.89M,
 final head 5,081.03M (+0.02%); an intermediate form that routed phis in `enqueue_users` ran 5,090.75M (+0.21%) and
 took 0.57% longer here, which is why the final form defers at dequeue.
