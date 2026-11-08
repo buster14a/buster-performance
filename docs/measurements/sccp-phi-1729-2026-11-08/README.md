@@ -76,7 +76,8 @@ head's run, within 0.5 ms of these):
 All 15 pairs of objects are byte-identical.
 
 `ir_optimize_visit`'s share of `cycles:u` at 16,000 (`results/profiles-dom-849db509.txt`, and the earlier head's in
-`results/profiles-dom-1c3a8859.txt`): ternary 66.3% → 0.75%, same 84.1% → 1.5% (earlier head's run). What remains is `tier1_cfg_allocate_impl` and `dataflow_liveness_vector_rows` (#1384).
+`results/profiles-dom-1c3a8859.txt`): ternary 65.9% → under 0.5% (the report's limit), ifs 65.4% → under 0.5%,
+same 84.1% → 1.8%. What remains is `tier1_cfg_allocate_impl` and `dataflow_liveness_vector_rows` (#1384).
 
 ## Limitations
 
