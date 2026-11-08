@@ -39,3 +39,5 @@ The separately retained `head-sqlite-count.tsv` is the candidate join performed 
 The archive excludes compiled SQLite/Lua executables and generated databases; it retains their hashes. SQLite and Lua remain external inputs; the archive includes project-original measurement fixtures and patch, not their source distributions. `logs/inputs.sha256` identifies the staged source files and their original notices remain with the external input trees.
 
 At main `77fd0f225ab83f479bf60234a750205df5683dd7`, the Tier 1 allocator, CFG/emitter, IR optimizer, x86 backend and `tier1_programs_measure.c` were unchanged from the pinned baseline; checker/input/initializer, preprocessor and CI setup did change. No equivalence or current-main performance result follows from this source comparison.
+
+A [follow-up integration identity record](current-integration-77fd/README.md) verifies that main `77fd0f22` and its conflict-free #1752 integration generate exactly the measured SQLite ELF and tag streams. It reuses these captures and does not add a native runtime or prove complete tag coverage.
