@@ -14,7 +14,7 @@ Both executables passed the existing speedtest1 verification hash `1248168 a7fa3
 | Combined | 433,608,852 | 427,734,867 | -1.35% |
 | Combined in `sqlite3VdbeExec` | 252,109,329 | 244,192,844 | -3.14% |
 
-The candidate falls far short of the issue's at-least-half edge-traffic target on this frozen SQLite comparison. This is not a 9700X runtime result and says nothing about the five Lua scripts' dynamic traffic. The `--verify` run is separate from the count run; matching database dumps and successful exits support, but do not independently prove, identical every-step behavior.
+The observed tagged traffic falls far short of the issue's at-least-half edge-traffic target on this frozen SQLite comparison and does not establish acceptance. This is not a 9700X runtime result and says nothing about the five Lua scripts' dynamic traffic. The `--verify` run is separate from the count run; matching database dumps and successful exits support, but do not independently prove, identical every-step behavior.
 
 An independent review matched `main`'s recorded address and instruction lengths against each disassembly, obtaining load bias `0x4000000` for each capture. No sampled instruction address inside either ELF executable region was unmatched. In each capture 1,986 instruction costs at 36 addresses associated with Callgrind's `???` object fell outside the executable interval and were excluded; their origin is unconfirmed. This is why `count.tsv` reports 1,986 unmatched, rather than zero. The `#total 0` in the earlier empty-input fit files is a parser-only check, not a dynamic count.
 
