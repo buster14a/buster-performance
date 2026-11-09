@@ -1,4 +1,4 @@
-# The width changes' Zen 5 rows (buster#1840)
+# buster#1840's 9700X records: Zen 5 rows and Tier 1's vector code
 
 The 9700X's measurement of the six register forms that buster#1840's width changes add to Tier 1:
 - `vextracti32x4` of a ymm and of a zmm register, and `vextracti64x4`;
@@ -180,3 +180,37 @@ The rows, as committed (latency and throughput in 1/256 cycle):
 | `VPMOVUSQD_XM64_X` | 512 | 128 |
 | `VPMOVUSQD_XM128_Y` | 1024 | 128 |
 | `VPMOVUSQD_YM256_Z` | 1024 | 128 |
+
+## Tier 1's vector code by each family (`measure-tier1-rows`)
+
+Families A (buster#1878, selects), B (buster#1924, width changes) and C (buster#1950, permutes, stacked on B), each against main.
+
+- **Commits:** main `cb608c1f616f8fe26234bcaaa869caccc571de63` against each head; `inputs.txt` has the heads, the lexer's inputs' SHA-256 and the toolchain.
+  - A: `ef33ec8f2e576427d2c664d50990604065c961be`
+  - B: `aae6f8508ebd46208f4d0633216c5fbf54fc61b3`
+  - C: `11dd0086b8152821b5745e755bbf0e5aae6eaa1b`
+- **Builds:** each built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0`, one hold each (`run-b.sh`).
+- **Command:** `measure-tier1-rows --march znver5 --base main` by each head's compiler, one hold per head, pinned to CPU 2 (`run-c.sh`). Its `--lexer` inputs are five of main's own sources: `c_checker.c`, `c_preprocessor.c`, `tier1_select.c`, `ir.c` and `c_parser.c`.
+  - `run-b.sh`'s first attempt at this step failed, its `--directory` missing. `run-c.sh` made the directories and ran it again.
+- **Output:** `rows-a.txt`, `rows-b.txt` and `rows-c.txt`. Every program's output agreed by every build; each file has every run.
+
+Medians of 11 runs, `--tier1` of the head against `--tier1` of main:
+
+| Program | A (selects) | B (width changes) | C (B and the permutes) |
+| --- | ---: | ---: | ---: |
+| machine rows' unit, user cycles | 1.000 | 0.998 | 0.998 |
+| lexer's byte-class scan, user cycles | 1.001 | 1.001 | 1.000 |
+| the compiler's lexer, user cycles | **1.005** | **0.984** | **0.986** |
+| the compiler's lexer, instructions | 0.999 | 0.999 | 0.999 |
+| `c_tokenize`, cycles per byte | 28.196 → 28.497 | 28.011 → 27.855 | 27.881 → 27.723 |
+
+Main's own runs differ between the three processes by up to 0.6%. The comparison is within each process, where main and the head alternate.
+
+The lexer's machine rows fall from 254 to:
+- A: 223;
+- B: 240;
+- C: 229.
+
+## The benchmark programs
+
+`run-b.sh` also compiled `measure-tier1-programs`' inputs by main's `--tier1` and each head's: sqlite3.c, with speedtest1's flags, and Lua 5.4.8's 33 sources. `log-b.txt` records that every object is byte-identical with main's for every head: those programs have no x86 builtins. So the families change none of their code, and `measure-tier1-programs` was not timed for them.
