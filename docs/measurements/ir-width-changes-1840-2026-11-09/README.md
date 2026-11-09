@@ -74,3 +74,121 @@ The forms are those Tier 1 selects for the IR's `permute`, `shuffle`, `align` an
 | `VSHUFI64X2_Z_Z_ZM512_IMM8` | 1280 | 128 | 256 | 256 |
 
 Latency and throughput are in 1/256 cycle, so each permute runs 2 per cycle. A 16-byte permute's latency is 2 cycles, a 32-byte one's 3 to 4, and a 64-byte one's 5, except `vpshufb`, which is 2 cycles at every width.
+
+## The conversions' rows (buster#1840, family D)
+
+A third process measured 88 more register forms with the same method:
+- **Script:** `zen5d.sh`. It cleans the worktree before applying its patch.
+- **Build:** buster main `cb608c1` with `familyd.patch`: families B, C and D, the conversions' rows `U`.
+- **Output:** `zen5d-table.txt` and `zen5d-errors.txt`.
+
+The forms are those Tier 1 selects for the IR's `extend` and `truncate`:
+- `vpmovzx` and `vpmovsx` of every pair of lanes at every result width (36);
+- `vpmov`, `vpmovs` and `vpmovus` of every pair at every source width (54, less `vpmovzxbw`'s and `vpmovsxbw`'s two already in the table).
+
+The rows, as committed (latency and throughput in 1/256 cycle):
+
+| Form | Latency | Throughput |
+| --- | ---: | ---: |
+| `VPMOVZXBD_Z_XM128` | 1024 | 128 |
+| `VPMOVZXBD_X_XM32_EVEX` | 512 | 128 |
+| `VPMOVM2B_Z_K` | 512 | 64 |
+| `VPMOVM2B_X_K` | 512 | 64 |
+| `VPMOVM2B_Y_K` | 512 | 64 |
+| `VPMOVM2W_Z_K` | 512 | 64 |
+| `VPMOVM2W_X_K` | 512 | 64 |
+| `VPMOVM2W_Y_K` | 512 | 64 |
+| `VPMOVM2D_Z_K` | 512 | 64 |
+| `VPMOVM2D_X_K` | 512 | 64 |
+| `VPMOVM2D_Y_K` | 512 | 64 |
+| `VPMOVM2Q_Z_K` | 512 | 64 |
+| `VPMOVM2Q_X_K` | 512 | 64 |
+| `VPMOVM2Q_Y_K` | 512 | 64 |
+| `VPMOVZXBW_X_XM64_EVEX` | 512 | 128 |
+| `VPMOVZXBW_Y_XM128_EVEX` | 512 | 128 |
+| `VPMOVZXBW_Z_YM256` | 1024 | 128 |
+| `VPMOVZXBD_Y_XM64_EVEX` | 512 | 128 |
+| `VPMOVZXBQ_X_XM16_EVEX` | 512 | 128 |
+| `VPMOVZXBQ_Y_XM32_EVEX` | 512 | 128 |
+| `VPMOVZXBQ_Z_XM64` | 1024 | 128 |
+| `VPMOVZXWD_X_XM64_EVEX` | 512 | 128 |
+| `VPMOVZXWD_Y_XM128_EVEX` | 512 | 128 |
+| `VPMOVZXWD_Z_YM256` | 1024 | 128 |
+| `VPMOVZXWQ_X_XM32_EVEX` | 512 | 128 |
+| `VPMOVZXWQ_Y_XM64_EVEX` | 512 | 128 |
+| `VPMOVZXWQ_Z_XM128` | 1024 | 128 |
+| `VPMOVZXDQ_X_XM64_EVEX` | 512 | 128 |
+| `VPMOVZXDQ_Y_XM128_EVEX` | 512 | 128 |
+| `VPMOVZXDQ_Z_YM256` | 1024 | 128 |
+| `VPMOVSXBW_X_XM64_EVEX` | 512 | 128 |
+| `VPMOVSXBW_Y_XM128_EVEX` | 512 | 128 |
+| `VPMOVSXBW_Z_YM256` | 1024 | 128 |
+| `VPMOVSXBD_X_XM32_EVEX` | 512 | 128 |
+| `VPMOVSXBD_Y_XM64_EVEX` | 512 | 128 |
+| `VPMOVSXBD_Z_XM128` | 1024 | 128 |
+| `VPMOVSXBQ_X_XM16_EVEX` | 512 | 128 |
+| `VPMOVSXBQ_Y_XM32_EVEX` | 512 | 128 |
+| `VPMOVSXBQ_Z_XM64` | 1024 | 128 |
+| `VPMOVSXWD_X_XM64_EVEX` | 512 | 128 |
+| `VPMOVSXWD_Y_XM128_EVEX` | 512 | 128 |
+| `VPMOVSXWD_Z_YM256` | 1024 | 128 |
+| `VPMOVSXWQ_X_XM32_EVEX` | 512 | 128 |
+| `VPMOVSXWQ_Y_XM64_EVEX` | 512 | 128 |
+| `VPMOVSXWQ_Z_XM128` | 1024 | 128 |
+| `VPMOVSXDQ_X_XM64_EVEX` | 512 | 128 |
+| `VPMOVSXDQ_Y_XM128_EVEX` | 512 | 128 |
+| `VPMOVSXDQ_Z_YM256` | 1024 | 128 |
+| `VPMOVWB_XM64_X` | 512 | 128 |
+| `VPMOVWB_XM128_Y` | 1024 | 128 |
+| `VPMOVWB_YM256_Z` | 1024 | 128 |
+| `VPMOVDB_XM32_X` | 512 | 128 |
+| `VPMOVDB_XM64_Y` | 1024 | 128 |
+| `VPMOVDB_XM128_Z` | 1280 | 128 |
+| `VPMOVDW_XM64_X` | 512 | 128 |
+| `VPMOVDW_XM128_Y` | 1024 | 128 |
+| `VPMOVDW_YM256_Z` | 1024 | 128 |
+| `VPMOVQB_XM16_X` | 512 | 128 |
+| `VPMOVQB_XM32_Y` | 1024 | 128 |
+| `VPMOVQB_XM64_Z` | 1280 | 128 |
+| `VPMOVQW_XM32_X` | 512 | 128 |
+| `VPMOVQW_XM64_Y` | 1024 | 128 |
+| `VPMOVQW_XM128_Z` | 1280 | 128 |
+| `VPMOVQD_XM64_X` | 512 | 128 |
+| `VPMOVQD_XM128_Y` | 1024 | 128 |
+| `VPMOVQD_YM256_Z` | 1024 | 128 |
+| `VPMOVSWB_XM64_X` | 512 | 128 |
+| `VPMOVSWB_XM128_Y` | 1024 | 128 |
+| `VPMOVSWB_YM256_Z` | 1024 | 128 |
+| `VPMOVSDB_XM32_X` | 512 | 128 |
+| `VPMOVSDB_XM64_Y` | 1024 | 128 |
+| `VPMOVSDB_XM128_Z` | 1280 | 128 |
+| `VPMOVSDW_XM64_X` | 512 | 128 |
+| `VPMOVSDW_XM128_Y` | 1024 | 128 |
+| `VPMOVSDW_YM256_Z` | 1024 | 128 |
+| `VPMOVSQB_XM16_X` | 512 | 128 |
+| `VPMOVSQB_XM32_Y` | 1024 | 128 |
+| `VPMOVSQB_XM64_Z` | 1280 | 128 |
+| `VPMOVSQW_XM32_X` | 512 | 128 |
+| `VPMOVSQW_XM64_Y` | 1024 | 128 |
+| `VPMOVSQW_XM128_Z` | 1280 | 128 |
+| `VPMOVSQD_XM64_X` | 512 | 128 |
+| `VPMOVSQD_XM128_Y` | 1024 | 128 |
+| `VPMOVSQD_YM256_Z` | 1024 | 128 |
+| `VPMOVUSWB_XM64_X` | 512 | 128 |
+| `VPMOVUSWB_XM128_Y` | 1024 | 128 |
+| `VPMOVUSWB_YM256_Z` | 1024 | 128 |
+| `VPMOVUSDB_XM32_X` | 512 | 128 |
+| `VPMOVUSDB_XM64_Y` | 1024 | 128 |
+| `VPMOVUSDB_XM128_Z` | 1280 | 128 |
+| `VPMOVUSDW_XM64_X` | 512 | 128 |
+| `VPMOVUSDW_XM128_Y` | 1024 | 128 |
+| `VPMOVUSDW_YM256_Z` | 1024 | 128 |
+| `VPMOVUSQB_XM16_X` | 512 | 128 |
+| `VPMOVUSQB_XM32_Y` | 1024 | 128 |
+| `VPMOVUSQB_XM64_Z` | 1280 | 128 |
+| `VPMOVUSQW_XM32_X` | 512 | 128 |
+| `VPMOVUSQW_XM64_Y` | 1024 | 128 |
+| `VPMOVUSQW_XM128_Z` | 1280 | 128 |
+| `VPMOVUSQD_XM64_X` | 512 | 128 |
+| `VPMOVUSQD_XM128_Y` | 1024 | 128 |
+| `VPMOVUSQD_YM256_Z` | 1024 | 128 |

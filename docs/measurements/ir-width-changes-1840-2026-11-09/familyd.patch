@@ -1,0 +1,2632 @@
+diff --git a/docs/ir-simd.md b/docs/ir-simd.md
+index bd19d33..8944377 100644
+--- a/docs/ir-simd.md
++++ b/docs/ir-simd.md
+@@ -383,6 +383,188 @@ The tests:
+   under a writemask and a float's, run natively against clang's; its bound of a
+   move for every two rows counts them with the rows, where they took no move.
+ 
++## Width changes (#1840)
++
++[#1840](https://github.com/buster14a/buster/issues/1840) decodes the x86
++builtins' remaining rows family by family. Its design comment counts them by
++kind. Moving bits between vector widths takes three unary or binary kinds of
++`intrinsic`:
++
++```text
++%4 = intrinsic.v4i32 %3 extract 3
++%9 = intrinsic.v16i32 %1 widen
++%13 = intrinsic.v16i32 %3, %1 insert 2
++```
++
++An intrinsic's `flags` are its immediate: a width change's part, in units of the
++narrower vector, and 0 for every other kind (which the verifier now checks per
++kind rather than as lanes).
++
++- `extract` (`BUSTER_IR_INTRINSIC_EXTRACT`): the `flags`th part of a, of the
++  result's width. The result is a narrower vector: 16 bytes of 32 or 64, or 32
++  of 64.
++- `widen` (`BUSTER_IR_INTRINSIC_WIDEN`): a in the result's low bytes and zeros
++  past them. a is a narrower vector; `flags` is 0.
++- `insert` (`BUSTER_IR_INTRINSIC_INSERT`): a, of the result's type, with its
++  `flags`th part of b's width replaced by b, a narrower vector.
++
++They read no lanes and move bits whole. The text names the part after an
++extract's or an insert's kind. `tests/ir/widths.ir` round-trips every form.
++
++The model (`ir_simd_model.c`'s `IR_SIMD_EXTRACT`, `IR_SIMD_WIDEN` and
++`IR_SIMD_INSERT`, its action's `index` the part) moves whole words, and the
++interpreter runs it. SCCP folds a width change once its operands are constant.
++GVN and LICM take it as a pure operation, its part in their key. Dead code
++removes an unused one.
++
++`ir_simd_typed_width` decodes three kinds of row:
++
++- **Casts.** The rows of no record of one vector operand (or two of one width,
++  the second kept for its effects alone), whose result is the operand's
++  register, of another width. These are the intrinsics' casts, as
++  `c_check_program_vector_builtins.c` gives every shuffle that moves no element.
++  A narrower result is an extract of part 0; a wider one is a widen, since Tier
++  0 and Tier 1 both zero-extend an operand into its role's register.
++- **Inserts.** BINARY_IMMEDIATE's `vinsert` rows (`vinserti32x4` to
++  `vinsertf64x4`, and the `vinsertf128` builtins) become inserts of the
++  immediate's part.
++- **Masked extracts.** EXTRACT_LANE's `vextract` rows under a writemask, merged
++  into w, become an extract and a `vselect` of the form's elements' lanes. The
++  `vselect` is left out where the typed stream's writemask has every lane, as
++  #1623's comparisons do.
++
++Each record must be register-direct with no other field, and the target must
++have AVX512F and VL, the rows' own forms' features (DQ for `32x8` and `64x2`)
++and, merged, the mask's moves. Otherwise the row stays a machine row.
++
++Tier 1 selects each kind as one EVEX instruction (`BUSTER_TIER1_VECTOR_WIDTH_CHANGE`):
++- an extract of part 0 and a widen as the narrower width's move, which an
++  extract leaves out when its registers are the same, and a widen never, since
++  the move zeroes the register past it;
++- another extract as `vextracti32x4` or `vextracti64x4`;
++- an insert as `vinserti32x4` or `vinserti64x4`.
++
++Their six register forms have new Zen 5 rows, measured on the 9700X ([the
++record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09),
++buster-performance#354; [the model guide](x86-zen5.md)).
++
++Measured by `--tier1 --tier1-report -march=znver5`, both compilers compiling
++main `cb608c1`'s sources:
++
++| Unit | Main rows | Records | Row moves | This change rows | Records | Row moves |
++| --- | ---: | ---: | ---: | ---: | ---: | ---: |
++| `main_unit_frontend.c` | 1,207 | 576,053 | 782 | 1,111 | 575,941 | 693 |
++| `main_unit_backend.c` | 1,735 | 1,490,643 | 1,010 | 1,643 | 1,490,520 | 926 |
++
++The tests:
++
++- `test-ir`: both verifiers admit each kind at every pair of widths and part
++  below 5 exactly where the widths and part agree (19 forms), and refuse another
++  kind's flags. The model's values are checked against bytes written out.
++- `test-ir-parse`: round-trips the forms.
++- `test-ir-optimize`: SCCP folds, by both paths, an insert's part back, a
++  widen's zeros and another part's own value.
++- `test-ir-simd`: decodes every insert rule (16) and masked extract rule (12)
++  at 8 immediates, and every cast's row. Features are written out, and each
++  row stays a machine row without each feature it needs and under 9 changes.
++- `test-tier1-masks`: runs 78 programs, each rule's every part and the 6 casts,
++  each its only row. Every lane of an extract is merged under an input word or
++  an unmasked writemask. They go through both lowering paths, the interpreter
++  at every stage and Tier 1's native code, against a C model.
++- `test-checker-driver`'s machine-rows unit: its inserts, extracts and casts are
++  now the IR's. It has 65 rows and 32 moves (main: 75 and 39), and its native
++  hashes are clang -O0's by both paths.
++
++## Permutes (#1840)
++
++Four more kinds of `intrinsic` move lanes of two vectors of the result's type,
++their immediate in `flags`:
++
++```text
++%4 = intrinsic.v16i32 %3, %2 permute 0
++%7 = intrinsic.v4i32 %1, %2 shuffle
++%8 = intrinsic.v16i32 %3, %6 align 47
++%11 = intrinsic.v16i32 %8, %6 shuffle_lanes 228
++```
++
++- `permute`: lane i is a's lane that b's lane i's low bits name, modulo the
++  lanes; its lanes are `1 << flags` bytes (0 to 3). These are `vpermb` to
++  `vpermq`, the variable permutes.
++- `shuffle`: byte i is 0 where b's byte i has its top bit set, and else a's byte,
++  within the same 16 bytes, that the low 4 bits of b's byte i name (`vpshufb`;
++  flags 0).
++- `align`: lane i is lane i + count of b's lanes followed by a's. Its lanes are
++  `1 << (flags >> 4)` bytes (4 or 8), and its count is flags' low 4 bits, below
++  the lanes (`valignd`, `valignq`).
++- `shuffle_lanes`: each 16-byte lane j comes from a for the result's low half
++  and from b for its high half: the lane that flags' bits from j times log2(the
++  lanes) name. A 32-byte vector takes 2 bits of flags and a 64-byte one any
++  byte (`vshufi64x2`, and `vshufi32x4`'s same lanes); a 16-byte one has none.
++
++`ir_permute_flags_valid` is the verifier's rule. The model's
++`IR_SIMD_PERMUTE` to `IR_SIMD_SHUFFLE_LANES` moves each byte, and the
++interpreter, SCCP, GVN and LICM take them as they take the width changes.
++
++`ir_simd_typed_permute` decodes the rows of one record of these forms at the
++result's width, of two vectors of that width:
++
++- the variable permutes, their indices in VECTOR(1) (vvvv) and their lanes in
++  VECTOR(0) (rm), as the front end swaps the builtins' arguments;
++- `vpshufb` of VECTOR(0) by VECTOR(1);
++- `valign*` and `vshufi*` of VECTOR(0) and VECTOR(1) by the immediate. An
++  align's count is the immediate's bits below the lanes, and a 32-byte shuffle
++  of lanes uses its low 2 bits: the bits the instruction reads, though the front
++  end passes the builtin's whole byte.
++
++The destination is VECTOR(0). The target needs the form's features (BW for
++words and `vpshufb`, VBMI for `vpermb`) and the vectors' moves.
++
++Tier 1 selects each as its form at the same width (`BUSTER_TIER1_VECTOR_PERMUTE`,
++`tier1_select_permute_form`), `vshufi64x2` for both shuffles of lanes. Its 19
++register forms, every one but `vpermb`'s 64-byte form, have new Zen 5 rows
++measured on the 9700X ([the
++record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09),
++buster-performance#354): 2 per cycle, and a latency of 2 cycles at 16 bytes,
++3 to 4 at 32 and 5 at 64 (2 at every width for `vpshufb`). A permute of a width with no form (a doubleword's or a
++quadword's of 16 bytes, a quadword's of 32) gets no candidate, though no row
++makes one.
++
++Measured by `--tier1 --tier1-report -march=znver5` on main `cb608c1`'s sources,
++with the width changes too:
++
++| Unit | Rows | Records | Row moves |
++| --- | ---: | ---: | ---: |
++| `main_unit_frontend.c` | 990 | 575,941 | 693 |
++| `main_unit_backend.c` | 1,510 | 1,490,520 | 926 |
++
++That is 121 and 133 rows fewer than the width changes alone (1,111 and 1,643),
++with the same records and moves around the rows: each of these rows was one
++record that took no move.
++
++The three-operand permutes (`vpermt2*`, which `__builtin_shufflevector`'s rows
++use too) wait on the owner's decision on #1840.
++
++The tests:
++
++- `test-ir`: both verifiers take each kind at each width and every flags byte
++  exactly where the rule, written out again, admits it (317 forms). They refuse
++  operands of another type and a missing b. The model's bytes are checked
++  against a byte formula on random vectors.
++- `test-ir-parse`: round-trips the forms.
++- `test-ir-optimize`: SCCP folds each kind, by both paths alike, to the
++  interpreter's value.
++- `test-ir-simd`: decodes every rule of these forms (vpermb, vpermw at 3 widths,
++  vpermd at 2 and vpermq at 1; vpshufb at 3; the aligns at 3 and the shuffles of
++  lanes at 2, at 8 immediates: 92 rows) to its kind and flags, written out, at
++  exactly its features. Each row stays a machine row without each feature it
++  needs and under 8 changes.
++- `test-tier1-masks`: runs 89 programs, every row but vpermb's (the
++  pipeline's x86-64-v4 has no VBMI), each as a program's only row, through both
++  lowering paths, the interpreter at every stage and Tier 1's native code. They
++  are checked against a C model written from Intel's manual.
++- `test-checker-driver`'s machine-rows unit: its `permutexvar` and
++  `shuffle_epi8` are now the IR's, leaving 61 rows and 32 moves.
++
+ ## Lanes: the vectors' element types (#141)
+ 
+ The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
+diff --git a/docs/tier1.md b/docs/tier1.md
+index eb9198b..c72d8c5 100644
+--- a/docs/tier1.md
++++ b/docs/tier1.md
+@@ -366,6 +366,13 @@ but its naked one. The scalar ones, BMI2's
+ instruction of selection's `TIER1_RULE_INTRINSIC`, and so are the C bit builtins'
+ rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`) and the signed
+ overflow builtins' (#1385: `saddo`, `ssubo` and `smulo`, the operation and `seto`).
++The x86 builtins' casts between vector widths, lane inserts and masked lane
++extracts are the IR's `extract`, `widen` and `insert` intrinsics (#1840, [the
++SIMD IR guide](ir-simd.md)'s "Width changes"), each one EVEX instruction of
++selection's `BUSTER_TIER1_VECTOR_WIDTH_CHANGE`; their variable permutes, byte
++shuffles, aligns and shuffles of lanes are its `permute`, `shuffle`, `align` and
++`shuffle_lanes` (#1840, its "Permutes"), each one EVEX instruction of
++`BUSTER_TIER1_VECTOR_PERMUTE`.
+ 
+ ### Inlining (#1282)
+ 
+diff --git a/docs/x86-zen5.md b/docs/x86-zen5.md
+index 6d4f8f8..3dead60 100644
+--- a/docs/x86-zen5.md
++++ b/docs/x86-zen5.md
+@@ -280,6 +280,20 @@ other 79 differ only in throughput, by the column's 1/64-cycle step (`ktest`'s
+ and `kortest`'s by their 0.5 or 1 cycle passes), or in pipe bits. Their 1,349
+ rows share 156 IDs.
+ 
++[#1840](https://github.com/buster14a/buster/issues/1840)'s width changes added
++six register rows, `vextracti32x4` of a ymm and a zmm register, `vextracti64x4`,
++`vinserti32x4` into a ymm and a zmm register and `vinserti64x4`, which Tier 1
++selects for the IR's `extract` and `insert`. They were measured by one `--missing
++--table` process on the 9700X (CPU 2, under the lock, built `BUSTER_HOST_ARCH=znver5
++BUSTER_DEBUG_INFO=0` at `cb608c1` with the change): the extracts have a latency
++of 2 cycles and a throughput of 0.25, the inserts 2 and 0.5, each one macro-op. [The
++record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/ir-width-changes-1840-2026-11-09)
++(buster-performance#354) has the process's output. Its permutes then added 19 more,
++measured the same way: `vpermb` of xmm and ymm registers, `vpermw` and
++`vpshufb` at every width, `vpermd` of ymm and zmm registers, `vpermq` of zmm
++ones, `valignd` and `valignq` at every width, and `vshufi64x2` of ymm and zmm
++registers.
++
+ What the rows say, a few families (cycles; derived values in italics):
+ 
+ | Family | Latency | Throughput | Macro-ops |
+diff --git a/src/buster/compiler/c_check_tier1_driver_test.c b/src/buster/compiler/c_check_tier1_driver_test.c
+index 6975130..fa382ff 100644
+--- a/src/buster/compiler/c_check_tier1_driver_test.c
++++ b/src/buster/compiler/c_check_tier1_driver_test.c
+@@ -3733,7 +3733,9 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
+     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
+     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
+     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
+-    // them with the rows still.
++    // them with the rows still. #1840 decodes its inserts, extracts and casts between widths into the IR's own
++    // intrinsics, and its variable permutes and byte shuffles into the IR's permutes, which leaves 61 rows and 32 moves by
++    // Tier 1 (75 and 39 before).
+     const uint64_t compares = 11;
+     char header[512];
+     char unit[512];
+diff --git a/src/buster/compiler/ir.c b/src/buster/compiler/ir.c
+index bf3531e..8eed37b 100644
+--- a/src/buster/compiler/ir.c
++++ b/src/buster/compiler/ir.c
+@@ -155,7 +155,10 @@ typedef enum IrOp
+     // cleared), and BMI1's bextr (a's bits from b's low byte up, as many as its second byte says), whose x86 rows the
+     // typed stream's lowering admits (ir_simd_typed.c). The unary splat (#1450) repeats scalar a's raw bits throughout
+     // a vector result; its scalar type gives the lane width, b is absent and flags are zero. It does no arithmetic,
+-    // including on floating operands, so signed zeros and NaN payloads are unchanged.
++    // including on floating operands, so signed zeros and NaN payloads are unchanged. The vector width changes (#1840:
++    // extract, widen and insert) move a vector's bits whole between widths, their part in flags, and the permutes (#1840:
++    // permute, shuffle, align and shuffle_lanes) move lanes of two vectors, their immediate in flags; the conversions
++    // (#1840: extend and truncate) widen or narrow integer lanes, their lanes and mode in flags.
+     IR_INTRINSIC,
+     // An atomic read/modify/write (#1059): `a` the object's address, `b` the operand, of the result's type (an integer of
+     // 1, 2, 4 or 8 bytes), and its flags BUSTER_IR_ATOMIC with its C memory order and its operation
+@@ -202,7 +205,33 @@ typedef enum IrOp
+ #define BUSTER_IR_INTRINSIC_SADDO 12u
+ #define BUSTER_IR_INTRINSIC_SSUBO 13u
+ #define BUSTER_IR_INTRINSIC_SMULO 14u
+-#define BUSTER_IR_INTRINSIC_COUNT 15u
++// The vector width changes (#1840), which move bits whole and read no lanes, their part in the instruction's flags (an
++// intrinsic's immediate, 0 for every other kind): extract's result is a's `flags`th part of the result's width, a wider
++// vector (16 bytes of 32 or 64, 32 of 64); widen's is a, a narrower vector, in its low bytes and zeros past them (flags
++// 0); and insert's is a, of its type, with its `flags`th part of b's width replaced by b, a narrower vector. The x86
++// builtins' casts between widths, vextracti32x4 to vinserti64x4.
++#define BUSTER_IR_INTRINSIC_EXTRACT 15u
++#define BUSTER_IR_INTRINSIC_WIDEN 16u
++#define BUSTER_IR_INTRINSIC_INSERT 17u
++// The permutes (#1840), of two vectors of the result's type, their immediate in flags: permute's lane i is a's lane that
++// b's lane i's low bits name, its lanes' bytes 1 << flags (0 to 3: vpermb to vpermq); shuffle's byte i is 0 where b's byte
++// i has its top bit and else a's byte in i's 16 bytes that b's byte's low 4 bits name (vpshufb, flags 0); align's lane i
++// is lane i + count of b's lanes followed by a's, its lanes' bytes 1 << (flags >> 4) (2 or 3) and its count flags' low 4
++// bits, below the lanes (valignd, valignq); and shuffle_lanes' 16-byte lane j is, from a for the result's low half and b
++// for its high half, the lane flags' bits from j times log2 of the lanes name (vshufi64x2: 32 or 64 bytes).
++#define BUSTER_IR_INTRINSIC_PERMUTE 18u
++#define BUSTER_IR_INTRINSIC_SHUFFLE 19u
++#define BUSTER_IR_INTRINSIC_ALIGN 20u
++#define BUSTER_IR_INTRINSIC_SHUFFLE_LANES 21u
++// The conversions between integer lanes (#1840), unary, their lanes in flags: the source's lanes' bytes' log2 in bits 0
++// and 1, the result's in bits 2 and 3, and the mode in bits 4 and 5. extend's lane i is a's lane i, zero-extended (mode 0)
++// or sign-extended (1) to a wider lane, as many lanes as the result has, from a's low bytes (vpmovzx, vpmovsx); truncate's
++// lane i is a's lane i, every lane of a, narrowed by wrapping (mode 0), signed saturation (1) or unsigned saturation of a
++// signed lane (2), in the result's low bytes and zeros past them, the result 16 bytes or the lanes' bytes if more (vpmov,
++// vpmovs, vpmovus).
++#define BUSTER_IR_INTRINSIC_EXTEND 22u
++#define BUSTER_IR_INTRINSIC_TRUNCATE 23u
++#define BUSTER_IR_INTRINSIC_COUNT 24u
+ 
+ // ICMP EQ/NE accept pointers too; the other integer predicates require integer operands. FCMP uses EQ through GE:
+ // ordered comparisons, except NE, which is true for unordered inputs, as in C.
+@@ -697,6 +726,15 @@ static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
+     "saddo",
+     "ssubo",
+     "smulo",
++    "extract",
++    "widen",
++    "insert",
++    "permute",
++    "shuffle",
++    "align",
++    "shuffle_lanes",
++    "extend",
++    "truncate",
+ };
+ 
+ // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
+@@ -1213,6 +1251,43 @@ static bool ir_lane_valid(uint32_t op, uint32_t lane)
+     return operation != IR_SIMD_OPERATION_COUNT && lane < IR_SIMD_LANE_COUNT && ir_simd_lane_valid(operation, (IrSimdLane)lane);
+ }
+ 
++// Whether a permute's flags (#1840, BUSTER_IR_INTRINSIC_PERMUTE to _SHUFFLE_LANES) are its kind's at vector type `type`:
++// permute's lanes' bytes' log2 (0 to 3), shuffle's 0, align's lanes' bytes' log2 (2 or 3) in bits 4 and 5 and its count,
++// below its lanes, in the low 4, and shuffle_lanes' immediate, of a 32-byte vector's two lanes' bits or a 64-byte one's.
++static bool ir_permute_flags_valid(uint32_t kind, uint32_t type, uint32_t flags)
++{
++    const uint32_t bits = ir_type_bits[type];
++    const uint32_t size = flags >> 4;
++    const bool valid = kind == BUSTER_IR_INTRINSIC_PERMUTE ? flags <= 3 :
++                       kind == BUSTER_IR_INTRINSIC_SHUFFLE ? flags == 0 :
++                       kind == BUSTER_IR_INTRINSIC_ALIGN   ? (size == 2 || size == 3) && (flags & 15) < bits / (8u << size) :
++                                                             (bits == 256 && flags < 4) || bits == 512;
++    return valid;
++}
++
++// Whether a conversion's flags (#1840, BUSTER_IR_INTRINSIC_EXTEND and _TRUNCATE) are valid from vector type `from` to
++// vector type `type`: an extend's to wider lanes, zero or sign, of no more of the source's bytes than it has; a truncate's
++// to narrower lanes, of every one of the source's lanes, wrapping or saturating, into 16 bytes or the lanes' bytes if more.
++static bool ir_convert_flags_valid(uint32_t kind, uint32_t from, uint32_t type, uint32_t flags)
++{
++    const uint32_t source = flags & 3;
++    const uint32_t result = (flags >> 2) & 3;
++    const uint32_t mode = flags >> 4;
++    bool valid = false;
++    if (kind == BUSTER_IR_INTRINSIC_EXTEND)
++    {
++        const uint32_t lanes = ir_type_bits[type] / (8u << result);
++        valid = result > source && mode <= 1 && lanes * (8u << source) <= ir_type_bits[from];
++    }
++    else
++    {
++        const uint32_t lanes = ir_type_bits[from] / (8u << source);
++        const uint32_t bits = lanes * (8u << result);
++        valid = result < source && mode <= 2 && ir_type_bits[type] == (bits > 128 ? bits : 128);
++    }
++    return valid;
++}
++
+ // The mask type of a comparison of vector type `type`'s lanes `lane`, a bit per lane (m8 for 8 lanes or fewer): IR_VOID
+ // for a type that isn't a vector.
+ static uint32_t ir_lane_mask(uint32_t type, uint32_t lane)
+@@ -1651,7 +1726,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
+     }
+     else if (((op == IR_LOAD || op == IR_STORE) && (!ir_access_flags_valid(op, f->flags[i]) || f->alignment_log2[i] > 31)) ||
+              (op == IR_ATOMIC_RMW && (!ir_rmw_flags_valid(f->flags[i]) || f->alignment_log2[i] > 31)) ||
+-             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
++             ((op != IR_LOAD && op != IR_STORE && op != IR_ATOMIC_RMW) && ((f->flags[i] != 0 && op != IR_INTRINSIC && !ir_lane_valid(op, f->flags[i])) || f->alignment_log2[i] != 0)))
+     {
+         check.error = IR_ERROR_METADATA;
+     }
+@@ -1720,7 +1795,48 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
+             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
+             case IR_RULE_INTRINSIC:
+             {
+-                if (c == BUSTER_IR_INTRINSIC_SPLAT)
++                // An intrinsic's flags are its immediate: a width change's part (#1840), and 0 for every other kind.
++                const uint32_t part = f->flags[i];
++                if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_WIDEN)
++                {
++                    const uint32_t narrow = c == BUSTER_IR_INTRINSIC_EXTRACT ? type : ta;
++                    const uint32_t wide = c == BUSTER_IR_INTRINSIC_EXTRACT ? ta : type;
++                    valid = ir_vector_type(type) && ir_vector_type(ta) && ir_type_bits[narrow] < ir_type_bits[wide] && b == BUSTER_IR_NONE &&
++                            (c == BUSTER_IR_INTRINSIC_EXTRACT ? part < ir_type_bits[wide] / ir_type_bits[narrow] : part == 0);
++                }
++                else if (c == BUSTER_IR_INTRINSIC_INSERT)
++                {
++                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
++                    {
++                        check = ir_check(IR_ERROR_OPERAND, i, 1);
++                    }
++                    else
++                    {
++                        const uint32_t tb_part = f->type[b];
++                        valid = ir_vector_type(type) && ta == type && ir_vector_type(tb_part) && ir_type_bits[tb_part] < ir_type_bits[type] &&
++                                part < ir_type_bits[type] / ir_type_bits[tb_part];
++                    }
++                }
++                else if (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE)
++                {
++                    valid = ir_vector_type(type) && ir_vector_type(ta) && b == BUSTER_IR_NONE && ir_convert_flags_valid(c, ta, type, part);
++                }
++                else if (c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
++                {
++                    if (b >= f->instruction_count || f->type[b] == IR_VOID || f->type[b] >= IR_TYPE_COUNT)
++                    {
++                        check = ir_check(IR_ERROR_OPERAND, i, 1);
++                    }
++                    else
++                    {
++                        valid = ir_vector_type(type) && ta == type && f->type[b] == type && ir_permute_flags_valid(c, type, part);
++                    }
++                }
++                else if (part != 0)
++                {
++                    valid = false;
++                }
++                else if (c == BUSTER_IR_INTRINSIC_SPLAT)
+                 {
+                     valid = ir_vector_type(type) && ir_splat_scalar_type(ta) && b == BUSTER_IR_NONE;
+                 }
+@@ -3093,6 +3209,12 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
+                         if (op == IR_INTRINSIC)
+                         {
+                             fprintf(output, " %s", c < BUSTER_IR_INTRINSIC_COUNT ? ir_intrinsic_names[c] : "invalid");
++                            // A width change's part (#1840), its immediate.
++                            if (c == BUSTER_IR_INTRINSIC_EXTRACT || c == BUSTER_IR_INTRINSIC_INSERT || c == BUSTER_IR_INTRINSIC_PERMUTE || c == BUSTER_IR_INTRINSIC_ALIGN ||
++                                c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE)
++                            {
++                                fprintf(output, " %u", (unsigned)f->flags[i]);
++                            }
+                         }
+                         if (op == IR_ATOMIC_RMW)
+                         {
+diff --git a/src/buster/compiler/ir_interpreter_simd.c b/src/buster/compiler/ir_interpreter_simd.c
+index ffd3a83..7bec6cd 100644
+--- a/src/buster/compiler/ir_interpreter_simd.c
++++ b/src/buster/compiler/ir_interpreter_simd.c
+@@ -32,6 +32,27 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
+     return operation;
+ }
+ 
++// A width change's, a permute's or a conversion's model operation (#1840: extract to truncate), or
++// IR_SIMD_OPERATION_COUNT for any other intrinsic.
++static IrSimdOperation ir_interpreter_simd_intrinsic(uint32_t kind)
++{
++    IrSimdOperation operation = IR_SIMD_OPERATION_COUNT;
++    switch (kind)
++    {
++        case BUSTER_IR_INTRINSIC_EXTRACT: operation = IR_SIMD_EXTRACT; break;
++        case BUSTER_IR_INTRINSIC_WIDEN: operation = IR_SIMD_WIDEN; break;
++        case BUSTER_IR_INTRINSIC_INSERT: operation = IR_SIMD_INSERT; break;
++        case BUSTER_IR_INTRINSIC_PERMUTE: operation = IR_SIMD_PERMUTE; break;
++        case BUSTER_IR_INTRINSIC_SHUFFLE: operation = IR_SIMD_SHUFFLE; break;
++        case BUSTER_IR_INTRINSIC_ALIGN: operation = IR_SIMD_ALIGN; break;
++        case BUSTER_IR_INTRINSIC_SHUFFLE_LANES: operation = IR_SIMD_SHUFFLE_LANES; break;
++        case BUSTER_IR_INTRINSIC_EXTEND: operation = IR_SIMD_EXTEND; break;
++        case BUSTER_IR_INTRINSIC_TRUNCATE: operation = IR_SIMD_TRUNCATE; break;
++        default: break;
++    }
++    return operation;
++}
++
+ static bool ir_interpreter_simd_supported(const IrFunction* function)
+ {
+     // A machine row (#141, IrFunction.rows) is x86 records, which the interpreter has no model of: Tier 1's native code
+@@ -58,6 +79,7 @@ static bool ir_interpreter_simd_supported(const IrFunction* function)
+             const uint8_t op = function->op[i];
+             supported = op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_BITCAST || op == IR_SELECT ||
+                         op == IR_PHI || op == IR_LOAD || (op == IR_INTRINSIC && function->c[i] == BUSTER_IR_INTRINSIC_SPLAT) ||
++                        (op == IR_INTRINSIC && ir_interpreter_simd_intrinsic(function->c[i]) != IR_SIMD_OPERATION_COUNT) ||
+                         ir_interpreter_simd_opcode(op) != IR_SIMD_OPERATION_COUNT;
+         }
+     }
+@@ -127,12 +149,15 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
+     {
+         const uint32_t ids[3] = { function->a[i], function->b[i], function->c[i] };
+         const uint32_t mask = ir_value_mask(function, i);
++        const bool intrinsic = op == IR_INTRINSIC;
+         IrSimdAction action = {
+-            .operation = ir_interpreter_simd_opcode(op),
++            .operation = intrinsic ? ir_interpreter_simd_intrinsic(function->c[i]) : ir_interpreter_simd_opcode(op),
+             .result = ir_simd_shape(function->type[i]),
+             .predicate = op == IR_VCMP ? (IrSimdPredicate)function->c[i] : IR_SIMD_EQ,
+-            // Its lanes (#141's element types): a vector operation's flags, which the verifier checked.
+-            .lane = (IrSimdLane)function->flags[i],
++            // Its lanes (#141's element types): a vector operation's flags, which the verifier checked; an intrinsic's
++            // flags are its part (#1840's width changes), and it reads no lanes.
++            .lane = intrinsic ? IR_SIMD_LANE_I32 : (IrSimdLane)function->flags[i],
++            .index = intrinsic ? function->flags[i] : 0,
+         };
+         IrSimdValue values[3] = {0};
+         const IrSimdValue* operands[3] = {0};
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index 05cba28..91c89ad 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -717,6 +717,37 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
+         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
+         ir_typed_lanes(sink, value, operation->lane);
+     }
++    else if (operation->convert != 0)
++    {
++        // A conversion (#1840), its lanes and mode in its flags; a masked truncation's merged into its second operand under
++        // its third where the typed stream's writemask hasn't every lane.
++        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], BUSTER_IR_NONE, operation->convert - 1u, 0);
++        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
++        if (operation->merge_mask && !unmasked)
++        {
++            value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
++            ir_typed_lanes(sink, value, operation->lane);
++        }
++    }
++    else if (operation->permute != 0)
++    {
++        // A permute (#1840), its immediate in its flags.
++        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], operands[1], operation->permute - 1u, 0);
++        ir_typed_lanes(sink, value, (IrSimdLane)operation->immediate);
++    }
++    else if (operation->width_change != 0)
++    {
++        // A width change (#1840), its part in its flags; a masked extract's merged into its second operand under its third
++        // where the typed stream's writemask hasn't every lane.
++        const uint32_t kind = operation->width_change - 1u;
++        value = ir_typed_emit(sink, IR_INTRINSIC, type, operands[0], kind == BUSTER_IR_INTRINSIC_INSERT ? operands[1] : BUSTER_IR_NONE, kind, 0);
++        ir_typed_lanes(sink, value, (IrSimdLane)operation->part);
++        if (operation->merge_mask && !unmasked)
++        {
++            value = ir_typed_emit(sink, IR_VSELECT, type, operands[2], value, operands[1], 0);
++            ir_typed_lanes(sink, value, operation->lane);
++        }
++    }
+     else
+     {
+         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+@@ -730,7 +761,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
+ // operand have it (_mm512_cmpeq_epi8_mask's -1). The typed stream decides it, so both lowering passes agree.
+ static bool ir_typed_unmasked(const Tier0Function* input, const IrSimdTypedOperation* operation, uint32_t i)
+ {
+-    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) : 0;
++    // A comparison's lanes, or a masked extract's or truncation's (#1840): its result's, the merged operand's.
++    const uint32_t lanes = operation->compare_mask ? 8u * operation->operand_bytes[0] / ir_simd_lane_bits(operation->lane) :
++                           operation->merge_mask   ? 8u * operation->operand_bytes[1] / ir_simd_lane_bits(operation->lane) :
++                                                     0;
+     const uint64_t every = lanes >= 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+     return lanes != 0 && i >= 2 && input->kinds[i - 1] == BUSTER_TYPED_CONVERT && input->classes[i - 1] == BUSTER_TYPED_CLASS_MASK && input->kinds[i - 2] == BUSTER_TYPED_CONST &&
+            input->classes[i - 2] >= BUSTER_TYPED_CLASS_I8 && input->classes[i - 2] <= BUSTER_TYPED_CLASS_U64 && (input->values[i - 2] & every) == every;
+diff --git a/src/buster/compiler/ir_optimize_gvn.c b/src/buster/compiler/ir_optimize_gvn.c
+index 88ec938..a0e7cf9 100644
+--- a/src/buster/compiler/ir_optimize_gvn.c
++++ b/src/buster/compiler/ir_optimize_gvn.c
+@@ -176,7 +176,10 @@ static void ir_gvn_classify(IrGvnWork* work)
+         const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + first);
+         const __mmask16 integer_compare = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmplt_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
+         const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
+-        const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT));
++        // A splat, the width changes, the permutes and the conversions (#1840: extract to truncate, consecutive kinds) are pure.
++        const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
++                                                                          (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
++                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TRUNCATE))));
+         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
+         _mm_mask_storeu_epi8(work->pure + first, valid, _mm_maskz_set1_epi8(eligible, 1));
+     }
+diff --git a/src/buster/compiler/ir_optimize_licm.c b/src/buster/compiler/ir_optimize_licm.c
+index 0d67133..1c10594 100644
+--- a/src/buster/compiler/ir_optimize_licm.c
++++ b/src/buster/compiler/ir_optimize_licm.c
+@@ -98,7 +98,10 @@ static void ir_licm_classify(IrLicmWork* work)
+         // Packed variable shifts are total even for oversized counts. Scalar shifts keep their fault exclusion.
+         const __mmask16 vector_shift = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) & _mm_cmpge_epu8_mask(types, _mm_set1_epi8(IR_V4I32)) & _mm_cmple_epu8_mask(types, _mm_set1_epi8(IR_V16I32));
+         const __m512i discriminators = _mm512_maskz_loadu_epi32(valid, f->c + first);
+-        const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(4)) & _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT));
++        // A splat, the width changes, the permutes and the conversions (#1840: extract to truncate, consecutive kinds) are pure.
++        const __mmask16 splat = _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(4)) & (_mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_SPLAT)) |
++                                                                          (_mm512_cmpge_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_EXTRACT)) &
++                                                                           _mm512_cmple_epu32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TRUNCATE))));
+         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
+         _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
+     }
+diff --git a/src/buster/compiler/ir_optimize_simd.c b/src/buster/compiler/ir_optimize_simd.c
+index 9d5c204..565667a 100644
+--- a/src/buster/compiler/ir_optimize_simd.c
++++ b/src/buster/compiler/ir_optimize_simd.c
+@@ -604,6 +604,30 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
+             result = IROPT_OVERDEFINED;
+         }
+     }
++    else if (op == IR_INTRINSIC && f->c[i] >= BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] <= BUSTER_IR_INTRINSIC_TRUNCATE)
++    {
++        // A width change, a permute or a conversion (#1840): exact integer and bit moves, folded by the model once every
++        // operand is constant.
++        static const uint8_t operations[] = { IR_SIMD_EXTRACT, IR_SIMD_WIDEN,         IR_SIMD_INSERT, IR_SIMD_PERMUTE,  IR_SIMD_SHUFFLE,
++                                              IR_SIMD_ALIGN,   IR_SIMD_SHUFFLE_LANES, IR_SIMD_EXTEND, IR_SIMD_TRUNCATE };
++        const bool binary = f->c[i] != BUSTER_IR_INTRINSIC_EXTRACT && f->c[i] != BUSTER_IR_INTRINSIC_WIDEN && f->c[i] != BUSTER_IR_INTRINSIC_EXTEND &&
++                            f->c[i] != BUSTER_IR_INTRINSIC_TRUNCATE;
++        const uint8_t left = work->states[a];
++        const uint8_t right = binary ? work->states[b] : IROPT_CONSTANT;
++        result = left == IROPT_OVERDEFINED || right == IROPT_OVERDEFINED ? IROPT_OVERDEFINED : left == IROPT_UNKNOWN || right == IROPT_UNKNOWN ? IROPT_UNKNOWN : IROPT_CONSTANT;
++        if (result == IROPT_CONSTANT)
++        {
++            const IrSimdValue operands[2] = { ir_optimize_simd_value(work, a), binary ? ir_optimize_simd_value(work, b) : (IrSimdValue){ 0 } };
++            const IrSimdValue* pointers[3] = { &operands[0], binary ? &operands[1] : 0, 0 };
++            const IrSimdAction action = {
++                .operation = (IrSimdOperation)operations[f->c[i] - BUSTER_IR_INTRINSIC_EXTRACT],
++                .result = ir_simd_shape(f->type[i]),
++                .operands = { ir_simd_shape(f->type[a]), binary ? ir_simd_shape(f->type[b]) : IR_SIMD_NONE, IR_SIMD_NONE },
++                .index = f->flags[i],
++            };
++            result = ir_simd_evaluate(&action, pointers, 0, 0, 0, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
++        }
++    }
+     else if (op == IR_COPY || op == IR_BITCAST)
+     {
+         result = work->states[a];
+diff --git a/src/buster/compiler/ir_optimize_simd_test.c b/src/buster/compiler/ir_optimize_simd_test.c
+index d6eaab0..6e09df7 100644
+--- a/src/buster/compiler/ir_optimize_simd_test.c
++++ b/src/buster/compiler/ir_optimize_simd_test.c
+@@ -592,6 +592,130 @@ static void ir_optimize_test_simd_splats(IrOptimizeTest* test, Arena* input, Are
+     }
+ }
+ 
++// The width changes (#1840): SCCP folds a constant insert, the extract of its inserted part and the extract of a widen's
++// zeros past its operand, by both paths, through a comparison with the values written out, to its constant mask; and
++// keeps an extract of another part apart from one whose value differs.
++static void ir_optimize_test_simd_widths(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
++{
++    for (uint32_t part = 0; part < 4; part += 1)
++    {
++        const uint64_t mark = input->length;
++        const IrSizes sizes = { .instruction_count = 12, .block_count = 1, .vector_constant_count = 3 };
++        IrFunction f = { 0 };
++        const bool created = ir_create(input, &sizes, &f) == IR_OK;
++        ir_optimize_test_expect(test, created, "constant width change optimizer fixture allocation");
++        if (created)
++        {
++            f.result_type = IR_M16;
++            f.block_offsets[1] = 12;
++            for (uint32_t w = 0; w < 8; w += 1)
++            {
++                f.vector_constants[0].words[w] = UINT64_C(0x0123456789abcdef) * (w + 3);
++            }
++            f.vector_constants[1].words[0] = UINT64_C(0xfeedfacecafebeef);
++            f.vector_constants[1].words[1] = UINT64_C(0x0badf00d8badf00d);
++            ir_optimize_test_instruction(&f, 0, IR_VCONST, IR_V16I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_instruction(&f, 1, IR_VCONST, IR_V4I32, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, IR_V16I32, 0, 1, BUSTER_IR_INTRINSIC_INSERT);
++            f.flags[2] = (uint8_t)part;
++            ir_optimize_test_instruction(&f, 3, IR_INTRINSIC, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT);
++            f.flags[3] = (uint8_t)part;
++            // The inserted part back, equal to the constant inserted, every byte.
++            ir_optimize_test_instruction(&f, 4, IR_VCMP, IR_M16, 3, 1, IR_EQ);
++            f.flags[4] = IR_SIMD_LANE_I8;
++            // A widen's part 1 is zeros: equal to the zero constant.
++            ir_optimize_test_instruction(&f, 5, IR_INTRINSIC, IR_V8I32, 1, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_WIDEN);
++            ir_optimize_test_instruction(&f, 6, IR_INTRINSIC, IR_V4I32, 5, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT);
++            f.flags[6] = 1;
++            ir_optimize_test_instruction(&f, 7, IR_VCONST, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_instruction(&f, 8, IR_VCMP, IR_M16, 6, 7, IR_EQ);
++            f.flags[8] = IR_SIMD_LANE_I8;
++            // Another part of the insert's result is the first constant's, which differs from the inserted one.
++            ir_optimize_test_instruction(&f, 9, IR_INTRINSIC, IR_V4I32, 2, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT);
++            f.flags[9] = (uint8_t)((part + 1) & 3);
++            ir_optimize_test_instruction(&f, 10, IR_VCMP, IR_M16, 9, 3, IR_NE);
++            f.flags[10] = IR_SIMD_LANE_I8;
++            // Its bytes against the inserted ones, written out.
++            uint64_t differ = 0;
++            for (uint32_t byte = 0; byte < 16; byte += 1)
++            {
++                const uint32_t at = ((part + 1) & 3) * 16 + byte;
++                const uint8_t mine = (uint8_t)(f.vector_constants[0].words[at / 8] >> (8 * (at & 7)));
++                const uint8_t inserted = (uint8_t)(f.vector_constants[1].words[byte / 8] >> (8 * (byte & 7)));
++                differ |= (uint64_t)(mine != inserted) << byte;
++            }
++            ir_optimize_test_instruction(&f, 11, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
++            IrOptimizeResult result = { 0 };
++            IrOptimizeOptions options = ir_optimize_options();
++            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
++            IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
++            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == 0xffff,
++                                    "a constant insert's inserted part folds to its every-lane-equal mask");
++            arena_pop_to(vector, 0);
++            f.a[11] = 8;
++            check = ir_optimize(&f, vector, scratch, options, &result);
++            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == 0xffff,
++                                    "a widen's zeros past its operand fold");
++            arena_pop_to(vector, 0);
++            f.a[11] = 10;
++            check = ir_optimize(&f, vector, scratch, options, &result);
++            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == differ && differ != 0,
++                                    "another part's extract keeps its own value");
++            arena_pop_to(vector, 0);
++        }
++        arena_pop_to(input, mark);
++    }
++}
++
++// The permutes (#1840): each kind of two constant vectors compared with a third, folded by both SCCP paths alike and to
++// the interpreter's value of the original (ir_optimize_test_simd_rewrite), at each width and a valid flags byte.
++static void ir_optimize_test_simd_permutes(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
++{
++    static const uint8_t flags[4][3] = { { 0, 1, 3 }, { 0, 0, 0 }, { 0x21, 0x33, 0x2b }, { 0, 2, 0xb1 } };
++    for (uint32_t kind = 0; kind < 4; kind += 1)
++    {
++        for (uint32_t width = kind == 3 ? 1 : 0; width < 3; width += 1)
++        {
++            const uint64_t mark = input->length;
++            const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .vector_constant_count = 3 };
++            IrFunction f = { 0 };
++            if (ir_create(input, &sizes, &f) != IR_OK)
++            {
++                ir_optimize_test_expect(test, false, "constant permute optimizer fixture allocation");
++                continue;
++            }
++            const IrType type = (IrType)(IR_V4I32 + width);
++            const uint32_t mask = ir_lane_mask(type, IR_SIMD_LANE_I8);
++            f.result_type = (uint8_t)mask;
++            f.block_offsets[1] = 6;
++            for (uint32_t w = 0; w < (2u << width); w += 1)
++            {
++                f.vector_constants[0].words[w] = UINT64_C(0x8796a5b4c3d2e1f0) * (w + 1);
++                f.vector_constants[1].words[w] = UINT64_C(0x0f1e2d3c4b5a6978) ^ (w * UINT64_C(0x0101010101010101));
++                f.vector_constants[2].words[w] = UINT64_C(0x5555aaaa3333cccc) + w;
++            }
++            ir_optimize_test_instruction(&f, 0, IR_VCONST, type, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_instruction(&f, 1, IR_VCONST, type, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_instruction(&f, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_PERMUTE + kind);
++            f.flags[2] = flags[kind][width];
++            ir_optimize_test_instruction(&f, 3, IR_VCONST, type, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
++            f.flags[4] = IR_SIMD_LANE_I8;
++            ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
++            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
++            IrOptimizeResult result = { 0 };
++            IrOptimizeOptions options = ir_optimize_options();
++            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
++            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
++            ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
++                                    "a constant permute folds through a comparison");
++            arena_pop_to(vector, 0);
++            arena_pop_to(input, mark);
++        }
++    }
++}
++
+ static void ir_optimize_test_simd(IrOptimizeTest* test)
+ {
+     Arena input = arena_reserve(UINT64_C(16) << 20);
+@@ -607,6 +731,8 @@ static void ir_optimize_test_simd(IrOptimizeTest* test)
+         ir_optimize_test_simd_flow(test, &input, &vector, &scalar, &scratch);
+         ir_optimize_test_simd_loop(test, &input, &vector, &scalar, &scratch);
+         ir_optimize_test_simd_splats(test, &input, &vector, &scalar, &scratch);
++        ir_optimize_test_simd_widths(test, &input, &vector, &scalar, &scratch);
++        ir_optimize_test_simd_permutes(test, &input, &vector, &scalar, &scratch);
+     }
+     arena_release(&input);
+     arena_release(&vector);
+diff --git a/src/buster/compiler/ir_parse.c b/src/buster/compiler/ir_parse.c
+index d03adc7..55a0a36 100644
+--- a/src/buster/compiler/ir_parse.c
++++ b/src/buster/compiler/ir_parse.c
+@@ -957,6 +957,13 @@ static void ir_parse_instruction(IrParseState* state)
+                         row.b = ir_parse_id(state, '%');
+                     }
+                     row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
++                    // A width change's part (#1840), its flags.
++                    if (row.c == BUSTER_IR_INTRINSIC_EXTRACT || row.c == BUSTER_IR_INTRINSIC_INSERT || row.c == BUSTER_IR_INTRINSIC_PERMUTE ||
++                        row.c == BUSTER_IR_INTRINSIC_ALIGN || row.c == BUSTER_IR_INTRINSIC_SHUFFLE_LANES || row.c == BUSTER_IR_INTRINSIC_EXTEND ||
++                        row.c == BUSTER_IR_INTRINSIC_TRUNCATE)
++                    {
++                        row.flags = (uint8_t)ir_parse_unsigned(state, 255, false);
++                    }
+                 }
+                 if (row.op == IR_LOAD || row.op == IR_STORE || row.op == IR_ATOMIC_RMW)
+                 {
+diff --git a/src/buster/compiler/ir_parse_test.c b/src/buster/compiler/ir_parse_test.c
+index 9b98bfc..dd7495d 100644
+--- a/src/buster/compiler/ir_parse_test.c
++++ b/src/buster/compiler/ir_parse_test.c
+@@ -701,6 +701,7 @@ static int run_ir_parse_tests(int argc, char** argv)
+                 "tests/ir/bit-intrinsics.ir",
+                 "tests/ir/overflow-intrinsics.ir",
+                 "tests/ir/splats.ir",
++                "tests/ir/widths.ir",
+                 "tests/ir/rows.ir",
+                 "tests/ir/carrier-rows.ir",
+             };
+diff --git a/src/buster/compiler/ir_simd_convert_forms.c b/src/buster/compiler/ir_simd_convert_forms.c
+new file mode 100644
+index 0000000..d4bf54d
+--- /dev/null
++++ b/src/buster/compiler/ir_simd_convert_forms.c
+@@ -0,0 +1,64 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// The integer lanes' conversions' x86 forms (#1840), which the typed lowering's decoder (ir_simd_typed_convert) admits
++// and Tier 1's selection (tier1_select_convert_form) emits: one table for both, so that they agree. Include after
++// x86_64_encoder.c; ir_simd_typed.c and tier1_select.c both include it, the first one alone defining it.
++#ifndef BUSTER_IR_SIMD_CONVERT_FORMS_INCLUDED
++#define BUSTER_IR_SIMD_CONVERT_FORMS_INCLUDED
++
++// The conversions' forms (#1840): the extensions by their sign (zero-extending first) and pair of lanes (bytes to words,
++// doublewords and quadwords, words to doublewords and quadwords, doublewords to quadwords) at the result's width, and the
++// truncations by their mode (wrapping, signed and unsigned saturation) and pair (words to bytes, doublewords to bytes and
++// words, quadwords to bytes, words and doublewords) at the source's width. Tier 1 selects the same forms
++// (tier1_select_convert_form).
++static const uint16_t ir_simd_typed_extensions[2][6][3] = {
++    {
++        { X86_FORM_VPMOVZXBW_X_XM64_EVEX, X86_FORM_VPMOVZXBW_Y_XM128_EVEX, X86_FORM_VPMOVZXBW_Z_YM256 },
++        { X86_FORM_VPMOVZXBD_X_XM32_EVEX, X86_FORM_VPMOVZXBD_Y_XM64_EVEX, X86_FORM_VPMOVZXBD_Z_XM128 },
++        { X86_FORM_VPMOVZXBQ_X_XM16_EVEX, X86_FORM_VPMOVZXBQ_Y_XM32_EVEX, X86_FORM_VPMOVZXBQ_Z_XM64 },
++        { X86_FORM_VPMOVZXWD_X_XM64_EVEX, X86_FORM_VPMOVZXWD_Y_XM128_EVEX, X86_FORM_VPMOVZXWD_Z_YM256 },
++        { X86_FORM_VPMOVZXWQ_X_XM32_EVEX, X86_FORM_VPMOVZXWQ_Y_XM64_EVEX, X86_FORM_VPMOVZXWQ_Z_XM128 },
++        { X86_FORM_VPMOVZXDQ_X_XM64_EVEX, X86_FORM_VPMOVZXDQ_Y_XM128_EVEX, X86_FORM_VPMOVZXDQ_Z_YM256 },
++    },
++    {
++        { X86_FORM_VPMOVSXBW_X_XM64_EVEX, X86_FORM_VPMOVSXBW_Y_XM128_EVEX, X86_FORM_VPMOVSXBW_Z_YM256 },
++        { X86_FORM_VPMOVSXBD_X_XM32_EVEX, X86_FORM_VPMOVSXBD_Y_XM64_EVEX, X86_FORM_VPMOVSXBD_Z_XM128 },
++        { X86_FORM_VPMOVSXBQ_X_XM16_EVEX, X86_FORM_VPMOVSXBQ_Y_XM32_EVEX, X86_FORM_VPMOVSXBQ_Z_XM64 },
++        { X86_FORM_VPMOVSXWD_X_XM64_EVEX, X86_FORM_VPMOVSXWD_Y_XM128_EVEX, X86_FORM_VPMOVSXWD_Z_YM256 },
++        { X86_FORM_VPMOVSXWQ_X_XM32_EVEX, X86_FORM_VPMOVSXWQ_Y_XM64_EVEX, X86_FORM_VPMOVSXWQ_Z_XM128 },
++        { X86_FORM_VPMOVSXDQ_X_XM64_EVEX, X86_FORM_VPMOVSXDQ_Y_XM128_EVEX, X86_FORM_VPMOVSXDQ_Z_YM256 },
++    },
++};
++static const uint16_t ir_simd_typed_truncations[3][6][3] = {
++    {
++        { X86_FORM_VPMOVWB_XM64_X, X86_FORM_VPMOVWB_XM128_Y, X86_FORM_VPMOVWB_YM256_Z },
++        { X86_FORM_VPMOVDB_XM32_X, X86_FORM_VPMOVDB_XM64_Y, X86_FORM_VPMOVDB_XM128_Z },
++        { X86_FORM_VPMOVDW_XM64_X, X86_FORM_VPMOVDW_XM128_Y, X86_FORM_VPMOVDW_YM256_Z },
++        { X86_FORM_VPMOVQB_XM16_X, X86_FORM_VPMOVQB_XM32_Y, X86_FORM_VPMOVQB_XM64_Z },
++        { X86_FORM_VPMOVQW_XM32_X, X86_FORM_VPMOVQW_XM64_Y, X86_FORM_VPMOVQW_XM128_Z },
++        { X86_FORM_VPMOVQD_XM64_X, X86_FORM_VPMOVQD_XM128_Y, X86_FORM_VPMOVQD_YM256_Z },
++    },
++    {
++        { X86_FORM_VPMOVSWB_XM64_X, X86_FORM_VPMOVSWB_XM128_Y, X86_FORM_VPMOVSWB_YM256_Z },
++        { X86_FORM_VPMOVSDB_XM32_X, X86_FORM_VPMOVSDB_XM64_Y, X86_FORM_VPMOVSDB_XM128_Z },
++        { X86_FORM_VPMOVSDW_XM64_X, X86_FORM_VPMOVSDW_XM128_Y, X86_FORM_VPMOVSDW_YM256_Z },
++        { X86_FORM_VPMOVSQB_XM16_X, X86_FORM_VPMOVSQB_XM32_Y, X86_FORM_VPMOVSQB_XM64_Z },
++        { X86_FORM_VPMOVSQW_XM32_X, X86_FORM_VPMOVSQW_XM64_Y, X86_FORM_VPMOVSQW_XM128_Z },
++        { X86_FORM_VPMOVSQD_XM64_X, X86_FORM_VPMOVSQD_XM128_Y, X86_FORM_VPMOVSQD_YM256_Z },
++    },
++    {
++        { X86_FORM_VPMOVUSWB_XM64_X, X86_FORM_VPMOVUSWB_XM128_Y, X86_FORM_VPMOVUSWB_YM256_Z },
++        { X86_FORM_VPMOVUSDB_XM32_X, X86_FORM_VPMOVUSDB_XM64_Y, X86_FORM_VPMOVUSDB_XM128_Z },
++        { X86_FORM_VPMOVUSDW_XM64_X, X86_FORM_VPMOVUSDW_XM128_Y, X86_FORM_VPMOVUSDW_YM256_Z },
++        { X86_FORM_VPMOVUSQB_XM16_X, X86_FORM_VPMOVUSQB_XM32_Y, X86_FORM_VPMOVUSQB_XM64_Z },
++        { X86_FORM_VPMOVUSQW_XM32_X, X86_FORM_VPMOVUSQW_XM64_Y, X86_FORM_VPMOVUSQW_XM128_Z },
++        { X86_FORM_VPMOVUSQD_XM64_X, X86_FORM_VPMOVUSQD_XM128_Y, X86_FORM_VPMOVUSQD_YM256_Z },
++    },
++};
++
++// A conversion's pair of lanes' bytes' log2s, by the tables' pair index: the extensions' (from, to), and the truncations'.
++static const uint8_t ir_simd_typed_extension_pairs[6][2] = { { 0, 1 }, { 0, 2 }, { 0, 3 }, { 1, 2 }, { 1, 3 }, { 2, 3 } };
++static const uint8_t ir_simd_typed_truncation_pairs[6][2] = { { 1, 0 }, { 2, 0 }, { 2, 1 }, { 3, 0 }, { 3, 1 }, { 3, 2 } };
++
++#endif
+diff --git a/src/buster/compiler/ir_simd_model.c b/src/buster/compiler/ir_simd_model.c
+index 3a96fe4..c5e77ae 100644
+--- a/src/buster/compiler/ir_simd_model.c
++++ b/src/buster/compiler/ir_simd_model.c
+@@ -52,6 +52,27 @@ typedef enum IrSimdOperation
+     IR_SIMD_FSUB,
+     IR_SIMD_FMUL,
+     IR_SIMD_FDIV,
++    // The width changes (#1840), bits moved whole, no lanes read: the `index`th part of a, of the result's width, a wider
++    // vector (extract); a in the result's low bits and zeros past them (widen); and a with its `index`th part of b's width
++    // replaced by b, a narrower vector (insert).
++    IR_SIMD_EXTRACT,
++    IR_SIMD_WIDEN,
++    IR_SIMD_INSERT,
++    // The permutes (#1840), lanes of a and b of the result's shape moved, no lanes read as numbers, their immediate the
++    // action's `index` (ir.c's BUSTER_IR_INTRINSIC_PERMUTE to _SHUFFLE_LANES): a's lane that b's lane's low bits name, of
++    // 1 << index bytes (permute); a's byte in the same 16 bytes that b's byte's low 4 bits name, or 0 where its top bit is
++    // set (shuffle); b's lanes followed by a's from the count in index's low 4 bits on, of 1 << (index >> 4) bytes (align);
++    // and a's 16-byte lanes for the low half and b's for the high half, as index's bits name them (shuffle_lanes).
++    IR_SIMD_PERMUTE,
++    IR_SIMD_SHUFFLE,
++    IR_SIMD_ALIGN,
++    IR_SIMD_SHUFFLE_LANES,
++    // The conversions (#1840), of integer lanes whose sizes and mode the action's `index` holds (ir.c's
++    // BUSTER_IR_INTRINSIC_EXTEND and _TRUNCATE): each of the result's lanes a's same lane widened, by zeros or its sign;
++    // each of a's lanes narrowed, wrapping or saturating as signed or as unsigned of a signed lane, into the result's low
++    // bytes, zeros past them.
++    IR_SIMD_EXTEND,
++    IR_SIMD_TRUNCATE,
+     IR_SIMD_OPERATION_COUNT,
+ } IrSimdOperation;
+ 
+@@ -99,6 +120,9 @@ struct IrSimdAction
+     IrSimdShape operands[3];
+     IrSimdPredicate predicate;
+     IrSimdLane lane;
++    // A width change's part (#1840: IR_SIMD_EXTRACT's and IR_SIMD_INSERT's), in units of the narrower vector; 0 for the
++    // other operations.
++    uint8_t index;
+     bool volatile_memory;
+ };
+ 
+@@ -190,6 +214,9 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
+         const IrSimdShape type = action->result;
+         const IrSimdLane lane = action->lane;
+         valid = action->operation == IR_SIMD_COMPARE || action->predicate == IR_SIMD_EQ;
++        valid = valid && (action->index == 0 || action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_INSERT || action->operation == IR_SIMD_PERMUTE ||
++                          action->operation == IR_SIMD_ALIGN || action->operation == IR_SIMD_SHUFFLE_LANES || action->operation == IR_SIMD_EXTEND ||
++                          action->operation == IR_SIMD_TRUNCATE);
+         valid = valid && (!action->volatile_memory || action->operation == IR_SIMD_LOAD || action->operation == IR_SIMD_STORE);
+         valid = valid && ir_simd_lane_valid(action->operation, lane);
+         // A floating comparison's predicates are C's: ==, !=, <, <=, > and >= (no unsigned ones).
+@@ -216,6 +243,37 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
+             case IR_SIMD_COMPARE: valid = valid && ir_simd_vector(a) && a == b && c == IR_SIMD_NONE && type == ir_simd_lane_mask(a, lane); break;
+             case IR_SIMD_SELECT: valid = valid && ir_simd_vector(type) && a == ir_simd_lane_mask(type, lane) && b == type && c == type; break;
+             case IR_SIMD_STORE: valid = valid && type == IR_SIMD_NONE && a != IR_SIMD_NONE && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
++            case IR_SIMD_EXTRACT:
++                valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && ir_simd_bits(type) < ir_simd_bits(a) && action->index < ir_simd_bits(a) / ir_simd_bits(type) &&
++                        b == IR_SIMD_NONE && c == IR_SIMD_NONE;
++                break;
++            case IR_SIMD_WIDEN: valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && ir_simd_bits(a) < ir_simd_bits(type) && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
++            case IR_SIMD_INSERT:
++                valid = valid && ir_simd_vector(type) && a == type && ir_simd_vector(b) && ir_simd_bits(b) < ir_simd_bits(type) &&
++                        action->index < ir_simd_bits(type) / ir_simd_bits(b) && c == IR_SIMD_NONE;
++                break;
++            case IR_SIMD_PERMUTE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && action->index <= 3; break;
++            case IR_SIMD_SHUFFLE: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE; break;
++            case IR_SIMD_ALIGN:
++                valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE && (action->index >> 4 == 2 || action->index >> 4 == 3) &&
++                        (action->index & 15u) < ir_simd_bits(type) / (8u << (action->index >> 4));
++                break;
++            case IR_SIMD_EXTEND:
++            case IR_SIMD_TRUNCATE:
++            {
++                const uint32_t source = action->index & 3;
++                const uint32_t result = (action->index >> 2) & 3;
++                const uint32_t mode = action->index >> 4;
++                const bool extend = action->operation == IR_SIMD_EXTEND;
++                const uint32_t lanes = extend ? ir_simd_bits(type) / (8u << result) : ir_simd_bits(a) / (8u << source);
++                const uint32_t bits = lanes * (8u << result);
++                valid = valid && ir_simd_vector(type) && ir_simd_vector(a) && b == IR_SIMD_NONE && c == IR_SIMD_NONE &&
++                        (extend ? result > source && mode <= 1 && lanes * (8u << source) <= ir_simd_bits(a) :
++                                  result < source && mode <= 2 && ir_simd_bits(type) == (bits > 128 ? bits : 128));
++            } break;
++            case IR_SIMD_SHUFFLE_LANES:
++                valid = valid && a == type && b == type && c == IR_SIMD_NONE && ((type == IR_SIMD_V8I32 && action->index < 4) || type == IR_SIMD_V16I32);
++                break;
+             default: valid = false; break;
+         }
+     }
+@@ -441,6 +499,91 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
+         memory->writes += store ? bytes : 0;
+         memory->volatile_accesses += action->volatile_memory ? bytes : 0;
+     }
++    else if (valid && (action->operation == IR_SIMD_EXTRACT || action->operation == IR_SIMD_WIDEN || action->operation == IR_SIMD_INSERT))
++    {
++        // Whole 64-bit words: every vector is 2, 4 or 8 of them.
++        const uint32_t result_words = ir_simd_bits(action->result) / 64;
++        const uint32_t part_words = ir_simd_bits(action->operation == IR_SIMD_INSERT ? action->operands[1] : action->operation == IR_SIMD_EXTRACT ? action->result : action->operands[0]) / 64;
++        const uint32_t first = action->index * part_words;
++        for (uint32_t word = 0; word < result_words; word += 1)
++        {
++            const bool inserted = action->operation == IR_SIMD_INSERT && word >= first && word < first + part_words;
++            staged.words[word] = action->operation == IR_SIMD_EXTRACT ? values[0]->words[first + word] :
++                                 action->operation == IR_SIMD_WIDEN   ? (word < part_words ? values[0]->words[word] : 0) :
++                                 inserted                             ? values[1]->words[word - first] :
++                                                                        values[0]->words[word];
++        }
++    }
++    else if (valid && (action->operation == IR_SIMD_EXTEND || action->operation == IR_SIMD_TRUNCATE))
++    {
++        // Lane by lane: the source's lane read, extended to 64 bits by its sign where a sign extension or a saturation of
++        // signed lanes reads it so, then widened or narrowed.
++        const uint32_t source = 8u << (action->index & 3);
++        const uint32_t result = 8u << ((action->index >> 2) & 3);
++        const uint32_t mode = action->index >> 4;
++        const bool extend = action->operation == IR_SIMD_EXTEND;
++        const uint32_t lanes = extend ? ir_simd_bits(action->result) / result : ir_simd_bits(action->operands[0]) / source;
++        for (uint32_t lane = 0; lane < lanes; lane += 1)
++        {
++            const uint64_t raw = ir_simd_lane_read(values[0], source, lane);
++            const int64_t signed_value = source == 64 ? (int64_t)raw : (int64_t)(raw << (64 - source)) >> (64 - source);
++            uint64_t value = raw;
++            if (extend)
++            {
++                value = mode == 1 ? (uint64_t)signed_value : raw;
++            }
++            else if (mode == 1)
++            {
++                const int64_t high = (int64_t)((UINT64_C(1) << (result - 1)) - 1);
++                const int64_t low = -high - 1;
++                value = (uint64_t)(signed_value > high ? high : signed_value < low ? low : signed_value);
++            }
++            else if (mode == 2)
++            {
++                const int64_t high = (int64_t)((UINT64_C(1) << (result - 1)) * 2 - 1);
++                value = (uint64_t)(signed_value < 0 ? 0 : signed_value > high ? high : signed_value);
++            }
++            ir_simd_lane_write(&staged, result, lane, result == 64 ? value : value & ((UINT64_C(1) << result) - 1));
++        }
++    }
++    else if (valid && action->operation >= IR_SIMD_PERMUTE && action->operation <= IR_SIMD_SHUFFLE_LANES)
++    {
++        // Byte by byte: each result byte is one byte of a or b, or 0 (a shuffle's of a control byte's top bit).
++        const uint8_t* a = (const uint8_t*)values[0]->words;
++        const uint8_t* b = (const uint8_t*)values[1]->words;
++        uint8_t* out = (uint8_t*)staged.words;
++        const uint32_t bytes = ir_simd_bits(action->result) / 8;
++        const uint32_t size = action->operation == IR_SIMD_PERMUTE ? 1u << action->index : action->operation == IR_SIMD_ALIGN ? 1u << (action->index >> 4) : 16u;
++        const uint32_t lanes = bytes / size;
++        for (uint32_t byte = 0; byte < bytes; byte += 1)
++        {
++            const uint32_t lane = byte / size;
++            const uint32_t within = byte % size;
++            uint8_t value = 0;
++            if (action->operation == IR_SIMD_PERMUTE)
++            {
++                uint64_t index = 0;
++                memcpy(&index, b + lane * size, size);
++                value = a[(uint32_t)(index & (lanes - 1)) * size + within];
++            }
++            else if (action->operation == IR_SIMD_SHUFFLE)
++            {
++                value = (b[byte] & 0x80) != 0 ? 0 : a[(byte & ~15u) | (b[byte] & 15u)];
++            }
++            else if (action->operation == IR_SIMD_ALIGN)
++            {
++                const uint32_t from = lane + (action->index & 15u);
++                value = from < lanes ? b[from * size + within] : a[(from - lanes) * size + within];
++            }
++            else
++            {
++                const uint32_t width = lanes == 2 ? 1 : 2;
++                const uint32_t selected = (action->index >> (lane * width)) & (lanes - 1);
++                value = (lane < lanes / 2 ? a : b)[selected * 16 + within];
++            }
++            out[byte] = value;
++        }
++    }
+     else if (valid)
+     {
+         const bool mask = !ir_simd_vector(action->result) && action->operation != IR_SIMD_COMPARE;
+diff --git a/src/buster/compiler/ir_simd_test.c b/src/buster/compiler/ir_simd_test.c
+index 63f24ca..8ade6ca 100644
+--- a/src/buster/compiler/ir_simd_test.c
++++ b/src/buster/compiler/ir_simd_test.c
+@@ -511,8 +511,235 @@ static void ir_test_splats(IrTestTally* test, Arena* output, Arena* scratch)
+     }
+ }
+ 
++// The width changes (#1840): extract, widen and insert of every pair of vector widths and every part to 4, admitted by
++// both verifiers exactly where the result's, the operands' and the part's widths agree (an extract's narrower part of
++// its wider operand, a widen's wider result, an insert's narrower part into its own type), every other kind's flags
++// refused; and the model's values against bytes written out: an extract's the operand's part, a widen's the operand and
++// zeros past it, an insert's the first operand with its part the second's.
++static void ir_test_width_changes(IrTestTally* test, Arena* output, Arena* scratch)
++{
++    const uint64_t mark = output->length;
++    uint32_t admitted_count = 0;
++    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
++    for (uint32_t kind = BUSTER_IR_INTRINSIC_EXTRACT; kind <= BUSTER_IR_INTRINSIC_INSERT; kind += 1)
++    {
++        for (uint32_t result = 0; result < 3; result += 1)
++        {
++            for (uint32_t first = 0; first < 3; first += 1)
++            {
++                for (uint32_t second = 0; second < 3; second += 1)
++                {
++                    for (uint32_t part = 0; part < 5; part += 1)
++                    {
++                        const bool insert = kind == BUSTER_IR_INTRINSIC_INSERT;
++                        if (!insert && second != 0)
++                        {
++                            continue;
++                        }
++                        IrFunction function = {0};
++                        const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
++                        const bool created = ir_create(output, &sizes, &function) == IR_OK;
++                        ir_test_expect(test, created, "width change verifier fixture allocation");
++                        if (!created)
++                        {
++                            continue;
++                        }
++                        const IrType type = (IrType)(IR_V4I32 + result);
++                        const IrType a = (IrType)(IR_V4I32 + first);
++                        const IrType b = (IrType)(IR_V4I32 + second);
++                        const uint32_t result_bytes = 16u << result;
++                        const uint32_t a_bytes = 16u << first;
++                        const uint32_t b_bytes = 16u << second;
++                        const bool admitted = kind == BUSTER_IR_INTRINSIC_EXTRACT ? result_bytes < a_bytes && part < a_bytes / result_bytes :
++                                              kind == BUSTER_IR_INTRINSIC_WIDEN   ? a_bytes < result_bytes && part == 0 :
++                                                                                    a == type && b_bytes < result_bytes && part < result_bytes / b_bytes;
++                        admitted_count += admitted;
++                        function.result_type = IR_VOID;
++                        function.block_offsets[1] = 4;
++                        ir_test_instruction(&function, 0, IR_UNDEF, a, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                        ir_test_instruction(&function, 1, IR_UNDEF, b, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                        ir_test_instruction(&function, 2, IR_INTRINSIC, type, 0, insert ? 1 : BUSTER_IR_NONE, kind);
++                        ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                        function.flags[2] = (uint8_t)part;
++                        ir_test_pair(test, &function, scratch, NULL, admitted, "a width change is admitted exactly where its widths and part agree");
++                        if (admitted)
++                        {
++                            ir_test_expect(test, ir_value_mask(&function, 2) == (insert ? 3u : 1u), "a width change uses its operands alone, its part in flags");
++                            function.b[2] = insert ? BUSTER_IR_NONE : 0;
++                            ir_test_pair(test, &function, scratch, NULL, false, "an insert needs its second operand and the others refuse one");
++                            function.b[2] = insert ? 1 : BUSTER_IR_NONE;
++                            function.c[2] = BUSTER_IR_INTRINSIC_SPLAT;
++                            ir_test_pair(test, &function, scratch, NULL, false, "another kind's flags are refused");
++                            function.c[2] = kind;
++                            // The model, against bytes written out.
++                            IrSimdValue values[2];
++                            for (uint32_t w = 0; w < 8; w += 1)
++                            {
++                                state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
++                                values[0].words[w] = w < a_bytes / 8 ? state : 0;
++                                values[1].words[w] = w < b_bytes / 8 ? ~state * 3 : 0;
++                            }
++                            const IrSimdValue* operands[3] = { &values[0], insert ? &values[1] : 0, 0 };
++                            const IrSimdAction action = {
++                                .operation = kind == BUSTER_IR_INTRINSIC_EXTRACT ? IR_SIMD_EXTRACT : kind == BUSTER_IR_INTRINSIC_WIDEN ? IR_SIMD_WIDEN : IR_SIMD_INSERT,
++                                .result = ir_simd_shape(type),
++                                .operands = { ir_simd_shape(a), insert ? ir_simd_shape(b) : IR_SIMD_NONE, IR_SIMD_NONE },
++                                .index = (uint8_t)part,
++                            };
++                            IrSimdValue value;
++                            memset(&value, 0xa5, sizeof(value));
++                            bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
++                            const uint8_t* bytes_a = (const uint8_t*)values[0].words;
++                            const uint8_t* bytes_b = (const uint8_t*)values[1].words;
++                            for (uint32_t byte = 0; exact && byte < 64; byte += 1)
++                            {
++                                const uint32_t start = insert ? part * b_bytes : 0;
++                                const uint8_t expected = byte >= result_bytes                                 ? 0 :
++                                                         kind == BUSTER_IR_INTRINSIC_EXTRACT                  ? bytes_a[part * result_bytes + byte] :
++                                                         kind == BUSTER_IR_INTRINSIC_WIDEN                    ? (byte < a_bytes ? bytes_a[byte] : 0) :
++                                                         byte >= start && byte < start + b_bytes             ? bytes_b[byte - start] :
++                                                                                                                bytes_a[byte];
++                                exact = ((const uint8_t*)value.words)[byte] == expected;
++                            }
++                            ir_test_expect(test, exact, "the model moves a width change's bytes whole and zeroes its sparse tail");
++                            IrSimdAction wrong = action;
++                            wrong.lane = IR_SIMD_LANE_I8;
++                            ir_test_expect(test, !ir_simd_evaluate(&wrong, operands, 0, 0, 0, &value), "a width change reads no lanes");
++                        }
++                        arena_pop_to(output, mark);
++                    }
++                }
++            }
++        }
++    }
++    // Extracts: 16 of 32 (2 parts), 16 of 64 (4), 32 of 64 (2); widens: 3 pairs; inserts: the same 8 parts as extracts.
++    ir_test_expect(test, admitted_count == 8 + 3 + 8, "every width change of the IR's vector widths is admitted, and no other");
++}
++
++// An independent byte model of the permutes (#1840) for the model's check: byte `byte` of a permute of a and b of
++// `bytes` bytes, kind past BUSTER_IR_INTRINSIC_PERMUTE, by the IR's flags.
++static uint8_t ir_test_permute_byte(uint32_t kind, uint32_t flags, uint32_t bytes, const uint8_t* a, const uint8_t* b, uint32_t byte)
++{
++    uint8_t value = 0;
++    if (kind == 0)
++    {
++        const uint32_t size = 1u << flags;
++        uint64_t index = 0;
++        for (uint32_t k = 0; k < size; k += 1)
++        {
++            index |= (uint64_t)b[byte / size * size + k] << (8 * k);
++        }
++        value = a[(uint32_t)(index % (bytes / size)) * size + byte % size];
++    }
++    else if (kind == 1)
++    {
++        value = b[byte] >= 0x80 ? 0 : a[byte / 16 * 16 + b[byte] % 16];
++    }
++    else if (kind == 2)
++    {
++        // b's elements, then a's: the 2 * bytes of their concatenation from the count's elements on.
++        const uint32_t size = 1u << (flags >> 4);
++        const uint32_t at = byte + (flags & 15) * size;
++        value = at < bytes ? b[at] : a[at - bytes];
++    }
++    else
++    {
++        const uint32_t lanes = bytes / 16;
++        const uint32_t lane = byte / 16;
++        const uint32_t bits = lanes == 2 ? 1 : 2;
++        const uint32_t selected = (flags >> (bits * lane)) % lanes;
++        value = (lane < lanes / 2 ? a : b)[selected * 16 + byte % 16];
++    }
++    return value;
++}
++
++// The permutes (#1840): permute, shuffle, align and shuffle_lanes of two vectors at every width and every flags byte,
++// admitted by both verifiers exactly where ir_permute_flags_valid's rule, written out again here, says (permute's lanes'
++// sizes 0 to 3; shuffle's 0; align's sizes 2 and 3 in bits 4 and 5 with a count below the lanes; shuffle_lanes' 2 bits of a
++// 32-byte vector's, any byte of a 64-byte one's, none of 16), refused with operands of another type or a missing b; and
++// the model's bytes against ir_test_permute_byte on random vectors.
++static void ir_test_permutes(IrTestTally* test, Arena* output, Arena* scratch)
++{
++    const uint64_t mark = output->length;
++    uint32_t admitted_count = 0;
++    uint64_t state = UINT64_C(0xd1b54a32d192ed03);
++    for (uint32_t kind = 0; kind < 4; kind += 1)
++    {
++        for (uint32_t width = 0; width < 3; width += 1)
++        {
++            const uint32_t bytes = 16u << width;
++            for (uint32_t flags = 0; flags < 256; flags += 1)
++            {
++                const uint32_t size = flags >> 4;
++                const bool admitted = kind == 0 ? flags <= 3 : kind == 1 ? flags == 0 :
++                                      kind == 2 ? (size == 2 || size == 3) && (flags & 15) < bytes >> size : (bytes == 32 && flags < 4) || bytes == 64;
++                admitted_count += admitted;
++                // Every admitted flags byte, and a sample of the refused ones.
++                if (!admitted && (flags % 17) != 0)
++                {
++                    continue;
++                }
++                IrFunction function = {0};
++                const IrSizes sizes = { .instruction_count = 4, .block_count = 1 };
++                if (ir_create(output, &sizes, &function) != IR_OK)
++                {
++                    ir_test_expect(test, false, "permute verifier fixture allocation");
++                    continue;
++                }
++                const IrType type = (IrType)(IR_V4I32 + width);
++                function.result_type = IR_VOID;
++                function.block_offsets[1] = 4;
++                ir_test_instruction(&function, 0, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                ir_test_instruction(&function, 1, IR_UNDEF, type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                ir_test_instruction(&function, 2, IR_INTRINSIC, type, 0, 1, BUSTER_IR_INTRINSIC_PERMUTE + kind);
++                ir_test_instruction(&function, 3, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                function.flags[2] = (uint8_t)flags;
++                ir_test_pair(test, &function, scratch, NULL, admitted, "a permute is admitted exactly where its kind's flags are valid at its width");
++                if (admitted)
++                {
++                    function.type[1] = (uint8_t)(IR_V4I32 + (width + 1) % 3);
++                    ir_test_pair(test, &function, scratch, NULL, false, "a permute's operands have its type");
++                    function.type[1] = (uint8_t)type;
++                    function.b[2] = BUSTER_IR_NONE;
++                    ir_test_pair(test, &function, scratch, NULL, false, "a permute has two operands");
++                    function.b[2] = 1;
++                    IrSimdValue values[2];
++                    for (uint32_t w = 0; w < 8; w += 1)
++                    {
++                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
++                        values[0].words[w] = w < bytes / 8 ? state : 0;
++                        state = state * UINT64_C(6364136223846793005) + UINT64_C(1442695040888963407);
++                        values[1].words[w] = w < bytes / 8 ? state : 0;
++                    }
++                    const IrSimdValue* operands[3] = { &values[0], &values[1], 0 };
++                    const IrSimdAction action = {
++                        .operation = (IrSimdOperation)(IR_SIMD_PERMUTE + kind),
++                        .result = ir_simd_shape(type),
++                        .operands = { ir_simd_shape(type), ir_simd_shape(type), IR_SIMD_NONE },
++                        .index = (uint8_t)flags,
++                    };
++                    IrSimdValue value;
++                    memset(&value, 0xa5, sizeof(value));
++                    bool exact = ir_simd_evaluate(&action, operands, 0, 0, 0, &value);
++                    for (uint32_t byte = 0; exact && byte < 64; byte += 1)
++                    {
++                        const uint8_t expected = byte < bytes ? ir_test_permute_byte(kind, flags, bytes, (const uint8_t*)values[0].words, (const uint8_t*)values[1].words, byte) : 0;
++                        exact = ((const uint8_t*)value.words)[byte] == expected;
++                    }
++                    ir_test_expect(test, exact, "the model's permutes move each byte as written out, and zero the sparse tail");
++                }
++                arena_pop_to(output, mark);
++            }
++        }
++    }
++    // Permute 4 sizes at 3 widths, shuffle 3, align (4 + 2) + (8 + 4) + (16 + 8), shuffle_lanes 4 + 256.
++    ir_test_expect(test, admitted_count == 12 + 3 + 42 + 260, "every permute's valid flags are admitted, and no other");
++}
++
+ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
+ {
++    ir_test_permutes(test, output, scratch);
++    ir_test_width_changes(test, output, scratch);
+     ir_test_bit_intrinsics(test, output, scratch);
+     ir_test_overflow_intrinsics(test, output, scratch);
+     ir_test_splats(test, output, scratch);
+diff --git a/src/buster/compiler/ir_simd_typed.c b/src/buster/compiler/ir_simd_typed.c
+index 947eb1d..34d9e67 100644
+--- a/src/buster/compiler/ir_simd_typed.c
++++ b/src/buster/compiler/ir_simd_typed.c
+@@ -88,8 +88,24 @@ struct IrSimdTypedOperation
+     // A row the IR has no operation of its own for (#141, ir_simd_typed_machine_row): the row itself, which a row call
+     // runs (IrFunction.rows).
+     bool machine;
++    // A width change (#1840, ir_simd_typed_width): its IR intrinsic (BUSTER_IR_INTRINSIC_EXTRACT, _WIDEN or _INSERT) plus
++    // one, 0 for any other row, and its part; and whether its result merges into its second operand under its third, the
++    // writemask (a masked extract's), at `lane`'s width.
++    uint8_t width_change;
++    uint8_t part;
++    bool merge_mask;
++    // A permute (#1840, ir_simd_typed_permute): its IR intrinsic (BUSTER_IR_INTRINSIC_PERMUTE to _SHUFFLE_LANES) plus one, 0
++    // for any other row, and its immediate, the IR's flags.
++    uint8_t permute;
++    uint8_t immediate;
++    // A conversion (#1840, ir_simd_typed_convert): its IR intrinsic (BUSTER_IR_INTRINSIC_EXTEND or _TRUNCATE) plus one, 0
++    // for any other row, its flags in `immediate`; a masked truncation's merge in `merge_mask` and `lane`.
++    uint8_t convert;
+ };
+ 
++// The conversions' forms (#1840), shared with Tier 1's selection.
++#include "buster/compiler/ir_simd_convert_forms.c"
++
+ typedef struct IrSimdTypedForm IrSimdTypedForm;
+ struct IrSimdTypedForm
+ {
+@@ -926,10 +942,281 @@ static IrSimdTypedStatus ir_simd_typed_compare_mask(const Tier0Operation* source
+     return status;
+ }
+ 
++// The width changes (#1840): a row of no record of one vector operand (or two of one width, the second kept for its
++// effects alone), whose result is the operand's register (c_check_program_vector_builtins.c's shuffles that move no
++// element, the intrinsics' casts), of 16, 32 or 64 bytes but the operand's: the operand's low bytes where the result is
++// narrower (extract, part 0), and the operand and zeros past it where it is wider (widen, Tier 0's and Tier 1's
++// placements zero-extend an operand into its role's register); an insertion's row (BINARY_IMMEDIATE's vinsert forms),
++// one record of its form, VECTOR(0) its destination and first source and VECTOR(1), of the form's narrower width, its
++// second, its immediate the part (insert); and a lane's masked extraction (EXTRACT_LANE's vextract forms), its first
++// record of its form from VECTOR(0) into VECTOR(1), of the form's narrower width, under MASK(2), its immediate the part,
++// and its second VECTOR(1) moved whole into VECTOR(0) (extract, merged under the mask into the second operand at the
++// form's elements' lanes, which Tier 1 selects as a vselect, or not where the typed stream's writemask has every lane).
++// Each register-direct with no other field. Its features are the forms Tier 1 selects for it: AVX512F's and VL's
++// vextracti32x4, vextracti64x4, vinserti32x4, vinserti64x4 and moves of each width, the row's own forms' and, merged, the
++// mask's moves' (DQ for a byte's); otherwise, and for any other form, it stays a machine row.
++static IrSimdTypedStatus ir_simd_typed_width(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
++{
++    // The inserts' and the extracts' forms, by their elements: 4-byte ones', then 8-byte ones'.
++    static const uint16_t inserts[] = {
++        X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8, X86_FORM_VINSERTF32X4_Y_Y_XM128_IMM8, X86_FORM_VINSERTF32X4_Z_Z_XM128_IMM8,
++        X86_FORM_VINSERTI32X8_Z_Z_YM256_IMM8, X86_FORM_VINSERTF32X8_Z_Z_YM256_IMM8, X86_FORM_VINSERTI64X2_Y_Y_XM128_IMM8, X86_FORM_VINSERTI64X2_Z_Z_XM128_IMM8,
++        X86_FORM_VINSERTF64X2_Y_Y_XM128_IMM8, X86_FORM_VINSERTF64X2_Z_Z_XM128_IMM8, X86_FORM_VINSERTI64X4_Z_Z_YM256_IMM8, X86_FORM_VINSERTF64X4_Z_Z_YM256_IMM8,
++    };
++    static const uint16_t extracts[2][6] = {
++        { X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8, X86_FORM_VEXTRACTF32X4_XM128_Y_IMM8, X86_FORM_VEXTRACTF32X4_XM128_Z_IMM8,
++          X86_FORM_VEXTRACTI32X8_YM256_Z_IMM8, X86_FORM_VEXTRACTF32X8_YM256_Z_IMM8 },
++        { X86_FORM_VEXTRACTI64X2_XM128_Y_IMM8, X86_FORM_VEXTRACTI64X2_XM128_Z_IMM8, X86_FORM_VEXTRACTF64X2_XM128_Y_IMM8, X86_FORM_VEXTRACTF64X2_XM128_Z_IMM8,
++          X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8, X86_FORM_VEXTRACTF64X4_YM256_Z_IMM8 },
++    };
++    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
++    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
++    const uint32_t bytes = source->result_bytes;
++    const uint32_t first = source->operand_bytes[0];
++    const bool vector = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->operand_count != 0 &&
++                        source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && (first == 16 || first == 32 || first == 64);
++    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
++    uint64_t forms = 0;
++    if (vector && source->record_count == 0 && first != bytes &&
++        (source->operand_count == 1 || (source->operand_count == 2 && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == first)))
++    {
++        candidate.width_change = (uint8_t)(bytes < first ? BUSTER_IR_INTRINSIC_EXTRACT + 1 : BUSTER_IR_INTRINSIC_WIDEN + 1);
++    }
++    const X86Instruction* record = &source->records[0];
++    for (uint32_t form = 0; vector && source->record_count == 1 && source->operand_count == 2 && form < BUSTER_ARRAY_LENGTH(inserts); form += 1)
++    {
++        const uint32_t narrow = source->operand_bytes[1];
++        const X86Instruction expected = { .form = inserts[form], .reg = v0, .vvvv = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = record->immediate };
++        const X86FormDescription* description = x86_form_description(inserts[form]);
++        const uint32_t wide = 16u << description->vector_length;
++        if (memcmp(record, &expected, sizeof(expected)) == 0 && first == bytes && wide == bytes && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
++            (narrow == 16 || narrow == 32) && narrow < bytes && record->immediate >= 0 && (uint32_t)record->immediate < bytes / narrow &&
++            (narrow == 32) == (form == 4 || form == 5 || form == 10 || form == 11))
++        {
++            candidate.width_change = BUSTER_IR_INTRINSIC_INSERT + 1;
++            candidate.part = (uint8_t)record->immediate;
++            forms = x86_target_requirement(record->form);
++        }
++    }
++    for (uint32_t size = 0; vector && source->record_count == 2 && source->operand_count == 3 && size < 2; size += 1)
++    {
++        for (uint32_t form = 0; form < BUSTER_ARRAY_LENGTH(extracts[size]); form += 1)
++        {
++            const uint32_t narrow = form >= 4 ? 32 : 16;
++            const uint32_t wide = form >= 4 || (form & 1) != 0 ? 64 : 32;
++            const uint32_t lanes = narrow / (size == 0 ? 4 : 8);
++            const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
++            const X86Instruction expected = {
++                .form = extracts[size][form],
++                .reg = v0,
++                .rm = v1,
++                .mode = BUSTER_X86_REGISTER_DIRECT,
++                .decorations = BUSTER_TIER0_DECORATION_MASK(2),
++                .immediate = record->immediate,
++            };
++            const X86Instruction moved = {
++                .form = narrow == 16 ? X86_FORM_VMOVDQU64_X_XM128 : X86_FORM_VMOVDQU64_Y_YM256,
++                .reg = v0,
++                .rm = v1,
++                .mode = BUSTER_X86_REGISTER_DIRECT,
++            };
++            if (memcmp(record, &expected, sizeof(expected)) == 0 && memcmp(&source->records[1], &moved, sizeof(moved)) == 0 && first == wide && bytes == narrow &&
++                source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == narrow && source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK &&
++                source->operand_bytes[2] == mask_bytes && record->immediate >= 0 && (uint32_t)record->immediate < wide / narrow)
++            {
++                candidate.width_change = BUSTER_IR_INTRINSIC_EXTRACT + 1;
++                candidate.part = (uint8_t)record->immediate;
++                candidate.merge_mask = true;
++                candidate.lane = size == 0 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
++                forms = x86_target_requirement(record->form) | x86_target_requirement(moved.form) | (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
++            }
++        }
++    }
++    candidate.required_features = ir_typed_vector_moves(bytes, target_features) | ir_typed_vector_moves(first, target_features) | BUSTER_X86_FEATURE(AVX512F) |
++                                  BUSTER_X86_FEATURE(AVX512VL) | (forms & ~BUSTER_X86_TARGET_KNOWN);
++    const IrSimdTypedStatus status = candidate.width_change != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
++                                                                                                                                                    IR_SIMD_TYPED_UNSUPPORTED;
++    if (status == IR_SIMD_TYPED_OK)
++    {
++        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2));
++        candidate.operand_count = source->operand_count;
++        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
++        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
++        *result = candidate;
++    }
++    return status;
++}
++
++// The permutes (#1840): a row of two vectors of the result's width (16, 32 or 64 bytes) and one record of a permute's form
++// at that width, register-direct with no decoration: vpermb, vpermw, vpermd and vpermq of VECTOR(1)'s indices (vvvv) into
++// VECTOR(0)'s lanes (rm), the variable permutes' builtins as the front end swaps them (permute of VECTOR(0) by VECTOR(1),
++// its flags its lanes' bytes' log2); vpshufb of VECTOR(0) (vvvv) by VECTOR(1) (rm) (shuffle); and valignd, valignq,
++// vshufi32x4 and vshufi64x2 of VECTOR(0) (vvvv) and VECTOR(1) (rm) by the record's immediate (align, of its lanes' size
++// and the immediate's count, its bits below the lanes, which the instruction reads; shuffle_lanes of the immediate, its
++// low 2 bits at 32 bytes, whose 32x4 and 64x2 forms move the same 16-byte lanes). The destination is VECTOR(0)'s register (reg). Its features are the form's and its vectors' moves
++// (AVX512F, VL below 64 bytes): Tier 1 selects the form at the same width, vshufi64x2 for both shuffles of lanes;
++// otherwise, and for any other form or field, it stays a machine row.
++static IrSimdTypedStatus ir_simd_typed_permute(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
++{
++    typedef struct IrSimdTypedPermuteForm IrSimdTypedPermuteForm;
++    struct IrSimdTypedPermuteForm
++    {
++        uint16_t forms[3];
++        uint8_t kind;
++        uint8_t flags;
++        bool indices_first;
++    };
++    static const IrSimdTypedPermuteForm forms[] = {
++        { { X86_FORM_VPERMB_X_X_XM128, X86_FORM_VPERMB_Y_Y_YM256, X86_FORM_VPERMB_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 0, true },
++        { { X86_FORM_VPERMW_X_X_XM128, X86_FORM_VPERMW_Y_Y_YM256, X86_FORM_VPERMW_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 1, true },
++        { { X86_FORM_NONE, X86_FORM_VPERMD_Y_Y_YM256_EVEX, X86_FORM_VPERMD_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 2, true },
++        { { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_VPERMQ_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_PERMUTE, 3, true },
++        { { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 }, BUSTER_IR_INTRINSIC_SHUFFLE, 0, false },
++        { { X86_FORM_VALIGND_X_X_XM128_IMM8, X86_FORM_VALIGND_Y_Y_YM256_IMM8, X86_FORM_VALIGND_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_ALIGN, 0x20, false },
++        { { X86_FORM_VALIGNQ_X_X_XM128_IMM8, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, X86_FORM_VALIGNQ_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_ALIGN, 0x30, false },
++        { { X86_FORM_NONE, X86_FORM_VSHUFI32X4_Y_Y_YM256_IMM8, X86_FORM_VSHUFI32X4_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_SHUFFLE_LANES, 0, false },
++        { { X86_FORM_NONE, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, X86_FORM_VSHUFI64X2_Z_Z_ZM512_IMM8 }, BUSTER_IR_INTRINSIC_SHUFFLE_LANES, 0, false },
++    };
++    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
++    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
++    const uint32_t bytes = source->result_bytes;
++    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
++    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
++                          source->operand_count == 2 && source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[0] == bytes &&
++                          source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[1] == bytes;
++    const X86Instruction* record = &source->records[0];
++    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
++    for (uint32_t form = 0; admitted && form < BUSTER_ARRAY_LENGTH(forms); form += 1)
++    {
++        const IrSimdTypedPermuteForm* entry = &forms[form];
++        const bool immediate = entry->kind == BUSTER_IR_INTRINSIC_ALIGN || entry->kind == BUSTER_IR_INTRINSIC_SHUFFLE_LANES;
++        const X86Instruction expected = {
++            .form = entry->forms[width],
++            .reg = v0,
++            .vvvv = entry->indices_first ? v1 : v0,
++            .rm = entry->indices_first ? v0 : v1,
++            .mode = BUSTER_X86_REGISTER_DIRECT,
++            .immediate = immediate ? record->immediate : 0,
++        };
++        // The bits of the immediate the instruction reads: an align's count below its lanes, a 32-byte shuffle of lanes' low 2.
++        const uint32_t lanes = bytes >> (entry->flags >> 4);
++        const uint32_t flags = entry->kind == BUSTER_IR_INTRINSIC_ALIGN                 ? entry->flags | ((uint32_t)record->immediate & (lanes - 1)) :
++                               entry->kind == BUSTER_IR_INTRINSIC_SHUFFLE_LANES && width == 1 ? (uint32_t)record->immediate & 3 :
++                               immediate                                                ? (uint32_t)record->immediate :
++                                                                                          entry->flags;
++        const bool fits = record->immediate >= 0 && record->immediate <= 255 && ir_permute_flags_valid(entry->kind, (uint32_t)(IR_V4I32 + width), flags);
++        if (expected.form != X86_FORM_NONE && fits && memcmp(record, &expected, sizeof(expected)) == 0)
++        {
++            candidate.permute = (uint8_t)(entry->kind + 1);
++            candidate.immediate = (uint8_t)flags;
++            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) | (width < 2 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
++                                          (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN);
++        }
++    }
++    const IrSimdTypedStatus status = candidate.permute != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
++                                                                                                                                              IR_SIMD_TYPED_UNSUPPORTED;
++    if (status == IR_SIMD_TYPED_OK)
++    {
++        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
++        candidate.operand_count = 2;
++        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
++        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
++        *result = candidate;
++    }
++    return status;
++}
++
++// The conversions (#1840): a row of one record of an extension's or a truncation's form (ir_simd_typed_extensions,
++// ir_simd_typed_truncations), register-direct and undecorated, of one vector of 16, 32 or 64 bytes into VECTOR(0)'s
++// register (__builtin_convertvector's rows): an extension's reg VECTOR(0), its destination, and rm VECTOR(0), its
++// source, at the result's width; a truncation's reg its source and rm its destination at the source's width. And a
++// truncation's builtin's row (TRUNCATE's) whose lanes fill its result: its first record the form from VECTOR(0) into
++// VECTOR(1)'s register under MASK(2), its second VECTOR(1) moved whole into VECTOR(0), its result merged under the
++// writemask into its second operand at the result's lanes, which Tier 1 selects as a vselect, or not where the typed
++// stream's writemask has every lane. Its flags are the pair's sizes and the sign or mode. Its features are its form's
++// (BW for words' lanes) and AVX512F's and VL's; otherwise, and for a truncation under a mask whose lanes leave its
++// result's upper bytes zero (whose merge isn't a vselect of the result's lanes), it stays a machine row.
++static IrSimdTypedStatus ir_simd_typed_convert(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
++{
++    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
++    const uint8_t v1 = BUSTER_TIER0_ROLE_VECTOR(1);
++    const uint32_t bytes = source->result_bytes;
++    const uint32_t first = source->operand_bytes[0];
++    const bool vectors = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->operand_count != 0 &&
++                         source->operand_classes[0] == BUSTER_TYPED_CLASS_VECTOR && (first == 16 || first == 32 || first == 64);
++    const bool masked = vectors && source->operand_count == 3 && source->record_count == 2 && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
++                        source->operand_bytes[1] == bytes && source->operand_classes[2] == BUSTER_TYPED_CLASS_MASK;
++    const bool plain = vectors && source->operand_count == 1 && source->record_count == 1;
++    const X86Instruction* record = &source->records[0];
++    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
++    for (uint32_t pair = 0; plain && pair < 6; pair += 1)
++    {
++        for (uint32_t sign = 0; sign < 2; sign += 1)
++        {
++            const uint32_t from = ir_simd_typed_extension_pairs[pair][0];
++            const uint32_t to = ir_simd_typed_extension_pairs[pair][1];
++            const X86Instruction expected = { .form = ir_simd_typed_extensions[sign][pair][bytes == 16 ? 0 : bytes == 32 ? 1 : 2], .reg = v0, .rm = v0, .mode = BUSTER_X86_REGISTER_DIRECT };
++            const uint32_t flags = from | to << 2 | sign << 4;
++            if (memcmp(record, &expected, sizeof(expected)) == 0 && ir_convert_flags_valid(BUSTER_IR_INTRINSIC_EXTEND, IR_V4I32 + (first == 16 ? 0 : first == 32 ? 1 : 2),
++                                                                                           IR_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2), flags))
++            {
++                candidate.convert = BUSTER_IR_INTRINSIC_EXTEND + 1;
++                candidate.immediate = (uint8_t)flags;
++            }
++        }
++    }
++    for (uint32_t pair = 0; (plain || masked) && pair < 6; pair += 1)
++    {
++        for (uint32_t mode = 0; mode < 3; mode += 1)
++        {
++            const uint32_t from = ir_simd_typed_truncation_pairs[pair][0];
++            const uint32_t to = ir_simd_typed_truncation_pairs[pair][1];
++            const X86Instruction expected = {
++                .form = ir_simd_typed_truncations[mode][pair][first == 16 ? 0 : first == 32 ? 1 : 2],
++                .reg = v0,
++                .rm = masked ? v1 : v0,
++                .mode = BUSTER_X86_REGISTER_DIRECT,
++                .decorations = masked ? BUSTER_TIER0_DECORATION_MASK(2) : 0,
++            };
++            const X86Instruction moved = { .form = bytes == 16 ? X86_FORM_VMOVDQU64_X_XM128 : X86_FORM_VMOVDQU64_Y_YM256, .reg = v0, .rm = v1, .mode = BUSTER_X86_REGISTER_DIRECT };
++            const uint32_t flags = from | to << 2 | mode << 4;
++            const uint32_t lanes = first >> from;
++            const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
++            // Under a mask, its lanes fill its result (no upper bytes the instruction zeroes), and its writemask has a bit
++            // for each.
++            const bool full = !masked || (lanes << to == bytes && source->operand_bytes[2] == mask_bytes && memcmp(&source->records[1], &moved, sizeof(moved)) == 0);
++            if (memcmp(record, &expected, sizeof(expected)) == 0 && full &&
++                ir_convert_flags_valid(BUSTER_IR_INTRINSIC_TRUNCATE, IR_V4I32 + (first == 16 ? 0 : first == 32 ? 1 : 2), IR_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2), flags))
++            {
++                candidate.convert = BUSTER_IR_INTRINSIC_TRUNCATE + 1;
++                candidate.immediate = (uint8_t)flags;
++                candidate.merge_mask = masked;
++                candidate.lane = to == 0 ? IR_SIMD_LANE_I8 : to == 1 ? IR_SIMD_LANE_I16 : IR_SIMD_LANE_I32;
++            }
++        }
++    }
++    const uint64_t mask = candidate.merge_mask ? (source->operand_bytes[2] == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (source->operand_bytes[2] >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
++                                                     (candidate.lane == IR_SIMD_LANE_I8 || candidate.lane == IR_SIMD_LANE_I16 ? BUSTER_X86_FEATURE(AVX512BW) : 0) :
++                                                 0;
++    candidate.required_features = ir_typed_vector_moves(bytes, target_features) | ir_typed_vector_moves(first, target_features) | BUSTER_X86_FEATURE(AVX512F) |
++                                  BUSTER_X86_FEATURE(AVX512VL) | (x86_target_requirement(record->form) & ~BUSTER_X86_TARGET_KNOWN) | mask;
++    const IrSimdTypedStatus status = candidate.convert != 0 && (target_features & candidate.required_features) == candidate.required_features ? IR_SIMD_TYPED_OK :
++                                                                                                                                              IR_SIMD_TYPED_UNSUPPORTED;
++    if (status == IR_SIMD_TYPED_OK)
++    {
++        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + (bytes == 16 ? 0 : bytes == 32 ? 1 : 2));
++        candidate.operand_count = source->operand_count;
++        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
++        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
++        *result = candidate;
++    }
++    return status;
++}
++
+ // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
+-// comparisons into a mask alone, then exact scalar splats; other admitted forms stay machine rows. A semantic match whose
+-// target lacks a required feature stays refused, but a comparison into a mask alone, whose machine row a target may still
+-// run, stays one.
++// comparisons into a mask alone, width changes, permutes and conversions (#1840), then exact scalar splats; other admitted forms stay machine rows. A
++// semantic match whose target lacks a required feature stays refused, but a comparison into a mask alone, a width
++// change, a permute or a conversion, whose machine row a target may still run, stays one.
+ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+ {
+     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
+@@ -950,6 +1237,18 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
+     {
+         status = ir_simd_typed_compare_mask(source, target_features, result);
+     }
++    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
++    {
++        status = ir_simd_typed_width(source, target_features, result);
++    }
++    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
++    {
++        status = ir_simd_typed_permute(source, target_features, result);
++    }
++    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
++    {
++        status = ir_simd_typed_convert(source, target_features, result);
++    }
+     if (status == IR_SIMD_TYPED_UNSUPPORTED)
+     {
+         status = ir_simd_typed_splat(source, target_features, result);
+diff --git a/src/buster/compiler/ir_simd_typed_test.c b/src/buster/compiler/ir_simd_typed_test.c
+index c403880..d06ae0c 100644
+--- a/src/buster/compiler/ir_simd_typed_test.c
++++ b/src/buster/compiler/ir_simd_typed_test.c
+@@ -906,8 +906,258 @@ static void ir_simd_typed_test_splats(IrTestTally* tally)
+     type_test_table_close(&table);
+ }
+ 
++// The width changes (#1840): every BINARY_IMMEDIATE rule of a vinsert form and every EXTRACT_LANE rule's row as the front
++// end makes it (an extract's in the mask class) at every immediate below 8 decodes as the IR's insert or masked extract of
++// the immediate's part, its features exactly AVX512F's and VL's and its forms' (DQ for 32x8 and 64x2, and an extract's
++// byte mask's), refused without each and under changes; and the casts' rows of no record, of one operand or two of one
++// width, decode as an extract of part 0 or a widen at every pair of widths and at no other row.
++static void ir_simd_typed_test_widths(IrTestTally* tally)
++{
++    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
++    const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
++    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
++    uint32_t inserts = 0;
++    uint32_t extracts = 0;
++    uint32_t casts = 0;
++    const bool tables = x86_encoder_initialize() && tier0_initialize();
++    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
++    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
++    {
++        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
++        const char* mnemonic = rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
++        const bool insert = rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other != 0 && strncmp(mnemonic, "vinsert", 7) == 0 && strcmp(mnemonic, "vinsertps") != 0;
++        const bool extract = rule->family == CHECK_X86_LOWER_EXTRACT_LANE;
++        for (uint32_t code = 0; (insert || extract) && code < 8; code += 1)
++        {
++            Tier0Operation row;
++            char description[224];
++            const bool made = check_x86_lower_row_of(&every, rule, code, 4, 0, false, &row) == NULL && (!extract || check_x86_lower_masks(&row, &every));
++            snprintf(description, sizeof(description), "%s (code %u): its row is the front end's", rule->name, code);
++            ir_test_expect(tally, made, description);
++            if (!made)
++            {
++                continue;
++            }
++            const uint32_t parts = (uint32_t)rule->bytes / rule->other;
++            const uint32_t lanes = (uint32_t)rule->other / rule->element;
++            const bool dq = strstr(mnemonic, "32x8") != 0 || strstr(mnemonic, "64x2") != 0;
++            const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | (dq || (extract && lanes <= 8) ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
++            IrSimdTypedOperation decoded;
++            memset(&decoded, 0xa5, sizeof(decoded));
++            const IrSimdTypedStatus status = ir_simd_typed_row(&row, avx512, &decoded);
++            snprintf(description, sizeof(description), "%s (code %u): the IR's %s of its part at exactly its features", rule->name, code, insert ? "insert" : "masked extract");
++            ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.part == code % parts &&
++                                      decoded.width_change == (insert ? BUSTER_IR_INTRINSIC_INSERT : BUSTER_IR_INTRINSIC_EXTRACT) + 1 && decoded.merge_mask == extract &&
++                                      (!extract || decoded.lane == (rule->element == 4 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64)) && decoded.required_features == expected,
++                           description);
++            inserts += insert;
++            extracts += extract;
++            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
++            {
++                IrSimdTypedOperation without;
++                memset(&without, 0x5a, sizeof(without));
++                const IrSimdTypedStatus refused = ir_simd_typed_row(&row, avx512 & ~features[f], &without);
++                const bool needed = (expected & features[f]) != 0;
++                snprintf(description, sizeof(description), "%s (code %u): without a feature it needs it stays the machine row, and needs no other", rule->name, code);
++                ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && without.width_change != 0, description);
++            }
++            for (uint32_t m = 0; m < 9; m += 1)
++            {
++                Tier0Operation changed = row;
++                X86Instruction* first = &changed.records[0];
++                bool applies = true;
++                switch (m)
++                {
++                case 0: first->decorations = extract ? 0 : BUSTER_TIER0_DECORATION_MASK(0); break;
++                case 1: first->immediate = (int32_t)parts; break;
++                case 2: first->mode = BUSTER_X86_MEMORY_BASE; break;
++                case 3: first->rm = BUSTER_TIER0_ROLE_VECTOR(2); break;
++                case 4: first->reg = BUSTER_TIER0_ROLE_VECTOR(1); break;
++                case 5: changed.operand_bytes[1] = rule->other == 16 ? 32 : 16; break;
++                case 6:
++                    applies = extract;
++                    changed.records[1].rm = BUSTER_TIER0_ROLE_VECTOR(0);
++                    break;
++                case 7:
++                    changed.records[changed.record_count] = changed.records[changed.record_count - 1];
++                    changed.record_count += 1;
++                    break;
++                case 8: first->vvvv = insert ? BUSTER_TIER0_ROLE_VECTOR(1) : BUSTER_TIER0_ROLE_VECTOR(0); break;
++                }
++                if (applies)
++                {
++                    memset(&decoded, 0xa5, sizeof(decoded));
++                    const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, avx512, &decoded);
++                    snprintf(description, sizeof(description), "%s (code %u, change %u): not the IR's width change", rule->name, code, m);
++                    ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), description);
++                }
++            }
++        }
++    }
++    // The casts' rows of no record (c_check_program_vector_builtins.c's shuffles that move no element).
++    for (uint32_t result = 0; result < 3; result += 1)
++    {
++        for (uint32_t operand = 0; operand < 3; operand += 1)
++        {
++            for (uint32_t kept = 0; kept < 2; kept += 1)
++            {
++                Tier0Operation row = {
++                    .result_class = BUSTER_TYPED_CLASS_VECTOR,
++                    .result_bytes = (uint8_t)(16u << result),
++                    .operand_count = (uint8_t)(1 + kept),
++                };
++                row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
++                row.operand_bytes[0] = (uint8_t)(16u << operand);
++                row.operand_classes[1] = kept != 0 ? BUSTER_TYPED_CLASS_VECTOR : 0;
++                row.operand_bytes[1] = kept != 0 ? (uint8_t)(16u << operand) : 0;
++                IrSimdTypedOperation decoded;
++                memset(&decoded, 0xa5, sizeof(decoded));
++                const IrSimdTypedStatus status = ir_simd_typed_row(&row, avx512, &decoded);
++                char description[160];
++                snprintf(description, sizeof(description), "a cast of %u bytes to %u (%u operands): %s", 16u << operand, 16u << result, 1 + kept,
++                         result == operand ? "the machine row" : result < operand ? "the IR's extract of part 0" : "the IR's widen");
++                const uint8_t kind = result < operand ? BUSTER_IR_INTRINSIC_EXTRACT + 1 : BUSTER_IR_INTRINSIC_WIDEN + 1;
++                ir_test_expect(tally, result == operand ? ir_simd_typed_test_undecoded(status, &decoded) :
++                                                         status == IR_SIMD_TYPED_OK && decoded.width_change == kind && decoded.part == 0 && !decoded.merge_mask &&
++                                                             decoded.required_features == (BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL)),
++                               description);
++                casts += status == IR_SIMD_TYPED_OK && decoded.width_change != 0;
++                // Changed: a record, an operand of another width or class, a target without VL.
++                Tier0Operation changed = row;
++                changed.records[0] = (X86Instruction){ .form = X86_FORM_VMOVDQU64_Z_ZM512, .reg = BUSTER_TIER0_ROLE_VECTOR(0), .rm = BUSTER_TIER0_ROLE_VECTOR(0), .mode = BUSTER_X86_REGISTER_DIRECT };
++                changed.record_count = 1;
++                ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, avx512, &decoded), &decoded), "a cast's row with a record is no width change");
++                changed = row;
++                changed.operand_classes[0] = BUSTER_TYPED_CLASS_U64;
++                changed.operand_bytes[0] = 0;
++                ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, avx512, &decoded), &decoded), "a cast's row of an integer is no width change");
++                if (kept != 0)
++                {
++                    changed = row;
++                    changed.operand_bytes[1] = (uint8_t)(16u << ((operand + 1) % 3));
++                    ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&changed, avx512, &decoded), &decoded), "a cast's kept operand has its first's width");
++                }
++                ir_test_expect(tally, ir_simd_typed_test_undecoded(ir_simd_typed_row(&row, avx512 & ~BUSTER_X86_FEATURE(AVX512VL), &decoded), &decoded), "a cast needs AVX512VL");
++            }
++        }
++    }
++    // Inserts: 4 forms of 16 bytes into 32 (vinserti32x4's and vinsertf32x4's, the vinsertf128 builtins' 3 too,
++    // vinserti64x2's, vinsertf64x2's) and the 512-bit ones, at 8 immediates.
++    ir_test_expect(tally, inserts != 0 && inserts % 8 == 0 && extracts != 0 && extracts % 8 == 0 && casts == 2 * 6, "every insert, masked extract and cast decodes");
++    printf("  IR SIMD rows: %u insert rows and %u masked extract rows of the front end at 8 immediates, and %u casts' rows, decode to the IR's width changes\n", inserts, extracts, casts);
++}
++
++// A front-end rule's permute (#1840), written out from its form's mnemonic: its kind past BUSTER_IR_INTRINSIC_PERMUTE
++// (0 vpermb to vpermq, 1 vpshufb, 2 valignd and valignq, 3 vshufi32x4 and vshufi64x2), or 4 for any other rule; and its
++// flags at immediate `code`: the elements' bytes' log2, 0, that log2 in bits 4 and 5 and the code's count below the
++// lanes, and the code below 4 of a 32-byte vector's or any byte of a 64-byte one's.
++static uint32_t ir_simd_typed_test_permute_kind(const CheckX86LowerRule* rule, uint32_t code, uint32_t* flags)
++{
++    const char* mnemonic = rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
++    const bool binary = rule->family == CHECK_X86_LOWER_BINARY && rule->other == 0;
++    const bool immediate = rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other == 0;
++    const uint32_t size = rule->element == 1 ? 0 : rule->element == 2 ? 1 : rule->element == 4 ? 2 : 3;
++    const bool permute = binary && rule->swap && (strcmp(mnemonic, "vpermb") == 0 || strcmp(mnemonic, "vpermw") == 0 ||
++                                                  (strcmp(mnemonic, "vpermd") == 0 && rule->bytes >= 32) || (strcmp(mnemonic, "vpermq") == 0 && rule->bytes == 64));
++    const bool shuffle = binary && !rule->swap && strcmp(mnemonic, "vpshufb") == 0;
++    const bool align = immediate && (strcmp(mnemonic, "valignd") == 0 || strcmp(mnemonic, "valignq") == 0);
++    const bool lanes = immediate && rule->bytes >= 32 && (strcmp(mnemonic, "vshufi32x4") == 0 || strcmp(mnemonic, "vshufi64x2") == 0);
++    const uint32_t kind = permute ? 0 : shuffle ? 1 : align ? 2 : lanes ? 3 : 4;
++    *flags = kind == 0 ? size : kind == 2 ? (size << 4) | (code % (rule->bytes >> size)) : kind == 3 ? (rule->bytes == 32 ? code & 3 : code & 255) : 0;
++    return kind;
++}
++
++// The permutes (#1840): every front-end rule of vpermb, vpermw, vpermd and vpermq (the variable permutes, their indices
++// in vvvv), vpshufb, valignd, valignq, vshufi32x4 and vshufi64x2, at 8 immediates for those that take one, decodes as the
++// IR's permute of its kind and flags, written out, at exactly its form's features and its vectors' moves; refused without
++// each and under 8 changes.
++static void ir_simd_typed_test_permutes(IrTestTally* tally)
++{
++    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
++    const uint64_t all = UINT64_MAX;
++    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512VBMI) };
++    uint32_t decoded_rows[4] = { 0 };
++    const bool tables = x86_encoder_initialize() && tier0_initialize();
++    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
++    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
++    {
++        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
++        uint32_t flags = 0;
++        const uint32_t kind = ir_simd_typed_test_permute_kind(rule, 0, &flags);
++        const uint32_t codes = kind >= 2 ? 8 : 1;
++        for (uint32_t code = 0; kind < 4 && code < codes; code += 1)
++        {
++            ir_simd_typed_test_permute_kind(rule, code, &flags);
++            Tier0Operation row;
++            char description[224];
++            const bool made = check_x86_lower_row_of(&every, rule, code, 4, 0, false, &row) == NULL;
++            snprintf(description, sizeof(description), "%s (code %u): its row is the front end's", rule->name, code);
++            ir_test_expect(tally, made, description);
++            if (!made)
++            {
++                continue;
++            }
++            const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
++                                      ((kind == 0 && rule->element <= 2) || kind == 1 ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
++                                      (kind == 0 && rule->element == 1 ? BUSTER_X86_FEATURE(AVX512VBMI) : 0);
++            IrSimdTypedOperation decoded;
++            memset(&decoded, 0xa5, sizeof(decoded));
++            const IrSimdTypedStatus status = ir_simd_typed_row(&row, all, &decoded);
++            snprintf(description, sizeof(description), "%s (code %u): the IR's permute of kind %u and flags 0x%x at exactly its features", rule->name, code, kind, flags);
++            ir_test_expect(tally, status == IR_SIMD_TYPED_OK && !decoded.machine && decoded.permute == BUSTER_IR_INTRINSIC_PERMUTE + kind + 1 && decoded.immediate == flags &&
++                                      decoded.width_change == 0 && decoded.operation == IR_SIMD_OPERATION_COUNT && (decoded.required_features & ~BUSTER_X86_FEATURE(AVX)) == expected,
++                           description);
++            decoded_rows[kind] += status == IR_SIMD_TYPED_OK && decoded.permute != 0;
++            for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
++            {
++                IrSimdTypedOperation without;
++                memset(&without, 0x5a, sizeof(without));
++                const IrSimdTypedStatus refused = ir_simd_typed_row(&row, all & ~features[f], &without);
++                const bool needed = (expected & features[f]) != 0;
++                snprintf(description, sizeof(description), "%s (code %u): without a feature it needs it stays the machine row, and needs no other", rule->name, code);
++                ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) || refused == IR_SIMD_TYPED_OK : refused == IR_SIMD_TYPED_OK && without.permute != 0,
++                               description);
++                if (needed && refused == IR_SIMD_TYPED_OK)
++                {
++                    ir_test_expect(tally, without.permute == 0, description);
++                }
++            }
++            for (uint32_t m = 0; m < 8; m += 1)
++            {
++                Tier0Operation changed = row;
++                X86Instruction* first = &changed.records[0];
++                switch (m)
++                {
++                case 0: first->decorations = BUSTER_TIER0_DECORATION_MASK(0); break;
++                case 1: first->mode = BUSTER_X86_MEMORY_BASE; break;
++                case 2: first->rm = first->vvvv; break;
++                case 3: first->reg = BUSTER_TIER0_ROLE_VECTOR(1); break;
++                case 4: changed.operand_bytes[1] = rule->bytes == 64 ? 32 : 64; break;
++                case 5:
++                    changed.records[1] = changed.records[0];
++                    changed.record_count = 2;
++                    break;
++                case 6: first->displacement = 4; break;
++                case 7: first->immediate = kind < 2 ? 1 : 256; break;
++                }
++                memset(&decoded, 0xa5, sizeof(decoded));
++                const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, all, &decoded);
++                snprintf(description, sizeof(description), "%s (code %u, change %u): not the IR's permute", rule->name, code, m);
++                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded) || (refused == IR_SIMD_TYPED_OK && decoded.permute == 0 && !decoded.machine && m == 4), description);
++            }
++        }
++    }
++    // vpermb and vpermw at 3 widths, vpermd at 2 and vpermq at 1; vpshufb at 3; valignd and valignq at 3 widths, and the
++    // two shuffles of lanes at 2, at 8 immediates.
++    ir_test_expect(tally, decoded_rows[0] == 9 && decoded_rows[1] == 3 && decoded_rows[2] == 6 * 8 && decoded_rows[3] == 4 * 8, "every permute rule decodes");
++    printf("  IR SIMD rows: the front end's permutes decode to the IR's: %u variable permutes, %u byte shuffles, %u aligns and %u shuffles of lanes\n", decoded_rows[0],
++           decoded_rows[1], decoded_rows[2], decoded_rows[3]);
++}
++
+ static void ir_simd_typed_test(IrTestTally* tally)
+ {
++    ir_simd_typed_test_permutes(tally);
++    ir_simd_typed_test_widths(tally);
+     ir_simd_typed_test_splats(tally);
+     ir_simd_typed_test_machine(tally);
+     TypeTestTable table = { 0 };
+diff --git a/src/buster/compiler/ir_source_roundtrip.c b/src/buster/compiler/ir_source_roundtrip.c
+index 4c4a66e..237f724 100644
+--- a/src/buster/compiler/ir_source_roundtrip.c
++++ b/src/buster/compiler/ir_source_roundtrip.c
+@@ -568,6 +568,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena*
+         "tests/ir/bit-intrinsics.ir",
+         "tests/ir/overflow-intrinsics.ir",
+         "tests/ir/splats.ir",
++        "tests/ir/widths.ir",
+     };
+     IrSourceTextTests tests = { 0 };
+     for (uint32_t f = 0; f < sizeof(fixtures) / sizeof(fixtures[0]); f += 1)
+diff --git a/src/buster/compiler/tier1_masks_test.c b/src/buster/compiler/tier1_masks_test.c
+index e8f5d08..c688263 100644
+--- a/src/buster/compiler/tier1_masks_test.c
++++ b/src/buster/compiler/tier1_masks_test.c
+@@ -109,6 +109,13 @@ struct Tier1MasksTest
+     uint32_t compare_rows;
+     uint32_t compare_decoded;
+     uint32_t compare_native;
++    // The front end's width changes (#1840, tier1_masks_test_widths): those tried, and those through every stage as the
++    // IR's extract, widen or insert.
++    uint32_t width_attempts;
++    uint32_t width_rows;
++    // The front end's permutes (#1840, tier1_masks_test_permutes): those tried, and those through every stage as the IR's.
++    uint32_t permute_attempts;
++    uint32_t permute_rows;
+     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
+     // copies renamed into a live value's register; and of each, those the code's certificate refused.
+     uint32_t row_reloads;
+@@ -4747,6 +4754,269 @@ static void tier1_masks_test_compares(Tier1MasksTest* test)
+     free(program);
+ }
+ 
++// The front end's width changes through the IR to Tier 1 (#1840): every insert rule (BINARY_IMMEDIATE's vinsert forms) and
++// masked extract rule (EXTRACT_LANE's, in the mask class) at each of its parts, and the casts' rows of no record at every
++// pair of widths, each as the program's only row, in 4 statements: of the input buffer's vectors k and k + 1 (modulo 4,
++// of the row's operands' bytes), an extract's writemask the input word k in the odd statements and a constant of every
++// lane in the even ones, as clang's intrinsics without a mask give it, the result stored into the output's vector k.
++// tier1_masks_test_typed_pipeline takes each through the IR as its extract, widen or insert (and an extract's vselect),
++// which the interpreter runs at every stage, and Tier 1 natively, against a C model of the bytes. Tier 0 doesn't run them
++// here, as the selects' (tier1_masks_test_selects).
++static void tier1_masks_test_widths(Tier1MasksTest* test)
++{
++    const X86Target target = { .features = test->v4_features };
++    Tier0TestMaskProgram* program = malloc(sizeof(*program));
++    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
++    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
++    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
++    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
++                                         "the width changes' memory");
++    uint64_t state = test->random ^ UINT64_C(0x3c6ef372fe94f82b);
++    // The rules' cases, then the 6 casts' (case past the rules: a pair of widths).
++    const uint32_t rules = BUSTER_ARRAY_LENGTH(check_x86_lower_rules);
++    for (uint32_t i = 0; ready && i < rules + 6; i += 1)
++    {
++        const CheckX86LowerRule* rule = i < rules ? check_x86_lower_rules + i : 0;
++        const char* mnemonic = rule != 0 && rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
++        const bool insert = rule != 0 && rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other != 0 && strncmp(mnemonic, "vinsert", 7) == 0 &&
++                            strcmp(mnemonic, "vinsertps") != 0;
++        const bool extract = rule != 0 && rule->family == CHECK_X86_LOWER_EXTRACT_LANE;
++        const bool cast = rule == 0;
++        static const uint8_t pairs[6][2] = { { 16, 32 }, { 16, 64 }, { 32, 64 }, { 32, 16 }, { 64, 16 }, { 64, 32 } };
++        const uint32_t parts = insert || extract ? (uint32_t)rule->bytes / rule->other : 1;
++        for (uint32_t code = 0; (insert || extract || cast) && code < parts; code += 1)
++        {
++            const uint64_t output_mark = test->output.length;
++            test->width_attempts += 1;
++            Tier0Operation row = { 0 };
++            bool made = true;
++            char name[128];
++            if (cast)
++            {
++                row.result_class = BUSTER_TYPED_CLASS_VECTOR;
++                row.result_bytes = pairs[i - rules][1];
++                row.operand_count = 1;
++                row.operand_classes[0] = BUSTER_TYPED_CLASS_VECTOR;
++                row.operand_bytes[0] = pairs[i - rules][0];
++                snprintf(name, sizeof(name), "a cast of %u bytes to %u", row.operand_bytes[0], row.result_bytes);
++            }
++            else
++            {
++                made = check_x86_lower_row_of(&target, rule, code, 4, 0, false, &row) == NULL && (!extract || check_x86_lower_masks(&row, &target));
++                snprintf(name, sizeof(name), "%s (part %u)", rule->name, code);
++            }
++            const uint32_t bytes = row.result_bytes;
++            const uint32_t a_bytes = row.operand_bytes[0];
++            const uint32_t b_bytes = row.operand_count > 1 ? row.operand_bytes[1] : 0;
++            bool ok = tier1_masks_test_expect(test, made && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's width change's row");
++            program->count = 0;
++            program->overflow = false;
++            program->rows = true;
++            program->objects = false;
++            for (uint32_t k = 0; ok && k < 4; k += 1)
++            {
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * a_bytes / 8 % 32);
++                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, a_bytes);
++                if (b_bytes != 0)
++                {
++                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + 1) * b_bytes / 8 % 32);
++                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, b_bytes);
++                }
++                if (extract && (k & 1) != 0)
++                {
++                    tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
++                    tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
++                }
++                else if (extract)
++                {
++                    tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_MAX);
++                }
++                if (extract)
++                {
++                    tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[2]);
++                }
++                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
++                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
++            }
++            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
++            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the width change's program fits");
++            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
++            functions[0].operations = &row;
++            functions[0].operation_count = 1;
++            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
++            {
++                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
++                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
++                tier0_test_mask_inputs(in, &state);
++                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
++                for (uint32_t k = 0; k < 4; k += 1)
++                {
++                    const uint8_t* a = (const uint8_t*)in + k * a_bytes % 256;
++                    const uint8_t* b = (const uint8_t*)in + (k + 1) * b_bytes % 256;
++                    const uint64_t mask = extract && (k & 1) != 0 ? in[k] : UINT64_MAX;
++                    uint8_t* out = wanted + k * bytes;
++                    for (uint32_t byte = 0; byte < bytes; byte += 1)
++                    {
++                        const uint32_t start = code * (insert ? b_bytes : bytes);
++                        const bool inserted = insert && byte >= start && byte < start + b_bytes;
++                        const bool kept = !extract || ((mask >> (byte / rule->element)) & 1) != 0;
++                        out[byte] = insert                     ? (inserted ? b[byte - start] : a[byte]) :
++                                    extract                    ? (kept ? a[start + byte] : b[byte]) :
++                                    bytes < a_bytes || byte < a_bytes ? a[byte] :
++                                                                 0;
++                    }
++                }
++            }
++            bool machine = false;
++            ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
++            test->width_rows += ok;
++            tier1_masks_test_expect(test, test->scratch.length == 0, "the width changes return the scratch arena");
++            arena_pop_to(&test->output, output_mark);
++            for (uint32_t k = 0; k < 3; k += 1)
++            {
++                arena_pop_to(&arenas[k], 0);
++            }
++        }
++    }
++    for (uint32_t k = 0; k < 3; k += 1)
++    {
++        arena_release(&arenas[k]);
++    }
++    free(expected);
++    free(inputs);
++    free(program);
++}
++
++// A C model of a front-end permute's x86 instruction (#1840), from Intel's manual, lane by lane: `out` of `bytes` bytes, of
++// table or first source a and index, control or second source b, its elements `element` bytes and its immediate `code`.
++// vpermb to vpermq: each element is a's element at the index in b's same element, modulo the elements; vpshufb: each
++// byte is 0 where b's byte is negative, else a's byte in the same 16 bytes at b's byte's low 4 bits; valignd and valignq:
++// the elements of b then a, from the immediate modulo the elements on; vshufi32x4 and vshufi64x2: each 16-byte lane of the
++// result's low half is a's and of its high half b's, the one the immediate's next 1 (32 bytes) or 2 (64 bytes) bits name.
++static void tier1_masks_test_permute_model(uint32_t kind, uint32_t element, uint32_t bytes, uint32_t code, const uint8_t* a, const uint8_t* b, uint8_t* out)
++{
++    const uint32_t elements = bytes / element;
++    if (kind == 0 || kind == 2)
++    {
++        for (uint32_t e = 0; e < elements; e += 1)
++        {
++            uint64_t index = 0;
++            memcpy(&index, b + e * element, element);
++            const uint32_t from = kind == 0 ? (uint32_t)(index % elements) : e + code % elements;
++            const uint8_t* source = kind == 0 ? a + from * element : from < elements ? b + from * element : a + (from - elements) * element;
++            memcpy(out + e * element, source, element);
++        }
++    }
++    else if (kind == 1)
++    {
++        for (uint32_t byte = 0; byte < bytes; byte += 1)
++        {
++            out[byte] = (int8_t)b[byte] < 0 ? 0 : a[(byte & ~15u) + (b[byte] & 15u)];
++        }
++    }
++    else
++    {
++        const uint32_t lanes = bytes / 16;
++        for (uint32_t lane = 0; lane < lanes; lane += 1)
++        {
++            const uint32_t selected = lanes == 2 ? (code >> lane) & 1 : (code >> (2 * lane)) & 3;
++            memcpy(out + 16 * lane, (lane < lanes / 2 ? a : b) + 16 * selected, 16);
++        }
++    }
++}
++
++// The front end's permutes through the IR to Tier 1 (#1840): every rule of vpermw, vpermd, vpermq, vpshufb, valignd,
++// valignq, vshufi32x4 and vshufi64x2 that the decoder takes (vpermb's need AVX512VBMI, which the pipeline's x86-64-v4
++// hasn't: test-ir-simd decodes them), at 8 immediates for the ones that take one, as the
++// program's only row in 4 statements of the input buffer's vectors k and k + 1 (modulo 4), stored into the output's
++// vector k; tier1_masks_test_typed_pipeline takes each through the IR as its permute, which the interpreter runs at
++// every stage, and Tier 1 natively, against tier1_masks_test_permute_model. Tier 0 doesn't run them here, as the selects'.
++static void tier1_masks_test_permutes(Tier1MasksTest* test)
++{
++    const X86Target target = { .features = test->v4_features };
++    Tier0TestMaskProgram* program = malloc(sizeof(*program));
++    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
++    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
++    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
++    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
++                                         "the permutes' memory");
++    uint64_t state = test->random ^ UINT64_C(0xa54ff53a5f1d36f1);
++    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
++    {
++        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
++        const char* mnemonic = rule->form != X86_FORM_NONE ? x86_form_description(rule->form)->mnemonic : "";
++        const bool binary = rule->family == CHECK_X86_LOWER_BINARY && rule->other == 0;
++        const bool immediate = rule->family == CHECK_X86_LOWER_BINARY_IMMEDIATE && rule->other == 0;
++        const uint32_t kind = binary && rule->swap && (strcmp(mnemonic, "vpermw") == 0 ||
++                                                       (strcmp(mnemonic, "vpermd") == 0 && rule->bytes >= 32) || (strcmp(mnemonic, "vpermq") == 0 && rule->bytes == 64)) ? 0 :
++                              binary && !rule->swap && strcmp(mnemonic, "vpshufb") == 0                                                                                   ? 1 :
++                              immediate && (strcmp(mnemonic, "valignd") == 0 || strcmp(mnemonic, "valignq") == 0)                                                           ? 2 :
++                              immediate && rule->bytes >= 32 && (strcmp(mnemonic, "vshufi32x4") == 0 || strcmp(mnemonic, "vshufi64x2") == 0)                               ? 3 :
++                                                                                                                                                                              4;
++        for (uint32_t code = 0; kind < 4 && code < (kind >= 2 ? 8u : 1u); code += 1)
++        {
++            const uint64_t output_mark = test->output.length;
++            test->permute_attempts += 1;
++            Tier0Operation row;
++            // A shuffle of lanes' immediates past the 8 low ones: every lane of each half named.
++            const uint32_t immediate_value = kind == 3 ? (code * 0x5b + 0x1e) & 0xff : code;
++            const bool made = check_x86_lower_row_of(&target, rule, immediate_value, 4, 0, false, &row) == NULL;
++            char name[128];
++            snprintf(name, sizeof(name), "%s (immediate %u)", rule->name, immediate_value);
++            const uint32_t bytes = rule->bytes;
++            bool ok = tier1_masks_test_expect(test, made && row.operand_count == 2 && row.result_class == BUSTER_TYPED_CLASS_VECTOR, "the front end's permute's row");
++            program->count = 0;
++            program->overflow = false;
++            program->rows = true;
++            program->objects = false;
++            for (uint32_t k = 0; ok && k < 4; k += 1)
++            {
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * bytes / 8);
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * bytes / 8 % 32);
++                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (k + 1) * bytes / 8 % 32);
++                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
++                tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
++                tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
++            }
++            tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
++            ok = ok && tier1_masks_test_expect(test, !program->overflow, "the permute's program fits");
++            Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
++            functions[0].operations = &row;
++            functions[0].operation_count = 1;
++            for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
++            {
++                uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
++                uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
++                tier0_test_mask_inputs(in, &state);
++                memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
++                for (uint32_t k = 0; k < 4; k += 1)
++                {
++                    tier1_masks_test_permute_model(kind, rule->element, bytes, immediate_value, (const uint8_t*)in + k * bytes % 256, (const uint8_t*)in + (k + 1) * bytes % 256,
++                                                   wanted + k * bytes);
++                }
++            }
++            bool machine = false;
++            ok = ok && tier1_masks_test_typed_pipeline(test, name, functions, true, inputs, expected, arenas, &machine);
++            test->permute_rows += ok;
++            tier1_masks_test_expect(test, test->scratch.length == 0, "the permutes return the scratch arena");
++            arena_pop_to(&test->output, output_mark);
++            for (uint32_t k = 0; k < 3; k += 1)
++            {
++                arena_pop_to(&arenas[k], 0);
++            }
++        }
++    }
++    for (uint32_t k = 0; k < 3; k += 1)
++    {
++        arena_release(&arenas[k]);
++    }
++    free(expected);
++    free(inputs);
++    free(program);
++}
++
+ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+ {
+     uint64_t seed = 179;
+@@ -4833,6 +5103,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+             tier1_masks_test_typed(&test);
+             tier1_masks_test_builtins(&test);
+             tier1_masks_test_compares(&test);
++            tier1_masks_test_widths(&test);
++            tier1_masks_test_permutes(&test);
+             tier1_masks_test_refusals(&test, baseline, foundation);
+             tier1_masks_test_scan(&test);
+             tier1_masks_test_forms(&test);
+@@ -4845,13 +5117,20 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
+             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
+                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
+-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows),
++            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.width_rows + test.permute_rows),
+                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
+             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
+             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
+             tier1_masks_test_expect(&test, test.compare_attempts == 24 * 8 + 6 * 32 && test.compare_rows == test.compare_attempts && test.compare_decoded == 24 * 6 + 6 * 12,
+                                     "every front-end comparison into a mask goes through Tier 0, the IR and Tier 1, those of an IR predicate as the IR's comparisons");
+             tier1_masks_test_expect(&test, !test.native || test.compare_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.compare_rows, "Tier 0 runs every front-end comparison natively");
++            // The width changes (#1840): every insert and masked extract rule at each part, and the 6 casts.
++            tier1_masks_test_expect(&test, test.width_attempts > 6 && test.width_rows == test.width_attempts,
++                                    "every front-end width change goes through the IR and Tier 1 as the IR's extract, widen or insert");
++            // The permutes (#1840): vpermw at 3 widths, vpermd at 2 and vpermq at 1; vpshufb at 3; valignd and valignq at
++            // 3 widths and the two shuffles of lanes at 2, at 8 immediates.
++            tier1_masks_test_expect(&test, test.permute_attempts == 6 + 3 + 6 * 8 + 4 * 8 && test.permute_rows == test.permute_attempts,
++                                    "every front-end permute goes through the IR and Tier 1 as the IR's permute");
+             // The front end's rows: every rule of the five families, the shifts at every count.
+             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
+             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
+@@ -4862,6 +5141,11 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+         printf("test-tier1-masks: the front end's comparisons into masks: %u through Tier 0 natively (%u runs) and Tier 1, %u of them the IR's comparisons through its interpreter, SSA and the "
+                "optimizer, the others machine rows\n",
+                test.compare_rows, test.compare_native, test.compare_decoded);
++        printf("test-tier1-masks: the front end's width changes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its extract, widen and insert\n",
++               test.width_rows);
++        printf("test-tier1-masks: the front end's permutes: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its permute, shuffle, align and "
++               "shuffle_lanes\n",
++               test.permute_rows);
+         tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
+                                 "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
+         tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index d6afadc..ce21d51 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -264,6 +264,16 @@ typedef enum Tier1SelectRule
+ #define BUSTER_TIER1_VECTOR_COMPARE 7
+ #define BUSTER_TIER1_VECTOR_SELECT 8
+ #define BUSTER_TIER1_VECTOR_SCALAR_SPLAT 9
++// A width change (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTRACT (0 extract, 1 widen, 2 insert),
++// `source_width` the other vector's bytes (an extract's or a widen's operand's, an insert's inserted values[1]'s),
++// `immediate` its part (tier1_select_width_change).
++#define BUSTER_TIER1_VECTOR_WIDTH_CHANGE 10
++// A permute (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_PERMUTE (0 permute, 1 shuffle, 2 align, 3
++// shuffle_lanes), `immediate` the IR's flags (tier1_select_permute_form).
++#define BUSTER_TIER1_VECTOR_PERMUTE 11
++// A conversion (#1840): `operation` its kind past BUSTER_IR_INTRINSIC_EXTEND (0 extend, 1 truncate), `immediate` the
++// IR's flags, `source_width` the source's bytes (tier1_select_convert_form).
++#define BUSTER_TIER1_VECTOR_CONVERT 12
+ 
+ // TIER1_RULE_X87's kinds, its pattern's `scale` (#141):
+ // - CONSTANT, its constant's index in `immediate`, and UNDEF, which stores nothing;
+@@ -1155,6 +1165,111 @@ static void tier1_select_overflow(Tier1SelectRecords* result, const Tier1SelectH
+ // A scalar splat (#1450): EVEX broadcasts directly from a general register or a floating scalar's xmm register.
+ // The baseline sequence copies bits through xmm registers only: movd/movq, low unpacks for bytes/words, pshufd and,
+ // for AVX's 32-byte result, vinsertf128. It never interprets a NaN or a signed zero as arithmetic.
++// A width change's records (#1840), EVEX's (the decoder admits one at a target with AVX512F and VL alone, and the
++// emission's allow-list refuses these forms elsewhere): an extract of part 0 the narrower width's move from the source's
++// register, which the destination's holds already where they are the same; a widen the narrower width's move, which zeroes
++// the wider register past it, even into its own register; an extract of another part vextracti32x4 (16 bytes of 32 or
++// 64) or vextracti64x4 (32 of 64); and an insert vinserti32x4 or vinserti64x4 of values[1] into a copy of values[0].
++static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
++{
++    const uint32_t kind = (uint32_t)holes->operation;
++    const uint8_t x = holes->destination & 15;
++    const uint8_t left = holes->left & 15;
++    const uint8_t right = holes->right & 15;
++    const uint32_t width = holes->width;
++    const uint32_t other = holes->source_width;
++    const uint32_t part = (uint32_t)holes->immediate;
++    if (kind == 2)
++    {
++        const uint16_t form = other == 32 ? X86_FORM_VINSERTI64X4_Z_Z_YM256_IMM8 : width == 64 ? X86_FORM_VINSERTI32X4_Z_Z_XM128_IMM8 : X86_FORM_VINSERTI32X4_Y_Y_XM128_IMM8;
++        tier1_select_append(result, (X86Instruction){ .form = form, .reg = x, .vvvv = left, .rm = right, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
++    }
++    else if (kind == 0 && part != 0)
++    {
++        const uint16_t form = width == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : other == 64 ? X86_FORM_VEXTRACTI32X4_XM128_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8;
++        tier1_select_append(result, (X86Instruction){ .form = form, .reg = left, .rm = x, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = (int32_t)part });
++    }
++    else if (kind == 1 || x != left)
++    {
++        tier1_select_append(result, tier1_select_class_move(x, left, kind == 1 ? other : width, false));
++    }
++}
++
++// A permute's EVEX form at `width` bytes (#1840), by its kind past BUSTER_IR_INTRINSIC_PERMUTE and the IR's flags, or
++// X86_FORM_NONE where it has none (a doubleword's or a quadword's variable permute of 16 bytes, a quadword's of 32, a
++// shuffle of 16-byte lanes of 16 bytes), which leaves its node no candidate: vpermb to vpermq by the lanes' size, vpshufb,
++// valignd or valignq by the lanes' size, and vshufi64x2.
++static uint16_t tier1_select_permute_form(uint32_t kind, uint32_t flags, uint32_t width)
++{
++    static const uint16_t permutes[4][3] = {
++        { X86_FORM_VPERMB_X_X_XM128, X86_FORM_VPERMB_Y_Y_YM256, X86_FORM_VPERMB_Z_Z_ZM512 },
++        { X86_FORM_VPERMW_X_X_XM128, X86_FORM_VPERMW_Y_Y_YM256, X86_FORM_VPERMW_Z_Z_ZM512 },
++        { X86_FORM_NONE, X86_FORM_VPERMD_Y_Y_YM256_EVEX, X86_FORM_VPERMD_Z_Z_ZM512 },
++        { X86_FORM_NONE, X86_FORM_NONE, X86_FORM_VPERMQ_Z_Z_ZM512 },
++    };
++    static const uint16_t shuffles[3] = { X86_FORM_VPSHUFB_X_X_XM128_EVEX, X86_FORM_VPSHUFB_Y_Y_YM256_EVEX, X86_FORM_VPSHUFB_Z_Z_ZM512 };
++    static const uint16_t aligns[2][3] = {
++        { X86_FORM_VALIGND_X_X_XM128_IMM8, X86_FORM_VALIGND_Y_Y_YM256_IMM8, X86_FORM_VALIGND_Z_Z_ZM512_IMM8 },
++        { X86_FORM_VALIGNQ_X_X_XM128_IMM8, X86_FORM_VALIGNQ_Y_Y_YM256_IMM8, X86_FORM_VALIGNQ_Z_Z_ZM512_IMM8 },
++    };
++    static const uint16_t lanes[3] = { X86_FORM_NONE, X86_FORM_VSHUFI64X2_Y_Y_YM256_IMM8, X86_FORM_VSHUFI64X2_Z_Z_ZM512_IMM8 };
++    const uint32_t index = width == 16 ? 0 : width == 32 ? 1 : width == 64 ? 2 : 3;
++    uint16_t form = X86_FORM_NONE;
++    if (index < 3)
++    {
++        form = kind == 0 && flags <= 3                         ? permutes[flags][index] :
++               kind == 1                                       ? shuffles[index] :
++               kind == 2 && (flags >> 4 == 2 || flags >> 4 == 3) ? aligns[(flags >> 4) - 2][index] :
++               kind == 3                                       ? lanes[index] :
++                                                                 X86_FORM_NONE;
++    }
++    return form;
++}
++
++// A permute's record (#1840): its form of values[0] and values[1] into the destination; the variable permutes take their
++// indices, values[1], in vvvv and the lanes they move, values[0], in rm, the others values[0] in vvvv and values[1] in rm,
++// and align and shuffle_lanes their immediate (an align's count, its flags' low 4 bits).
++static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
++{
++    const uint32_t kind = (uint32_t)holes->operation;
++    const uint32_t flags = (uint32_t)holes->immediate;
++    const uint8_t left = holes->left & 15;
++    const uint8_t right = holes->right & 15;
++    const X86Instruction record = {
++        .form = tier1_select_permute_form(kind, flags, holes->width),
++        .reg = holes->destination & 15,
++        .vvvv = kind == 0 ? right : left,
++        .rm = kind == 0 ? left : right,
++        .mode = BUSTER_X86_REGISTER_DIRECT,
++        .immediate = kind == 2 ? (int32_t)(flags & 15) : kind == 3 ? (int32_t)flags : 0,
++    };
++    tier1_select_append(result, record);
++}
++
++#include "buster/compiler/ir_simd_convert_forms.c"
++
++// A conversion's EVEX form (#1840), by its kind past BUSTER_IR_INTRINSIC_EXTEND, the IR's flags, the result's bytes and
++// the source's: the decoder's tables' (ir_simd_typed_extensions at the result's width, ir_simd_typed_truncations at the
++// source's), or X86_FORM_NONE for a pair the flags don't name.
++static uint16_t tier1_select_convert_form(uint32_t kind, uint32_t flags, uint32_t width, uint32_t source_width)
++{
++    const uint32_t from = flags & 3;
++    const uint32_t to = (flags >> 2) & 3;
++    const uint32_t mode = flags >> 4;
++    const uint32_t bytes = kind == 0 ? width : source_width;
++    const uint32_t index = bytes == 16 ? 0 : bytes == 32 ? 1 : bytes == 64 ? 2 : 3;
++    uint16_t form = X86_FORM_NONE;
++    for (uint32_t pair = 0; index < 3 && pair < 6; pair += 1)
++    {
++        const uint8_t* sizes = kind == 0 ? ir_simd_typed_extension_pairs[pair] : ir_simd_typed_truncation_pairs[pair];
++        if (sizes[0] == from && sizes[1] == to)
++        {
++            form = kind == 0 && mode <= 1 ? ir_simd_typed_extensions[mode][pair][index] : kind == 1 && mode <= 2 ? ir_simd_typed_truncations[mode][pair][index] : X86_FORM_NONE;
++        }
++    }
++    return form;
++}
++
+ static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
+ {
+     const uint32_t type = holes->source_width;
+@@ -1722,6 +1837,27 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
+         {
+             tier1_select_scalar_splat(&result, holes);
+         }
++        else if (kind == BUSTER_TIER1_VECTOR_WIDTH_CHANGE)
++        {
++            tier1_select_width_change(&result, holes);
++        }
++        else if (kind == BUSTER_TIER1_VECTOR_PERMUTE)
++        {
++            tier1_select_permute(&result, holes);
++        }
++        else if (kind == BUSTER_TIER1_VECTOR_CONVERT)
++        {
++            // An extension's destination in reg and its source in rm; a truncation's source in reg and its destination in
++            // rm, which zeroes the register past its lanes.
++            const bool extend = holes->operation == 0;
++            const X86Instruction record = {
++                .form = tier1_select_convert_form((uint32_t)holes->operation, (uint32_t)holes->immediate, width, holes->source_width),
++                .reg = extend ? x : left,
++                .rm = extend ? left : x,
++                .mode = BUSTER_X86_REGISTER_DIRECT,
++            };
++            tier1_select_append(&result, record);
++        }
+         else if (holes->sse && width == 16 && kind != BUSTER_TIER1_VECTOR_COMPARE && kind != BUSTER_TIER1_VECTOR_SELECT)
+         {
+             tier1_select_sse_vector(&result, holes, destination);
+@@ -4027,7 +4163,7 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
+     // A vector's operations (#141), behind one test: a function without vectors pays no other here.
+     const bool vector_node = (vector_width != 0 && (op == IR_VCONST || op == IR_UNDEF || op == IR_COPY || op == IR_NOT || op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND ||
+                                                    op == IR_OR || op == IR_XOR || op == IR_SHL || op == IR_LSHR || op == IR_ASHR || (op >= IR_FADD && op <= IR_FDIV) ||
+-                                                   op == IR_VSELECT || (op == IR_INTRINSIC && c == BUSTER_IR_INTRINSIC_SPLAT))) ||
++                                                   op == IR_VSELECT || (op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_SPLAT || (c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_TRUNCATE))))) ||
+                              compare_width != 0;
+     if (vector_node)
+     {
+@@ -4064,6 +4200,56 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
+             base.intrinsic_cost = 1;
+             tier1_select_add_candidate(forest, node, &candidates, base);
+         }
++        else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_EXTRACT && c <= BUSTER_IR_INTRINSIC_INSERT)
++        {
++            // A width change (#1840): the other vector's width, and the part in the IR's flags.
++            const uint32_t other = c == BUSTER_IR_INTRINSIC_INSERT ? b : a;
++            base.rule = TIER1_RULE_VECTOR;
++            base.width = (uint8_t)vector_width;
++            base.scale = BUSTER_TIER1_VECTOR_WIDTH_CHANGE;
++            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTRACT);
++            base.source_width = other < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[other]) : 0;
++            base.immediate = function->flags[node];
++            base.values[0] = a;
++            if (c == BUSTER_IR_INTRINSIC_INSERT)
++            {
++                base.values[1] = b;
++            }
++            base.intrinsic_cost = 1;
++            tier1_select_add_candidate(forest, node, &candidates, base);
++        }
++        else if (vector_width != 0 && op == IR_INTRINSIC && c >= BUSTER_IR_INTRINSIC_PERMUTE && c <= BUSTER_IR_INTRINSIC_SHUFFLE_LANES)
++        {
++            // A permute (#1840): its immediate in the IR's flags; no candidate where its width has no form.
++            base.rule = TIER1_RULE_VECTOR;
++            base.width = (uint8_t)vector_width;
++            base.scale = BUSTER_TIER1_VECTOR_PERMUTE;
++            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_PERMUTE);
++            base.immediate = function->flags[node];
++            base.values[0] = a;
++            base.values[1] = b;
++            base.intrinsic_cost = 1;
++            if (tier1_select_permute_form(c - BUSTER_IR_INTRINSIC_PERMUTE, function->flags[node], vector_width) != X86_FORM_NONE)
++            {
++                tier1_select_add_candidate(forest, node, &candidates, base);
++            }
++        }
++        else if (vector_width != 0 && op == IR_INTRINSIC && (c == BUSTER_IR_INTRINSIC_EXTEND || c == BUSTER_IR_INTRINSIC_TRUNCATE))
++        {
++            // A conversion (#1840): its lanes and mode in the IR's flags, the source's width beside them.
++            base.rule = TIER1_RULE_VECTOR;
++            base.width = (uint8_t)vector_width;
++            base.scale = BUSTER_TIER1_VECTOR_CONVERT;
++            base.operation = (uint8_t)(c - BUSTER_IR_INTRINSIC_EXTEND);
++            base.immediate = function->flags[node];
++            base.source_width = a < function->instruction_count ? (uint8_t)tier1_select_vector_width(function->type[a]) : 0;
++            base.values[0] = a;
++            base.intrinsic_cost = 1;
++            if (tier1_select_convert_form(c - BUSTER_IR_INTRINSIC_EXTEND, function->flags[node], vector_width, base.source_width) != X86_FORM_NONE)
++            {
++                tier1_select_add_candidate(forest, node, &candidates, base);
++            }
++        }
+         else if (vector_width != 0 && (op == IR_COPY || op == IR_NOT))
+         {
+             base.rule = TIER1_RULE_VECTOR;
+diff --git a/src/buster/compiler/x86_zen5_rows.c b/src/buster/compiler/x86_zen5_rows.c
+index e51066d..00e0b78 100644
+--- a/src/buster/compiler/x86_zen5_rows.c
++++ b/src/buster/compiler/x86_zen5_rows.c
+@@ -983,6 +983,12 @@
+     X(VPBROADCASTQ_X_XM64, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTQ_Y_XM64, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VINSERTF128_Y_Y_XM128_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VEXTRACTI32X4_XM128_Y_IMM8, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
++    X(VEXTRACTI32X4_XM128_Z_IMM8, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
++    X(VEXTRACTI64X4_YM256_Z_IMM8, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
++    X(VINSERTI32X4_Y_Y_XM128_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VINSERTI32X4_Z_Z_XM128_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VINSERTI64X4_Z_Z_YM256_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPERMQ_Y_YM256_IMM8, REGISTER, 1024, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VANDPS_Y_Y_YM256, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VORPS_Y_Y_YM256, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+@@ -1255,6 +1261,113 @@
+     X(VPMULLQ_Z_Z_ZM512, REGISTER, 768, 128, 256, U, U, 256, 64, 0x67, 0x00, 0x18) \
+     X(VPMULLQ_X_X_XM128, REGISTER, 768, 128, 256, U, U, 256, 64, 0x67, 0x00, 0x18) \
+     X(VPMULLQ_Y_Y_YM256, REGISTER, 768, 128, 256, U, U, 256, 64, 0x67, 0x00, 0x18) \
++    X(VPMOVZXBW_X_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXBW_Y_XM128_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXBW_Z_YM256, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXBD_Y_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXBQ_X_XM16_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXBQ_Y_XM32_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXBQ_Z_XM64, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXWD_X_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXWD_Y_XM128_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXWD_Z_YM256, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXWQ_X_XM32_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXWQ_Y_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXWQ_Z_XM128, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXDQ_X_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXDQ_Y_XM128_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVZXDQ_Z_YM256, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBW_X_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBW_Y_XM128_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBW_Z_YM256, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBD_X_XM32_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBD_Y_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBD_Z_XM128, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBQ_X_XM16_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBQ_Y_XM32_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXBQ_Z_XM64, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXWD_X_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXWD_Y_XM128_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXWD_Z_YM256, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXWQ_X_XM32_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXWQ_Y_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXWQ_Z_XM128, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXDQ_X_XM64_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXDQ_Y_XM128_EVEX, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSXDQ_Z_YM256, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVWB_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVWB_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVWB_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVDB_XM32_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVDB_XM64_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVDB_XM128_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVDW_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVDW_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVDW_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQB_XM16_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQB_XM32_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQB_XM64_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQW_XM32_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQW_XM64_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQW_XM128_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQD_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQD_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVQD_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSWB_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSWB_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSWB_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSDB_XM32_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSDB_XM64_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSDB_XM128_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSDW_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSDW_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSDW_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQB_XM16_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQB_XM32_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQB_XM64_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQW_XM32_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQW_XM64_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQW_XM128_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQD_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQD_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVSQD_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSWB_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSWB_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSWB_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSDB_XM32_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSDB_XM64_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSDB_XM128_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSDW_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSDW_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSDW_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQB_XM16_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQB_XM32_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQB_XM64_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQW_XM32_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQW_XM64_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQW_XM128_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQD_XM64_X, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQD_XM128_Y, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPMOVUSQD_YM256_Z, REGISTER, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VPERMB_X_X_XM128, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMB_Y_Y_YM256, REGISTER, 1024, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMW_X_X_XM128, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMW_Y_Y_YM256, REGISTER, 1024, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMW_Z_Z_ZM512, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMD_Y_Y_YM256_EVEX, REGISTER, 1024, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMD_Z_Z_ZM512, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPERMQ_Z_Z_ZM512, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPSHUFB_X_X_XM128_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPSHUFB_Y_Y_YM256_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPSHUFB_Z_Z_ZM512, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VALIGND_X_X_XM128_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VALIGND_Y_Y_YM256_IMM8, REGISTER, 1024, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VALIGND_Z_Z_ZM512_IMM8, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VALIGNQ_X_X_XM128_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VALIGNQ_Y_Y_YM256_IMM8, REGISTER, 768, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VALIGNQ_Z_Z_ZM512_IMM8, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VSHUFI64X2_Y_Y_YM256_IMM8, REGISTER, 768, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VSHUFI64X2_Z_Z_ZM512_IMM8, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPERMB_Z_Z_ZM512, REGISTER, 1280, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPSRLVQ_Z_Z_ZM512, REGISTER, 512, 128, 256, U, U, 256, 32, 0x67, 0x00, 0x18) \
+     X(VPSRLVQ_X_X_XM128_EVEX, REGISTER, 512, 128, 256, U, U, 256, 32, 0x67, 0x00, 0x18) \
+diff --git a/tests/ir/widths.ir b/tests/ir/widths.ir
+new file mode 100644
+index 0000000..ed1bba5
+--- /dev/null
++++ b/tests/ir/widths.ir
+@@ -0,0 +1,49 @@
++function (ptr) -> void {
++b0:
++  %0 = param.ptr 0
++  %1 = load.v4i32 %0 align=16
++  %2 = load.v8i32 %0 align=32
++  %3 = load.v16i32 %0 align=64
++  %4 = intrinsic.v4i32 %2 extract 0
++  %5 = intrinsic.v4i32 %2 extract 1
++  %6 = intrinsic.v4i32 %3 extract 0
++  %7 = intrinsic.v4i32 %3 extract 3
++  %8 = intrinsic.v8i32 %3 extract 1
++  %9 = intrinsic.v8i32 %1 widen
++  %10 = intrinsic.v16i32 %1 widen
++  %11 = intrinsic.v16i32 %2 widen
++  %12 = intrinsic.v8i32 %2, %1 insert 1
++  %13 = intrinsic.v16i32 %3, %1 insert 2
++  %14 = intrinsic.v16i32 %3, %2 insert 1
++  %15 = xor.v4i32 %4, %5
++  %16 = xor.v4i32 %15, %6
++  %17 = xor.v4i32 %16, %7
++  %18 = store.void %0, %17 align=16
++  %19 = xor.v8i32 %8, %9
++  %20 = xor.v8i32 %19, %12
++  %21 = store.void %0, %20 align=32
++  %22 = xor.v16i32 %10, %11
++  %23 = xor.v16i32 %22, %13
++  %24 = xor.v16i32 %23, %14
++  %25 = store.void %0, %24 align=64
++  %26 = ret.void
++}
++function (ptr) -> void {
++b0:
++  %0 = param.ptr 0
++  %1 = load.v4i32 %0 align=16
++  %2 = load.v8i32 %0 align=32
++  %3 = load.v16i32 %0 align=64
++  %4 = intrinsic.v16i32 %3, %3 permute 0
++  %5 = intrinsic.v8i32 %2, %2 permute 1
++  %6 = intrinsic.v16i32 %3, %4 permute 3
++  %7 = intrinsic.v4i32 %1, %1 shuffle
++  %8 = intrinsic.v16i32 %3, %6 align 47
++  %9 = intrinsic.v4i32 %1, %7 align 33
++  %10 = intrinsic.v8i32 %2, %5 shuffle_lanes 2
++  %11 = intrinsic.v16i32 %8, %6 shuffle_lanes 228
++  %12 = store.void %0, %11 align=64
++  %13 = store.void %0, %10 align=32
++  %14 = store.void %0, %9 align=16
++  %15 = ret.void
++}
