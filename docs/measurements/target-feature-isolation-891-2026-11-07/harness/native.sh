@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin.
+set -euo pipefail
+export LC_ALL=C
+test "$(uname -s)" = Linux
+grep -Eq '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+cat /var/lib/buster-9700x/owner
+root="$HOME/buster-fast-bench/1313-codex-01a1b5d1"
+out="$RUNNER_TEMP/1313-evidence-$GITHUB_RUN_ID"
+mkdir -p "$root" "$out" "$root/measure"
+trap 'status=$?; if [ "$status" -ne 0 ]; then printf "FAILED_STATUS=%s\n" "$status"; for file in "$out"/*.err "$out"/*.stat; do if [ -f "$file" ]; then printf "FILE %s\n" "$file"; tail -n12 "$file"; fi; done; fi' EXIT
+if [ ! -d "$root/repo/.git" ]; then
+  git clone --no-checkout https://github.com/buster14a/buster.git "$root/repo"
+fi
+git -C "$root/repo" fetch --no-tags origin 25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7 5929d0e2e2ab5a179313c082811b59a3ccdd0e0d eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a
+if [ ! -e "$root/base/.git" ]; then git -C "$root/repo" worktree add --detach "$root/base" 25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7; fi
+if [ ! -e "$root/pr/.git" ]; then
+  git -C "$root/repo" worktree add --detach "$root/pr" 25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7
+  git -C "$root/pr" -c user.name='Codex qualification' -c user.email='codex@openai.com' merge --no-commit 5929d0e2e2ab5a179313c082811b59a3ccdd0e0d
+fi
+if [ ! -e "$root/isolated/.git" ]; then git -C "$root/repo" worktree add --detach "$root/isolated" eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a; fi
+test "$(git -C "$root/base" write-tree)" = 3be16b2d1910c27040f0db6350576bbb29b2d5f6
+test "$(git -C "$root/pr" write-tree)" = 668c2e7b486d17b346594f209c3cc189aa8945af
+test "$(git -C "$root/isolated" write-tree)" = a8f009a1e65c8bb92f68efe37fc0c453a609da06
+{
+  uname -a
+  clang --version
+  cmake --version | head -n1
+  ninja --version
+  perf --version
+  printf 'main=25a3fdb1d76ed4f440e8b4e99e10722a0f1304a7\npr=5929d0e2e2ab5a179313c082811b59a3ccdd0e0d\ncandidate=eb40d4a401d4dc696df0ea7e5ba3e09d7fe7cc1a\n'
+  for role in base pr isolated; do
+    printf '%s tree=' "$role"
+    git -C "$root/$role" write-tree
+  done
+} | tee "$out/identity.txt"
+for role in base pr isolated; do
+  (cd "$root/$role" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh) > "$out/build-$role.log" 2>&1
+  tail -n8 "$out/build-$role.log"
+  sha256sum "$root/$role/build/compiler" | tee -a "$out/binaries.sha256"
+  object=$(find "$root/$role/build/cmake" -path "*/Release/*" -name main_unit_checker.c.o -print -quit)
+  test -f "$object"
+  objcopy --dump-section ".rodata.str1.1=$out/$role-checker-strings" "$object" /dev/null
+  sha256sum "$out/$role-checker-strings" | tee -a "$out/checker-strings.sha256"
+  readelf -WS "$root/$role/build/compiler" > "$out/sections-$role.txt"
+done
+if cmp -s "$out/base-checker-strings" "$out/isolated-checker-strings"; then printf "CHECKER_STRING_POOLS_IDENTICAL\n"; else printf "CHECKER_STRING_POOLS_DIFFER\n"; fi
+corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
+sqlite="$corpus/sqlite/sqlite3.c"
+printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite" | sha256sum --check | tee "$out/input.txt"
+sha256sum "$corpus/provenance/gnu17-pinned-predefines.txt" | tee "$out/predefines.sha256"
+cd "$root/measure"
+options=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --clang-features --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$corpus/sqlite" "$sqlite")
+printf '%q ' ./compiler -c "${options[@]}" -o sqlite3.o > "$out/argv.txt"
+printf '\n' >> "$out/argv.txt"
+sample()
+{
+  local role="$1" mode="$2" number="$3"
+  local target=sqlite3.o
+  local flag=-c
+  if [ "$mode" = syntax ]; then flag=-fsyntax-only; target=syntax.out; fi
+  if [ "$mode" = preprocess ]; then flag=-E; target=preprocess.out; fi
+  cp "$root/$role/build/compiler" compiler
+  cmp "$root/$role/build/compiler" compiler
+  taskset -c 2 ./compiler "$flag" "${options[@]}" -o "$target" > "$out/warm-$role-$mode-$number.out" 2> "$out/warm-$role-$mode-$number.err"
+  taskset -c 2 perf stat -x, -e instructions:u -o "$out/$role-$mode-$number.stat" -- ./compiler "$flag" "${options[@]}" -o "$target" > "$out/$role-$mode-$number.out" 2> "$out/$role-$mode-$number.err"
+  awk -F, '$3=="instructions:u" {if ($1 !~ /^[0-9]+$/ || $5+0 != 100) exit 1; found=1; print $1} END {if (!found) exit 1}' "$out/$role-$mode-$number.stat" > "$out/count"
+  printf '%s,%s,%s,%s\n' "$role" "$mode" "$number" "$(cat "$out/count")" | tee -a "$out/counts.csv"
+  cat "$out/$role-$mode-$number.stat"
+  if [ "$mode" != syntax ]; then
+    sha256sum "$target" | tee -a "$out/output-$mode.sha256"
+  fi
+  cmp "$root/$role/build/compiler" compiler
+}
+for number in aa1 aa2 aa3 aa4; do sample base compile "$number"; done
+for number in 1 2 3 4 5 6 7; do
+  if ((number % 2)); then roles=(base pr isolated); else roles=(isolated pr base); fi
+  for role in "${roles[@]}"; do sample "$role" compile "$number"; done
+done
+for mode in syntax preprocess; do
+  for number in 1 2 3; do
+    if ((number % 2)); then roles=(base pr isolated); else roles=(isolated pr base); fi
+    for role in "${roles[@]}"; do sample "$role" "$mode" "$number"; done
+  done
+done
+for mode in compile preprocess; do
+  test "$(cut -d ' ' -f1 "$out/output-$mode.sha256" | sort -u | wc -l)" = 1
+done
+sha256sum -c "$out/binaries.sha256"
+cat "$out/counts.csv"
+printf 'ALL_OBJECTS_IDENTICAL\n'

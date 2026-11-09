@@ -1,0 +1,588 @@
+diff --git a/docs/ir-simd.md b/docs/ir-simd.md
+index bd19d33..95d9317 100644
+--- a/docs/ir-simd.md
++++ b/docs/ir-simd.md
+@@ -383,6 +383,90 @@ The tests:
+   under a writemask and a float's, run natively against clang's; its bound of a
+   move for every two rows counts them with the rows, where they took no move.
+ 
++## Selects and undefined vectors (#1840)
++
++The x86 builtins' remaining rows ([#1840](https://github.com/buster14a/buster/issues/1840))
++are decoded family by family into the IR's operations. Families that need a new
++operation get a kind of `intrinsic`, as the splat does. Counted at Tier 1's
++emission of each machine row (`--tier1 --tier1-report -march=znver5`, inlined
++copies included), main `cb608c1` has 1,207 machine rows in `main_unit_frontend.c`
++and 1,735 in `main_unit_backend.c`. They break down by kind as follows:
++
++| Kind | Frontend | Backend |
++| --- | ---: | ---: |
++| selects (a masked move: `_mm512_mask_mov_*`, `_mask_blend_*`, every masked operation's merge) | 257 | 403 |
++| permutes and shuffles (`vpermt2*` 263 of both units' 567, `vpermb/w/d/q` 177) | 312 | 255 |
++| masked loads | 151 | 247 |
++| masked stores | 45 | 91 |
++| shifts by a scalar or an immediate, rotates | 32 | 176 |
++| other integer operations (minimum, maximum, saturation, products' high halves) | 60 | 55 |
++| casts between widths (rows of no record) | 55 | 55 |
++| 16- and 32-byte lanes inserted and extracted | 41 | 48 |
++| compress and expand | 41 | 18 |
++| AES rounds | 65 | 13 |
++| extensions | 27 | 84 |
++| truncations | 25 | 31 |
++| masks to vectors and back | 32 | 8 |
++| one element, movemask | 23 | 23 |
++| undefined vectors | 21 | 36 |
++| ternary logic, tests, blends | 10 | 54 |
++| reductions | 9 | 31 |
++| gathers, scatters, compressing stores | 1 | 71 |
++| floating arithmetic and conversions, others | 0 | 36 |
++
++The first family needs no new operation. `ir_simd_typed_select` decodes a SELECT
++rule's row (`__builtin_ia32_select*` of each element and width) as the opmask
++conversion leaves it. The row has a mask and two vectors of one width. Its two
++records are `vmovdqu64` of VECTOR(2) into VECTOR(0), then the move of the
++elements (`vmovdqu8` to `vmovdqu64`) of VECTOR(1) into it under MASK(0), both
++register-direct with no other field or decoration. It becomes the IR's
++`vselect` of the mask, VECTOR(1) and VECTOR(2), its lanes the elements'
++integers, as Tier 1 selects it already (`vpblendmb` to `vpblendmq`). A float's,
++a double's, a half's and a bf16's select has the integer lanes of its width,
++whose bits it copies without evaluating them. The mask must be the lanes'
++(`ir_lane_mask`'s bytes). The features are those of the forms Tier 1 selects:
++AVX512F, VL below 64 bytes, BW for byte and word lanes, and the mask's moves
++(DQ for a byte's, BW for 32 and 64 lanes').
++
++`ir_simd_typed_zero` decodes an UNDEFINED rule's row (`_mm512_undefined_epi32`
++and the rest): no operand and one `vpxorq` of VECTOR(0) with itself at the
++result's width. It becomes the IR's zero vector of that width, the value the row
++gives, which refines an undefined vector.
++
++Any other form, decoration or target leaves the row a machine row, as before:
++zeroing, a different register, a memory operand, a record too many, a mask of
++another width, or a target without one of the features.
++
++Measured by `--tier1 --tier1-report -march=znver5`, each compiler compiling
++the same sources, the change removes 278 frontend rows and 439 backend rows:
++
++| Unit | Main `cb608c1` rows | Records | This change rows | Records |
++| --- | ---: | ---: | ---: | ---: |
++| `main_unit_frontend.c` | 1,207 | 576,053 | 929 | 575,650 |
++| `main_unit_backend.c` | 1,735 | 1,490,643 | 1,296 | 1,490,048 |
++
++The moves around the rows fall from 782 to 636 in the frontend and from 1,010 to
++818 in the backend.
++
++The tests:
++
++- `test-ir-simd` decodes every SELECT rule's row (24: bytes to quadwords, floats,
++  doubles, halves and bf16s at three widths) and the three UNDEFINED rules'.
++  Their lanes, masks and features are checked against values written out. A
++  row stays a machine row:
++  - without each feature it needs;
++  - under 10 changes (decorations, zeroing, displacement, memory, registers,
++    an immediate, a mask or vector of another width, a record too many).
++- `test-tier1-masks` takes each of the 27 rows as a program's only row, in
++  four statements of vectors and masks from an input buffer. It runs them
++  through both lowering paths, the IR's interpreter at every stage, and Tier
++  1's native code, against a C model. Tier 0 doesn't run them there: its
++  register-direct moves have no Zen 5 row yet, which its builds require.
++- `test-checker-driver`'s machine rows' unit keeps its masked operations and
++  blends, now the IR's selects. It has 61 machine rows where main has 75, with
++  33 moves where main has 39, still within its bound of a move for every two
++  rows.
++
+ ## Lanes: the vectors' element types (#141)
+ 
+ The IR's vector types are containers of 16, 32 and 64 bytes (`v4i32`, `v8i32`
+diff --git a/docs/tier1.md b/docs/tier1.md
+index eb9198b..a62879b 100644
+--- a/docs/tier1.md
++++ b/docs/tier1.md
+@@ -366,6 +366,10 @@ but its naked one. The scalar ones, BMI2's
+ instruction of selection's `TIER1_RULE_INTRINSIC`, and so are the C bit builtins'
+ rows (#1374: `tzcnt`, `bsf`, `lzcnt`, `bsr`, `popcnt` and `bswap`) and the signed
+ overflow builtins' (#1385: `saddo`, `ssubo` and `smulo`, the operation and `seto`).
++The masked moves' selects of the x86 builtins (every masked operation's merge)
++are the IR's `vselect` and their undefined vectors its zero vector (#1840, [the
++SIMD IR guide](ir-simd.md)'s "Selects and undefined vectors"), which Tier 1
++selects as `vpblendm` and `vpxor`.
+ 
+ ### Inlining (#1282)
+ 
+diff --git a/src/buster/compiler/c_check_tier1_driver_test.c b/src/buster/compiler/c_check_tier1_driver_test.c
+index 6975130..ba68ad9 100644
+--- a/src/buster/compiler/c_check_tier1_driver_test.c
++++ b/src/buster/compiler/c_check_tier1_driver_test.c
+@@ -3733,7 +3733,8 @@ static void check_test_driver_tier1_rows(CheckTest* test, const char* clang, con
+     // each path, with rematerialization and without, every function Tier 1's, at most one move for every two rows (Tier 0's
+     // placement moved every vector operand in and every vector result out: 150 for the unit's 58 rows). The unit's 11
+     // compares into masks were rows that took no move; #1623 decodes them into the IR's comparisons, so the bound counts
+-    // them with the rows still.
++    // them with the rows still. #1840 decodes its masked operations' and blends' selects into the IR's vselect, which
++    // leaves 61 rows and 33 moves by Tier 1 (75 and 39 before).
+     const uint64_t compares = 11;
+     char header[512];
+     char unit[512];
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index 05cba28..528b8e1 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -717,6 +717,18 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_vector_operation(
+         value = ir_typed_emit(sink, IR_VSELECT, type, mask, active, inactive, 0);
+         ir_typed_lanes(sink, value, operation->lane);
+     }
++    else if (operation->operation == IR_SIMD_SELECT)
++    {
++        // A masked move's select (#1840): the second operand's lanes where the mask's bits are set, the third's elsewhere.
++        value = ir_typed_emit(sink, IR_VSELECT, type, operands[0], operands[1], operands[2], 0);
++        ir_typed_lanes(sink, value, operation->lane);
++    }
++    else if (operation->zero)
++    {
++        // An undefined vector's row (#1840): the zero vector it gives.
++        const uint64_t zero[8] = {0};
++        value = ir_typed_vector_constant(sink, type, zero);
++    }
+     else
+     {
+         value = ir_typed_emit(sink, (IrOp)ops[operation->operation], type, operands[0], operation->operand_count == 2 ? operands[1] : BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+diff --git a/src/buster/compiler/ir_simd_typed.c b/src/buster/compiler/ir_simd_typed.c
+index 947eb1d..1c6d1e9 100644
+--- a/src/buster/compiler/ir_simd_typed.c
++++ b/src/buster/compiler/ir_simd_typed.c
+@@ -88,6 +88,9 @@ struct IrSimdTypedOperation
+     // A row the IR has no operation of its own for (#141, ir_simd_typed_machine_row): the row itself, which a row call
+     // runs (IrFunction.rows).
+     bool machine;
++    // A row of no operand whose vector is zeros (#1840, ir_simd_typed_zero): an undefined vector's, which the IR's zero
++    // constant is.
++    bool zero;
+ };
+ 
+ typedef struct IrSimdTypedForm IrSimdTypedForm;
+@@ -926,10 +929,100 @@ static IrSimdTypedStatus ir_simd_typed_compare_mask(const Tier0Operation* source
+     return status;
+ }
+ 
++// A masked move's select (#1840): the SELECT rule's row as the opmask conversion leaves it (c_check_program_x86.c's
++// CHECK_X86_LOWER_SELECT, `_mm512_mask_mov_epi8`, `_mm512_mask_blend_epi32` and the rest at each width): a mask and two
++// vectors of one width (16, 32 or 64 bytes) in, VECTOR(2)'s register moved whole into VECTOR(0)'s (vmovdqu64), then
++// VECTOR(1)'s moved into it under MASK(0) by the move of its elements (vmovdqu8 to vmovdqu64), register-direct with no
++// other field or decoration. It is the IR's vselect of the mask, VECTOR(1) and VECTOR(2), its lanes the move's elements'
++// integers, whose mask must be the lanes' (ir_lane_mask's bytes: a byte for 8 lanes or fewer). Its features are the
++// forms Tier 1 selects for it: vpblendm at its lanes' width (BW for bytes and words) and its moves (AVX512F, VL below 64
++// bytes; the mask's: DQ for a byte's, BW for 32 and 64 lanes'). Otherwise it stays a machine row.
++static IrSimdTypedStatus ir_simd_typed_select(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
++{
++    static const uint16_t moves[4][3] = {
++        { X86_FORM_VMOVDQU8_X_XM128, X86_FORM_VMOVDQU8_Y_YM256, X86_FORM_VMOVDQU8_Z_ZM512 },
++        { X86_FORM_VMOVDQU16_X_XM128, X86_FORM_VMOVDQU16_Y_YM256, X86_FORM_VMOVDQU16_Z_ZM512 },
++        { X86_FORM_VMOVDQU32_X_XM128, X86_FORM_VMOVDQU32_Y_YM256, X86_FORM_VMOVDQU32_Z_ZM512 },
++        { X86_FORM_VMOVDQU64_X_XM128, X86_FORM_VMOVDQU64_Y_YM256, X86_FORM_VMOVDQU64_Z_ZM512 },
++    };
++    static const uint8_t lanes[4] = { IR_SIMD_LANE_I8, IR_SIMD_LANE_I16, IR_SIMD_LANE_I32, IR_SIMD_LANE_I64 };
++    const uint32_t bytes = source->result_bytes;
++    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
++    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 2 &&
++                          source->operand_count == 3 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && source->operand_classes[1] == BUSTER_TYPED_CLASS_VECTOR &&
++                          source->operand_bytes[1] == bytes && source->operand_classes[2] == BUSTER_TYPED_CLASS_VECTOR && source->operand_bytes[2] == bytes;
++    const X86Instruction whole = {
++        .form = moves[3][width],
++        .reg = BUSTER_TIER0_ROLE_VECTOR(0),
++        .rm = BUSTER_TIER0_ROLE_VECTOR(2),
++        .mode = BUSTER_X86_REGISTER_DIRECT,
++    };
++    IrSimdTypedOperation candidate = { .operation = IR_SIMD_OPERATION_COUNT };
++    for (uint32_t size = 0; admitted && size < 4; size += 1)
++    {
++        const X86Instruction merged = {
++            .form = moves[size][width],
++            .reg = BUSTER_TIER0_ROLE_VECTOR(0),
++            .rm = BUSTER_TIER0_ROLE_VECTOR(1),
++            .mode = BUSTER_X86_REGISTER_DIRECT,
++            .decorations = BUSTER_TIER0_DECORATION_MASK(0),
++        };
++        const uint32_t count = bytes >> size;
++        const uint32_t mask_bytes = count <= 8 ? 1 : count / 8;
++        if (memcmp(&source->records[0], &whole, sizeof(whole)) == 0 && memcmp(&source->records[1], &merged, sizeof(merged)) == 0 && source->operand_bytes[0] == mask_bytes)
++        {
++            candidate.operation = IR_SIMD_SELECT;
++            candidate.lane = (IrSimdLane)lanes[size];
++            candidate.required_features = ir_typed_vector_moves(bytes, target_features) | BUSTER_X86_FEATURE(AVX512F) |
++                                          ((x86_target_requirement(whole.form) | x86_target_requirement(merged.form)) & ~BUSTER_X86_TARGET_KNOWN) |
++                                          (mask_bytes == 1 ? BUSTER_X86_FEATURE(AVX512DQ) : 0) | (mask_bytes >= 4 ? BUSTER_X86_FEATURE(AVX512BW) : 0);
++        }
++    }
++    const IrSimdTypedStatus status = candidate.operation != IR_SIMD_OPERATION_COUNT && (target_features & candidate.required_features) == candidate.required_features ?
++                                         IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
++    if (status == IR_SIMD_TYPED_OK)
++    {
++        candidate.shape = (IrSimdShape)(IR_SIMD_V4I32 + width);
++        candidate.operand_count = source->operand_count;
++        memcpy(candidate.operand_classes, source->operand_classes, sizeof(candidate.operand_classes));
++        memcpy(candidate.operand_bytes, source->operand_bytes, sizeof(candidate.operand_bytes));
++        *result = candidate;
++    }
++    return status;
++}
++
++// An undefined vector's row (#1840, c_check_program_x86.c's CHECK_X86_LOWER_UNDEFINED, `_mm512_undefined_epi32` and the
++// rest): no operand, one record of vpxorq of VECTOR(0) with itself at the result's width, register-direct and undecorated.
++// It is the IR's zero vector of that width, which the row gives (a refinement of an undefined value). Its features are
++// the form's and the vector's moves; otherwise it stays a machine row.
++static IrSimdTypedStatus ir_simd_typed_zero(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
++{
++    static const uint16_t forms[3] = { X86_FORM_VPXORQ_X_X_XM128, X86_FORM_VPXORQ_Y_Y_YM256, X86_FORM_VPXORQ_Z_Z_ZM512 };
++    const uint32_t bytes = source->result_bytes;
++    const uint32_t width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
++    const uint8_t v0 = BUSTER_TIER0_ROLE_VECTOR(0);
++    const X86Instruction expected = { .form = forms[width], .reg = v0, .vvvv = v0, .rm = v0, .mode = BUSTER_X86_REGISTER_DIRECT };
++    const bool admitted = source->result_class == BUSTER_TYPED_CLASS_VECTOR && (bytes == 16 || bytes == 32 || bytes == 64) && source->record_count == 1 &&
++                          source->operand_count == 0 && memcmp(&source->records[0], &expected, sizeof(expected)) == 0;
++    const uint64_t required = ir_typed_vector_moves(bytes, target_features) | (x86_target_requirement(expected.form) & ~BUSTER_X86_TARGET_KNOWN);
++    const IrSimdTypedStatus status = admitted && (target_features & required) == required ? IR_SIMD_TYPED_OK : IR_SIMD_TYPED_UNSUPPORTED;
++    if (status == IR_SIMD_TYPED_OK)
++    {
++        const IrSimdTypedOperation candidate = {
++            .operation = IR_SIMD_OPERATION_COUNT,
++            .shape = (IrSimdShape)(IR_SIMD_V4I32 + width),
++            .required_features = required,
++            .zero = true,
++        };
++        *result = candidate;
++    }
++    return status;
++}
++
+ // A row's decoding: the bit builtins', the signed overflow builtins', masks, scalar intrinsics, lane operations,
+-// comparisons into a mask alone, then exact scalar splats; other admitted forms stay machine rows. A semantic match whose
+-// target lacks a required feature stays refused, but a comparison into a mask alone, whose machine row a target may still
+-// run, stays one.
++// comparisons into a mask alone, masked moves' selects and undefined vectors (#1840), then exact scalar splats; other
++// admitted forms stay machine rows. A semantic match whose target lacks a required feature stays refused, but a
++// comparison into a mask alone, a select or an undefined vector, whose machine row a target may still run, stays one.
+ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_t target_features, IrSimdTypedOperation* result)
+ {
+     const bool masks = source != NULL && source->operand_count != 0 && source->operand_classes[0] == BUSTER_TYPED_CLASS_MASK && tier0_class_integer(source->result_class);
+@@ -950,6 +1043,14 @@ static IrSimdTypedStatus ir_simd_typed_row(const Tier0Operation* source, uint64_
+     {
+         status = ir_simd_typed_compare_mask(source, target_features, result);
+     }
++    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
++    {
++        status = ir_simd_typed_select(source, target_features, result);
++    }
++    if (status == IR_SIMD_TYPED_UNSUPPORTED && source->result_class == BUSTER_TYPED_CLASS_VECTOR)
++    {
++        status = ir_simd_typed_zero(source, target_features, result);
++    }
+     if (status == IR_SIMD_TYPED_UNSUPPORTED)
+     {
+         status = ir_simd_typed_splat(source, target_features, result);
+diff --git a/src/buster/compiler/ir_simd_typed_test.c b/src/buster/compiler/ir_simd_typed_test.c
+index c403880..9323a2a 100644
+--- a/src/buster/compiler/ir_simd_typed_test.c
++++ b/src/buster/compiler/ir_simd_typed_test.c
+@@ -906,8 +906,119 @@ static void ir_simd_typed_test_splats(IrTestTally* tally)
+     type_test_table_close(&table);
+ }
+ 
++// The masked moves' selects and the undefined vectors (#1840): every SELECT rule's row (`__builtin_ia32_select*`, of each
++// element and width) as the opmask conversion leaves it decodes as the IR's vselect of its elements' integer lanes, its
++// mask, VECTOR(1) and VECTOR(2), at exactly its forms' features and its mask's moves', and every UNDEFINED rule's as the
++// zero vector; without a feature either needs, and changed one way at a time, each stays a machine row.
++static void ir_simd_typed_test_selects(IrTestTally* tally)
++{
++    const X86Target every = { .features = UINT64_MAX, .extensions = UINT64_MAX };
++    const uint64_t avx512 = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512DQ);
++    static const uint64_t features[] = { BUSTER_X86_FEATURE(AVX512F), BUSTER_X86_FEATURE(AVX512VL), BUSTER_X86_FEATURE(AVX512BW), BUSTER_X86_FEATURE(AVX512DQ) };
++    uint32_t selects = 0;
++    uint32_t zeros = 0;
++    const bool tables = x86_encoder_initialize() && tier0_initialize();
++    ir_test_expect(tally, tables, "the encoder's, the effects' and Tier 0's tables");
++    for (uint32_t i = 0; tables && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
++    {
++        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
++        const bool select = rule->family == CHECK_X86_LOWER_SELECT;
++        if (!select && rule->family != CHECK_X86_LOWER_UNDEFINED)
++        {
++            continue;
++        }
++        Tier0Operation row;
++        char description[224];
++        const bool made = check_x86_lower_row_of(&every, rule, 0, 4, 0, false, &row) == NULL && (!select || check_x86_lower_masks(&row, &every));
++        snprintf(description, sizeof(description), "%s: its row is the front end's", rule->name);
++        ir_test_expect(tally, made, description);
++        if (!made)
++        {
++            continue;
++        }
++        const uint32_t lanes = rule->bytes / rule->element;
++        const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
++        const uint8_t lane = rule->element == 1 ? IR_SIMD_LANE_I8 : rule->element == 2 ? IR_SIMD_LANE_I16 : rule->element == 4 ? IR_SIMD_LANE_I32 : IR_SIMD_LANE_I64;
++        // Written out: AVX512F, VL below 64 bytes, BW for bytes' and words' moves and for 32 and 64 lanes' masks, DQ for 8
++        // lanes' or fewer; an undefined vector's vpxorq AVX512F's and VL's alone.
++        const uint64_t expected = BUSTER_X86_FEATURE(AVX512F) | (rule->bytes < 64 ? BUSTER_X86_FEATURE(AVX512VL) : 0) |
++                                  (select && (rule->element <= 2 || lanes >= 32) ? BUSTER_X86_FEATURE(AVX512BW) : 0) |
++                                  (select && lanes <= 8 ? BUSTER_X86_FEATURE(AVX512DQ) : 0);
++        const IrSimdShape shape = (IrSimdShape)(IR_SIMD_V4I32 + (rule->bytes == 16 ? 0 : rule->bytes == 32 ? 1 : 2));
++        IrSimdTypedOperation decoded;
++        memset(&decoded, 0xa5, sizeof(decoded));
++        const IrSimdTypedStatus status = ir_simd_typed_row(&row, avx512, &decoded);
++        const bool common = status == IR_SIMD_TYPED_OK && !decoded.machine && !decoded.compare_mask && !decoded.expand_mask && decoded.mask_bytes == 0 &&
++                            decoded.intrinsic == 0 && decoded.splat_bytes == 0 && decoded.required_features == expected && decoded.shape == shape;
++        if (select)
++        {
++            selects += 1;
++            snprintf(description, sizeof(description), "%s: the IR's vselect of its mask and two vectors at its elements' lanes and features", rule->name);
++            ir_test_expect(tally, common && !decoded.zero && decoded.operation == IR_SIMD_SELECT && decoded.lane == lane && decoded.operand_count == 3 &&
++                                      decoded.operand_classes[0] == BUSTER_TYPED_CLASS_MASK && decoded.operand_bytes[0] == mask_bytes,
++                           description);
++        }
++        else
++        {
++            zeros += 1;
++            snprintf(description, sizeof(description), "%s: the IR's zero vector at its features", rule->name);
++            ir_test_expect(tally, common && decoded.zero && decoded.operation == IR_SIMD_OPERATION_COUNT && decoded.operand_count == 0, description);
++        }
++        for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(features); f += 1)
++        {
++            IrSimdTypedOperation without;
++            memset(&without, 0x5a, sizeof(without));
++            const IrSimdTypedStatus refused = ir_simd_typed_row(&row, avx512 & ~features[f], &without);
++            const bool needed = (expected & features[f]) != 0;
++            snprintf(description, sizeof(description), "%s: without a feature it needs it stays the machine row, and needs no other", rule->name);
++            ir_test_expect(tally, needed ? ir_simd_typed_test_undecoded(refused, &without) : refused == IR_SIMD_TYPED_OK && !without.machine, description);
++        }
++        for (uint32_t m = 0; m < 11; m += 1)
++        {
++            Tier0Operation changed = row;
++            X86Instruction* last = &changed.records[changed.record_count - 1];
++            bool applies = true;
++            switch (m)
++            {
++            case 0: last->decorations = select ? 0 : BUSTER_TIER0_DECORATION_MASK(0); break;
++            case 1: last->decorations = (uint8_t)(BUSTER_TIER0_DECORATION_MASK(0) | BUSTER_X86_DECORATION_ZEROING); break;
++            case 2: last->displacement = 8; break;
++            case 3: last->mode = BUSTER_X86_MEMORY_BASE; break;
++            case 4: last->rm = BUSTER_TIER0_ROLE_VECTOR(3); break;
++            case 5: last->reg = BUSTER_TIER0_ROLE_VECTOR(1); break;
++            case 6: changed.records[0].rm = BUSTER_TIER0_ROLE_VECTOR(1); break;
++            case 7: last->immediate = 1; break;
++            case 8:
++                applies = select;
++                changed.operand_bytes[0] = (uint8_t)(mask_bytes == 8 ? 4 : mask_bytes * 2);
++                break;
++            case 9:
++                applies = select;
++                changed.operand_bytes[2] = rule->bytes == 64 ? 32 : 64;
++                break;
++            case 10:
++                changed.records[changed.record_count] = *last;
++                changed.record_count += 1;
++                break;
++            }
++            if (applies)
++            {
++                memset(&decoded, 0xa5, sizeof(decoded));
++                const IrSimdTypedStatus refused = ir_simd_typed_row(&changed, avx512, &decoded);
++                snprintf(description, sizeof(description), "%s (change %u): neither the IR's select nor its zero vector", rule->name, m);
++                ir_test_expect(tally, ir_simd_typed_test_undecoded(refused, &decoded), description);
++            }
++        }
++    }
++    // Bytes, words, doublewords and quadwords and the packed floats', doubles', halves' and bf16s' selects at 3 widths, and
++    // the 3 undefined vectors.
++    ir_test_expect(tally, selects == 8 * 3 && zeros == 3, "every select and undefined vector rule decodes");
++    printf("  IR SIMD rows: %u of the front end's select rows decode to the IR's vselect and %u undefined vectors to its zero vector\n", selects, zeros);
++}
++
+ static void ir_simd_typed_test(IrTestTally* tally)
+ {
++    ir_simd_typed_test_selects(tally);
+     ir_simd_typed_test_splats(tally);
+     ir_simd_typed_test_machine(tally);
+     TypeTestTable table = { 0 };
+diff --git a/src/buster/compiler/tier1_masks_test.c b/src/buster/compiler/tier1_masks_test.c
+index e8f5d08..652246a 100644
+--- a/src/buster/compiler/tier1_masks_test.c
++++ b/src/buster/compiler/tier1_masks_test.c
+@@ -109,6 +109,10 @@ struct Tier1MasksTest
+     uint32_t compare_rows;
+     uint32_t compare_decoded;
+     uint32_t compare_native;
++    // The front end's masked moves' selects and undefined vectors (#1840, tier1_masks_test_selects): those tried, and
++    // those through every stage as the IR's vselect or zero vector.
++    uint32_t select_attempts;
++    uint32_t select_rows;
+     // The machine rows' mutants (#1284, tier1_masks_test_row_mutants): borrowed opmask registers' reloads left out, staging
+     // copies renamed into a live value's register; and of each, those the code's certificate refused.
+     uint32_t row_reloads;
+@@ -4747,6 +4751,109 @@ static void tier1_masks_test_compares(Tier1MasksTest* test)
+     free(program);
+ }
+ 
++// The front end's masked moves' selects and undefined vectors through Tier 0 and the IR to Tier 1 (#1840): every SELECT
++// rule (`__builtin_ia32_select*` of each element and width) as check_x86_lower_masks moves its mask into the mask class,
++// and every UNDEFINED rule, each as the program's only row, in 4 statements: a select of the vectors at k and k + 1
++// (modulo 4, of the rule's bytes each) from the input buffer under the input word k, converted to the mask, stored into
++// the output's vector k; an undefined vector's zeros stored there. tier1_masks_test_typed_pipeline takes it through the
++// IR as its vselect or zero vector, which the IR's interpreter runs at every stage, and through Tier 1 natively, each
++// against a C model: each lane the first vector's where the mask's bit is set, the second's elsewhere; zeros. Tier 0 runs
++// no row of them here: its register-direct moves have no Zen 5 row (x86_zen5_rows.c) yet, which its builds require.
++static void tier1_masks_test_selects(Tier1MasksTest* test)
++{
++    const X86Target target = { .features = test->v4_features };
++    Tier0TestMaskProgram* program = malloc(sizeof(*program));
++    uint64_t* inputs = calloc(BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS, BUSTER_TIER1_MASKS_TEST_IN);
++    uint8_t* expected = malloc(BUSTER_TIER1_MASKS_TEST_OUT * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS);
++    Arena arenas[3] = { arena_reserve(64u << 20), arena_reserve(64u << 20), arena_reserve(64u << 20) };
++    bool ready = tier1_masks_test_expect(test, program != 0 && inputs != 0 && expected != 0 && arenas[0].base != 0 && arenas[1].base != 0 && arenas[2].base != 0,
++                                         "the selects' memory");
++    uint64_t state = test->random ^ UINT64_C(0xbb67ae8584caa73b);
++    for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(check_x86_lower_rules); i += 1)
++    {
++        const CheckX86LowerRule* rule = check_x86_lower_rules + i;
++        const bool select = rule->family == CHECK_X86_LOWER_SELECT;
++        if (!select && rule->family != CHECK_X86_LOWER_UNDEFINED)
++        {
++            continue;
++        }
++        const uint64_t output_mark = test->output.length;
++        test->select_attempts += 1;
++        Tier0Operation row;
++        const bool made = check_x86_lower_row_of(&target, rule, 0, 4, 0, false, &row) == NULL && (!select || check_x86_lower_masks(&row, &target));
++        const uint32_t bytes = rule->bytes;
++        const uint32_t slots = bytes / 8;
++        bool ok = tier1_masks_test_expect(test, made && row.operand_count == (select ? 3 : 0) && row.result_class == BUSTER_TYPED_CLASS_VECTOR && row.result_bytes == bytes,
++                                          "the front end's select or undefined vector row, in the mask class at x86-64-v4");
++        program->count = 0;
++        program->overflow = false;
++        program->rows = true;
++        program->objects = false;
++        for (uint32_t k = 0; ok && k < 4; k += 1)
++        {
++            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, k * slots);
++            if (select)
++            {
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k);
++                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
++                tier0_test_mask_emit(program, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_MASK, row.operand_bytes[0]);
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, k * slots);
++                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
++                tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, ((k + 1) & 3) * slots);
++                tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
++            }
++            tier0_test_mask_emit(program, BUSTER_TYPED_X86, row.result_class, 0);
++            tier0_test_mask_emit(program, BUSTER_TYPED_SET, row.result_class, bytes);
++        }
++        tier0_test_mask_emit(program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
++        ok = ok && tier1_masks_test_expect(test, !program->overflow, "the select's program fits");
++        Tier0Function functions[2] = { tier0_test_mask_function(program), tier0_test_mask_leaf() };
++        functions[0].operations = &row;
++        functions[0].operation_count = 1;
++        for (uint32_t input = 0; ok && input < BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS; input += 1)
++        {
++            uint64_t* in = inputs + (uint64_t)input * (BUSTER_TIER1_MASKS_TEST_IN / 8);
++            uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
++            tier0_test_mask_inputs(in, &state);
++            memset(wanted, 0xa5, BUSTER_TIER1_MASKS_TEST_OUT);
++            for (uint32_t k = 0; k < 4; k += 1)
++            {
++                const uint8_t* w = (const uint8_t*)in + bytes * k;
++                const uint8_t* a = (const uint8_t*)in + bytes * ((k + 1) & 3);
++                uint8_t* out = wanted + bytes * k;
++                for (uint32_t lane = 0; lane < bytes / rule->element; lane += 1)
++                {
++                    const bool set = select && (in[k] >> lane & 1) != 0;
++                    if (select)
++                    {
++                        memcpy(out + rule->element * lane, (set ? w : a) + rule->element * lane, rule->element);
++                    }
++                    else
++                    {
++                        memset(out + rule->element * lane, 0, rule->element);
++                    }
++                }
++            }
++        }
++        bool machine = false;
++        ok = ok && tier1_masks_test_typed_pipeline(test, rule->name, functions, true, inputs, expected, arenas, &machine);
++        test->select_rows += ok;
++        tier1_masks_test_expect(test, test->scratch.length == 0, "the selects return the scratch arena");
++        arena_pop_to(&test->output, output_mark);
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            arena_pop_to(&arenas[k], 0);
++        }
++    }
++    for (uint32_t k = 0; k < 3; k += 1)
++    {
++        arena_release(&arenas[k]);
++    }
++    free(expected);
++    free(inputs);
++    free(program);
++}
++
+ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+ {
+     uint64_t seed = 179;
+@@ -4833,6 +4940,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+             tier1_masks_test_typed(&test);
+             tier1_masks_test_builtins(&test);
+             tier1_masks_test_compares(&test);
++            tier1_masks_test_selects(&test);
+             tier1_masks_test_refusals(&test, baseline, foundation);
+             tier1_masks_test_scan(&test);
+             tier1_masks_test_forms(&test);
+@@ -4845,13 +4953,17 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+             // Tier 0's programs through the IR: every one taken whole, some with machine rows, and natively by both paths.
+             tier1_masks_test_expect(&test, test.typed_programs == BUSTER_TIER1_MASKS_TEST_PROGRAMS && test.typed_machine != 0 && test.typed_machine < test.typed_programs,
+                                     "Tier 0's mask programs go through the IR and Tier 1, those whose rows the decoders refuse as machine rows");
+-            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows),
++            tier1_masks_test_expect(&test, !test.native || test.typed_runs == 2u * BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * (test.typed_programs + test.builtin_rows + test.compare_rows + test.select_rows),
+                                     "every typed program and front-end row runs natively by both of Tier 1's paths");
+             // The comparisons: 24 integer rules (bytes to quadwords, signed and unsigned, at 3 widths) at 8 immediates, 6
+             // of them the IR's; 6 packed float rules at 32, 12 of them the IR's.
+             tier1_masks_test_expect(&test, test.compare_attempts == 24 * 8 + 6 * 32 && test.compare_rows == test.compare_attempts && test.compare_decoded == 24 * 6 + 6 * 12,
+                                     "every front-end comparison into a mask goes through Tier 0, the IR and Tier 1, those of an IR predicate as the IR's comparisons");
+             tier1_masks_test_expect(&test, !test.native || test.compare_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.compare_rows, "Tier 0 runs every front-end comparison natively");
++            // The selects (#1840): 24 SELECT rules (bytes to quadwords, floats, doubles, halves and bf16s at 3 widths) and 3
++            // UNDEFINED ones, every one the IR's own operation.
++            tier1_masks_test_expect(&test, test.select_attempts == 24 + 3 && test.select_rows == test.select_attempts,
++                                    "every front-end select and undefined vector goes through Tier 0, the IR and Tier 1 as the IR's vselect or zero vector");
+             // The front end's rows: every rule of the five families, the shifts at every count.
+             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
+             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
+@@ -4862,6 +4974,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
+         printf("test-tier1-masks: the front end's comparisons into masks: %u through Tier 0 natively (%u runs) and Tier 1, %u of them the IR's comparisons through its interpreter, SSA and the "
+                "optimizer, the others machine rows\n",
+                test.compare_rows, test.compare_native, test.compare_decoded);
++        printf("test-tier1-masks: the front end's selects and undefined vectors: %u through the IR's interpreter, SSA, the optimizer and Tier 1 natively as its vselect and zero vector\n",
++               test.select_rows);
+         tier1_masks_test_expect(&test, tier1_masks_test_row_occupancy(),
+                                 "VECTOR roles share a register where one is done with it before the other's pure write in a record whose destination may be a source, and only there (#1283, #1284)");
+         tier1_masks_test_expect(&test, test.row_reloads != 0 && test.row_stagings != 0 && test.row_roles != 0 && test.row_k0 != 0 && test.row_splits != 0 && test.row_split_mutants != 0 && test.vector_moves != 0,
+diff --git a/src/buster/compiler/x86_zen5_rows.c b/src/buster/compiler/x86_zen5_rows.c
+index e51066d..dbfe63a 100644
+--- a/src/buster/compiler/x86_zen5_rows.c
++++ b/src/buster/compiler/x86_zen5_rows.c
+@@ -1277,6 +1277,18 @@
+     X(VPBLENDMQ_X_X_XM128, MASKED, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VPBLENDMQ_Y_Y_YM256, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VPBLENDMQ_Y_Y_YM256, MASKED, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
++    X(VMOVDQU8_X_XM128, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU8_Y_YM256, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU8_Z_ZM512, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU16_X_XM128, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU16_Y_YM256, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU16_Z_ZM512, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU32_X_XM128, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU32_Y_YM256, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU32_Z_ZM512, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU64_X_XM128, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU64_Y_YM256, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
++    X(VMOVDQU64_Z_ZM512, MASKED, U, U, U, U, U, U, U, 0x00, 0x00, 0x00) \
+     X(VPBLENDMB_Z_Z_ZM512, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VPBLENDMB_Z_Z_ZM512, MASKED, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VPBLENDMB_X_X_XM128, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \

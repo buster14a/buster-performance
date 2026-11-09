@@ -1,0 +1,100 @@
+diff --git a/src/buster/compiler/tier1_compare_memory_test.c b/src/buster/compiler/tier1_compare_memory_test.c
+index 2c2134ed..8d1486db 100644
+--- a/src/buster/compiler/tier1_compare_memory_test.c
++++ b/src/buster/compiler/tier1_compare_memory_test.c
+@@ -39,16 +39,26 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
+         {
+             0,
+             1,
++            127,
++            128,
++            mask - 128,
++            mask - 127,
+             sign - 1,
+             sign,
+             mask - 1,
+             mask,
+         };
++        // The negative cases are normalized to the actual memory width, as promotion removal publishes them.
++        // Positive 128 and negative 129 must retain full immediates; byte operands always use their one-byte field.
++        const uint64_t immediates[] = { mask, 0, 127, 128, mask - 127, mask - 128 };
++        const bool short_immediates[] = { true, true, true, false, true, false };
+         uint8_t* bytes = mapping + 4096 - width;
+         for (uint32_t predicate = 0; predicate < IR_PREDICATE_COUNT; predicate += 1)
+         {
+-            for (uint32_t immediate = width < 4 ? 1 : 0; immediate < 2; immediate += 1)
++            for (uint32_t variant = width < 4 ? 1 : 0; variant <= BUSTER_ARRAY_LENGTH(immediates); variant += 1)
+             {
++                const bool immediate = variant != 0;
++                const uint64_t constant = immediate ? immediates[variant - 1] : 0;
+                 for (uint32_t d = 0; d < BUSTER_ARRAY_LENGTH(destinations); d += 1)
+                 {
+                     for (uint32_t branch = 0; branch < 2; branch += 1)
+@@ -56,7 +66,7 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
+                         const Tier1SelectHoles holes =
+                         {
+                             .rule = branch != 0 ? TIER1_RULE_BRANCH_COMPARE : immediate != 0 ? TIER1_RULE_COMPARE_IMMEDIATE : TIER1_RULE_COMPARE,
+-                            .immediate = mask,
++                            .immediate = constant,
+                             .memory =
+                             {
+                                 .displacement = -3,
+@@ -72,6 +82,23 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
+                             .compare_memory = true,
+                         };
+                         const Tier1SelectRecords selected = tier1_select_test_expand(test, &holes);
++                        if (immediate)
++                        {
++                            const uint32_t expected_bytes = width == 1 || short_immediates[variant - 1] ? 1 : width == 2 ? 2 : 4;
++                            uint32_t compares = 0;
++                            bool shortest = true;
++                            for (uint32_t r = 0; r < selected.count; r += 1)
++                            {
++                                const uint32_t form = selected.records[r].form;
++                                const X86Effects* effects = x86_effects(form);
++                                if (effects->operation == X86_OPERATION_CMP)
++                                {
++                                    compares += 1;
++                                    shortest &= effects->width == width && x86_form_description(form)->immediate_bytes == expected_bytes;
++                                }
++                            }
++                            tier1_select_test_expect(test, compares == 1 && shortest, "memory CMP uses the shortest exact-width immediate at signed-byte boundaries");
++                        }
+                         X86Instruction records[8];
+                         memcpy(records, selected.records, selected.count * sizeof(*records));
+                         uint32_t count = selected.count;
+@@ -98,10 +125,10 @@ static void tier1_select_test_compare_memory_holes(Tier1SelectTest* test)
+                         {
+                             for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(samples); a += 1)
+                             {
+-                                for (uint32_t b = 0; b < BUSTER_ARRAY_LENGTH(samples); b += 1)
++                                for (uint32_t b = 0; b < (immediate ? 1u : BUSTER_ARRAY_LENGTH(samples)); b += 1)
+                                 {
+                                     memcpy(bytes, &samples[a], width);
+-                                    const bool compared = immediate != 0 ? tier1_select_test_memory_predicate(predicate, width, samples[a], mask) :
++                                    const bool compared = immediate != 0 ? tier1_select_test_memory_predicate(predicate, width, samples[a], constant) :
+                                                                           tier1_select_test_memory_predicate(predicate, width, samples[b], samples[a]);
+                                     const uint64_t expected = branch != 0 ? (compared ? 11 : 22) : compared;
+                                     const uint64_t actual = tier1_select_test_call(test, (uintptr_t)bytes, 3, samples[b]);
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index 7f930f08..3411841f 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -710,9 +710,14 @@ static void tier1_select_compare(Tier1SelectRecords* result, const Tier1SelectHo
+         X86Instruction record = holes->memory;
+         if (holes->compare_immediate)
+         {
+-            record.form = holes->width == 1 ? X86_FORM_CMP_RM8_IMM8 : holes->width == 2 ? X86_FORM_CMP_RM16_IMM16 :
+-                          holes->width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
+-            record.immediate = (int32_t)holes->immediate;
++            const uint16_t short_form = holes->width == 1 ? X86_FORM_CMP_RM8_IMM8 : holes->width == 2 ? X86_FORM_CMP_RM16_IMM8 :
++                                        holes->width == 8 ? X86_FORM_CMP_RM64_IMM8 : X86_FORM_CMP_RM32_IMM8;
++            // A removed promotion leaves the immediate in the memory operand's width. The shared proof accepts
++            // normalized negative bit patterns such as 0xff80 at 16 bits, without narrowing positive 128 to -128.
++            record.form = holes->width == 1 || x86_immediate_encodes(short_form, (int64_t)holes->immediate) ? short_form :
++                          holes->width == 2 ? X86_FORM_CMP_RM16_IMM16 : holes->width == 8 ? X86_FORM_CMP_RM64_IMM32 : X86_FORM_CMP_RM32_IMM32;
++            int32_t high = 0;
++            x86_immediate_field(record.form, (int64_t)holes->immediate, &record.immediate, &high);
+         }
+         else
+         {
