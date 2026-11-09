@@ -90,24 +90,12 @@ The rows, as committed (latency and throughput in 1/256 cycle):
 
 | Form | Latency | Throughput |
 | --- | ---: | ---: |
-| `VPMOVZXBD_Z_XM128` | 1024 | 128 |
-| `VPMOVZXBD_X_XM32_EVEX` | 512 | 128 |
-| `VPMOVM2B_Z_K` | 512 | 64 |
-| `VPMOVM2B_X_K` | 512 | 64 |
-| `VPMOVM2B_Y_K` | 512 | 64 |
-| `VPMOVM2W_Z_K` | 512 | 64 |
-| `VPMOVM2W_X_K` | 512 | 64 |
-| `VPMOVM2W_Y_K` | 512 | 64 |
-| `VPMOVM2D_Z_K` | 512 | 64 |
-| `VPMOVM2D_X_K` | 512 | 64 |
-| `VPMOVM2D_Y_K` | 512 | 64 |
-| `VPMOVM2Q_Z_K` | 512 | 64 |
-| `VPMOVM2Q_X_K` | 512 | 64 |
-| `VPMOVM2Q_Y_K` | 512 | 64 |
 | `VPMOVZXBW_X_XM64_EVEX` | 512 | 128 |
 | `VPMOVZXBW_Y_XM128_EVEX` | 512 | 128 |
 | `VPMOVZXBW_Z_YM256` | 1024 | 128 |
+| `VPMOVZXBD_X_XM32_EVEX` | 512 | 128 |
 | `VPMOVZXBD_Y_XM64_EVEX` | 512 | 128 |
+| `VPMOVZXBD_Z_XM128` | 1024 | 128 |
 | `VPMOVZXBQ_X_XM16_EVEX` | 512 | 128 |
 | `VPMOVZXBQ_Y_XM32_EVEX` | 512 | 128 |
 | `VPMOVZXBQ_Z_XM64` | 1024 | 128 |
