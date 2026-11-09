@@ -214,3 +214,25 @@ The lexer's machine rows fall from 254 to:
 ## The benchmark programs
 
 `run-b.sh` also compiled `measure-tier1-programs`' inputs by main's `--tier1` and each head's: sqlite3.c, with speedtest1's flags, and Lua 5.4.8's 33 sources. `log-b.txt` records that every object is byte-identical with main's for every head: those programs have no x86 builtins. So the families change none of their code, and `measure-tier1-programs` was not timed for them.
+
+## Family A's lexer, again (`run-d.sh`)
+
+The first process put A's lexer 0.5% slower. Yet A's Tier 1 code of it differs from main's only at the selects: each was three records, `vmovdqu64`, a merge-masked `vmovdqu8` and `vmovdqa64`, and is now one `vpblendmb`. That is fewer instructions with the same 2-cycle dependency (below).
+
+`run-d.sh` measured A twice more and B once, each one hold, as `run-c.sh` did. Output is in `rows-a2.txt`, `rows-b2.txt` and `rows-a3.txt`.
+
+| Process | lexer user cycles, head / main | `c_tokenize` cycles/B, main → head |
+| --- | ---: | --- |
+| A, first (`rows-a.txt`) | 1.005 | 28.196 → 28.497 |
+| A, second (`rows-a2.txt`) | 1.002 | 28.329 → 28.466 |
+| A, third (`rows-a3.txt`) | 0.987 | 28.883 → 28.007 |
+| B, first (`rows-b.txt`) | 0.984 | 28.011 → 27.855 |
+| B, second (`rows-b2.txt`) | 0.984 | 27.727 → 27.539 |
+
+Main's own `c_tokenize` varies from 27.7 to 28.9 cycles/B between these processes, so A's lexer is within that noise. B's 1.6% reproduces.
+
+## Masked register moves (`zen5a.sh`)
+
+A merge-masked `vmovdqu8`/`16`/`32`/`64` between registers might be a faster select than `vpblendm`. To test that, `zen5a.sh` measured the masked register moves on main `cb608c1` with `familya-moves.patch`. That patch is family A with the twelve rows added as `U`; the rows are not committed.
+
+The result is in `zen5a-table.txt`. Every masked register move has `vpblendm`'s figures: latency 512, throughput 64 (1/256 cycle), one macro-op. So a masked move gives a select nothing over `vpblendm`.
