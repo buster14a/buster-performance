@@ -1,0 +1,64 @@
+# Guard and real-lock SQLite smoke, 2026-11-06
+
+This is a single-sample plumbing smoke, not a curve, output-equality comparison,
+wait measurement, or acceptance result. The performance checkout was
+`b136b9af48b3c72fc8bcd40ff204a0628316a944`; the compiler checkout was merged
+Buster `2dc50258e8b33393474b64032a5cbe9f17c63def`, with executable SHA-256
+`51b54dd02986a28f294c0d5b2539e93739acb8962851127316da7953d4f8b09b`.
+The separately locked build produced runner SHA-256
+`3a9eb04027d31e6316b6c845f0b0be2b2b02420e64b98c8b7244fce010d63f3d`;
+a separately locked self-test passed 52 checks. The post-smoke identity record
+rechecked both executables and revisions.
+
+The normal controller used the real prepared SQLite case and a one-grant wrapper
+included in the archive. That wrapper delegated the first invocation to the
+actual `exclusive.sh` shared lock and deliberately refused every subsequent
+invocation. The one-lane reference completed successfully and created one
+verified object. Its guard reports 270,695,871 ns, status 0, no interruption,
+and no adopted descendants; its successful wrapper elapsed 275,434,120 ns,
+including lock wait. These are guard plumbing observations, not performance
+acceptance data.
+
+The wrapper intentionally refused warmup 0, exit 99. The retained controller
+log and case status show failure and `parent-issue-status=not-established`.
+The failed warmup's lock-window receipt explicitly marks its elapsed time as
+invalid for an upper lock-hold bound. No later samples ran. The single compiled
+object is omitted from the archive; its original object hash is retained.
+
+`receipts.tar.gz` retains the frozen case manifests, controller and reference
+records, guard and failed-warmup receipts, one-grant script, preparation logs,
+and post-smoke identities. `SHA256SUMS` inside the archive checks the archived
+sanitized files. Host home paths are replaced by `$BENCH_HOME/`, and other
+sessions' lock-holder details in preparation logs are redacted. Consequently,
+recorded hashes of original files and commands containing those paths are
+historical identity evidence, not hashes of the sanitized files or directly
+replayable commands. The original unredacted files remain on the host.
+
+The exact-merged compiler's hosted sanitizer/fuzz prerequisite, the three-case
+campaign, and measured waits remained pending when this smoke ran. The native
+qualification's documented internal host/tool exclusions still apply.
+
+## Handshake-fixture follow-up
+
+Hosted sanitizer run [42266176543](https://github.com/buster14a/buster-performance/actions/runs/42266176543)
+failed a combined outer-wrapper fixture assertion; its available artifact did
+not identify the failing conjunct. The subsequent fixture waits for a live
+escaped descendant, verifies that fd 9 is contended, then signals cleanup and
+checks descendant death and lock release. Local optimized and sanitizer
+self-tests passed 55 checks each. The original failed hosted run remains part
+of the record; its precise cause was not established.
+
+A new separately locked build at performance revision
+`0404e7cf12f04c9995b42108e4313c919d1e0a55` produced runner SHA-256
+`e354444a18ae4a079014d3d0bef0b5107d8294ca633cbc2655f70ed04d416ca1`;
+a separately locked self-test passed 55 checks. The compiler revision and
+executable were unchanged. The second single-grant SQLite reference passed,
+with no interrupted guard or remaining descendants; its guard interval was
+270,809,506 ns and its successful wrapper interval was 275,390,089 ns. The
+wrapper intentionally refused warmup 0 and the controller recorded
+`case-status=failed` and `parent-issue-status=not-established`.
+
+`receipts-0404e7cf.tar.gz` contains this second smoke's sanitized receipts,
+post-smoke identities, lock wrapper, build and self-test logs, and its own
+`SHA256SUMS`; the same redactions and omitted-object limitation described above
+apply. It does not alter the first smoke or establish acceptance.
