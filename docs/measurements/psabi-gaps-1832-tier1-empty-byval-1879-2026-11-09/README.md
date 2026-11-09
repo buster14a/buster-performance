@@ -63,3 +63,23 @@ Compiler issues:
 - These are single-host, single-input measurements.
 - The #1832 benchmark has two rounds per tree, not three.
 - The #1879 A/B measures the head before main was merged into it. The merged head's change to `ir_lower.c` is the same.
+
+## #1832 item 5: `abi_result` from a table, not kept (`1832-result-table-ab.log`, `1832-result-table-ab.sh`)
+
+- **Base:** main `48c0839` with #1960's two-line build fix, the only change. SHA-256 `4bde44245f4f4b881c87793581407b1d172d45e7e3ea79291269616d64d177e6`.
+- **Head:** the same plus `4da833f` (branch `claude/psabi-result-table-1832`). There, `abi_result` takes its registers from 64 `AbiReturn` templates indexed by the classes as they pass. SHA-256 `e02399ac8091f05155654e3c7f8b0af87991b06ac5df784e877956d8a5201a96`.
+- **Build:** both with znver5 in a cloud container, copied to the host.
+- **Run:** `taskset -c 2 ./X benchmark-calling-convention --only classification`, three alternating rounds in one lock hold.
+
+| vector path | base (rounds 1–3) | head (rounds 1–3) |
+| --- | --- | --- |
+| classify-all 16 B, ns/type | 40.07, 40.10, 39.77 | 40.23, 39.71, 39.74 |
+| classify-all 16 B, instructions/type | 620.28 | 623.28 |
+| classify-all 16 B, mispredicts/type | 2.888, 2.900, 2.894 | 2.933, 2.859, 2.859 |
+| batches-16, ns/type | 28.64, 28.61, 28.68 | 28.76, 28.88, 28.83 |
+
+- **Result:** no gain.
+  - classify-all is within noise; batches-16 is 0.5% slower in every round.
+  - The head runs 3 more instructions per type.
+  - Mispredicts are unchanged, so `abi_result`'s branches on the classes weren't the cost.
+- **Decision:** not proposed for merge.
