@@ -1,0 +1,72 @@
+# Reproduction commands. Use absolute paths for these three variables.
+# BASE_SOURCE: clean checkout at 39506e8609750fa31ef5a443dea12f0d545a27c6.
+# CANDIDATE_SOURCE: separate checkout at the same revision, then apply candidate.patch.gz.
+# PACKET: this directory. OUT: a fresh scratch output directory.
+# Put Clang/LLVM 23.1.4, CMake 4.4.3 and Ninja 1.13.2 on PATH; see toolchain.txt.
+# Exact source and common flag argv are retained in input-captures.tar.gz.
+# Native builds additionally use CMake's per-object output/dependency arguments.
+
+gzip -dc "$PACKET/candidate.patch.gz" | git -C "$CANDIDATE_SOURCE" apply -
+(cd "$CANDIDATE_SOURCE" && sha256sum -c "$PACKET/source-inputs.sha256")
+
+cc -std=c17 -O2 -Wall -Wextra -Werror "$PACKET/tools/collect_build_inputs.c" -o "$OUT/collect-build-inputs"
+cc -std=c17 -O2 -Wall -Wextra -Werror "$PACKET/tools/compare_dependencies.c" -o "$OUT/compare-dependencies"
+cc -std=c17 -O2 -Wall -Wextra -Werror "$PACKET/tools/incremental_plans.c" -lcrypto -o "$OUT/incremental-plans"
+cc -std=c17 -O2 -Wall -Wextra -Werror -I"$CANDIDATE_SOURCE" "$PACKET/tools/incremental-existing-adapter.c" -o "$OUT/incremental-existing"
+cc -std=c17 -O2 -Wall -Wextra -Werror -I"$CANDIDATE_SOURCE" "$PACKET/tools/fuzz-ownership-adapter.c" -o "$OUT/fuzz-ownership"
+cc -std=c17 -O2 -Wall -Wextra -Werror -I"$CANDIDATE_SOURCE/tools/ci" "$PACKET/tools/ownership_fingerprints.c" -o "$OUT/ownership-fingerprints"
+
+# Repeat for each checkout and each architecture. Jobs is a verification setting,
+# not an elapsed-time benchmark configuration. This packet used 2 or 3 native jobs.
+(cd "$BASE_SOURCE" && BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 ./build.sh build --jobs 2)
+(cd "$BASE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh build --jobs 2)
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 ./build.sh build --jobs 2)
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh build --jobs 2)
+# Spell the option as --jobs 2 when invoking build.sh.
+
+(cd "$BASE_SOURCE" && BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 "$OUT/collect-build-inputs" "$OUT/base-scalar")
+(cd "$BASE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 "$OUT/collect-build-inputs" "$OUT/base-vector")
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 "$OUT/collect-build-inputs" "$OUT/candidate-scalar")
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 "$OUT/collect-build-inputs" "$OUT/candidate-vector")
+"$OUT/compare-dependencies" "$OUT/base-scalar" "$OUT/candidate-scalar" > "$OUT/dependencies-scalar.tsv"
+"$OUT/compare-dependencies" "$OUT/base-vector" "$OUT/candidate-vector" > "$OUT/dependencies-vector.tsv"
+
+# Compare corresponding CMakeFiles/*/Release/src/buster/compiler/*.c.o files
+# and Release/compiler with cmp and SHA256, as recorded in objects/.
+"$OUT/incremental-plans" "$BASE_SOURCE" build/cmake/x86-64-g0 base-scalar base "$OUT/edit-plans"
+"$OUT/incremental-plans" "$BASE_SOURCE" build/cmake/znver5-g0 base-vector base "$OUT/edit-plans"
+"$OUT/incremental-plans" "$CANDIDATE_SOURCE" build/cmake/x86-64-g0 candidate-scalar candidate "$OUT/edit-plans"
+"$OUT/incremental-plans" "$CANDIDATE_SOURCE" build/cmake/znver5-g0 candidate-vector candidate "$OUT/edit-plans"
+
+(cd "$CANDIDATE_SOURCE" && cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/build_regression.c -o build/build-regression)
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 build/build-regression --ownership-only build/cmake/x86-64-g0/Release/compiler)
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 build/build-regression --ownership-only build/cmake/znver5-g0/Release/compiler)
+(cd "$CANDIDATE_SOURCE" && cc -std=c17 -O2 -Wall -Wextra -Werror tools/ci/changes.c -o build/changes && build/changes --self-test)
+
+# The existing incremental workflow is called unchanged; its adapter restores
+# the model-unit timestamp. Keep this exclusive of source edits/other builds.
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=x86-64 BUSTER_DEBUG_INFO=0 "$OUT/incremental-existing" "$OUT")
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 "$OUT/incremental-existing" "$OUT")
+# If Debug exists and its only pending step is Selecting Debug compile commands,
+# refresh that exact target, then require both compiler plans to report no work:
+(cd "$CANDIDATE_SOURCE" && ninja -C build/cmake/znver5-g0 -f build-Debug.ninja Debug/compile_commands.json)
+
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh build --config Debug --jobs 3)
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh check-call-graph --jobs 3)
+# Spell the option as --jobs 3 when invoking build.sh.
+# Refresh Debug's filtered database if configuration work made it stale, then:
+(cd "$CANDIDATE_SOURCE" && BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 build/build-regression --ownership-only build/cmake/znver5-g0/Debug/compiler)
+
+# Runtime commands use the explicit vector Release executable from the source root:
+# test-call-graph; test-preprocessor; test-parser-bindings; test-executable;
+# test-dynamic; test-ir; test-ir-simd; test-parser; test-checker --requests;
+# test-check-builtins; test-check-builtins-vector; test-check-builtins-float;
+# test-tier1-select; test-tier1-masks;
+# test-ir-source --simd "$PACKET/fixtures/source-probe.c".
+# The initial parser invocation without an input file is preserved in validation/runtime/status.tsv;
+# use the correctly invoked test-parser receipt for its result.
+
+# PP, writer and fuzz READMEs give their additional exact reproduction interfaces.
+# Fuzz compile/dependency receipts do not claim a full executable link/run.
+# To recompute all packet digests from this directory:
+# find . -type f ! -path './SHA256SUMS' -print0 | sort -z | xargs -0 sha256sum
