@@ -6,8 +6,9 @@ generation experiment. The source base is Buster
 `647340a44ae189d2c0f3ec903c71597609e59640`.
 
 The candidate source revision and exact changed-file identities are recorded in
-`source-identity.json` and `source-files.sha256`. The final documentation-only
-commit links back to this packet; it changes no compiled input.
+`source-identity.json` and `source-files.sha256`. Follow-up source commits update
+evidence links and CI's synthetic tool archive; the compiler inputs remain those
+of the recorded candidate.
 
 ## Scope of the evidence
 
@@ -166,6 +167,13 @@ variables. The final scalar optional-tree ownership check passes all 548 active
 fixture/support paths. Selector self-tests pass 1,681 checks. The build's seven
 ordinary flag-policy cases, driver wrapper regression and strict partition
 fixture also pass.
+
+Initial hosted CI caught a synthetic-archive omission: the installer fixture
+needed executable stubs for `llvm-split`, `llvm-nm` and `llvm-objcopy` alongside
+the real installer's new inputs. Adding those three stubs makes
+`bash tests/ci/hosted-tools.sh` pass, including acquisition, mirror, extraction,
+relocation, runtime and incomplete-publication failure cases. Its raw log and
+the exact updated test-script identity are retained under `integrated-codegen/`.
 
 ### Diagnostics and environment limits
 
