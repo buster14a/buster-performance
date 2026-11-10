@@ -15,6 +15,15 @@ resolved through the frozen source link above. All source license texts are
 retained byte for byte under [`LICENSES/`](LICENSES/), and the existing project
 default text is retained as [`LICENSE`](LICENSE).
 
+`docs/measurements/build-owner-boundaries-2026-11-10/` records original C
+measurement helpers and build-ownership observations under the project default
+terms. Its compressed source patches relocate existing Buster definitions,
+including previously generated LLVM-derived preprocessor data; their original
+terms and attribution remain intact. The packet's `PROVENANCE.md` identifies
+those portions, the source/toolchain inputs and external OpenSSL/system tools.
+No toolchain implementation, system-header content or native compiler binary
+is redistributed in that packet.
+
 Original measurement reports, fixtures and harnesses follow their existing
 Apache-2.0 WITH LLVM-exception terms except for identified component-specific
 portions. In particular, the Clang-generated
