@@ -63,8 +63,9 @@ emission runs on several lanes); `a.c` to `d.c` (#905's four small units, from
 - `scripts/kprof.sh r1`: `perf record -a -g` at 25 kHz while 300 of each build's one-line `-c` run
   (`raw/kprof-*.txt`, the reports by symbol of the `compiler-0` threads; the `.data` files aren't kept).
 - `scripts/exits.sh r1` and `r2` (`scripts/exits.c`): a process that touches 64 MB in base pages and exits, with no
-  thread, 1 to 7 parked threads, one joined thread, or a private futex hash of 16 slots (`raw/exits-r1.txt`,
-  `raw/exits-r2.txt`).
+  thread, 1 to 7 parked threads, one joined thread, or a private futex hash of 16 slots (`raw/exits-r2.txt`; r1, in
+  `raw/exits-r1.txt`, ran a first version of both files, with only 1 and 7 parked threads and the joined one, 200 rounds;
+  `exits.c` then gained the other modes, which leave those three as they were).
 - `scripts/batch.sh r2`: 400 processes of one input, 1, 8 or 16 at a time (`xargs -P`), under `perf stat -a` (the
   elapsed time and the unhalted cycles of every CPU), base and head alternated, 5 rounds (`raw/batch-*-r2.txt`; `r1`'s
   per-process task clock missed the kworkers' work and its elapsed time wasn't recorded, so it isn't kept).
