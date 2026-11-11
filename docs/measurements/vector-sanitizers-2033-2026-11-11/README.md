@@ -33,6 +33,55 @@ run of the pooled vector row, [43027989712](https://github.com/buster14a/buster/
 - **Failure:** t1 (the thread builder) failed "Check unity fixture ownership without rebuilding": the pack's identity
   runs `./build.sh configure`, leaving the tree's build out of date. Fixed in `b5ae9b821`; not yet run on CI.
 
-The confirming run of the fixed branch was dispatched as
-[43032895653](https://github.com/buster14a/buster/actions/runs/43032895653), which failed on every job's toolchain
-install during a hosted DNS outage (`Temporary failure resolving 'security.ubuntu.com'`) and tested nothing.
+## The confirming run
+
+[43065872321](https://github.com/buster14a/buster/actions/runs/43065872321) (purpose `full`, at `9c5133fe6`).
+
+- `jobs-43065872321/`: its first attempt's jobs pages (`.../runs/43065872321/attempts/1/jobs`, two pages).
+- `logs-43065872321/`: the 16 vector items' job logs (`jobs.txt` lists the job IDs).
+
+The scripts above ran unchanged over these, with the assignment
+`m1x1-m2x4-m3x5-m4x6-a1x8-a2x9-a3x10-a4x11-t1x12-t2x16-t3x17-t4x18-n1x19-n2x20-n3x21-n4x22`.
+
+- **Verdict:** all 16 items passed in draw 1, attempt 1. Each configuration's items installed one product, built
+  by its item 1: memory `6e275a2baf97`, address `da40d0ac9efa`, thread `e8ed9523be36`, none `eb03030ed96a` (the
+  first 12 hex digits of each SHA-256). t1, the thread builder, passed "Check unity fixture ownership without
+  rebuilding", which confirms `b5ae9b821`.
+- **Draw:** 48 candidates, 31 qualified (65%). The 17 that didn't qualify were 14 EPYC 7763s and 3 EPYC 9V74s.
+  The collector took 28 s and assigned the items in the measured order: memory, address, thread, none. Redraws:
+  32 candidates, 12.8 runner-minutes, a mean of 24 s each.
+- **Rows (wall time, runner-minutes):**
+
+| Configuration | vector (4 items) | native | x86-64 |
+| --- | --- | --- | --- |
+| memory | 23.4 min, 85.3 | 30.1 min, 121.8 (5 shards) | 30.6 min, 89.2 |
+| address | 19.5 min, 72.4 | 21.2 min, 73.5 | 18.0 min, 45.5 |
+| thread | 19.1 min, 72.3 | 27.1 min, 94.5 | 22.3 min, 82.2 |
+| none | 9.8 min, 37.1 | 12.0 min, 43.0 | 48.6 min, 68.4 (with SQLite's full Tcl suite's job) |
+
+- **Products:** item 1 built in 492, 493, 200 and 122 s (memory, address, thread, none). Waiting items waited
+  125–597 s, downloaded in 1–5 s and installed in 3–4 s. A waiting item spent −10 to 111 s (mean 32.1 s,
+  6.4 runner-minutes per run) more than building its own. That is more than run 1's mean of 24.5 s, because
+  items now poll for their product every 30 s rather than every 10 s (buster#2309).
+
+- **9700X:** "Native tests and benchmarks on Benchpress" ran, and failed before its benchmarks in both attempts on
+  one command: `test-checker-deferred: the sparse arena's page policy, demand-zero storage or release differs`
+  (138 of 139 passed). Main's nightly run [42972886068](https://github.com/buster14a/buster/actions/runs/42972886068)
+  (at `a1aecd773`) fails the same check on the same host. It came to main with `check_deferred_test_sparse_pages`
+  (#1984's merge, 2026-11-10). benchpress has transparent huge pages `enabled=always` (`defrag=madvise`), and the
+  hosted runners pass it. So "Build and execute on Ryzen 7 9700X" fails on its qualification.
+
+## Runs between
+
+- [43032895653](https://github.com/buster14a/buster/actions/runs/43032895653) (at `e945d43ba`). Attempt 1 failed
+  every job's toolchain install during a hosted DNS outage (`Temporary failure resolving 'security.ubuntu.com'`).
+  Attempt 2 ("re-run all jobs") lost about 40 jobs, 15 of them vector candidates, to the outage's return, and was
+  cancelled.
+- [43048773801](https://github.com/buster14a/buster/actions/runs/43048773801) (at `17939415`, with main's
+  DNS-over-HTTPS mirror pin). t1's builder passed fixture ownership. UBSan stopped items a3 and a4, and the native
+  address row's shard 3, at `c_check_wide.c:265` (`shift exponent 65 is too large for 32-bit type 'uint32_t'` in
+  `check_wide_add_vector`, from buster#1447's wide `_BitInt` folding); buster `2d33f5f4f` fixes it. The verdict
+  could not list the run's artifacts, `API rate limit exceeded for installation` (buster#2309).
+- Run 43027989712's attempt 2 ("re-run failed jobs", on the old code) exercised the rerun path. t1's holder,
+  candidate 6, drew an EPYC 7763 that does not qualify, so it did not retake t1 and published no attempt-2
+  product. The verdict failed again on t1 alone.
