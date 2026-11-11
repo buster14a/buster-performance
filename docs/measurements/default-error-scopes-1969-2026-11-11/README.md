@@ -22,8 +22,7 @@ main.c of the head tree with its options (`run.sh`).
 **Non-qualifying: one lock hold around a series.** `time-runs.log` comes from `run.sh`: one `time-runs`
 comparison, 3 warm-ups and 21 runs per build and list in a Williams order, under **one** hold of the 9700X lock
 (about 90 s). That is a series of runs under one hold, which AGENTS.md's per-run lock rule forbids. Treat
-these numbers as an observation. `ab.sh`, which takes the lock for each run, was started for a compliant
-repeat; its results are added here if it completes.
+these numbers as an observation. The per-run-lock repeat is below.
 
 ## Results (time-runs.log, non-qualifying)
 
@@ -46,9 +45,30 @@ repeat; its results are added here if it completes.
 - So the step isn't the arenas' huge pages. It comes with the binary's layout: text +9.3 KB, data and bss equal.
   This record doesn't identify it further.
 
+## Per-run-lock repeat (ab2.log, qualifying lock use)
+
+`ab.sh` ran `ab` with plain `-fsyntax-only` and the 9700X lock taken per run (`ab.log`). It printed no timings:
+`ab` only runs each command, and plain `-fsyntax-only` prints nothing. `ab2.sh` repeats it with `--time-stages`,
+whose `time-stage total` line is each run's own wall time (6 rounds, Williams order, CPU 2, one lock hold per run;
+`ab2-totals.tsv` lists them by round).
+
+| input | base runs (ms) | head runs (ms) | median base | median head |
+| --- | --- | --- | --- | --- |
+| sqlite3.c | 96.4 96.4 97.0 97.7 113.3 116.5 | 95.9 96.7 101.2 112.5 113.1 117.4 | 97.3 | 106.8 |
+| main.c | 577.9 585.4 587.3 683.1 695.7 713.3 | 681.9 691.7 694.7 697.4 704.0 749.8 | 635.2 | 696.1 |
+
+The runs fall into two modes, about 96 and 113 ms on sqlite3.c and about 580 and 690 ms on main.c, in both trees.
+Each run takes the lock separately, between other sessions' work, so the mode follows the host's state at the run,
+not the tree. Within a round where both trees fell in the same mode they agree to about 2% or better: sqlite3.c's
+rounds 1, 2, 4 and 5, main.c's rounds 3, 4 and 5. The medians differ only because main.c's base runs fell in the fast
+mode three times and its head runs none (rounds 1, 2 and 6). Six rounds can't separate that from the change. With the
+time-runs comparison's equal instruction counts (above), this repeat finds no difference, but its medians aren't
+evidence of one either way.
+
 ## Files
 
 - `run.sh`, `time-runs.log`: the time-runs comparison.
 - `rss.sh`, `rss.log`: the base-page peak comparison.
-- `ab.sh`: the per-run-lock repeat (results pending).
+- `ab.sh`, `ab.log`: the per-run-lock repeat without timings (plain `-fsyntax-only` prints none).
+- `ab2.sh`, `ab2.log`, `ab2-totals.tsv`: the per-run-lock repeat with `--time-stages`.
 - `identities.txt`: SHA-256 of the input and both executables, clang, kernel and CPU.
