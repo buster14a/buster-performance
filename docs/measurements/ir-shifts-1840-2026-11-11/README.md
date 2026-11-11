@@ -74,3 +74,21 @@ Machine rows, both compilers (the shifts' and this change's) compiling buster#19
 | --- | ---: | ---: | ---: | ---: |
 | `main_unit_frontend.c` | 628 | 543,620 | 596 | 543,612 |
 | `main_unit_backend.c` | 792 | 1,541,683 | 784 | 1,541,683 |
+
+## The lane operations (buster#1840, item 4)
+
+A third process measured the 72 register forms Tier 1 selects for the IR's `lane_op`: `vpminub` to `vpmaxsq` and
+`vpaddusb` to `vpsubsw` at every width.
+- **Script:** `zen5-lane.sh` (the build and the measurement, each one hold of the lock, the measurement on CPU 2).
+- **Build:** buster `f0b65bb` (branch `ir/1840-lane-ops`, its 72 rows `U`): the masks' commit `16cccc5` plus
+  `lane-ops.patch`, built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0`.
+- **Output:** `zen5-lane-table.txt` and `zen5-lane-errors.txt`.
+
+| Forms | Latency | Throughput | Pipes |
+| --- | ---: | ---: | --- |
+| `vpminub` to `vpmaxud` (bytes to doublewords), every width | 512 | 64 | 128 |
+| `vpminuq` to `vpmaxsq`, every width | 512 | 128 | 0 |
+| `vpaddusb` to `vpsubsw`, every width | 512 | 128 | 0 |
+
+Machine rows, both compilers compiling buster#1972's sources `2461071` (`report-lane-*.txt`): `main_unit_frontend.c`
+596 → 541, `main_unit_backend.c` 784 → 752; records unchanged (543,612 and 1,541,683).
