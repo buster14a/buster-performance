@@ -60,7 +60,8 @@ A byte at depth -1 changes the outcome only when it names an opener's role whose
   parser's scratch, 0 differ". `test-parser --scalar` reported the same 0 differences but failed in the driver's
   address-space check: "an invalid file: a run in a child gave status 1 and [the expected message] (peak
   1013965189120)", the status and text equal to the in-process run's, so the child wasn't counted clean or `VmSize`
-  read 0. The trim doesn't touch that check. `v2-test-parser-scalar-2.log` is its rerun.
+  read 0. The trim doesn't touch that check. Its rerun on the same build passed (`v2-test-parser-scalar-2.log`, status 0),
+  so that failure didn't reproduce.
 
 ### The cost of test-parser's clearing and of the new check (`results/9700x/results/`, `scripts/measure.sh`, `measure2.sh`)
 
@@ -105,7 +106,8 @@ What they settle:
 - The 256-stream count's cost wasn't measured; it is scaled from the 2,000-stream run.
 - The release-only variant (#2087's `MADV_DONTNEED` for scratch over 1 MB, without the clearing) wasn't built; the
   clearing's memset is user time, which barely differs, so it would cost about what clear does.
-- The driver test's part 3 failures and the `--scalar` driver failure weren't run against main on the 9700X.
+- The driver test's part 3 failures weren't run against main on the 9700X, nor was the `--scalar` driver failure,
+  which passed on a rerun.
 
 ## Machines
 
