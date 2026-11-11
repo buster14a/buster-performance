@@ -69,7 +69,8 @@ emission runs on several lanes); `a.c` to `d.c` (#905's four small units, from
 - `scripts/batch.sh r2`: 400 processes of one input, 1, 8 or 16 at a time (`xargs -P`), under `perf stat -a` (the
   elapsed time and the unhalted cycles of every CPU), base and head alternated, 5 rounds (`raw/batch-*-r2.txt`; `r1`'s
   per-process task clock missed the kworkers' work and its elapsed time wasn't recorded, so it isn't kept).
-- `scripts/tests.sh`: the head's tests on the 9700X (`raw/tests-head.status`, `raw/test-head-*.log`).
+- `scripts/tests.sh` and `scripts/tsan.sh`: the head's tests on the 9700X, its Release build's and a ThreadSanitizer
+  build's (`raw/tests-head.status`, `raw/test-head-*.log`, `raw/tsan-head-*`).
 
 ## Results
 
@@ -144,7 +145,9 @@ Run 8 at a time, where cores stay busy, the head is 15% to 25% faster.
 **Tests** (`raw/tests-head.status`, on the 9700X, the head's own Release build `tree-head/build/compiler`, SHA-256
 `c5f5ae5e…`): `test-lanes` (with its new on-demand sessions; the core checks on a core's two siblings), `test-check-lanes`
 (7,622 checks, its sibling commands among them), `test-check-units`, `test-checker-deferred`, `test-call-graph` and
-`./build.sh check-call-graph` all pass. `raw/container.txt` has the cloud container's cross-check (4 CPUs, no SMT, shared
+`./build.sh check-call-graph` all pass; and a ThreadSanitizer build of the head (`scripts/tsan.sh`,
+`BUSTER_SANITIZER=thread`) passes `test-lanes` and `test-check-lanes` with no report (`raw/tsan-head-*`).
+`raw/container.txt` has the cloud container's cross-check (4 CPUs, no SMT, shared
 with other sessions, so counts only): base's one-line `-c` created 3 threads there and the head's none, the outputs of
 both builds byte-identical for every input, and the head's tests there.
 
