@@ -120,3 +120,26 @@ by command, row and CPU model.
 
 To pair the pull request's runs, run `hosted-times.sh RUN DIRECTORY > results/hosted/after-RUN.tsv` over each run's
 unzipped logs, then `pairs.sh results/hosted`.
+
+## Hosted afters (`results/hosted/after-43076616781.tsv`, `results/hosted/pairs.txt`)
+
+The pull request's run 43076616781 (buster head `f855d736`, which also merges main up to 6f8f41b9, so it includes
+#2263's server time limits that the befores don't) is the after. Its logs were each shard job's log, saved under the
+archive's names. A pull request's run has only the x86-64 row, so this is one sample per command, on two CPU models.
+The native plain row, which runs these commands both ways, runs on main pushes only; its `differential … 0 differ`
+check comes from the first push to main after the merge.
+
+| command | CPU | runs served, before → after | wall, after (befores: mean, range, count) | wall | CPU s, after (before mean) | CPU |
+| --- | --- | --- | --- | --- | --- | --- |
+| part 1 | EPYC 7763 | 1488 → 1641 (+153) | 34.3 s (35.8, 34.9–37.1, 15) | -4.1% | 29.6 (25.0) | +18.6% |
+| part 2 | EPYC 7763 | 1754 → 1756 (+2) | 22.6 s (21.3, 20.4–22.5, 15) | +6.0% | 18.8 (19.1) | -1.8% |
+| part 3 | EPYC 7763 | 961 → 961 | 105.3 s (93.5, 88.1–105.5, 15) | +12.6% | 102.4 (90.4) | +13.3% |
+| part 4 | EPYC 9V74 | 1475 → 1500 (+25) | 18.1 s (18.9, 16.8–21.4, 9) | -4.5% | 17.7 (17.0) | +3.9% |
+| units, 2 CPUs | EPYC 9V74 | 133 → 133 | 41.2 s (38.6, 36.8–40.2, 8) | +6.8% | 51.3 (43.4) | +18.1% |
+
+- **Served counts** rose by 153 in part 1 and 25 in part 4, as the local measurement predicted. Part 2's +2 is main's
+  (its befores range over 1749 and 1754 with main's cases).
+- **"s of CPU"** rose for parts 1 and 3 and the units, as predicted: the servers' CPU time is now counted.
+- **Wall** fell slightly for parts 1 and 4. It rose for part 3 (at the top of its befores' range) and the units (1.0 s
+  above it). With one sample each, these are indications, not effects.
+- **No request ran past its time limit** (#2263's new count): 0 in every command.
