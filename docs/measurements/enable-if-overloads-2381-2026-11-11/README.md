@@ -30,4 +30,4 @@ The native builds' instruction counts rise slightly. sqlite3.c never reaches the
 
 ## Limitations
 
-This covers one host, one session, one placement and 15 runs per build. The callgrind comparison was made on a cloud container (AMD EPYC with AVX-512), not on the 9700X, with the baseline build.
+This covers one host, one session, one placement and 15 runs per build. The callgrind comparison was made on a cloud container (an Intel Xeon with AVX-512), not on the 9700X, with the baseline build.
