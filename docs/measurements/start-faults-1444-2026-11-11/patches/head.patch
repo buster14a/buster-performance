@@ -1,0 +1,379 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index b45e88d..af9e539 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -78,6 +78,7 @@
+ //   - clang's arguments for ours (pp_clang_arguments), and a clang run (pp_clang_preprocess), for the commands that run
+ //     clang with them.
+ 
++#include <stddef.h>
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <string.h>
+@@ -795,8 +796,6 @@ struct FileCache
+     // The four arrays' arena of tables, file_cache_initialize's (#1521), or empty where they are tables of a unit's
+     // (pp_initialize_once).
+     Arena arrays;
+-    // Each lane's arenas, reserved when the lane first prepares a record.
+-    FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
+     // The records prepared, and their tokens (for the tests and the benchmark).
+     uint64_t prepared_records;
+     uint64_t prepared_tokens;
+@@ -806,6 +805,14 @@ struct FileCache
+     // The base pages at the start of the token columns' arenas of the lanes past lane 0, which c_files.c sets for a group
+     // of many lanes before it reserves them (file_cache_arenas), or 0 for arena_reserve's.
+     uint64_t lane_small_bytes;
++    // The lanes whose arenas file_cache_arenas has reserved, or tried to, a bit each: a lane whose bit is clear has its
++    // arenas all zero. What walks the lanes' arenas (file_cache_release, pp_release_file_columns) walks these alone
++    // (#1444): `lanes` is 130 KB, 32 pages, of which a compile on one lane uses the first, and a walk of every lane read
++    // and wrote every page, 63 of an empty file's 98 faults in its preprocessor's tables, where the cache is.
++    uint64_t lanes_reserved[BUSTER_LANE_MAX_COUNT / 64];
++    // Each lane's arenas, reserved when the lane first prepares a record. Last, so that the fields before it are
++    // cleared without its pages (file_cache_release).
++    FileCacheArenas lanes[BUSTER_LANE_MAX_COUNT];
+ };
+ 
+ // A range of the location space: one inclusion of a file, or a chunk of scratch spellings (`file` BUSTER_PP_NONE).
+@@ -3884,19 +3891,24 @@ static __attribute__((unused)) void file_cache_release(FileCache* cache)
+             munmap((void*)cache->paths[p].probe.bytes, cache->paths[p].probe.length);
+         }
+     }
+-    for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
++    for (uint32_t word = 0; word < BUSTER_ARRAY_LENGTH(cache->lanes_reserved); word += 1)
+     {
+-        FileCacheArenas* arenas = &cache->lanes[lane];
+-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arenas->columns); i += 1)
++        for (uint64_t lanes = cache->lanes_reserved[word]; lanes != 0; lanes &= lanes - 1)
+         {
+-            arena_release(&arenas->columns[i]);
++            FileCacheArenas* arenas = &cache->lanes[word * 64 + (uint32_t)__builtin_ctzll(lanes)];
++            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(arenas->columns); i += 1)
++            {
++                arena_release(&arenas->columns[i]);
++            }
++            arena_release(&arenas->arena);
++            arena_release(&arenas->bytes);
+         }
+-        arena_release(&arenas->arena);
+-        arena_release(&arenas->bytes);
+     }
+     arena_release(&cache->arrays);
+     arena_release(&cache->path_arena);
+-    *cache = (FileCache){ 0 };
++    // The lanes are zero now, those released as every other one was: the rest of the cache is cleared without their
++    // pages, which a unit's cache, in its tables, has never touched past the first lanes.
++    memset(cache, 0, offsetof(FileCache, lanes));
+ }
+ 
+ // The arenas lane `lane` prepares records into, reserved the first time. Reserving takes the process's memory map lock,
+@@ -3906,6 +3918,9 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
+     FileCacheArenas* result = &cache->lanes[lane];
+     if (result->arena.base == 0)
+     {
++        // Atomic, as two lanes whose first reservations failed may try again at once (c_files.c reserves them before its
++        // lanes start, one lane after another), each on its own lane's bit of a shared word.
++        __atomic_fetch_or(&cache->lanes_reserved[lane / 64], 1ull << (lane % 64), __ATOMIC_RELAXED);
+         // Reserved in turn until one can't be, and then none of them, so that a lane short of address space fails to
+         // prepare, as a reservation that fails stops a run, rather than going on without the arena it lacked.
+         Arena* arenas[] = { &result->columns[0], &result->columns[1], &result->columns[2], &result->arena, &result->bytes };
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 758d00d..8c68620 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -14130,9 +14130,12 @@ BUSTER_PREPROCESSOR_ENTRY void pp_release_file_columns(Preprocessor* pp, bool po
+                 pp_forget_prepared(&pp->datas[d], false);
+             }
+         }
++        // The lanes whose arenas were reserved alone (FileCache.lanes_reserved): the others' are zero, and on pages a unit
++        // on one lane never touches.
+         for (uint32_t lane = 0; lane < BUSTER_LANE_MAX_COUNT; lane += 1)
+         {
+-            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cache->lanes[lane].columns); i += 1)
++            const bool reserved = (cache->lanes_reserved[lane / 64] >> (lane % 64) & 1) != 0;
++            for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(cache->lanes[lane].columns); i += 1)
+             {
+                 Arena* columns = &cache->lanes[lane].columns[i];
+                 if (poison && columns->base != NULL && columns->mapping_bytes != 0 && columns->peak != 0)
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 047f80a..6a0881f 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -78,6 +78,7 @@
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
+ #include <sys/syscall.h>
++#include <sys/utsname.h>
+ #include <linux/futex.h>
+ 
+ // CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
+@@ -254,6 +255,20 @@ bool arena_pages_busy;
+ #else
+ static bool arena_pages_busy;
+ #endif
++// Whether a mapping made with MAP_STACK is VM_NOHUGEPAGE from the start, as Linux's are since 6.7 (#1444): then a
++// reservation that its layout doesn't keep in base pages (arena_reserve_policy's base pages of 2 MB or more, a busy
++// host's arenas, an arena of tables of 2 MB or more) is mapped so, rather than advised MADV_NOHUGEPAGE by a call of its
++// own, which split its mapping and took the address space's lock for writing. A later MADV_HUGEPAGE replaces it where
++// an arena's huge pages start, as it replaced the advice. arena_page_policy sets it from the kernel's release, once,
++// before the process starts any thread; elsewhere, or on an older kernel, the reservations advise as before. main.c's
++// units share it.
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern bool arena_stack_base_pages;
++#elif defined(BUSTER_UNIT)
++bool arena_stack_base_pages;
++#else
++static bool arena_stack_base_pages;
++#endif
+ // An arena that holds no memory, for measuring what pushes take: its pushes take room as from an arena reserved at a
+ // page boundary, up to BUSTER_ARENA_MAX_CAPACITY, and its length after them is that room. Its base is past the
+ // addresses the kernel maps a process's memory at unasked (BUSTER_ARENA_MAX_CAPACITY), so that reading or writing what a
+@@ -478,6 +493,18 @@ static Arena arena_pool_take(ArenaPool* pool, uint32_t slot, uint64_t capacity,
+     return result;
+ }
+ 
++// The flags of the mapping (`mapping_bytes`) that reserves an arena of `capacity` bytes, the first `small` of them base
++// pages: with arena_stack_base_pages, MAP_STACK, which maps it VM_NOHUGEPAGE throughout, where arena_reserve_policy
++// would advise MADV_NOHUGEPAGE (base pages of 2 MB or more, or a busy host's arena of 2 MB or more). Its huge pages past
++// `small`, if any, are advised MADV_HUGEPAGE by the first commit that reaches them (arena_commit), as without it: until
++// then they are inaccessible, whatever their advice.
++static int arena_reservation_flags(uint64_t capacity, uint64_t small, uint64_t mapping_bytes)
++{
++    const uint64_t base_pages = capacity > small ? small : mapping_bytes;
++    const bool advised = (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES) || base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES;
++    return MAP_PRIVATE | MAP_ANONYMOUS | (advised && arena_stack_base_pages ? MAP_STACK : 0);
++}
++
+ // Past the first `small` bytes, base is placed so that base + small starts on a huge-page boundary, a page or more past
+ // the mapping's start. The reservation itself is inaccessible and uncharged under strict overcommit; arena_push makes
+ // only its used prefix writable.
+@@ -514,7 +541,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+         allowed = allowed && arena_test_reservation_allowed(arena_mapping_bytes(requested));
+ #endif
+         errno = ENOMEM;
+-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
++        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0) : MAP_FAILED;
+         // Do not evade an injected failure. Valgrind may reject a valid oversized mapping with EINVAL rather than
+         // ENOMEM. Both layout refusals get a bounded retry, never a greedy half-limit map.
+         if (bounded && allowed && mapping == MAP_FAILED && (errno == ENOMEM || errno == EINVAL) && capacity > BUSTER_ARENA_COMPACT_BYTES)
+@@ -522,7 +549,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+             arena_compact = true;
+             capacity = BUSTER_ARENA_COMPACT_BYTES;
+             mapping_bytes = arena_mapping_bytes(capacity);
+-            mapping = mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++            mapping = mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0);
+         }
+         if (mapping != MAP_FAILED)
+         {
+@@ -535,12 +562,14 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+                 offset = huge_begin - small - (uintptr_t)mapping;
+             }
+             const uint64_t base_pages = capacity > small ? small : mapping_bytes;
+-            if (arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
++            // Where arena_reservation_flags mapped it VM_NOHUGEPAGE (arena_stack_base_pages), the mapping needs no advice.
++            const bool mapped = arena_stack_base_pages;
++            if (!mapped && arena_pages_busy && mapping_bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+             {
+                 // A busy host's arenas are base pages throughout: arena_commit advises none of them huge.
+                 madvise(mapping, mapping_bytes, MADV_NOHUGEPAGE);
+             }
+-            else if (base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
++            else if (!mapped && base_pages >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+             {
+                 madvise(mapping, offset + base_pages, MADV_NOHUGEPAGE);
+             }
+@@ -663,14 +692,18 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+         allowed = arena_test_reservation_allowed(mapping_bytes);
+ #endif
+         errno = ENOMEM;
+-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) : MAP_FAILED;
++        // Base pages but where a table's huge pages are advised below: from 2 MB, by the mapping itself
++        // (arena_stack_base_pages: MAP_STACK) or else by advice.
++        const bool advised = bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES;
++        const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (advised && arena_stack_base_pages ? MAP_STACK : 0);
++        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, flags, -1, 0) : MAP_FAILED;
+         if (mapping != MAP_FAILED)
+         {
+             // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
+             // page past it).
+             const uintptr_t after_guard = (uintptr_t)mapping + BUSTER_ARENA_PAGE_BYTES;
+             const uint64_t offset = BUSTER_ARENA_PAGE_BYTES + (huge ? (phase - after_guard) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1) : 0);
+-            if (bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES)
++            if (advised && !arena_stack_base_pages)
+             {
+                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
+             }
+@@ -788,8 +821,31 @@ static bool arena_host_busy(void)
+ // a large unit's arenas fill theirs (docs/translation-units.md, "Memory"), but not where the other cores are busy
+ // (arena_host_busy): then the arenas alone take base pages (arena_pages_busy), by their own advice, which no process this
+ // one starts inherits. A process started with them off keeps them off.
++// Whether `release`, the kernel's (uname's), is Linux 6.7 or later, whose MAP_STACK maps a region VM_NOHUGEPAGE: its
++// major and minor numbers, compared in order. A release that doesn't start with them is taken for an older kernel.
++static bool arena_release_maps_stack_base_pages(const char* release)
++{
++    uint64_t numbers[2] = { 0, 0 };
++    uint32_t at = 0;
++    bool valid = true;
++    for (uint32_t part = 0; valid && part < 2; part += 1)
++    {
++        const uint32_t start = at;
++        while (release[at] >= '0' && release[at] <= '9' && at - start < 9)
++        {
++            numbers[part] = numbers[part] * 10 + (uint64_t)(release[at] - '0');
++            at += 1;
++        }
++        valid = at > start && (part == 1 || release[at] == '.');
++        at += part == 0 && valid ? 1 : 0;
++    }
++    return valid && (numbers[0] > 6 || (numbers[0] == 6 && numbers[1] >= 7));
++}
++
+ static void arena_page_policy(const char* setting)
+ {
++    struct utsname kernel;
++    arena_stack_base_pages = uname(&kernel) == 0 && arena_release_maps_stack_base_pages(kernel.release);
+     uint32_t eax = 0;
+     uint32_t ebx = 0;
+     uint32_t ecx = 0;
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index 13927cd..246e7f5 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -503,9 +503,91 @@ static bool lane_test_resident(const uint8_t* address)
+     return mincore((void*)address, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 && (vector & 1) != 0;
+ }
+ 
++// The reservations that keep 2 MB or more in base pages (#1444), mapped VM_NOHUGEPAGE (arena_stack_base_pages:
++// MAP_STACK) where the kernel maps MAP_STACK so, and advised MADV_NOHUGEPAGE by a call of their own elsewhere: the same
++// pages either way. An arena with 8 MB of base pages, before its first commit and as it commits past them; a busy host's
++// arena (arena_pages_busy); and an arena of tables, a table of base pages throughout beside one with huge pages past
++// its first 2 MB. MAP_STACK splits no mapping: before its first commit, the wide arena's base pages are one mapping with
++// the rest of its reservation, where the advice split them off. And the kernel releases arena_page_policy reads.
++static void lane_test_stack_base_pages(LaneTestTally* tally)
++{
++    static const struct
++    {
++        const char* release;
++        bool maps;
++    } releases[] = {
++        { "6.18.50-2-lts", true }, { "6.7.0", true }, { "6.7", true }, { "6.07.1", true }, { "7.0.0", true }, { "10.1", true },
++        { "6.6.69", false },       { "5.15.0-91-generic", false }, { "6", false }, { "6.", false }, { "6.x", false },
++        { "", false },             { "abc", false }, { "16000000000.1", false },
++    };
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(releases); i += 1)
++    {
++        lane_test_expect(tally, arena_release_maps_stack_base_pages(releases[i].release) == releases[i].maps, "a kernel's release was misread");
++    }
++    struct utsname kernel;
++    const bool supported = uname(&kernel) == 0 && arena_release_maps_stack_base_pages(kernel.release);
++    const bool was_stack = arena_stack_base_pages;
++    const bool was_busy = arena_pages_busy;
++    for (uint32_t mode = 0; mode < (supported ? 2u : 1u); mode += 1)
++    {
++        arena_stack_base_pages = mode == 1;
++        bool found = false;
++        uint64_t first = 0;
++        uint64_t last = 0;
++        const uint64_t wide_small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
++        Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, wide_small);
++        if (wide.base != 0)
++        {
++            const bool head = lane_test_vm_flag_in((uintptr_t)wide.base, "nh", &found, &first, &last) && found;
++            const bool whole = last > (uintptr_t)wide.base + wide_small;
++            lane_test_expect(tally, head && whole == arena_stack_base_pages, "an arena's 8 MB of base pages weren't mapped or advised as asked");
++            const bool pushed = arena_push(&wide, wide_small, 1) == wide.base;
++            const bool base_pages = lane_test_vm_flag((uintptr_t)wide.base + wide_small - 1, "nh", &found) && found &&
++                                    !(lane_test_huge_capable((uintptr_t)wide.base + wide_small / 2, &found) || !found);
++            const bool past = arena_push(&wide, 1, 1) != 0 && lane_test_vm_flag((uintptr_t)wide.base + wide_small, "hg", &found) && found &&
++                              lane_test_vm_flag((uintptr_t)wide.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "hg", &found) && found;
++            const bool kept = lane_test_vm_flag((uintptr_t)wide.base, "nh", &found) && found;
++            lane_test_expect(tally, pushed && base_pages && past && kept && wide.huge, "an arena with 8 MB of base pages took other pages than it asked for");
++        }
++        lane_test_expect(tally, wide.base != 0, "an arena with 8 MB of base pages couldn't be reserved");
++        arena_release(&wide);
++        arena_pages_busy = true;
++        Arena busy = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++        const bool busy_pushed = busy.base != 0 && arena_push(&busy, 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, 1) == busy.base;
++        const bool busy_base = busy_pushed && lane_test_vm_flag((uintptr_t)busy.base, "nh", &found) && found &&
++                               lane_test_vm_flag((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found) && found &&
++                               lane_test_vm_flag((uintptr_t)busy.base + BUSTER_LANE_TEST_LARGE_ARENA - 1, "nh", &found) && found &&
++                               !(lane_test_huge_capable((uintptr_t)busy.base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found) && !busy.huge;
++        lane_test_expect(tally, busy_base, "a busy host's arena may take huge pages");
++        arena_release(&busy);
++        arena_pages_busy = was_busy;
++        ArenaTable tables[] = {
++            { .bytes = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + 5, .small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES },
++            { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES },
++        };
++        Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
++        if (held.base != 0)
++        {
++            const uintptr_t plain = (uintptr_t)tables[0].base;
++            const uintptr_t split = (uintptr_t)tables[1].base;
++            const bool plain_base = lane_test_vm_flag(plain, "nh", &found) && found && lane_test_vm_flag(plain + tables[0].bytes - 1, "nh", &found) && found &&
++                                    !(lane_test_huge_capable(plain + BUSTER_ARENA_HUGE_PAGE_BYTES, &found) || !found);
++            const bool split_head = lane_test_vm_flag(split, "nh", &found) && found && !(lane_test_huge_capable(split, &found) || !found);
++            const bool split_tail = (split + BUSTER_ARENA_HUGE_PAGE_BYTES) % BUSTER_ARENA_HUGE_PAGE_BYTES == 0 &&
++                                    lane_test_vm_flag(split + BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found) && found &&
++                                    lane_test_huge_capable(split + BUSTER_ARENA_HUGE_PAGE_BYTES, &found) && found;
++            lane_test_expect(tally, plain_base && split_head && split_tail, "an arena of tables' pages aren't each table's own arena's");
++        }
++        lane_test_expect(tally, held.base != 0, "an arena of tables couldn't be reserved");
++        arena_release(&held);
++    }
++    arena_stack_base_pages = was_stack;
++}
++
+ static bool lane_test_arenas(void)
+ {
+     LaneTestTally tally = { 0 };
++    lane_test_stack_base_pages(&tally);
+ 
+     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+     static const struct
+diff --git a/src/buster/compiler/test_paths.h b/src/buster/compiler/test_paths.h
+index 0bfbdd7..e86c48c 100644
+--- a/src/buster/compiler/test_paths.h
++++ b/src/buster/compiler/test_paths.h
+@@ -14,9 +14,19 @@
+ 
+ #define BUSTER_TEST_TEMPORARY_BYTES 4096
+ 
++// The buffer, one for the whole executable: main.c's unit defines it, and every other object, a unit of main.c or a
++// benchmark's object of its own, declares it. Every object that includes this file is linked with main.c's. A buffer of
++// each object's own was 19 of the executable's 22 pages of zero thread-local data, which the C library clears at every
++// thread's start, the process's first among them: 10 of an empty file's faults on the 9700X (#1444).
++#if defined(BUSTER_UNIT) && BUSTER_UNIT == BUSTER_UNIT_DRIVER
++_Thread_local char oracle_temporary_buffer[BUSTER_TEST_TEMPORARY_BYTES];
++#else
++extern _Thread_local char oracle_temporary_buffer[BUSTER_TEST_TEMPORARY_BYTES];
++#endif
++
+ static inline __attribute__((unused)) const char* oracle_temporary_directory(void)
+ {
+-    static _Thread_local char directory[BUSTER_TEST_TEMPORARY_BYTES];
++    char* directory = oracle_temporary_buffer;
+     const char* base = getenv("TMPDIR");
+     base = base != 0 && base[0] != 0 ? base : "/tmp";
+     size_t length = 0;
+@@ -35,7 +45,7 @@ static inline __attribute__((unused)) const char* oracle_temporary_directory(voi
+         {
+             slash = false;
+         }
+-        if (length + 1 >= sizeof(directory))
++        if (length + 1 >= BUSTER_TEST_TEMPORARY_BYTES)
+         {
+             return base;
+         }
+diff --git a/tools/ci/build_regression.c b/tools/ci/build_regression.c
+index fbfba3f..0297443 100644
+--- a/tools/ci/build_regression.c
++++ b/tools/ci/build_regression.c
+@@ -1311,7 +1311,7 @@ static const OwnershipException ownership_exceptions[] = {
+     { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xb84cf97ab4156949) },
+     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
+     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },
+-    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization for production/profile and test subprocesses", UINT64_C(0xe425875a65b829de) },
++    { "src/buster/compiler/test_paths.h", ownership_main_units, "temporary-directory normalization for production/profile and test subprocesses", UINT64_C(0x433189fdd139cffd) },
+     { "src/buster/compiler/test_tool.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "external tool probes for these six test families", UINT64_C(0xfc1a967b31b9b4af) },
+     { "src/buster/compiler/test_tool.h", "main.c main_unit_x86.c main_unit_frontend.c main_unit_link.c main_unit_types.c main_unit_backend.c", "tool probe interface for its six implementation consumers", UINT64_C(0x398696e707640aa9) },
+     { "src/buster/compiler/test_process.c", ownership_main_units, "CPU grant and capture-file helpers used by shared parser/process interfaces", UINT64_C(0x72b4864f47979300) },
