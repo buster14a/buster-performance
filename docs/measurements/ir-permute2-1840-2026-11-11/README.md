@@ -45,7 +45,11 @@ are counts, not timings). The base is buster#2208's head `f324f2ac` (the lane op
 with its tests. `rows-debug.patch` is the uncommitted counting aid both compilers carried, which prints each emitted
 machine row's forms; `machine-rows.txt` holds the counts.
 
-| Unit | Rows before | Rows after |
-| --- | ---: | ---: |
-| `main_unit_frontend.c` | 541 | 395 |
-| `main_unit_backend.c` | 753 | 666 |
+| Unit | Rows before | Rows after `ffbf99c9` | Rows after `4f18b961` |
+| --- | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 541 | 395 | 350 |
+| `main_unit_backend.c` | 753 | 666 | 642 |
+
+`4f18b961` also decodes `__builtin_shufflevector`'s rows of narrower vectors into a wider one, its tables widened: no
+`vpermt2` row is left in either unit. `machine-rows.txt`'s `new` lines are `ffbf99c9`'s, its `narrow` lines
+`4f18b961`'s.
