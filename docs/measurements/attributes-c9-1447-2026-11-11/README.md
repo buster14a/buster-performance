@@ -29,3 +29,22 @@ lookup of tags' attributes (`check_input_tag_names`).
 The wall and cycle differences are within the runs' spread (the ranges in
 `times-pr2133.txt` overlap). Instructions move by 0.02% on sqlite3.c and not at
 all on main.c: no cost on the hot path.
+
+## The stack through `cfi_salt` (buster#2133, #2149, #2215 and the `cfi_salt` PR)
+
+`setup2.sh checker/1447-cfi-salt cfi-salt` rebuilt head at
+`82b741f52dbc2aadbf46ac97d6fe24a9a22edbaf` (`cfi_salt` as part of a prototype's
+type, with every earlier C9 PR under it; head binary sha256
+`513c43a75cae96cd44e09de25953599e58a03ff2682570da1e5e78c8e0169aab`) and ran
+`measure.sh cfi-salt` against the same base (`times-cfi-salt.txt`).
+
+| Input | Metric | Base median | Head median | Head vs base |
+|---|---|---|---|---|
+| sqlite3.c | wall | 97.070 ms | 96.966 ms | −0.11% |
+| sqlite3.c | user cycles | 451.548 M | 450.619 M | −0.21% |
+| sqlite3.c | instructions | 987,255,862 | 987,705,019 | +0.045% |
+| main.c | wall | 584.205 ms | 583.181 ms | −0.18% |
+| main.c | user cycles | 2924.198 M | 2916.628 M | −0.26% |
+| main.c | instructions | 8,770,385,972 | 8,771,407,180 | +0.012% |
+
+Within the runs' spread: no measurable cost.
