@@ -49,3 +49,28 @@ uncommitted counting aid both compilers carried, which prints each emitted machi
 | `main_unit_backend.c` | 967 | 1,542,016 | 792 | 1,541,683 |
 
 No shift by an int stays a machine row (32 and 175 before).
+
+## The masks' conversions (buster#1840, item 3)
+
+A second process measured the 12 register forms Tier 1 selects for a vector's sign bits as a mask, `vpmovb2m` to
+`vpmovq2m` at every width:
+- **Script:** `zen5-mask.sh`: the build and the measurement, each one hold of the lock, the measurement on CPU 2.
+- **Build:** buster `40cda70` (branch `ir/1840-mask-vectors`, the change with its 12 rows `U`): the shifts' commit
+  `3bf6339` plus `mask-vectors.patch`, built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0`.
+- **Output:** `zen5-mask-table.txt` (standard output) and `zen5-mask-errors.txt` (standard error, exit status, commit).
+
+| Forms | Latency | Throughput | Macro-ops | FP ops | Pipes |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `vpmovb2m` to `vpmovq2m` of an xmm register | 768 | 128 | 256 | 256 | 256 |
+| of a ymm register | 1024 | 128 | 256 | 256 | 256 |
+| of a zmm register | 1536 | 128 | 256 | 256 | 256 |
+
+So 3, 4 and 6 cycles of latency, 2 per cycle. The `vpmovm2*` forms already had rows.
+
+Machine rows, both compilers (the shifts' and this change's) compiling buster#1972's sources `2461071` as above
+(`report-mask-*.txt` for this change):
+
+| Unit | Rows before | Records before | Rows after | Records after |
+| --- | ---: | ---: | ---: | ---: |
+| `main_unit_frontend.c` | 628 | 543,620 | 596 | 543,612 |
+| `main_unit_backend.c` | 792 | 1,541,683 | 784 | 1,541,683 |
