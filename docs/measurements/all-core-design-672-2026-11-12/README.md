@@ -293,9 +293,29 @@ The families are the one-core record's, by the functions' names; `scripts/famili
 - One lane's pass is in one of two page states, as
   [the file-scope record](../file-scope-design-672-2026-11-12/) found: round 2's median has 368,141 faults where the
   others have 343,109.
-- **By family of function** (`scripts/muslsample.sh`, `tables/musl-families.tsv`; sampled cycles a pass). User
-  cycles, eight lanes over one lane: the reader 1.08 (1,489 M → 1,615 M), the parser 1.08, the graph's construction
-  1.13, the program 1.13, the emission 1.05, the preprocessor 1.24, libc's `memset` and its kin 1.36.
+- **By family of function** (`scripts/muslsample.sh`, `tables/musl-families.tsv`). A command of several units
+  reports no stages, so the families stand for them. Sampled user cycles a pass, one cohort each way (2 passes on
+  one lane, 4 on eight); their totals inflate 1.16 times where the unsampled medians above inflate 1.21:
+
+| family, user cycles a pass | one lane | 8 lanes | times |
+| --- | ---: | ---: | ---: |
+| the reader's other functions | 1,489.3 M | 1,615.2 M | 1.08 |
+| the preprocessor and the lexer | 804.6 M | 1,001.7 M | 1.24 |
+| the emission | 324.9 M | 341.0 M | 1.05 |
+| the parser and the tree's columns | 279.3 M | 301.0 M | 1.08 |
+| libc: `memset`, `memmove`, `memcmp` | 239.2 M | 325.8 M | 1.36 |
+| the graph's construction | 224.5 M | 254.8 M | 1.13 |
+| warnings | 175.5 M | 192.8 M | 1.10 |
+| the program and its controls | 164.9 M | 186.7 M | 1.13 |
+| the lowering | 102.1 M | 127.3 M | 1.25 |
+| the type table | 98.4 M | 102.3 M | 1.04 |
+| initializers and static data | 96.0 M | 102.0 M | 1.06 |
+| the graph run and its loop | 80.5 M | 87.5 M | 1.09 |
+| the C rules for a node | 63.7 M | 73.3 M | 1.15 |
+| rest | 570.6 M | 626.8 M | 1.10 |
+| samples at the kernel's addresses | 184.7 M | 356.0 M | 1.93 |
+| all | 4,898.2 M | 5,694.2 M | 1.16 |
+
 - **The kernel's families**, both modes' sampled cycles a pass:
 
 | family | one lane | 8 lanes | 8 commands |
