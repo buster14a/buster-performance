@@ -1,0 +1,741 @@
+diff --git a/src/buster/compiler/baked.c b/src/buster/compiler/baked.c
+index 12f8bab9..3a8929dd 100644
+--- a/src/buster/compiler/baked.c
++++ b/src/buster/compiler/baked.c
+@@ -4,7 +4,7 @@
+ // The baked tables (#590, baked.h). `bake-tables OUTPUT` writes this executable with its buster_baked section as the
+ // initializers leave it, so that a compile starts with x86_encode's templates, the x86 semantics' tables, Tier 0's, the
+ // Zen 5 cost model's, the unwind templates, Tier 1's selection state tables, the parser's tables (#652), the
+-// lowering's runtime functions' names' hashes (#442) and the node machine's transition table (#2524) built.
++// lowering's runtime functions' names' hashes (#442) and the node machine's transition table and rows (#2524) built.
+ // build.sh runs it on each executable it links. It runs in the checker's unit, whose Tier 0, unwind, Zen 5, Tier 1 and
+ // lowering copies the C driver uses (main.c), and builds the parser's in the frontend's unit, their home, through
+ // parse_tables_initialize: it zeroes the section, runs the nine initializers, checks that they wrote nothing in the image's writable memory outside the
+@@ -31,12 +31,12 @@ static bool tier1_select_initialized(void);
+ #include <sys/stat.h>
+ #include <unistd.h>
+ 
+-// The node machine's transition table (#2524, c_check_node_machine_type.c), the checker unit's alone; another unit's bake
+-// has none to build.
++// The node machine's tables (#2524): T's transition table (c_check_node_machine_type.c) and X's rows
++// (c_check_node_machine_expand.c), the checker unit's alone; another unit's bake has none to build.
+ static bool bake_node_machine_initialize(void)
+ {
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+-    return node_machine_tables_initialize();
++    return node_machine_tables_initialize() && node_machine_expand_tables_initialize();
+ #else
+     return true;
+ #endif
+@@ -45,7 +45,7 @@ static bool bake_node_machine_initialize(void)
+ static bool bake_node_machine_ready(void)
+ {
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+-    return node_machine_tables_ready;
++    return node_machine_tables_ready && node_machine_expand_tables_ready;
+ #else
+     return true;
+ #endif
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index a2737244..c6acf44e 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -1787,6 +1787,8 @@ struct NodeShadow
+     uint64_t row_nodes;
+     uint64_t action_nodes;
+     uint64_t twin_differences;
++    // The expressions whose entries X's rows write otherwise than its twin, or refuse otherwise (--verify).
++    uint64_t row_differences;
+     uint64_t action_ops[CHECK_OP_COUNT];
+     // The timing: each file's least cycles, instructions and TSC ticks over the passes for each sweep set, summed, and
+     // the evaluated nodes and records they took. `counted`: whether the cycle counter could be opened.
+@@ -1908,7 +1910,16 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+     const uint64_t row_nodes = machine->row_nodes;
+     const uint64_t action_nodes = machine->action_nodes;
+     const uint64_t twins = machine->twin_differences;
++    const uint64_t rows = machine->row_differences;
+     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_run(machine, first, root, records, root_context, pop->target, object) : refusal;
++    const bool rows_same = machine->row_differences == rows;
++    shadow->row_differences += !rows_same;
++    if (!rows_same && shadow->listed < node_census_list)
++    {
++        shadow->listed += 1;
++        printf("node-shadow: difference file=%s line=%u root=%s rows=DIFFERENT refusal=%s\n", s->file,
++               node_census_line(s->pp, program->parser, program->input->graph.tokens[root]), node_census_root_names[context], node_machine_refusal_names[refusal]);
++    }
+     shadow->expressions += 1;
+     shadow->nodes += nodes;
+     shadow->records += walked;
+@@ -2067,8 +2078,9 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+     printf("node-shadow: machine-taken expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%) records=%" PRIu64 " entries=%" PRIu64 "\n",
+            shadow->taken_expressions, node_census_share(shadow->taken_expressions, shadow->expressions), shadow->taken_nodes,
+            node_census_share(shadow->taken_nodes, shadow->nodes), shadow->taken_records, shadow->entries);
+-    printf("node-shadow: differences values=%" PRIu64 " entries=%" PRIu64 " twin=%" PRIu64 " (row-typed nodes %" PRIu64 ", action-typed %" PRIu64 "%s)\n",
+-           shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
++    printf("node-shadow: differences values=%" PRIu64 " entries=%" PRIu64 " twin=%" PRIu64 " rows=%" PRIu64 " (row-typed nodes %" PRIu64 ", action-typed %" PRIu64
++           "%s)\n",
++           shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_differences, shadow->row_nodes, shadow->action_nodes,
+            shadow->verify ? ", verified" : "");
+     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
+     {
+@@ -2415,7 +2427,8 @@ static int run_node_census(int count, char** arguments)
+     }
+     free(files);
+     free(options);
+-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0);
++    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 ||
++                                         shadow.row_differences != 0);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index e01f3f78..93535b4d 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -219,12 +219,15 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char**
+     fflush(stdout);
+     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
+             shadow.record_count < shadow.record_capacity;
+-    const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
++    const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.row_differences == 0 &&
++                      shadow.taken_expressions != 0 &&
+                       (scalar || shadow.row_nodes != 0);
+     if (!valid || !same)
+     {
+-        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 " differ; %" PRIu64 " expressions taken, %" PRIu64 " row-typed nodes\n",
+-                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.taken_expressions,
++        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", rows %" PRIu64 " differ; %" PRIu64
++                " expressions taken, %" PRIu64 " row-typed nodes\n",
++                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences,
++                shadow.row_differences, shadow.taken_expressions,
+                 shadow.row_nodes);
+     }
+     uint32_t line = 1;
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index bd168e7b..4c4e87cc 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -118,6 +118,9 @@ struct NodeMachine
+     uint64_t row_nodes;
+     uint64_t action_nodes;
+     uint64_t twin_differences;
++    // --verify: the expressions whose entries X's rows write otherwise than its twin, or refuse otherwise
++    // (c_check_node_machine_expand.c).
++    uint64_t row_differences;
+     // The nodes T typed by the action, by operator.
+     uint64_t action_ops[CHECK_OP_COUNT];
+     // The current expression: its records are the graph's nodes first to first + count - 2, and its root the last, which is
+@@ -144,7 +147,8 @@ struct NodeMachine
+     uint8_t* contexts;
+     TypeId* targets;
+     uint8_t* templates;
+-    // X's tape: the expression's entries, a local's holding its object.
++    // X's tape: the expression's entries, a local's holding its object; then eight entries' room for the rows' fixed-width
++    // stores, and (--verify) the twin's entries in a second half.
+     uint8_t* kinds;
+     uint8_t* classes;
+     uint64_t* tape;
+@@ -160,6 +164,7 @@ static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGrap
+ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count);
+ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object);
+ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object);
++static bool node_machine_expand_tables_initialize(void);
+ 
+ // The machine's columns for `program`'s unit, from `arena`: whether there was room.
+ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
+@@ -192,9 +197,9 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+     machine->contexts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
+     machine->targets = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, most);
+     machine->templates = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, most);
+-    machine->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
+-    machine->classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, entries);
+-    machine->tape = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, entries);
++    machine->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, 2 * entries + BUSTER_NODE_MACHINE_ROW_MOST);
++    machine->classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, 2 * entries + BUSTER_NODE_MACHINE_ROW_MOST);
++    machine->tape = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, 2 * entries + BUSTER_NODE_MACHINE_ROW_MOST);
+     const bool room = machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->codes != NULL && machine->left != NULL && machine->right != NULL &&
+                       machine->values != NULL && machine->words != NULL && machine->facts != NULL &&
+                       machine->value_classes != NULL && machine->converted != NULL &&
+@@ -214,7 +219,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+             machine->type_complete_at[index] = valid ? node_machine_complete_at(program->types, &program->input->graph, type) : UINT32_MAX;
+         }
+     }
+-    return room && node_machine_tables_initialize();
++    return room && node_machine_tables_initialize() && node_machine_expand_tables_initialize();
+ }
+ 
+ // Type `type`'s word (NodeMachine.type_words), or a class of UINT8_MAX and no facts past the table.
+diff --git a/src/buster/compiler/c_check_node_machine_expand.c b/src/buster/compiler/c_check_node_machine_expand.c
+index f0d20797..21215998 100644
+--- a/src/buster/compiler/c_check_node_machine_expand.c
++++ b/src/buster/compiler/c_check_node_machine_expand.c
+@@ -2,10 +2,23 @@
+ // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+ //
+ // #2524's node machine's X sweep (c_check_node_machine.c has the machine): node_machine_expand walks the records up
+-// the postorder and writes each evaluated one's row to the tape, its own entries by its template (node_machine_own,
+-// check_lower_template_own's) and then its conversion's to its target in its context (node_machine_conversion,
+-// check_lower_template_conversion's). It reads the records T typed and C classified through the record accessors alone;
+-// the tape (NodeMachine's kinds, classes and tape) is its own.
++// the postorder and writes each evaluated one's row to the tape, its own entries by its template and then its
++// conversion's to its target in its context. It reads the records T typed and C classified through the record accessors
++// alone; the tape (NodeMachine's kinds, classes and tape) is its own. Two paths write the same entries:
++//
++// - By the rows (node_machine_expand_rows, the default; docs/node-machine.md, "C and X: contexts and expansion"): each
++//   record's row of node_machine_entry_rows, its own entries' and its conversion's, written by three stores of eight
++//   entries whatever its length (its kinds; its classes, a byte shuffle of the record's classes and the fixed ones; its
++//   values, a permute of its payload, its offset, 0 and 1), the tape then advancing by its count. Its own row is its
++//   template's, chosen by one branch on the template that reads only what that row needs (node_machine_own_row); its
++//   conversion's is node_machine_conversion_rows' at its class and its target's, a table made from the twin itself.
++// - The twin, the templates' rules as branches and an entry at a time (node_machine_own, check_lower_template_own's, and
++//   node_machine_conversion, check_lower_template_conversion's): --scalar runs it, and --verify runs it beside the rows
++//   on every expression and counts those whose entries or refusal differ (NodeMachine.row_differences).
++//
++// node_machine_expand_tables_initialize makes the rows (baked.c bakes them): each own row's entries from their list
++// (node_machine_own_entries) with each conversion's, and the conversion rows by running node_machine_conversion at every
++// key on a machine of two types and matching its entries with the conversions' rows.
+ #ifndef BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
+ #define BUSTER_C_CHECK_NODE_MACHINE_EXPAND_INCLUDED
+ 
+@@ -209,9 +222,9 @@ static bool node_machine_conversion(NodeMachine* machine, uint32_t r)
+     return takes;
+ }
+ 
+-// X: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape. `object` as
+-// in C.
+-static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
++// X's twin: each evaluated record's row, its own entries and then its conversion's, up the postorder into the tape, an
++// entry at a time. `object` as in C.
++static NodeMachineRefusal node_machine_expand_twin(NodeMachine* machine, uint32_t object)
+ {
+     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+     const uint32_t count = machine->count;
+@@ -232,5 +245,528 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
+     return refusal;
+ }
+ 
++// The own entries' rows, by what each writes (node_machine_own_entries): node_machine_own's cases, and an address's
++// (node_machine_address) with and without its offset and a constant's conversion.
++typedef enum NodeMachineOwn
++{
++    NODE_MACHINE_OWN_NONE,
++    NODE_MACHINE_OWN_INTEGER,
++    NODE_MACHINE_OWN_OFFSET,
++    NODE_MACHINE_OWN_OFFSET_CONVERT,
++    NODE_MACHINE_OWN_LOCAL_ADDRESS,
++    NODE_MACHINE_OWN_LOCAL_ADDRESS_CONVERT,
++    NODE_MACHINE_OWN_LOCAL_ADDRESS_OFFSET,
++    NODE_MACHINE_OWN_LOCAL_ADDRESS_OFFSET_CONVERT,
++    NODE_MACHINE_OWN_GLOBAL_ADDRESS,
++    NODE_MACHINE_OWN_GLOBAL_ADDRESS_CONVERT,
++    NODE_MACHINE_OWN_GLOBAL_ADDRESS_OFFSET,
++    NODE_MACHINE_OWN_GLOBAL_ADDRESS_OFFSET_CONVERT,
++    NODE_MACHINE_OWN_LOCAL,
++    NODE_MACHINE_OWN_GLOBAL,
++    NODE_MACHINE_OWN_LOAD,
++    NODE_MACHINE_OWN_MEMBER,
++    NODE_MACHINE_OWN_MEMBER_LOAD,
++    NODE_MACHINE_OWN_NEGATIVE,
++    NODE_MACHINE_OWN_BIT_NOT,
++    NODE_MACHINE_OWN_EQUAL,
++    NODE_MACHINE_OWN_EQUAL_NARROW,
++    NODE_MACHINE_OWN_NOT_EQUAL,
++    NODE_MACHINE_OWN_NOT_EQUAL_NARROW,
++    NODE_MACHINE_OWN_POINTER,
++    NODE_MACHINE_OWN_POINTER_SUBTRACT,
++    NODE_MACHINE_OWN_POINTER_LOAD,
++    NODE_MACHINE_OWN_STORE_LOCAL,
++    NODE_MACHINE_OWN_STORE_GLOBAL,
++    NODE_MACHINE_OWN_STORE,
++    // A binary operator's: its typed kind's (check_lower_binary), from BUSTER_TYPED_ADD's to BUSTER_TYPED_GE's.
++    NODE_MACHINE_OWN_BINARY,
++    NODE_MACHINE_OWNS = NODE_MACHINE_OWN_BINARY + (BUSTER_TYPED_GE - BUSTER_TYPED_ADD + 1),
++} NodeMachineOwn;
++
++// A conversion's row (node_machine_conversion's cases): none, a discard, a conversion to its target's class, a conversion
++// to _Bool of a narrow class or of another, or one the templates don't take.
++typedef enum NodeMachineConversion
++{
++    NODE_MACHINE_CONVERSION_NONE,
++    NODE_MACHINE_CONVERSION_DISCARD,
++    NODE_MACHINE_CONVERSION_CONVERT,
++    NODE_MACHINE_CONVERSION_BOOL_NARROW,
++    NODE_MACHINE_CONVERSION_BOOL,
++    NODE_MACHINE_CONVERSION_REFUSED,
++    NODE_MACHINE_CONVERSIONS,
++} NodeMachineConversion;
++
++// An entry row's class sources (NodeMachineEntryRow.classes): the record's own class, its first operand's, its target's,
++// then the fixed classes, the bytes of the word node_machine_expand_rows shuffles.
++#define BUSTER_NODE_MACHINE_CLASS_OWN 0u
++#define BUSTER_NODE_MACHINE_CLASS_OPERAND 1u
++#define BUSTER_NODE_MACHINE_CLASS_TARGET 2u
++#define BUSTER_NODE_MACHINE_CLASS_U64 3u
++#define BUSTER_NODE_MACHINE_CLASS_I64 4u
++#define BUSTER_NODE_MACHINE_CLASS_I32 5u
++#define BUSTER_NODE_MACHINE_CLASS_U8 6u
++#define BUSTER_NODE_MACHINE_CLASS_FIXED                                                                                                    \
++    ((uint64_t)BUSTER_TYPED_CLASS_U64 << 24 | (uint64_t)BUSTER_TYPED_CLASS_I64 << 32 | (uint64_t)BUSTER_TYPED_CLASS_I32 << 40 |           \
++     (uint64_t)BUSTER_TYPED_CLASS_U8 << 48)
++// An entry row's value sources (NodeMachineEntryRow.values), the indexes of a permute of two tables of eight: the record's
++// payload and its offset, then 0 and 1.
++#define BUSTER_NODE_MACHINE_VALUE_PAYLOAD 0u
++#define BUSTER_NODE_MACHINE_VALUE_OFFSET 1u
++#define BUSTER_NODE_MACHINE_VALUE_ZERO 8u
++#define BUSTER_NODE_MACHINE_VALUE_ONE 9u
++
++// One of X's rows: up to eight entries' kinds, their classes' sources and their values' sources, the count it writes and
++// whether the templates refuse it (its conversion isn't theirs, or it would pass BUSTER_NODE_MACHINE_ROW_MOST entries).
++typedef struct NodeMachineEntryRow NodeMachineEntryRow;
++struct NodeMachineEntryRow
++{
++    uint8_t kinds[BUSTER_NODE_MACHINE_ROW_MOST];
++    uint8_t classes[BUSTER_NODE_MACHINE_ROW_MOST];
++    uint8_t values[BUSTER_NODE_MACHINE_ROW_MOST];
++    uint8_t count;
++    uint8_t refused;
++    uint8_t pad[6];
++};
++
++_Static_assert(sizeof(NodeMachineEntryRow) == 32, "an entry row is thirty-two bytes");
++
++// The conversion rows' keys (node_machine_conversion_key): the source's class (0 to 15, 16 for any other), the target's,
++// whether the source is an aggregate, and the target's facts that node_machine_conversion reads (aggregate, complex,
++// _Bool, _BitInt).
++#define BUSTER_NODE_MACHINE_CONVERSION_CLASSES 17u
++#define BUSTER_NODE_MACHINE_CONVERSION_KEYS (BUSTER_NODE_MACHINE_CONVERSION_CLASSES * BUSTER_NODE_MACHINE_CONVERSION_CLASSES * 32u)
++#define BUSTER_NODE_MACHINE_CONVERSION_FACTS                                                                                               \
++    (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)
++
++// X's rows, by own row and then conversion, and the conversion rows by key: made by node_machine_expand_tables_initialize
++// and baked (baked.c).
++static BUSTER_BAKED_UNIT NodeMachineEntryRow node_machine_entry_rows[NODE_MACHINE_OWNS * NODE_MACHINE_CONVERSIONS];
++static BUSTER_BAKED_UNIT uint8_t node_machine_conversion_rows[BUSTER_NODE_MACHINE_CONVERSION_KEYS];
++static BUSTER_BAKED_UNIT bool node_machine_expand_tables_ready;
++
++// The key of a conversion from a record of class `class` (an aggregate's: `aggregate`) to a type of word `word`.
++static inline uint32_t node_machine_conversion_key(uint8_t class, bool aggregate, uint32_t word)
++{
++    const uint8_t target_class = (uint8_t)word;
++    const uint32_t source = class < BUSTER_TYPED_CLASSES ? class : BUSTER_TYPED_CLASSES;
++    const uint32_t target = target_class < BUSTER_TYPED_CLASSES ? target_class : BUSTER_TYPED_CLASSES;
++    const uint32_t facts = _pext_u32((uint8_t)(word >> 8), BUSTER_NODE_MACHINE_CONVERSION_FACTS);
++    return ((source * BUSTER_NODE_MACHINE_CONVERSION_CLASSES + target) * 2u + (aggregate ? 1u : 0u)) * 16u + facts;
++}
++
++// Appends an entry of `kind`, its class from source `class` and its value from source `value`, to `row`.
++static void node_machine_row_put(NodeMachineEntryRow* row, uint8_t kind, uint8_t class, uint8_t value)
++{
++    const uint32_t at = row->count;
++    if (at < BUSTER_NODE_MACHINE_ROW_MOST)
++    {
++        row->kinds[at] = kind;
++        row->classes[at] = class;
++        row->values[at] = value;
++    }
++    row->count = (uint8_t)(at + 1);
++}
++
++// Own row `own`'s entries, node_machine_own's for the case it names, appended to `row`. A load's and a store's value is 0:
++// check_lower_access_value's for every class but the vectors', which no template's load or store has (a template loads
++// and stores the classes I8 to F64, and an aggregate's U64).
++static void node_machine_own_entries(NodeMachineOwn own, NodeMachineEntryRow* row)
++{
++    const uint8_t zero = BUSTER_NODE_MACHINE_VALUE_ZERO;
++    const uint8_t payload = BUSTER_NODE_MACHINE_VALUE_PAYLOAD;
++    const uint8_t self = BUSTER_NODE_MACHINE_CLASS_OWN;
++    const bool local_address = own >= NODE_MACHINE_OWN_LOCAL_ADDRESS && own <= NODE_MACHINE_OWN_LOCAL_ADDRESS_OFFSET_CONVERT;
++    const bool global_address = own >= NODE_MACHINE_OWN_GLOBAL_ADDRESS && own <= NODE_MACHINE_OWN_GLOBAL_ADDRESS_OFFSET_CONVERT;
++    const uint32_t address_step = local_address ? own - NODE_MACHINE_OWN_LOCAL_ADDRESS : global_address ? own - NODE_MACHINE_OWN_GLOBAL_ADDRESS : 0;
++    if (own == NODE_MACHINE_OWN_INTEGER)
++    {
++        node_machine_row_put(row, BUSTER_TYPED_CONST, self, payload);
++    }
++    else if (own == NODE_MACHINE_OWN_OFFSET || own == NODE_MACHINE_OWN_OFFSET_CONVERT)
++    {
++        node_machine_row_put(row, BUSTER_TYPED_CONST, BUSTER_NODE_MACHINE_CLASS_U64, payload);
++    }
++    else if (local_address || global_address)
++    {
++        node_machine_row_put(row, local_address ? BUSTER_TYPED_LOCAL_ADDRESS : BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_NODE_MACHINE_CLASS_U64, payload);
++        if (address_step >= 2)
++        {
++            node_machine_row_put(row, BUSTER_TYPED_CONST, BUSTER_NODE_MACHINE_CLASS_I64, BUSTER_NODE_MACHINE_VALUE_OFFSET);
++            node_machine_row_put(row, BUSTER_TYPED_PTR_ADD, BUSTER_NODE_MACHINE_CLASS_U64, BUSTER_NODE_MACHINE_VALUE_ONE);
++        }
++    }
++    else if (own == NODE_MACHINE_OWN_LOCAL || own == NODE_MACHINE_OWN_GLOBAL)
++    {
++        node_machine_row_put(row, own == NODE_MACHINE_OWN_LOCAL ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL, self, payload);
++    }
++    else if (own == NODE_MACHINE_OWN_MEMBER || own == NODE_MACHINE_OWN_MEMBER_LOAD)
++    {
++        node_machine_row_put(row, BUSTER_TYPED_CONST, BUSTER_NODE_MACHINE_CLASS_U64, payload);
++        node_machine_row_put(row, BUSTER_TYPED_PTR_ADD, BUSTER_NODE_MACHINE_CLASS_U64, BUSTER_NODE_MACHINE_VALUE_ONE);
++    }
++    else if (own == NODE_MACHINE_OWN_NEGATIVE || own == NODE_MACHINE_OWN_BIT_NOT)
++    {
++        node_machine_row_put(row, own == NODE_MACHINE_OWN_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, self, zero);
++    }
++    else if (own >= NODE_MACHINE_OWN_EQUAL && own <= NODE_MACHINE_OWN_NOT_EQUAL_NARROW)
++    {
++        const bool narrow = own == NODE_MACHINE_OWN_EQUAL_NARROW || own == NODE_MACHINE_OWN_NOT_EQUAL_NARROW;
++        if (narrow)
++        {
++            node_machine_row_put(row, BUSTER_TYPED_CONVERT, BUSTER_NODE_MACHINE_CLASS_I32, zero);
++        }
++        node_machine_row_put(row, BUSTER_TYPED_CONST, narrow ? BUSTER_NODE_MACHINE_CLASS_I32 : BUSTER_NODE_MACHINE_CLASS_OPERAND, zero);
++        node_machine_row_put(row, own <= NODE_MACHINE_OWN_EQUAL_NARROW ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_NODE_MACHINE_CLASS_I32, zero);
++    }
++    else if (own >= NODE_MACHINE_OWN_POINTER && own <= NODE_MACHINE_OWN_POINTER_LOAD)
++    {
++        if (own == NODE_MACHINE_OWN_POINTER_SUBTRACT)
++        {
++            node_machine_row_put(row, BUSTER_TYPED_NEG, BUSTER_NODE_MACHINE_CLASS_I64, zero);
++        }
++        node_machine_row_put(row, BUSTER_TYPED_PTR_ADD, BUSTER_NODE_MACHINE_CLASS_U64, payload);
++    }
++    else if (own >= NODE_MACHINE_OWN_STORE_LOCAL && own <= NODE_MACHINE_OWN_STORE)
++    {
++        const uint8_t kind = own == NODE_MACHINE_OWN_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : own == NODE_MACHINE_OWN_STORE_GLOBAL ? BUSTER_TYPED_STORE_GLOBAL : BUSTER_TYPED_STORE;
++        node_machine_row_put(row, kind, self, own == NODE_MACHINE_OWN_STORE ? zero : payload);
++    }
++    else if (own >= NODE_MACHINE_OWN_BINARY)
++    {
++        node_machine_row_put(row, (uint8_t)(BUSTER_TYPED_ADD + (own - NODE_MACHINE_OWN_BINARY)), self, zero);
++    }
++    // What ends a row: an address constant's conversion to its integer class, a load.
++    if (own == NODE_MACHINE_OWN_OFFSET_CONVERT || ((local_address || global_address) && (address_step & 1u) != 0))
++    {
++        node_machine_row_put(row, BUSTER_TYPED_CONVERT, self, zero);
++    }
++    if (own == NODE_MACHINE_OWN_LOAD || own == NODE_MACHINE_OWN_MEMBER_LOAD || own == NODE_MACHINE_OWN_POINTER_LOAD)
++    {
++        node_machine_row_put(row, BUSTER_TYPED_LOAD, self, zero);
++    }
++}
++
++// Conversion `conversion`'s entries, node_machine_conversion's for the case it names, appended to `row`.
++static void node_machine_conversion_entries(NodeMachineConversion conversion, NodeMachineEntryRow* row)
++{
++    const uint8_t zero = BUSTER_NODE_MACHINE_VALUE_ZERO;
++    if (conversion == NODE_MACHINE_CONVERSION_DISCARD)
++    {
++        node_machine_row_put(row, BUSTER_TYPED_DISCARD, BUSTER_NODE_MACHINE_CLASS_OWN, zero);
++    }
++    else if (conversion == NODE_MACHINE_CONVERSION_CONVERT)
++    {
++        node_machine_row_put(row, BUSTER_TYPED_CONVERT, BUSTER_NODE_MACHINE_CLASS_TARGET, zero);
++    }
++    else if (conversion == NODE_MACHINE_CONVERSION_BOOL_NARROW || conversion == NODE_MACHINE_CONVERSION_BOOL)
++    {
++        const bool narrow = conversion == NODE_MACHINE_CONVERSION_BOOL_NARROW;
++        if (narrow)
++        {
++            node_machine_row_put(row, BUSTER_TYPED_CONVERT, BUSTER_NODE_MACHINE_CLASS_I32, zero);
++        }
++        node_machine_row_put(row, BUSTER_TYPED_CONST, narrow ? BUSTER_NODE_MACHINE_CLASS_I32 : BUSTER_NODE_MACHINE_CLASS_OWN, zero);
++        node_machine_row_put(row, BUSTER_TYPED_NE, BUSTER_NODE_MACHINE_CLASS_I32, zero);
++        node_machine_row_put(row, BUSTER_TYPED_CONVERT, BUSTER_NODE_MACHINE_CLASS_U8, zero);
++    }
++}
++
++// Makes X's rows: each own row's entries with each conversion's, and the conversion rows from the twin,
++// node_machine_conversion run at every key on a machine of three types (none, the source's and the target's) and one
++// record, each key's the first conversion row whose entries are the twin's (or the refusal). Whether every key's
++// entries were one of the rows'.
++static bool node_machine_expand_tables_initialize(void)
++{
++    bool valid = true;
++    if (!node_machine_expand_tables_ready)
++    {
++        for (uint32_t own = 0; own < NODE_MACHINE_OWNS; own += 1)
++        {
++            for (uint32_t conversion = 0; conversion < NODE_MACHINE_CONVERSIONS; conversion += 1)
++            {
++                NodeMachineEntryRow row = { 0 };
++                node_machine_own_entries((NodeMachineOwn)own, &row);
++                node_machine_conversion_entries((NodeMachineConversion)conversion, &row);
++                row.refused = conversion == NODE_MACHINE_CONVERSION_REFUSED || row.count > BUSTER_NODE_MACHINE_ROW_MOST;
++                row.count = row.refused ? 0 : row.count;
++                node_machine_entry_rows[own * NODE_MACHINE_CONVERSIONS + conversion] = row;
++            }
++        }
++        uint32_t words[3] = { 0 };
++        CheckValue value = { .type = (TypeId)1 << BUSTER_TYPE_INDEX_SHIFT };
++        TypeId target = (TypeId)2 << BUSTER_TYPE_INDEX_SHIFT;
++        uint8_t context = 0;
++        uint8_t facts = 0;
++        uint8_t class = 0;
++        uint8_t kinds[2 * BUSTER_NODE_MACHINE_ROW_MOST];
++        uint8_t classes[2 * BUSTER_NODE_MACHINE_ROW_MOST];
++        uint64_t tape[2 * BUSTER_NODE_MACHINE_ROW_MOST];
++        NodeMachine machine = {
++            .type_words = words,
++            .type_count = 3,
++            .values = &value,
++            .targets = &target,
++            .contexts = &context,
++            .facts = &facts,
++            .value_classes = &class,
++            .kinds = kinds,
++            .classes = classes,
++            .tape = tape,
++        };
++        for (uint32_t key = 0; valid && key < BUSTER_NODE_MACHINE_CONVERSION_KEYS; key += 1)
++        {
++            const uint32_t target_facts = _pdep_u32(key % 16u, BUSTER_NODE_MACHINE_CONVERSION_FACTS);
++            const bool aggregate = (key / 16u) % 2u != 0;
++            const uint32_t target_code = (key / 32u) % BUSTER_NODE_MACHINE_CONVERSION_CLASSES;
++            const uint32_t source_code = key / 32u / BUSTER_NODE_MACHINE_CONVERSION_CLASSES;
++            const uint8_t target_class = target_code < BUSTER_TYPED_CLASSES ? (uint8_t)target_code : UINT8_MAX;
++            words[2] = target_class | target_facts << 8 | BUSTER_NODE_MACHINE_WORD_VALID;
++            class = source_code < BUSTER_TYPED_CLASSES ? (uint8_t)source_code : UINT8_MAX;
++            facts = aggregate ? BUSTER_CHECK_LOWER_TYPE_AGGREGATE : 0;
++            machine.entry_count = 0;
++            const bool takes = node_machine_conversion(&machine, 0);
++            // The record's class sources, as node_machine_expand_rows reads them.
++            const uint8_t converted = (target_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : target_class;
++            const uint64_t sources = (uint64_t)class | (uint64_t)converted << 16 | BUSTER_NODE_MACHINE_CLASS_FIXED;
++            uint32_t found = takes ? NODE_MACHINE_CONVERSIONS : NODE_MACHINE_CONVERSION_REFUSED;
++            for (uint32_t conversion = 0; takes && conversion < NODE_MACHINE_CONVERSION_REFUSED && found == NODE_MACHINE_CONVERSIONS; conversion += 1)
++            {
++                NodeMachineEntryRow row = { 0 };
++                node_machine_conversion_entries((NodeMachineConversion)conversion, &row);
++                bool same = row.count == machine.entry_count;
++                for (uint32_t e = 0; same && e < row.count; e += 1)
++                {
++                    same = row.kinds[e] == kinds[e] && (uint8_t)(sources >> (8 * row.classes[e])) == classes[e] && tape[e] == 0;
++                }
++                found = same ? conversion : found;
++            }
++            valid = node_machine_conversion_key(class, aggregate, words[2]) == key && found < NODE_MACHINE_CONVERSIONS;
++            node_machine_conversion_rows[key] = (uint8_t)found;
++        }
++        node_machine_expand_tables_ready = valid;
++    }
++    return valid;
++}
++
++// Record `r`'s own row (node_machine_own's case for its template, in its context) and the values it reads: its payload
++// and offset, and its first operand's class. One branch on the template; each case reads only its row's facts.
++// `object` as in C.
++static inline __attribute__((always_inline)) NodeMachineOwn node_machine_own_row(const NodeMachine* machine, uint32_t r, uint32_t object, uint64_t* payload,
++                                                                                  uint64_t* offset, uint8_t* class_a)
++{
++    const CheckLowerTemplate kind = node_machine_record_template(machine, r);
++    const uint8_t context = node_machine_record_context(machine, r);
++    const uint8_t class = node_machine_record_class(machine, r);
++    const bool reads = (context & BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS) == 0 && (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_ADDRESS) == 0;
++    NodeMachineOwn own = NODE_MACHINE_OWN_NONE;
++    switch (kind)
++    {
++        case CHECK_LOWER_TEMPLATE_CONSTANT:
++        case CHECK_LOWER_TEMPLATE_ADDRESS:
++        {
++            // A folded constant (none where it is discarded) and an object's address (node_machine_address): an address
++            // constant's object, a local's or a global's symbol, and its offset; then an address constant's conversion
++            // to its signed integer class; an integer's bits in its class, sign-extended where it is signed; a float's.
++            const bool constant = kind == CHECK_LOWER_TEMPLATE_CONSTANT;
++            const bool address = !constant || node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_ADDRESS;
++            const uint32_t known = node_machine_record_object(machine, r);
++            const int64_t moved = node_machine_record_offset(machine, r);
++            if (constant && (context & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) != 0)
++            {
++            }
++            else if (address)
++            {
++                const bool local = node_machine_local(machine, known);
++                const bool converts = constant && node_machine_record_category(machine, r) == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 &&
++                                      class <= BUSTER_TYPED_CLASS_I64;
++                const uint32_t base = known == 0 ? NODE_MACHINE_OWN_OFFSET :
++                                      (local ? NODE_MACHINE_OWN_LOCAL_ADDRESS : NODE_MACHINE_OWN_GLOBAL_ADDRESS) + (moved != 0 ? 2u : 0u);
++                own = (NodeMachineOwn)(base + (converts ? 1u : 0u));
++                *payload = known == 0 ? (uint64_t)moved : local ? known : machine->program->object_symbols[known];
++                *offset = (uint64_t)moved;
++            }
++            else if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
++            {
++                const uint32_t shift = 64u - (8u << ((class - 1) / 2));
++                const uint64_t raised = node_machine_record_integer(machine, r) << shift;
++                own = NODE_MACHINE_OWN_INTEGER;
++                *payload = (class & 1u) != 0 ? (uint64_t)((int64_t)raised >> shift) : raised >> shift;
++            }
++            else
++            {
++                own = NODE_MACHINE_OWN_INTEGER;
++                *payload = check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r));
++            }
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_LOCAL:
++        case CHECK_LOWER_TEMPLATE_GLOBAL:
++        {
++            const uint32_t known = node_machine_record_object(machine, r);
++            own = kind == CHECK_LOWER_TEMPLATE_LOCAL ? NODE_MACHINE_OWN_LOCAL : NODE_MACHINE_OWN_GLOBAL;
++            *payload = kind == CHECK_LOWER_TEMPLATE_LOCAL ? known : machine->program->object_symbols[known];
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_DEREFERENCE:
++        {
++            own = reads ? NODE_MACHINE_OWN_LOAD : NODE_MACHINE_OWN_NONE;
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_MEMBER:
++        {
++            const uint64_t bytes = node_machine_record_member_offset(machine, r) / 8;
++            own = bytes != 0 ? (reads ? NODE_MACHINE_OWN_MEMBER_LOAD : NODE_MACHINE_OWN_MEMBER) : reads ? NODE_MACHINE_OWN_LOAD : NODE_MACHINE_OWN_NONE;
++            *payload = bytes;
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_UNARY:
++        {
++            own = node_machine_record_op(machine, r) == CHECK_OP_NEGATIVE ? NODE_MACHINE_OWN_NEGATIVE : NODE_MACHINE_OWN_BIT_NOT;
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_TRUTH:
++        {
++            const uint8_t operand = node_machine_class(machine, node_machine_record_converted(machine, r, 0));
++            const uint32_t narrow = check_lower_narrow(operand) ? 1u : 0u;
++            own = (NodeMachineOwn)((node_machine_record_op(machine, r) == CHECK_OP_NOT ? NODE_MACHINE_OWN_EQUAL : NODE_MACHINE_OWN_NOT_EQUAL) + narrow);
++            *class_a = operand;
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_BINARY:
++        {
++            own = (NodeMachineOwn)(NODE_MACHINE_OWN_BINARY + (check_lower_binary(node_machine_record_op(machine, r)) - BUSTER_TYPED_ADD));
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_POINTER:
++        {
++            const CheckOp op = node_machine_record_op(machine, r);
++            own = op == CHECK_OP_SUBTRACT ? NODE_MACHINE_OWN_POINTER_SUBTRACT : op == CHECK_OP_SUBSCRIPT && reads ? NODE_MACHINE_OWN_POINTER_LOAD : NODE_MACHINE_OWN_POINTER;
++            *payload = check_action_pointer_stride(machine->types, node_machine_record_converted(machine, r, 0));
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_STORE_LOCAL:
++        case CHECK_LOWER_TEMPLATE_STORE_GLOBAL:
++        {
++            const bool initialize = node_machine_record_op(machine, r) == CHECK_OP_INITIALIZE;
++            const uint32_t target = initialize ? object : node_machine_record_object(machine, node_machine_record_left(machine, r));
++            own = kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? NODE_MACHINE_OWN_STORE_LOCAL : NODE_MACHINE_OWN_STORE_GLOBAL;
++            *payload = kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : machine->program->object_symbols[target];
++            break;
++        }
++        case CHECK_LOWER_TEMPLATE_STORE:
++        {
++            own = NODE_MACHINE_OWN_STORE;
++            break;
++        }
++        default:
++        {
++            break;
++        }
++    }
++    return own;
++}
++
++// X by the rows: each evaluated record's row, its own (node_machine_own_row) with its conversion's to its target in its
++// context (node_machine_conversion_rows', at the key of its class and its target's word), written by three stores of
++// eight entries: the row's kinds; its classes, a byte shuffle of the record's class, its first operand's, its target's
++// and the fixed ones; its values, a permute of the record's payload and offset with 0 and 1. The tape then advances by
++// the row's count, and the next row overlaps what this one wrote past it (the tape has eight entries' room past its
++// last). `object` as in C.
++static NodeMachineRefusal node_machine_expand_rows(NodeMachine* machine, uint32_t object)
++{
++    NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
++    const uint32_t count = machine->count;
++    uint8_t* kinds = machine->kinds;
++    uint8_t* classes = machine->classes;
++    uint64_t* tape = machine->tape;
++    uint32_t at = 0;
++    uint32_t stopped = machine->stopped;
++    uint32_t r = 0;
++    while (refusal == NODE_MACHINE_TAKEN && r < count)
++    {
++        if (node_machine_record_evaluated(machine, r))
++        {
++            uint64_t payload = 0;
++            uint64_t offset = 0;
++            uint8_t class_a = 0;
++            const NodeMachineOwn own = node_machine_own_row(machine, r, r == count - 1 ? object : 0, &payload, &offset, &class_a);
++            const TypeId from = node_machine_record_type(machine, r);
++            const TypeId to = node_machine_record_target(machine, r);
++            const uint32_t to_word = node_machine_word(machine, to);
++            const uint8_t class = node_machine_record_class(machine, r);
++            const bool aggregate = (node_machine_record_facts(machine, r) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0;
++            const bool converts = node_machine_record_context(machine, r) == 0 && to != 0 && from != to;
++            const NodeMachineConversion conversion =
++                converts ? (NodeMachineConversion)node_machine_conversion_rows[node_machine_conversion_key(class, aggregate, to_word)] : NODE_MACHINE_CONVERSION_NONE;
++            const uint8_t to_class = (to_word & ((uint32_t)BUSTER_CHECK_LOWER_TYPE_AGGREGATE << 8)) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_word;
++            const NodeMachineEntryRow* row = node_machine_entry_rows + (uint32_t)own * NODE_MACHINE_CONVERSIONS + conversion;
++            const uint64_t sources = (uint64_t)class | (uint64_t)class_a << 8 | (uint64_t)to_class << 16 | BUSTER_NODE_MACHINE_CLASS_FIXED;
++#if BUSTER_HOST_VECTOR
++            uint64_t row_kinds;
++            memcpy(&row_kinds, row->kinds, sizeof(row_kinds));
++            memcpy(kinds + at, &row_kinds, sizeof(row_kinds));
++            const __m128i row_classes = _mm_shuffle_epi8(_mm_cvtsi64_si128((long long)sources), _mm_loadl_epi64((const __m128i*)row->classes));
++            _mm_storel_epi64((__m128i*)(classes + at), row_classes);
++            const __m512i values = _mm512_zextsi128_si512(_mm_set_epi64x((long long)offset, (long long)payload));
++            const __m512i fixed = _mm512_setr_epi64(0, 1, 0, 0, 0, 0, 0, 0);
++            const __m512i index = _mm512_cvtepu8_epi64(_mm_loadl_epi64((const __m128i*)row->values));
++            _mm512_storeu_si512(tape + at, _mm512_permutex2var_epi64(values, index, fixed));
++#else
++            const uint64_t values[16] = { payload, offset, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0 };
++            for (uint32_t i = 0; i < BUSTER_NODE_MACHINE_ROW_MOST; i += 1)
++            {
++                kinds[at + i] = row->kinds[i];
++                classes[at + i] = (uint8_t)(sources >> (8 * (row->classes[i] & 7u)));
++                tape[at + i] = values[row->values[i] & 15u];
++            }
++#endif
++            at += row->count;
++            refusal = row->refused != 0 ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
++            stopped = r;
++        }
++        r += refusal == NODE_MACHINE_TAKEN;
++    }
++    machine->entry_count = at;
++    machine->stopped = stopped;
++    return refusal;
++}
++
++// X: by the rows, or (--scalar) by the twin; with --verify by both, the twin's entries kept apart (in the tape's second
++// half) and compared with the rows', which stay.
++static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
++{
++    NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
++    if (machine->scalar)
++    {
++        refusal = node_machine_expand_twin(machine, object);
++    }
++    else if (machine->verify)
++    {
++        uint8_t* kinds = machine->kinds;
++        uint8_t* classes = machine->classes;
++        uint64_t* tape = machine->tape;
++        const uint32_t half = BUSTER_NODE_MACHINE_MOST * BUSTER_NODE_MACHINE_ROW_MOST;
++        machine->kinds = kinds + half;
++        machine->classes = classes + half;
++        machine->tape = tape + half;
++        const NodeMachineRefusal twin = node_machine_expand_twin(machine, object);
++        const uint32_t entries = machine->entry_count;
++        machine->kinds = kinds;
++        machine->classes = classes;
++        machine->tape = tape;
++        refusal = node_machine_expand_rows(machine, object);
++        bool same = refusal == twin && (refusal != NODE_MACHINE_TAKEN || machine->entry_count == entries);
++        for (uint32_t e = 0; same && refusal == NODE_MACHINE_TAKEN && e < entries; e += 1)
++        {
++            same = kinds[e] == kinds[half + e] && classes[e] == classes[half + e] && tape[e] == tape[half + e];
++        }
++        machine->row_differences += !same;
++    }
++    else
++    {
++        refusal = node_machine_expand_rows(machine, object);
++    }
++    return refusal;
++}
+ 
+ #endif
