@@ -292,11 +292,10 @@ What it shows:
   in conflict in either unit, and with the other unit's tables no wrong answer for the 51,514 and 27,324 nodes whose
   keys they know. The first two operands' types have to be in the key: without them a store to an object that isn't
   evaluated as an operand is undecided (6,233 of `sqlite3.c`'s assignments).
-- **Most types are lookups, not transitions.** 42% of `sqlite3.c`'s evaluated nodes are leaves and 36% take their
-  type from a declaration or the type table: 39,998 casts (37,534 of them to void, the discards of expression
-  statements and clauses), 31,435 member accesses, 13,545 calls, 6,938 subscripts, 1,988 conversions and 1,145
-  dereferences. The table types 22%. T's cost in the machine is then mostly the lookups it shares with today's rules,
-  which the prototype is given.
+- **Most types are lookups, not transitions.** 42% of `sqlite3.c`'s evaluated nodes are leaves and 36% take their type
+  from a declaration or the type table: 39,998 casts (37,534 of them to void: the discards), 31,435 member accesses,
+  13,545 calls, 6,938 subscripts, 1,988 conversions and 1,145 dereferences. The table types 22%. T's cost in the
+  machine is then mostly the lookups it shares with today's rules, which the prototype is given.
 - **An operand's context and target are its node's to decide, with the operand's own operator.** No key in conflict
   in `sqlite3.c`; 14 in musl (97 operands). Without the operand's operator in the key, 30,375 operands of
   `sqlite3.c`'s casts are undecided: a discard's cast to void gives a comma the discard itself and any other operand a
@@ -312,8 +311,9 @@ What it shows:
 - **What it refuses is mostly its own templates' shape**, not the design's: in `sqlite3.c` a node of more than 16
   entries or of a run of more than 8 (2.4% of the nodes are in such expressions: the post-increments and
   post-decrements, the bit-field stores and reads, `va_arg`) and a node with an entry inside an operand's entries
-  (0.9%: compound assignments and increments), then the conflicting keys (0.2%). In musl also the nodes popped twice
-  (3.2%) and the conflicting keys, the array's above first (6.3%).
+  (0.9%: compound assignments and increments), then the conflicting keys (0.2%). The four runs themselves serve the
+  5,770 nodes (2.2%) that write before or between their operands: `&&`, `||`, `?:` and the compound assignments. In
+  musl also the nodes popped twice (3.2%) and the conflicting keys, the array's above first (6.3%).
 - **Learned tables are not the design's.** With the other unit's tables the sweeps take 59% of `sqlite3.c`'s nodes and
   42% of musl's, since a key here is a node's whole facts, and `sqlite3.c`'s tables give musl 23 wrong entries, all
   that array's key's: `sqlite3.c` has no node of its second answer. Tables baked from the rules over every key, and
