@@ -26,7 +26,7 @@ lua = [r for r in runs if r[0] == "lua"]
 orders = sorted({r[2] for r in lua})
 scripts = ["calls", "tables", "strings", "arithmetic", "closures"]
 print(f"Lua: {len(lua)} runs, {len(orders)} layouts, {len({r[1] for r in lua})} rounds")
-for metric, name, scale in METRICS:
+for metric, name, scale in METRICS if lua else []:
     print(f"\n### Lua's five scripts, {name}\n")
     print("| Layout | base | head | head / base |")
     print("| ---: | ---: | ---: | ---: |")
