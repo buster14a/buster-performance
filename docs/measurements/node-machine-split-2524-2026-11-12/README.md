@@ -102,6 +102,54 @@ accessors, are main's:
 - `test-baked-tables`: the same bytes as built, built twice the same, nothing written outside them.
 - The build regression's `--ownership-only`: ok. It pins the four machine files to `main_unit_checker.c`.
 
+## The merged head, `f5b919f2`
+
+Before #2571 merged, main took #2569 (`&&`, `||` and `?:`), and the branch took #2575 (calls), which was built on
+the split. Two merges brought them together:
+
+- **`3878feb1`:** main `f2faf255` merged into the split, with #2569's changes ported into the split files and its new
+  columns read through new accessors.
+- **`f5b919f2`:** #2575's calls merged with that. The two codes had both numbered their first template
+  `CHECK_LOWER_TEMPLATE_STORE + 1`; the call's is now the fourth of `NodeMachineTemplate`. The labels' numbering takes a
+  subtree's first record from T's `lowest` column, which counts a call's arguments, in place of #2569's walk of the
+  operands, which didn't.
+
+`f5b919f2` is the commit #2571 merged as. `scripts/merge.sh` built main `f2faf255`, `3878feb1` and `f5b919f2` in turn,
+each build and run in its own hold of the lock. It ran `time.sh` and `corpora.sh` on all three, and `tests.sh` on
+`f5b919f2` (`results/f2faf255/`, `3878feb1/`, `f5b919f2/`, `logs/*-3878feb1.log`, `logs/*-f5b919f2*.log`). Main's build
+log was overwritten by `3878feb1`'s build in the same tree; its binary's hash is in `results/f2faf255/commit.txt`.
+
+**The port costs nothing.** `3878feb1` takes main's set exactly, so their instructions a node compare:
+
+| `sqlite3.c`, instructions a taken evaluated node | T | T+C | T+C+X |
+| --- | ---: | ---: | ---: |
+| main `f2faf255` | 371.5 | 575.3 | 695.3 |
+| `3878feb1` | 371.5 | 575.4 | 687.9 |
+
+- T runs 2 more instructions in the whole file (57,308,343 against 57,308,341).
+- C runs 0.1 more a node.
+- X runs 7.4 fewer a node, for the same reason as at `34748d68`.
+- On Lua, all three run 865.8 instructions a node, against main's 873.3.
+- The two take the same nodes on every corpus (`sqlite3.c` 154,280, 59.3% of the census-taken; Lua 29,595; musl
+  65,775) with 0 differences.
+
+**`f5b919f2`, with calls too:**
+
+| | `sqlite3.c` | Lua 5.4.8 | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, of the census-taken | 242,002 (93.0%) | 53,385 (87.2%) | 98,763 (82.1%) |
+| refused by code | 6.4% | 7.5% | 10.5% |
+| labels compared, in taken expressions | 7,346 in 2,779 | 1,366 in 483 | 3,682 in 1,326 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+| cycles, instructions a taken evaluated node | 222.6, 764.1 | 203.9, 909.2 | not timed |
+
+- **Labels with calls.** `sqlite3.c` compares 7,346 labels, against main's 5,438, because the expressions that mix
+  calls with `&&`, `||` and `?:` are taken now: the labels' numbering through calls' arguments holds on real code.
+- **The tests pass:** `test-checker` (829,506 checks, 0 failures, its fixture with calls under and around `&&`, `||`
+  and `?:`), `check-call-graph`, `test-baked-tables` and the ownership check.
+- **Cost.** On `sqlite3.c`, T is 446.7 instructions a node and T+C 651.1. The rise against main's 695.3 is the newly
+  taken expressions' cost, as #2569 and #2575 each found: no figure here compares the split's cost with calls.
+
 ## Limits
 
 - **One process a figure.** Each is the least of 11 passes, and placement moves cycles by about 3% (the shadow's
