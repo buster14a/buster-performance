@@ -319,8 +319,9 @@ The link is 2.1% of the build, and `-g` 14% of a `-g` build.
   `benchmark-link --only direct` on CPU 2, which links again and again in one process: its program of one worker in
   four units, as a static executable (741,600 bytes; the hello world's is 740,168), links in 0.294 ms (`open` 0.025,
   `begin` and `end` 0.136, `write` 0.134), where the fresh process above takes 0.977. In a fresh process the
-  `executable` stage takes 103 page faults and adds 6.5 MB to the resident set (the clock's own columns): the binding
-  of a program that keeps 0.74 MB of the runtime faults in three quarters of the 8.7 MB snapshot's mapping.
+  `executable` stage takes 103 page faults and the resident set grows 6.5 MB in it (the clock's own columns), for a
+  program that keeps 0.74 MB of the runtime; the benchmark reports 25 to 48 faults and 3.1 to 3.2 MB a warm link.
+  The clock doesn't say whose pages they are, the 8.7 MB snapshot's mapping or the binding's own arenas.
 - **The runtime's snapshot saves a link 1.1 ms, a static one 3.8 ms.** With no snapshot to open (`cold`), `runtime`
   takes 1.199 ms where it takes 0.057, and static 3.907 where 0.095: the import, and the snapshot's write (3.3 MB
   and 8.7 MB). A compiler writes it once. The mixed path doesn't use it.
@@ -455,19 +456,18 @@ rows are the `-g` build's time over the plain build's. One lane on CPU 2, but fo
 | dependency files | under 0.1 | | | | | |
 | a lane without a CPU: seven lanes and one of their CPUs busy, of 173.2 and 269.3 ms | 33.2, **1.24** | 125.7, **1.88** | | | | |
 
-Ranked. Each of the first three is filed as an issue in buster, as are the defects named under them; this
-revision was written before the issues, so their numbers are in the record's next revision and in the ranking's
-comment on buster#672:
+Ranked, with the issue filed for each:
 
 1. **A lane without a CPU, 1.88 and 1.24.** With one of its seven CPUs busy, the shell's static build from sources
    takes 269.3 ms where it takes 143.6, and the dynamic one 173.2 where 139.9; the link of the two objects alone 28
-   times as long. Section 4.
+   times as long. Section 4. buster#2545.
 2. **A static hello world's link, 1.71.** 0.98 ms of a 2.35 ms build, where the same link warm in one process takes
    0.29 ms (`raw/linkbench/`: `benchmark-link`'s one worker in four units) and a dynamic hello world's 0.11 ms.
-   Section 3.
+   Section 3. buster#2546.
 3. **`-g`, 1.26.** 1.27 on `-c sqlite3.c`, 1.26 on the shell, 1.16 on synth, 1.06 on musl, and on seven lanes 1.24,
-   1.15 and 1.07; 85% of it one stage on one lane. Sections 1 and 3. Its three concrete defects are filed apart:
-   the value DWARF built twice, the statement ends derived again, a lexical block for every brace pair.
+   1.15 and 1.07; 85% of it one stage on one lane. Sections 1 and 3. buster#2540, and its three concrete defects apart:
+   the value DWARF built twice (buster#2542), the statement ends derived again (buster#2544), a lexical block for every
+   brace pair (buster#2543).
 4. **Everything else is under 1.03.** The driver's link is 1.005 to 1.024 of these builds (1.012 to 1.038 on seven
    lanes), process start and exit 1.002 to 1.006, `-lm`'s import 1.002; dependency files, the exit helper and the
    output's file system don't show. The first link of a new compiler pays the runtime's import and the snapshot's
@@ -478,9 +478,9 @@ Beside the ranking:
 - **What a build doesn't use.** A system linker in the driver's place would make the shell's steps 1.04 (lld), 1.02
   (mold) and 1.07 (GNU ld) times as long on one thread, and static 1.05, 1.04 and 1.15. binutils' `ar` over musl's
   objects takes 84 ms, 1.08 of a build that ends in `libc.a`: the driver has no archiver.
-- **A regression, not a part** (section 7): musl's `-c` is 1.07 times what it was a few hours before.
-- **What stopped a build** (section 6): `-static` with `-lm`, `__tls_get_addr`, the assembler's displacement and
-  `.type NAME,%function`.
+- **A regression, not a part** (section 7): musl's `-c` is 1.07 times what it was a few hours before. buster#2547.
+- **What stopped a build** (section 6): buster#2548 (`-static` with `-lm`), buster#2549 (`__tls_get_addr`), buster#2550
+  (the assembler's displacement) and buster#2551 (`.type NAME,%function`).
 - **Not ranked here:** the units themselves. Their one-core side (the node machine, buster#2524, and the lever
   outside it) and their all-core side are claimed on buster#672; this record's `-c` figures are for the bounds only.
 
@@ -502,7 +502,8 @@ Not time, but where "as far as the driver takes it" ended. `scripts/defects.sh` 
   `memset.c` instead.
 - **File-scope assembly with `.type NAME,%function` is refused**: "unsupported: file-scope assembly the assembler
   doesn't take" (musl's `crt_arch.h`, so `crt1.c`). `.weak`, `.hidden`, the instructions and a call of a C function
-  of the unit are taken. clang compiles the record's `crt1.o`.
+  of the unit are taken; the assembler's `.type` takes its type after an `@` alone (`assembler.c`), where GNU as
+  also takes `%`. clang compiles the record's `crt1.o`.
 - **No shared library from these objects**: the driver refuses `-fPIC` (buster#2101), and `link-foreign -shared` of
   the library's objects refuses their relocations, as it should.
 - **`--time-stages` has no stage for the mixed path's link**: a link of objects reports its 2.1 ms as `release`.
@@ -522,7 +523,8 @@ are `strlen` (+366 M), `pp_prepared_directive` (+287 M), `printf`'s formatting (
 each reserved name outside the command line's definitions it compares the name with 29 feature-test macros by
 `strlen` and `memcmp`, then calls `pp_diagnose_group`, which formats the message and reads the command line's
 warning options before it learns that the warning is off. `sqlite3.c` pays 8.6 M instructions for it (0.6%). No
-build of the revisions between was made: the attribution is the profile's and the diff's.
+build of the revisions between was made: the attribution is the profile's and the diff's, and not all of the cycles
+need be this (buster#2532 has 4,496 M user cycles at `ecaf57b5`, two merges before buster#2530's).
 
 ## Limits
 
@@ -533,6 +535,9 @@ build of the revisions between was made: the attribution is the profile's and th
   within 1% (`tables/*.tsv`'s least and greatest), and the one-core record's `-c` is reproduced within 0.6%; a few
   runs are 20% slow (the greatest of `s-dyn-g`, of `q-static-g`). The eight-core lists are another matter (section
   4): their figures are of seven lanes on the seven cores it was not on, and no figure here is of eight free cores.
+- **musl's command has two page states** (buster#2532's correction describes them): two of `m-c`'s seven runs took
+  418,189 page faults and 30 to 60 ms more than the others' 343,106. The medians are of the commoner state, which is
+  also the one-core record's (343,019 faults), so section 7 compares like with like; instructions don't depend on it.
 - **Per-stage counters are sampled** at 100,003 cycles a sample, and a stage's boundary is known to about 0.3 ms.
 - **musl's `-g` is attributed by function names**, not by stage.
 - **The comparison with clang and GCC is of what each calls `-g`**: clang's rows carry columns and its strings are
