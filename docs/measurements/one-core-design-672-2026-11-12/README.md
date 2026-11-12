@@ -5,7 +5,8 @@ These are the measurements that [buster#2524](https://github.com/buster14a/buste
 [buster#672](https://github.com/buster14a/buster/issues/672)'s one-core target. They attribute the compile of the
 frozen `sqlite3.c` to the compiler's stages by hardware counters, split it between the unit's function bodies and its
 file scope, compare it with tcc's own split on the same file, and count what a table of node transitions could take.
-Nothing here measures the design itself: it isn't built.
+Section 9 runs a prototype of the design's three sweeps over the compile's real nodes, for what tables decide and what
+the sweeps cost. Nothing here measures the design itself: it isn't built.
 
 - **Source:** buster `d96b2e731e42a4a4740fa78e494578f90eaff5a5` (main on 12 November), a clean clone built on the host
   by `./build.sh` (Release, `-O3 -march=native`, debug information), `raw/build.log`. The executable's SHA-256 is
@@ -225,6 +226,104 @@ the compile's 681.5 M cycles. It gives 1.24, 1.34 and 1.39 times after the desig
 step 3, and 1.61, 2.00 and 2.40 after step 4, and 2.91 times if the bodies' work from `check-input` to `lower` were
 free. The design's first two steps exist to replace its assumptions with counts and times.
 
+Section 9's prototype measures part of two of those assumptions. Its sweeps cost 46.8 cycles a body token, of the 90,
+55 and 45 that the three cases give the machine's whole work on expressions: the expected case's 55 would leave 8 for
+the lookups, the records and the silence tests that the prototype doesn't do, so a first machine is likelier between
+the expected and the conservative cases. The estimate depends little on it: with 90% of the nodes in taken
+expressions, step 2 gives 1.34 at 55 cycles a body token, 1.31 at 75, 1.29 at 90, 1.25 at 120 and 1.22 at 150
+(`tables/gains.txt`'s last rows). And the prototype's tables take expressions holding 96.5% of `sqlite3.c`'s nodes
+and 88.2% of musl's before any test for diagnostics, against the cases' 80%, 90% and 95%.
+
+## 9. A prototype of the design's sweeps over the real nodes
+
+**The data.** `scripts/dump.sh` rebuilds the tree with `scripts/inventory-dump.patch`, a patch to
+`measure-lowering-templates` alone (no compile's code changes; the patched executable's hash is in
+`raw/sweeps/dump-identity.txt`, and every other section is the unpatched one's), and has the inventory write, for
+every lowered body, each expression task's pop with the lowering's own key for its node (its operator, its context,
+its type's class and facts, its constant kind, category and flags, its first two operands' types and its conversion
+target), the node whose task pushed it, and every typed entry with the pop that wrote it: 28.7 MB for `sqlite3.c`
+and 14.3 MB for musl's 1,336 units (`raw/sweeps/dump-sizes.txt` has their hashes; the dumps aren't stored).
+
+**The prototype.** `scripts/tools/sweeps.c` reads a dump and runs the design's three sweeps over it, one full
+expression's tree at a time, with no graph, stream or task:
+
+- **T**, up the postorder: each node's facts (its type's class and facts, its constant kind, its category, its flags,
+  its object's kind) from a table keyed by its operator, its evaluated operands' facts and its first two operands'
+  types.
+- **C**, down from the root: each operand's context (address, initialized, discard, `_BitInt`, popped twice) and
+  conversion target from a table keyed by its node's operator, context and facts and by its own operator and facts.
+- **X**: the lowering's key of each node rebuilt from that state alone, the node's template (its entries' kinds and
+  classes, in runs before, between and after its operands' entries, and the conversion asked of it) from a table by
+  that key and the operand count, and the expression's entries written in evaluation order with fixed-width stores:
+  straight down the postorder when no node of the tree writes before or between its operands, by a walk otherwise.
+
+It is **not the machine**: it reads no source, binds no name, reads no type table, tests nothing for diagnostics. What
+a declaration or the type table would give the machine, it is given: a leaf's facts; the facts of a cast, a member, a
+subscript, a dereference, a call, a conversion and a builtin; the targets of a call's and a builtin's operands; a
+root's context; and every entry's value, in its node's template's order. Its tables are **learned from the dump**
+and hashed (one 16-byte slot a key, a multiply or two a lookup over the nodes' 64-bit fact codes), where the design's
+are baked from the rules and indexed by small codes. A key that two nodes answer differently is a conflict and
+refuses the expressions of its nodes; a node whose entries no template of this shape holds (more than 16, a run of
+more than 8, an entry inside an operand's entries, a node popped twice) gives its key no template. An expression is
+taken when every node of it is in the tables, with nothing of the pipeline's answers deciding that, and its emitted
+entries are then compared with the stream's own, kind, class and value. `scripts/sweeps.sh` ran it three times a unit
+with 31 passes each and once with the other unit's tables (`raw/sweeps/sweeps-*.txt`), and `scripts/probes.sh` the
+readings of the dumps that chose the keys (`scripts/tools/key_probes.py`, `raw/sweeps/key-probes-*.txt`).
+Both ran under `lock.sh` as every script here did, each in a hold of its own, but they don't write the lock's line
+as the others do. `tables/sweeps.md` (`scripts/tools/sweeps_summary.py`) has all of it; in short:
+
+| | `sqlite3.c` | musl's 1,336 units |
+| --- | ---: | ---: |
+| evaluated nodes, in full expressions | 266,707 in 52,368 | 131,092 in 26,451 |
+| leaves; nodes typed by the table; nodes whose facts a lookup gives | 42.1%; 22.2%; 35.7% | 44.4%; 27.8%; 27.7% |
+| type keys, in conflict | 3,075, 0 | 2,835, 0 |
+| operands the context table is asked; its keys, in conflict | 179,916; 9,742, 0 | 92,119; 9,476, 14 |
+| template keys, in conflict; templates | 2,400, 3; 787 | 2,396, 4; 865 |
+| rebuilt keys that differ from the lowering's | 0 | 0 |
+| nodes in taken expressions | 257,465 (96.5%) | 115,610 (88.2%) |
+| emitted entries, and those that differ from the stream's | 346,998, 0 | 154,132, 0 |
+| cycles, instructions, mispredicted branches a node, an expression at a time | 99.7, 264, 1.16 | 100.6, 268, 1.16 |
+| … a unit at a time, cycles: T, C, the templates' choice, the expansion | 15.8, 32.1, 37.2, 21.3 | 16.9, 30.5, 36.5, 21.0 |
+
+What it shows:
+
+- **The operands' facts decide a node's facts** for every operator outside the lookups' (all of the arithmetic, the
+  comparisons, the logical operators, `?:`, the comma, `&x`, the assignments, the increments, the condition): no key
+  in conflict in either unit, and with the other unit's tables no wrong answer for the 51,514 and 27,324 nodes whose
+  keys they know. The first two operands' types have to be in the key: without them a store to an object that isn't
+  evaluated as an operand is undecided (6,233 of `sqlite3.c`'s assignments).
+- **Most types are lookups, not transitions.** 42% of `sqlite3.c`'s evaluated nodes are leaves and 36% take their
+  type from a declaration or the type table: 39,998 casts (37,534 of them to void, the discards of expression
+  statements and clauses), 31,435 member accesses, 13,545 calls, 6,938 subscripts, 1,988 conversions and 1,145
+  dereferences. The table types 22%. T's cost in the machine is then mostly the lookups it shares with today's rules,
+  which the prototype is given.
+- **An operand's context and target are its node's to decide, with the operand's own operator.** No key in conflict
+  in `sqlite3.c`; 14 in musl (97 operands). Without the operand's operator in the key, 30,375 operands of
+  `sqlite3.c`'s casts are undecided: a discard's cast to void gives a comma the discard itself and any other operand a
+  conversion to void. A call's and a builtin's operands (16% of `sqlite3.c`'s) take their targets as given.
+  That the tasks pop a node twice (a compound literal's value wherever it is used, and in musl some dereferences at a
+  root with their operand: 613 nodes, none in `sqlite3.c`) isn't in the node's key, so the context carries it, and
+  the table gives it to an operand without a new conflict.
+- **The lowering's key and the operand count decide a node's entries**, but for 3 keys in `sqlite3.c` (an aggregate's
+  assignment in two keys, 50 nodes one way and 3 the other, and an atomic builtin, whose entry's class the key
+  doesn't hold) and 4 in musl (the aggregate's two; a complex local's conversion to `float`, by its parts' class; and
+  a local array's value, `LOCAL_ADDRESS` for 1,152 nodes and `LOCAL` for 47, which the key has no fact for). Every
+  taken expression's entries are the stream's, entry for entry.
+- **What it refuses is mostly its own templates' shape**, not the design's: in `sqlite3.c` a node of more than 16
+  entries or of a run of more than 8 (2.4% of the nodes are in such expressions: the post-increments and
+  post-decrements, the bit-field stores and reads, `va_arg`) and a node with an entry inside an operand's entries
+  (0.9%: compound assignments and increments), then the conflicting keys (0.2%). In musl also the nodes popped twice
+  (3.2%) and the conflicting keys, the array's above first (6.3%).
+- **Learned tables are not the design's.** With the other unit's tables the sweeps take 59% of `sqlite3.c`'s nodes and
+  42% of musl's, since a key here is a node's whole facts, and `sqlite3.c`'s tables give musl 23 wrong entries, all
+  that array's key's: `sqlite3.c` has no node of its second answer. Tables baked from the rules over every key, and
+  the pipeline kept as their check, are the design's answer to both.
+- **The cost.** 99.7 cycles, 264 instructions and 1.16 mispredicted branches a node of `sqlite3.c` (99.5 to 101.7
+  over the three runs), 103.3 a taken node: 46.8 cycles a body token, against the 752 that the stages between the
+  parser and Tier 0 spend and the 391 that the design's step 2 would stop spending. An expression at a time, the
+  design's order, costs 6% less than a unit at a time and mispredicts a third less. The hashed keys and the branches
+  on a node's kind are the prototype's; the lookups it is given are not in its time.
+
 ## Limits
 
 - **One host, one day, one revision.** Each table is `d96b2e73`'s on the 9700X; the runs of a table are interleaved
@@ -237,11 +336,17 @@ free. The design's first two steps exist to replace its assumptions with counts 
 - **tcc's parts are address ranges** of a stripped, link-time-optimized library.
 - **The inventory counts the lowering's view** (which typed entries a node gives). It doesn't count which nodes could
   raise a diagnostic, which the design's first milestone has to.
+- **The prototype is not the machine** (section 9): its lookups, its entries' values and its roots' contexts are
+  given, its tables are learned from the unit they are used on, and it tests nothing for diagnostics. Its counts say
+  what keys decide in two corpora, not in C; its time is the sweeps' mechanics over 31 passes of one unit's nodes, with
+  the tables warm, not a compile's.
 - No run here used more than one lane or more than one process at a time.
 
 ## Files
 
 - `env.txt`: the host and the identities. `raw/COMMIT`, `raw/build.log`: the tree and its build.
-- `scripts/`: `lock.sh` (the hold), `build.sh`, `env.sh`, and one script a measurement; `scripts/tools/` the reducers.
+- `scripts/`: `lock.sh` (the hold), `build.sh`, `env.sh`, and one script a measurement; `scripts/tools/` the reducers
+  and `sweeps.c`, the prototype. `scripts/inventory-dump.patch` is section 9's patch to the tree; `env.txt`'s hashes
+  are from before it, and `raw/sweeps/scripts-hashes.txt` has section 9's scripts'.
 - `raw/`: every run's output as written, by measurement. `raw/stagecounters/*.samples.gz` are `perf script`'s samples.
 - `tables/`: the reductions, each made from `raw/` by the tool named above, and `gains.txt`, the estimate.

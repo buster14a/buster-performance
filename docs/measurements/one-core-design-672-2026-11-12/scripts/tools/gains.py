@@ -57,3 +57,12 @@ for name, expressions, bodies, machine in CASES:
         saved += (coverage * sum(removed.values()) - machine[step]) * BODY_TOKENS * scale + coverage * KERNEL_STEP[step]
         row.append(total / (total - saved))
     print(f'{name}\t{row[0]:.2f}\t{row[1]:.2f}\t{row[2]:.2f}\t{(total - saved) / 1e6:.0f}')
+# Step 2 by the machine's own cost, at the expected coverage, beside what the prototype of its three sweeps costs
+# (tables/sweeps.md: 99.7 cycles a node of sqlite3.c's 266,707, an expression at a time, with hashed tables and its
+# lookups given).
+PROTOTYPE = 99.7 * 266707 / BODY_TOKENS
+print(f"the prototype's sweeps: {PROTOTYPE:.1f} cycles a body token")
+print("step 2 at 90% of the nodes, by the machine's cycles a body token:")
+for machine in (45.0, 55.0, 75.0, 90.0, 120.0, 150.0):
+    saved = (0.90 * sum(STEP2.values()) - machine) * BODY_TOKENS * scale + 0.90 * KERNEL_STEP[0]
+    print(f'{machine:.0f}\t{total / (total - saved):.2f}')
