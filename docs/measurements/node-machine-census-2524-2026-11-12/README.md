@@ -11,7 +11,9 @@ nothing.
 - **Source:** buster `eb62e20f18233702c405596b464847b832162717` (branch `claude/clever-fermat-yjq9wz`, the census's pull request), built on the host by
   `./build.sh` (Release, the host's native target, znver5). `results/build.log` has the build and the executable's
   SHA-256. `results-da354120/` is the same run at the branch's first commit `da354120`, before the census counted a
-  system header's macro apart (below); its counts are the same but for that line.
+  system header's macro apart (below); its counts are the same but for that line. `results-c1435396/` is the same run
+  at the pull request's final commit `c1435396` (main merged in, every warning classified, tests for main's two new
+  warnings): its counts are `results/`'s, with an `unmodeled-warning` row that refuses nothing.
 - **Host:** the Ryzen 7 9700X (`benchpress`), each script's command in one hold of the machine's lock
   (`scripts/lock.sh`), pinned to CPU 2. `results/holder.txt` is the lock's own line for the census's hold.
 - **The command:** `measure-node-machine --list 40` (buster's `c_check_node_census.c`, documented in
@@ -97,5 +99,6 @@ The silence tests' refusals:
 ## Files
 
 - `scripts/`: `lock.sh` (the hold), `build.sh` and `census.sh`.
-- `results/`: the build's log and the census's reports at `eb62e20f18233702c405596b464847b832162717`; `results-da354120/` the same at `da354120`. The
-  lock's waiting messages, which name other sessions, are left out of the build logs.
+- `results/`: the build's log and the census's reports at `eb62e20f`; `results-da354120/` and `results-c1435396/` the
+  same at `da354120` and `c1435396`. The lock's waiting messages, which name other sessions, are left out of the build
+  logs.
