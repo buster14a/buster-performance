@@ -216,6 +216,15 @@ proportions `sqlite3.c`'s timed samples gave it (`tables/musl-stages.tsv`): `che
 `lower` 3.5%, and 5.4% in functions `sqlite3.c`'s compile gave no stage. The kernel has 22.1% of all cycles
 (`raw/musl/cycles-dso.txt`).
 
+## 8. The estimate
+
+`scripts/tools/gains.py` (`tables/gains.txt`) is the design's estimate of its gains, not a measurement: the cycles a
+body token that each of the design's steps would stop spending for what its machine takes (a reading of the tables of
+section 4: which functions run for a node today), three sets of assumed coverage and of the machine's own cost, and
+the compile's 681.5 M cycles. It gives 1.24, 1.34 and 1.39 times after the design's step 2, 1.38, 1.57 and 1.68 after
+step 3, and 1.61, 2.00 and 2.40 after step 4, and 2.91 times if the bodies' work from `check-input` to `lower` were
+free. The design's first two steps exist to replace its assumptions with counts and times.
+
 ## Limits
 
 - **One host, one day, one revision.** Each table is `d96b2e73`'s on the 9700X; the runs of a table are interleaved
@@ -235,4 +244,4 @@ proportions `sqlite3.c`'s timed samples gave it (`tables/musl-stages.tsv`): `che
 - `env.txt`: the host and the identities. `raw/COMMIT`, `raw/build.log`: the tree and its build.
 - `scripts/`: `lock.sh` (the hold), `build.sh`, `env.sh`, and one script a measurement; `scripts/tools/` the reducers.
 - `raw/`: every run's output as written, by measurement. `raw/stagecounters/*.samples.gz` are `perf script`'s samples.
-- `tables/`: the reductions, each made from `raw/` by the tool named above.
+- `tables/`: the reductions, each made from `raw/` by the tool named above, and `gains.txt`, the estimate.
