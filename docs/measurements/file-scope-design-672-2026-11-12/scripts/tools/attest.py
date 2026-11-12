@@ -27,6 +27,9 @@
 # empty declaration a token, so that every other token keeps its index in the unit as well as its line and column
 # (the compiler names a string literal's symbol by its token's index). OUT_DIR's units are for the time, DIR's for the
 # comparison of the objects.
+# --skips FILE also writes, a line a unit sorted by unit, the skipped declarations' ordinals among the unit's
+# declarations (pragma lines apart) and the count of those: "UNIT<TAB>DECLARATIONS<TAB>ORDINAL,ORDINAL,...", which
+# probe.patch's BUSTER_PROBE_SKIPS makes the compiler's own reader pass unread.
 # --warm starts with every unit's declarations in the memo (a second command with a memo kept from the first: a bound).
 # --order FILE reads the units in FILE's order (paths, a line each; their base names).
 # REPORT.tsv: a row a unit and a summary: tokens by class.
@@ -382,11 +385,14 @@ def main():
     warm = False
     order_file = None
     semi_dir = None
+    skips_path = None
+    skips = {}
     while arguments and arguments[0].startswith('--'):
         a = arguments.pop(0)
         if a == '--warm': warm = True
         elif a == '--order': order_file = arguments.pop(0)
         elif a == '--semi': semi_dir = arguments.pop(0)
+        elif a == '--skips': skips_path = arguments.pop(0)
     in_dir, out_dir, report_path = arguments[:3]
     os.makedirs(out_dir, exist_ok=True)
     if semi_dir:
@@ -459,6 +465,8 @@ def main():
                     reasons[d.reason] += count
                     declaration_counts['not eligible'] += 1
             memo.update(d.hash for d in declarations if d.eligible)
+            proper = [d for d in declarations if not d.pragma]
+            skips[name[:-2]] = (len(proper), [index for index, d in enumerate(proper) if d.dead])
             tokens = sum(len(d.tokens) for d in declarations)
             open(os.path.join(out_dir, name), 'w', errors='surrogateescape').write(''.join(out))
             if semi is not None:
@@ -480,6 +488,12 @@ def main():
         report.write('# kind\ttokens\ttokens skipped\n')
         for k, c in kinds_total.most_common():
             report.write(f'# {k}\t{c}\t{kinds_skipped[k]}\n')
+
+    if skips_path:
+        with open(skips_path, 'w') as out:
+            for unit in sorted(skips):
+                count, ordinals = skips[unit]
+                out.write(f"{unit}\t{count}\t{','.join(str(o) for o in ordinals)}\n")
 
 
 if __name__ == '__main__':

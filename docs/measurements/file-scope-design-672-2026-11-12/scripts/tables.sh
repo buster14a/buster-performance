@@ -45,7 +45,8 @@ python3 tools/repeats.py "$raw/prep/musl-declarations.tsv" > "$out/musl-repeats.
     echo "asm index, once against each unit:"; cat "$raw/asm/objects.txt"
 } > "$out/emulation.txt"
 {
-    for directory in musl musl-pass1 live live2 semi glibc asm fixed; do
+    for directory in musl musl-pass1 live live2 semi glibc asm fixed skip skip2 skip3; do
+        [[ -d $raw/$directory ]] || continue
         echo "## $directory"; python3 tools/stat_medians.py "$raw/$directory"
     done
 } > "$out/medians.txt"
@@ -54,4 +55,30 @@ python3 tools/repeats.py "$raw/prep/musl-declarations.tsv" > "$out/musl-repeats.
         echo "## $run"; cat "$raw/$run.txt"
     done
 } > "$out/prototype.txt"
+{
+    echo "## skip2 (11 rounds, the final build): by page state"; python3 tools/skip_table.py "$raw/skip2"
+    echo "## skip (the first run, 5 rounds): by page state"; python3 tools/skip_table.py "$raw/skip"
+    if [[ -d $raw/skip3 ]]; then echo "## skip3 (the glibc units preprocessed): by page state"; python3 tools/skip_table.py "$raw/skip3"; fi
+    echo "## objects, diagnostics and the patch's own counts"
+    echo "skip:"; cat "$raw/skip/objects.txt"
+    echo "skipcount:"; cat "$raw/skipcount/counts.txt"
+    echo "skip2:"; cat "$raw/skip2/objects.txt"
+    if [[ -d $raw/skip3 ]]; then echo "skip3:"; cat "$raw/skip3/objects.txt"; fi
+} > "$out/skip.txt"
+python3 tools/probe_table.py "$raw/skip2" musl ms cycles-u cycles-k > "$out/skip-musl-stages.tsv"
+python3 tools/probe_table.py "$raw/skip2" glibc ms cycles-u cycles-k > "$out/skip-glibc-stages.tsv"
+python3 tools/probe_table.py "$raw/skip2" sqlite ms cycles-u cycles-k > "$out/skip-sqlite-stages.tsv"
+if [[ -d $raw/skip3 ]]; then python3 tools/probe_table.py "$raw/skip3" glibc ms cycles-u cycles-k > "$out/skip-glibc-i-stages.tsv"; fi
+python3 tools/skip_residual.py "$raw" > "$out/skip-residual.tsv"
+(cd "$raw/skipprofile" && python3 ../../scripts/tools/families.py musl-read.work.tsv musl-skipped.work.tsv glibc-read.work.tsv glibc-skipped.work.tsv --top 50) > "$out/skip-families.tsv"
+{
+    echo "## state.sh: musl's command, the address space's randomization on (random) and off (fixed)"; cat "$raw/state/rounds.tsv"
+    echo "## transparent huge pages (enabled, defrag) and randomize_va_space"; cat "$raw/state/settings.txt"
+    echo "## asm.sh's rounds by page state"; python3 tools/skip_table.py "$raw/asm" each-unit once
+    echo "## musl.sh's rounds of -c and -fsyntax-only of the sources by page state"; python3 tools/skip_table.py "$raw/musl" c syntax | grep -P '^\t|^workload'
+    echo "## the rounds of -c of musl's sources in the state without huge pages (over 400,000 page faults), of all, by script"
+    for pattern in musl/stat-c- asm/stat-each-unit- asm/stat-once- skip/stat-musl-c-read- skip/stat-musl-c-skipped- skip2/stat-musl-c-read- skip2/stat-musl-c-skipped- state/stat-musl-random- state/stat-musl-fixed-; do
+        awk -F, -v p="$pattern" '$3 == "page-faults" { n += 1; if ($1 > 400000) h += 1 } END { printf "%s\t%d of %d\n", p, h, n }' "$raw"/$pattern*.csv
+    done
+} > "$out/state.txt"
 python3 tools/gains.py "$raw" > "$out/gains.txt"

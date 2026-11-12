@@ -4,14 +4,17 @@
 #
 # rank.py RAW_DIR: the levers outside buster#2524's scope, ranked by a measured bound: what each workload's compile
 # would cost, in cycles of both modes, if the lever's work were free. From the probe's stage counters (probe.sh:
-# RAW_DIR/probe), the asm index's two builds (asm.sh: RAW_DIR/asm) and an empty unit's process (fixed.sh:
-# RAW_DIR/fixed). A lever's work on musl's command (1,336 units, one lane) and on the frozen sqlite3.c:
+# RAW_DIR/probe), the asm index's two ways (asm.sh: RAW_DIR/asm, the stage counters too) and an empty unit's process
+# (fixed.sh: RAW_DIR/fixed). A lever's work on musl's command (1,336 units, one lane) and on the frozen sqlite3.c:
 #   file scope   the checker's stages (type-table to select) on the units without bodies, less an empty unit's: what
 #                reading the file scope's declarations costs
 #   kernel       every kernel cycle of the compile
 #   preprocess   the `preprocess` stage, both modes
 #   fixed        the empty units' whole compile (musl: 1,336 of them as one command; sqlite3.c: an empty unit's process)
-#   asm index    the asm matcher's index, made once a unit with asm statements: the two builds' difference
+#   asm index    the asm matcher's index, made once a unit with asm statements: the two ways' difference, by the
+#                stages' sums of their probe runs, which are all in one page state. (This row first took perf stat's
+#                medians of asm.sh's rounds, 556.4 M: the two ways' medians fell in different page states, the
+#                each-unit way's with 75,000 more page faults, which state.sh and skip_table.py explain.)
 #   parse        the `parse` stage, both modes
 #   emission     the stages from backend-setup and tier0 to object-write but the lowering
 #   bodies       for reference, buster#2524's: the stages from check-input to lower on the units less the same on the
@@ -31,10 +34,10 @@ def read_lines(path):
 raw = sys.argv[1]
 
 
-def probe(prefix, variant):
+def probe(prefix, variant, directory='probe'):
     # A variant's stage medians: {stage: (user cycles, kernel cycles, ms)}.
     runs = collections.defaultdict(lambda: collections.defaultdict(list))
-    directory = os.path.join(raw, 'probe')
+    directory = os.path.join(raw, directory)
     for name in sorted(os.listdir(directory)):
         m = re.fullmatch(re.escape(prefix) + '-' + re.escape(variant) + r'(?:-p1)?-(\d+)\.txt(?:\.gz)?', name)
         if not m:
@@ -83,9 +86,9 @@ musl_empty = probe('musl', 'empty-c')
 sqlite = probe('sqlite', 'source')
 sqlite_spine = probe('sqlite', 'spine')
 total = {'musl': both(musl, musl), 'sqlite': both(sqlite, sqlite)}
-asm_each = stat('asm', 'each-unit')
-asm_once = stat('asm', 'once')
-asm = (asm_each['cycles:u'] + asm_each['cycles:k']) - (asm_once['cycles:u'] + asm_once['cycles:k'])
+asm_each = probe('musl', 'each-unit', 'asm')
+asm_once = probe('musl', 'once', 'asm')
+asm = both(asm_each, asm_each) - both(asm_once, asm_once)
 empty_process = stat('fixed', 'process-empty')
 levers = [
     ('file scope: reading its declarations', both(musl_spine, CHECKER) - both(musl_empty, CHECKER), both(sqlite_spine, CHECKER)),
