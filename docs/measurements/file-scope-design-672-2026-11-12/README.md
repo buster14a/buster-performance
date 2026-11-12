@@ -245,13 +245,16 @@ The 109 that differ with the blanked units differ in a string literal's symbol a
 | musl's preprocessed units, `-c`, one command | user cycles | kernel cycles | CPU ms |
 | --- | ---: | ---: | ---: |
 | as they are | 3,650 M | 842 M | 810.7 |
-| a `;` a skipped token: more than the design leaves | 2,462 M | 798 M | 587.7 |
+| a `;` a skipped token | 2,462 M | 798 M | 587.7 |
 | the skipped tokens gone: less than the design leaves | 2,204 M | 769 M | 537.8 |
 
 The design leaves a skipped declaration's tokens in the unit, lexed and parsed as they were, and reads nothing of
-it; the placeholder units also read an empty declaration at each skipped token, and the blanked units also drop the
-tokens' lexing and parse. By stage, in user cycles: `check-input` is 1,930 M as they are, 897 M with the placeholders
-and 761 M with the tokens gone; the parse 241 M, 210 M and 146 M.
+it; the placeholder units read an empty declaration at each skipped token instead, and the blanked units drop the
+tokens' lexing and parse too. By stage, in user cycles: `check-input` is 1,930 M as they are, 897 M with the
+placeholders and 761 M with the tokens gone; the parse 241 M, 210 M and 146 M. The placeholder units were meant as an
+upper bound of the design's time and are not one: section 11's skip in the reader itself takes 613.0 ms on these
+units, since a token the reader passes still costs the unit-wide passes more than an empty declaration costs to read
+(section 12).
 
 With a memo kept across processes (`raw/live2`): musl's units as 1,336 processes take 1,566.9 ms as they are and
 1,232.7 with a warm memo's skipped tokens gone; `sqlite3.c`, 115.3 and 107.4 ms (46,014 tokens skipped, 2,579 of 7,298
@@ -476,9 +479,10 @@ in the first state.
 - **What a skipped token still costs** (section 12) compares units whose skipped tokens are in the text with units
   where they are not: the two differ by more than the passes that see those tokens (the columns' sizes, the pages
   touched, the caches).
-- **The two brackets are not the design's time.** The placeholder units read an empty declaration a skipped token
-  and lex and parse `;` where the design lexes and parses the declaration's own tokens; the blanked units lex and
-  parse nothing there.
+- **Section 7's two variants are not the design's time.** The placeholder units read an empty declaration a skipped
+  token and lex and parse `;` where the design lexes and parses the declaration's own tokens; the blanked units lex
+  and parse nothing there. The blanked units are below the design's time; the placeholder units turned out not to be
+  above it (section 11).
 - **The prototype is not the compiler's code** (section 9): its lists come from its own scan of kinds and spelling
   classes, its hashes are 64 bits, and it runs 21 repetitions of a command over warm data.
 - **musl's preprocessed units stand for its sources** in sections 7 and 9: the same tokens, without the
