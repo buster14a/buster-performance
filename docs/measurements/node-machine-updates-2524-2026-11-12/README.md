@@ -19,7 +19,7 @@ wraps `~/buster-fast-bench/exclusive.sh`), pinned to CPU 2.
 
 ## Sources and binaries
 
-- **The measured commits** are on main [`0af27a30`](https://github.com/buster14a/buster/commit/0af27a3096f9bd96334f27943dfc50918f58bc17):
+- **The measured commits,** before the merge below, are on main [`0af27a30`](https://github.com/buster14a/buster/commit/0af27a3096f9bd96334f27943dfc50918f58bc17):
   - [`ec743d0d8dd7e2b3c52c15582360f7d1a6fe19d0`](https://github.com/buster14a/buster/commit/ec743d0d8dd7e2b3c52c15582360f7d1a6fe19d0),
     the codes;
   - [`6196395c738d55cd6baef7e6ea46cbe386f9eeb7`](https://github.com/buster14a/buster/commit/6196395c738d55cd6baef7e6ea46cbe386f9eeb7),
@@ -142,6 +142,43 @@ A taken evaluated node on `sqlite3.c`, in cycles and instructions (`results/LABE
   instructions at 96.6 and 104.1 cycles. Compare the labels by their instructions.
 
 The step's cost gate, 120 cycles a node, is where the earlier records left it. This PR adds coverage.
+
+## After the merge with the logical operators
+
+While the PR was open, main gained the machine's `&&`, `||` and `?:` (buster#2569), whose entries before and between
+operands are segments after an operand's row, as an update's first row is. The PR merged main into its branch:
+- [`e02cecd72d2843024ae203b39a7f0c1fc0bf098e`](https://github.com/buster14a/buster/commit/e02cecd72d2843024ae203b39a7f0c1fc0bf098e)
+  is the merge;
+- [`58ca4ea76cdccd950dd9cd40a27ae239d8620752`](https://github.com/buster14a/buster/commit/58ca4ea76cdccd950dd9cd40a27ae239d8620752)
+  keeps `node_machine_put_truth` inlined, as main has it.
+
+Their baseline is main [`f2faf255`](https://github.com/buster14a/buster/commit/f2faf255e64c2551d63b55bf08039da59e31336a),
+built in the main worktree by `scripts/main-at.sh` (`results/main-f2faf255`). `scripts/off-at.sh` builds a commit with
+the update codes refused (`diffs/updates-SHA-off.diff`).
+
+| | `sqlite3.c` | Lua 5.4.8 | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main `f2faf255` | 154,280 (59.31%) | 29,595 (48.35%) | 65,775 (54.66%) |
+| machine-taken evaluated nodes, `58ca4ea7` | **169,496 (65.16%)** | **32,547 (53.18%)** | **75,541 (62.78%)** |
+| machine-taken expressions, main and `58ca4ea7` | 67.62%, 74.34% | 54.59%, 61.45% | 62.60%, 72.68% |
+| entries compared | 249,280 | 42,862 | 107,086 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+The machine now refuses by code only calls: they are every one of `sqlite3.c`'s 13,069 expressions refused by code,
+Lua's 3,885 and musl's 5,141. `e02cecd7` measured the same counts and no difference (`results/e02cecd7/verify-*.txt`).
+
+| label | T | C | X | T, C and X | taken nodes | Lua, T, C and X |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| main `f2faf255` | 98.1, 371.5 | 53.5, 203.8 | 40.8, 120.0 | 192.4, 695.3 | 154,280 | 188.1, 873.3 |
+| `e02cecd7` | 97.4, 380.1 | 53.8, 210.6 | 36.1, 124.0 | 187.3, 714.7 | 169,496 | 190.6, 894.9 |
+| `58ca4ea7` | 99.3, 380.1 | 55.0, 210.6 | 36.8, 124.1 | 191.1, 714.8 | 169,496 | 189.1, 894.9 |
+| `e02cecd7-off`, main's expressions | 94.9, 370.8 | 50.4, 204.4 | 33.9, 120.5 | 179.2, 695.7 | 154,280 | 183.5, 874.5 |
+| `58ca4ea7-off`, main's expressions | 96.7, 370.8 | 50.3, 204.4 | 32.8, 120.5 | 179.8, 695.7 | 154,280 | 188.7, 874.5 |
+
+- **What the code costs main's expressions:** 0.4 instructions a node (695.7 against 695.3).
+- **What the new expressions cost:** 714.8 instructions a node against 695.3, on 9.9% more nodes.
+- **The inlining of `node_machine_put_truth`** changed no instruction count (714.7 and 714.8). It restores main's set of
+  out-of-line functions: `nm` of `58ca4ea7`'s compiler lists main's and the updates' own.
 
 ## Mishaps, and what was kept of them
 
