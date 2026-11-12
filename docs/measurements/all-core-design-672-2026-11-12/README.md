@@ -68,6 +68,11 @@ the design itself: it isn't built.
 
 ### What disturbed the runs
 
+- **Measured again without the stray:** [`all-core-rerun-2536-2026-11-12`](../all-core-rerun-2536-2026-11-12/) ran
+  every script here again after it was killed (13:51:28 UTC), with the same executable and inputs. The stray had put
+  the two-worker cohorts' compiles on base pages (without it most take huge pages), and left the four- to
+  fifteen-worker cohorts a lighter host: without it, eight workers cost 2.8% more user cycles and 9.5% more kernel
+  cycles a compile, 288.8 MB/s. That record has every table again beside these.
 - **A stray process held a core all day.** A test program of another session (`run`, PID 3239052, started by hand at
   08:16 UTC, its parent gone) looped at 100% of a CPU outside the lock. It was reported to the owner and not touched.
   Every cohort records the foreign processes above half a CPU before and after it (`*.strays.txt`): in 252 of 338
