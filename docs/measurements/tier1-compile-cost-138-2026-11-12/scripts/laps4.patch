@@ -1,0 +1,2173 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index fc65220f..632c7fde 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -21,6 +21,7 @@
+ #include <sys/resource.h>
+ 
+ #include "c_check_clock_rss.c"
++#include "tier1_laps.h"
+ 
+ typedef enum CheckStage
+ {
+@@ -306,6 +307,7 @@ static void check_clock_start(CheckClock* stage_clock)
+ // Charges the time since the last lap to `stage`; nothing without a clock.
+ static inline void check_clock_lap(CheckClock* stage_clock, CheckStage stage)
+ {
++    t1_lap(T1_DRIVER + (uint32_t)stage);
+     if (stage_clock != NULL)
+     {
+         const uint64_t now = __rdtsc();
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 376822eb..5eda3b20 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -20,6 +20,7 @@
+ // `verify`, each proved against its records/control flow, with the same CFI as the fixed-frame analyzer (unwind_tier0).
+ // Backend tests share only the frame verifier; source consumers retain the complete emission below.
+ #if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
++#include "tier1_laps.h"
+ #include "worker_budget.c"
+ #include "c_check_tier1_outcome.c"
+ 
+@@ -1687,6 +1688,9 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
+     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
+ }
+ 
++// Defined in c_check_tier1.c (laps4.patch's prototype): the bodies from `first` on as one batch through Tier 1's pipeline.
++static uint32_t check_program_emit_tier1_batch(CheckEmitRun* run, CheckEmitLane* lane, uint32_t first, uint32_t end);
++
+ // A lowered part's code on lane `lane`: each body's Tier 0 code, the lane's function access column given, and its code
+ // after Tier 0 (check_program_emit_code) until one of them fails.
+ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
+@@ -1694,9 +1698,14 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+     const uint32_t end = part->lower.end;
+     part->tier0_failed = end;
+     part->code_failed = end;
++    // The bodies below this have their Tier 1 outcome already, from the prototype's batch.
++    uint32_t batched = part->lower.first;
+     for (uint32_t b = part->lower.first; part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && b < end; b += 1)
+     {
+         Tier0Function* function = &run->lowered->functions[b];
++        t1_function(b);
++        t1_row()->typed_entries = function->count;
++        t1_row()->typed_locals = function->local_count;
+         // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's; one that takes
+         // directives is an assembled unit, which the merge publishes (check_program_emit_asm_unit).
+         const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+@@ -1704,6 +1713,10 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+         // whose templates take directives is an assembled unit, which remains an explicit admission refusal here.
+         const bool unit_naked = naked != 0 && naked->unit_assembled;
+         CheckTier1Outcome outcome = (CheckTier1Outcome){ 0 };
++        if (lane->tier1 != NULL && buster_t1.batch != 0 && b >= batched)
++        {
++            batched = check_program_emit_tier1_batch(run, lane, b, end);
++        }
+         if (unit_naked)
+         {
+             if (lane->tier1 != NULL)
+@@ -1715,7 +1728,7 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+         }
+         else
+         {
+-            outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
++            outcome = lane->tier1 == NULL ? (CheckTier1Outcome){ 0 } : b < batched ? run->tier1_outcomes[b] : check_program_emit_tier1(run, lane, b, naked != 0);
+         }
+         const bool tier1 = outcome.category == CHECK_TIER1_SUCCESS;
+         const bool forbidden = outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
+@@ -4839,6 +4852,30 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+             arena_pop_to(&lanes->arenas[lane].bytes, 0);
+         }
+     }
++    // The lap log's rows of this unit's functions: their names, which stay in the link's names, and the next unit's start.
++    for (uint64_t f = buster_t1.unit_first + 1; buster_t1.laps != 0 && f <= buster_t1.function_count; f += 1)
++    {
++        const uint32_t b = buster_t1.functions[f].body;
++        const SymbolId symbol = valid && b < count ? check_program_body_symbol(program, b) : 0;
++        const NameId name = symbol < result->link.symbols.count ? result->link.symbols.name[symbol] : 0;
++        if (name != 0)
++        {
++            const uint32_t length = result->link.names.length[name];
++            uint8_t* copy = malloc((size_t)length + 1);
++            if (copy != 0)
++            {
++                memcpy(copy, result->link.names.bytes[name], length);
++                copy[length] = 0;
++                buster_t1.functions[f].name = copy;
++                buster_t1.functions[f].name_length = length;
++            }
++        }
++    }
++    if (buster_t1.laps != 0)
++    {
++        buster_t1.unit_first = buster_t1.function_count;
++        buster_t1.units += 1;
++    }
+     // With --tier1-refusals, each body Tier 0 compiled, in source order, by its symbol's name.
+     for (uint32_t b = 0; valid && run.tier1_outcomes != 0 && lanes->tier1_refusals != NULL && b < count; b += 1)
+     {
+diff --git a/src/buster/compiler/c_check_tier1.c b/src/buster/compiler/c_check_tier1.c
+index 5b685125..0894f358 100644
+--- a/src/buster/compiler/c_check_tier1.c
++++ b/src/buster/compiler/c_check_tier1.c
+@@ -12,6 +12,7 @@
+ // 0's; and with -g, its source events at the function's granularity (the body's start and the epilogue:
+ // docs/tier1.md's "Debug information"). Include after tier1_emit.c and c_check_program_emit.c.
+ 
++#include "tier1_laps.h"
+ #include "ir_optimize_verified.c"
+ #include "ir_wide.c"
+ #include "ir_vector_split.c"
+@@ -273,394 +274,579 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
+ 
+ #include "c_check_tier1_debug.c"
+ 
+-static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
+-                                             bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
+-                                             CheckTier1Counts* counts, const CheckTier1Fault* fault)
++// MEASUREMENT PROTOTYPE (laps4.patch, buster#138): check_tier1_compile's steps as phases over an item that holds what
++// was its locals, so that the same code runs a function through every phase (check_tier1_compile, as before) or a batch
++// of functions through each phase in turn (check_tier1_batch, the emission's with BUSTER_T1_BATCH). An item's address
++// must not change between its phases: its plan, revision and options point into it.
++enum
++{
++    CHECK_TIER1_PHASE_LOWER,
++    CHECK_TIER1_PHASE_INLINE,
++    CHECK_TIER1_PHASE_GVN,
++    CHECK_TIER1_PHASE_SSA,
++    CHECK_TIER1_PHASE_WIDE,
++    CHECK_TIER1_PHASE_VECTOR_SPLIT,
++    CHECK_TIER1_PHASE_TRUTH,
++    CHECK_TIER1_PHASE_IF_CONVERT,
++    CHECK_TIER1_PHASE_OPTIMIZE,
++    CHECK_TIER1_PHASE_VERIFY,
++    CHECK_TIER1_PHASE_SELECT,
++    CHECK_TIER1_PHASE_EMIT,
++    CHECK_TIER1_PHASE_PUBLISH = CHECK_TIER1_PHASE_EMIT + BUSTER_TIER1_EMIT_PHASES,
++    CHECK_TIER1_PHASE_COUNT,
++};
++
++typedef struct CheckTier1Item CheckTier1Item;
++struct CheckTier1Item
++{
++    const Tier0Function* function;
++    const X86Target* target;
++    const CheckTier1Fault* fault;
++    EmittedCode* code;
++    CheckTier1Counts* counts;
++    uint8_t result_class;
++    CheckTier1Outcome outcome;
++    CheckTier1Stage stage;
++    IrFunction lowered;
++    uint32_t inlined_calls;
++    bool lowered_verified;
++    IrFunction promoted;
++    IrGvnResult gvn_result;
++    bool gvn_applied;
++    const IrFunction* unssa;
++    IrWideResult wide;
++    uint32_t pre_blocks;
++    uint32_t pre_moved;
++    IrOptimizeResult optimized;
++    bool verify_scalar;
++    IrVerifiedRevision revision;
++    IrVerifiedAnalysis analysis;
++    Tier1SelectPlan plan;
++    Tier1EmitResult emitted;
++    Tier1EmitDiagnostic diagnostic;
++    Tier1EmitOptions options;
++    Tier1EmitError emit_error;
++    uint32_t emit_node;
++    bool emit_done;
++    bool emit_finished;
++};
++
++// Phases `first` to `last` of `it`. `alone`: the function runs every phase before another function starts, so the
++// lane's arenas are its own, emptied before and after it, as check_tier1_compile's were; otherwise the batch's caller
++// prepares the lane and empties its arenas.
++static void check_tier1_item_run(CheckTier1Lane* lane, CheckTier1Item* it, uint32_t first, uint32_t last, bool alone, bool scalar, bool rematerialize, bool gvn, bool certify, bool sources,
++                                 Arena* output)
+ {
+-    *code = (EmittedCode){ 0 };
+-    *counts = (CheckTier1Counts){ 0 };
+-    CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
+-                                                check_tier1_lane_prepare(lane, target, gvn) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
+-    CheckTier1Stage stage = outcome.stage;
++#define BUSTER_CHECK_TIER1_PHASE(k) (first <= (uint32_t)(k) && (uint32_t)(k) <= last)
++    const Tier0Function* function = it->function;
++    const CheckTier1Fault* fault = it->fault;
+     Arena* scratch = &lane->scratch;
+-    const IrType result_type = result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[result_class];
+-    IrFunction lowered = { 0 };
+-    // A caller of a function that returns twice (#1847, Tier0Function.calls_returns_twice) is Tier 0's: Tier 1 shares
+-    // call-save rows and spill slots among values whose ranges don't meet on the CFG, which has no edge from a longjmp
+-    // back to the call, so a second return would read another value's bytes. Its IR lowers as any other's.
+-    if (stage == CHECK_TIER1_COMPILED && function->calls_returns_twice)
+-    {
+-        outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_RETURNS_TWICE, UINT32_MAX, 0);
+-        stage = outcome.stage;
+-    }
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        // A vector wider than the target moves whole is taken, and split below (#1624).
+-        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar) :
+-                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
+-        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.dominance_checked = check.dominance_checked;
+-        stage = outcome.stage;
+-    }
+-    // The calls of the unit's always_inline functions expanded, and the aggregates' slots split (#1282,
+-    // c_check_tier1_inline.c), in steps[4] and steps[5]: what the solver and promotion take in place of the lowering.
+-    IrFunction expanded = { 0 };
+-    uint32_t inlined_calls = 0;
+-    const CheckTier1Inline* inlining = lane->inlining;
+-    const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
+-    // Whether `lowered` is still the lowering's verified result: inlining's expansion isn't verified until promotion.
+-    bool lowered_verified = true;
+-    if (stage == CHECK_TIER1_COMPILED && inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count &&
+-        check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, &expanded, &inlined_calls))
+-    {
+-        lowered = expanded;
+-        lowered_verified = false;
+-    }
+-    IrFunction promoted = { 0 };
+-    // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
+-    // need: on promoted SSA its class representatives lengthen live ranges across blocks, which Tier 1's allocation then
+-    // pays for in moves and spills. Its rewritten function is verified. Like the other stages, only an explicit
+-    // capability refusal permits Tier 0 fallback; resource or invariant failures retain their original IrCheck.
+-    IrGvnResult gvn_result = { 0 };
+-    bool gvn_applied = false;
+-    if (stage == CHECK_TIER1_COMPILED && gvn)
+-    {
+-        IrGvnOptions options = ir_gvn_options();
+-        options.scalar = scalar;
+-        const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
+-        outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.dominance_checked = check.dominance_checked;
+-        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-        gvn_applied = stage == CHECK_TIER1_COMPILED;
+-    }
+-    const IrFunction* unssa = gvn_applied ? &gvn_result.function : &lowered;
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        // GVN's result and the lowering's are each verified whole as they're made, so promotion doesn't verify them again
+-        // (#1379); an inlined expansion it does.
+-        const bool verified = gvn_applied || lowered_verified;
+-        const IrCheck check = verified ? ssa_ir_promote_verified_input(unssa, !scalar, &lane->steps[1], scratch, &promoted) :
+-                              scalar   ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &promoted) :
+-                                         ssa_ir_promote(unssa, &lane->steps[1], scratch, &promoted);
+-        outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.dominance_checked = check.dominance_checked;
+-        outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-    }
+-    // The 128-bit integers' halves (#141, ir_wide.c), which the optimizer then takes: a function without any is the
+-    // promoted one itself, borrowed.
+-    IrWideResult wide = { 0 };
+-    uint32_t pre_blocks = 0;
+-    uint32_t pre_moved = 0;
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
+-        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-    }
+-    // The vectors wider than the target moves whole, as its widest vectors' pieces (#1624, ir_vector_split.c), in the same
+-    // step's arena, after the halves: a function without any is the halves' (or the promoted one) itself, borrowed.
+-    if (stage == CHECK_TIER1_COMPILED)
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_LOWER))
++    {
++        *it->code = (EmittedCode){ 0 };
++        *it->counts = (CheckTier1Counts){ 0 };
++        const bool prepared = !alone || check_tier1_lane_prepare(lane, it->target, gvn);
++        it->outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, prepared ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
++        it->stage = it->outcome.stage;
++        t1_lap(T1_ARENAS);
++        const IrType result_type = it->result_class == UINT8_MAX ? IR_VOID : (IrType)ir_typed_types[it->result_class];
++        it->lowered_verified = true;
++        // A caller of a function that returns twice (#1847) is Tier 0's (check_tier1_compile's comment).
++        if (it->stage == CHECK_TIER1_COMPILED && function->calls_returns_twice)
++        {
++            it->outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_RETURNS_TWICE, UINT32_MAX, 0);
++            it->stage = it->outcome.stage;
++        }
++        if (it->stage == CHECK_TIER1_COMPILED)
++        {
++            const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, it->target->features, &lane->steps[0], scratch, &it->lowered, scalar) :
++                                           ir_lower_typed_target_pieces(function, result_type, function->symbol_count, it->target->features, &lane->steps[0], scratch, &it->lowered, scalar);
++            it->outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++            it->outcome.dominance_checked = check.dominance_checked;
++            it->stage = it->outcome.stage;
++            t1_row()->lowered_instructions = it->lowered.instruction_count;
++            t1_row()->lowered_blocks = it->lowered.block_count;
++        }
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_INLINE))
++    {
++        IrFunction expanded = { 0 };
++        const CheckTier1Inline* inlining = lane->inlining;
++        const uint64_t body = inlining != NULL ? (uint64_t)(function - inlining->lowered->functions) : UINT64_MAX;
++        if (it->stage == CHECK_TIER1_COMPILED && inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count &&
++            check_tier1_inline(lane, (uint32_t)body, &it->lowered, it->target, scalar, &expanded, &it->inlined_calls))
++        {
++            it->lowered = expanded;
++            it->lowered_verified = false;
++        }
++        t1_lap(T1_INLINE);
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_GVN))
++    {
++        if (it->stage == CHECK_TIER1_COMPILED && gvn)
++        {
++            IrGvnOptions options = ir_gvn_options();
++            options.scalar = scalar;
++            const IrCheck check = ir_optimize_gvn(&it->lowered, &lane->steps[7], scratch, options, &it->gvn_result);
++            it->outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++            it->outcome.dominance_checked = check.dominance_checked;
++            it->outcome.operation = check.instruction < it->lowered.instruction_count ? it->lowered.op[check.instruction] : IR_OP_COUNT;
++            it->stage = it->outcome.stage;
++            it->gvn_applied = it->stage == CHECK_TIER1_COMPILED;
++            t1_lap(T1_GVN);
++        }
++        it->unssa = it->gvn_applied ? &it->gvn_result.function : &it->lowered;
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_SSA) && it->stage == CHECK_TIER1_COMPILED)
++    {
++        const IrFunction* unssa = it->unssa;
++        const bool verified = it->gvn_applied || it->lowered_verified;
++        const IrCheck check = verified ? ssa_ir_promote_verified_input(unssa, !scalar, &lane->steps[1], scratch, &it->promoted) :
++                              scalar   ? ssa_ir_promote_scalar(unssa, &lane->steps[1], scratch, &it->promoted) :
++                                         ssa_ir_promote(unssa, &lane->steps[1], scratch, &it->promoted);
++        it->outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++        it->outcome.dominance_checked = check.dominance_checked;
++        it->outcome.operation = check.instruction < unssa->instruction_count ? unssa->op[check.instruction] : IR_OP_COUNT;
++        it->stage = it->outcome.stage;
++        t1_row()->promoted_instructions = it->promoted.instruction_count;
++        t1_row()->promoted_blocks = it->promoted.block_count;
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_WIDE) && it->stage == CHECK_TIER1_COMPILED)
++    {
++        const IrCheck check = scalar ? ir_wide_split_scalar(&it->promoted, &lane->steps[6], scratch, &it->wide) : ir_wide_split(&it->promoted, &lane->steps[6], scratch, &it->wide);
++        it->outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++        it->outcome.operation = check.instruction < it->promoted.instruction_count ? it->promoted.op[check.instruction] : IR_OP_COUNT;
++        it->stage = it->outcome.stage;
++        t1_lap(T1_WIDE);
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_VECTOR_SPLIT) && it->stage == CHECK_TIER1_COMPILED)
+     {
+         IrVectorSplitResult pieces = { 0 };
+-        const uint32_t piece = ir_typed_vector_piece(target->features);
+-        const IrCheck check = scalar ? ir_vector_split_scalar(&wide.function, piece, &lane->steps[6], scratch, &pieces) : ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
+-        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-        wide.function = stage == CHECK_TIER1_COMPILED ? pieces.function : wide.function;
+-    }
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
+-        // No later consumer reads their old operands and no analysis revision has been published. Simplify before
+-        // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
+-        ir_truth_simplify(&wide.function, scalar);
+-    }
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        // #1382's bounded, total scalar arms become selects before any retained analysis is built. The result
+-        // borrows immutable tables from the promoted/wide input; all stay live until the optimizer copies them.
+-        IrIfConvertResult converted = { 0 };
+-        const IrCheck check = ir_if_convert(&wide.function, &lane->steps[6], scratch, scalar, &converted);
+-        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-        wide.function = stage == CHECK_TIER1_COMPILED ? converted.function : wide.function;
+-    }
+-    // --tier1-schedule=pre (#172): each block's instructions reordered on the same owned columns, before the optimizer's
+-    // final verification, which then covers the new order. No room for the pass's scratch is a resource failure.
+-    if (stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
+-    {
+-        // With --verify, the original columns and the permutation, which the scalar reference checks.
+-        const uint64_t mark = scratch->length;
+-        Tier1ScheduleIrOriginal original = { 0 };
+-        uint32_t* order = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
+-        uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)wide.function.instruction_count + 1) : 0;
+-        const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(&wide.function, scratch, &original));
+-        Tier1ScheduleIrStats schedule_stats = { 0 };
+-        IrError error = copied ? tier1_schedule_ir_function(&wide.function, scratch, order, &schedule_stats) : IR_ERROR_MEMORY;
+-        error = error == IR_OK && certify && !tier1_schedule_ir_verify(&original, &wide.function, order, place) ? IR_ERROR_STRUCTURE : error;
+-        arena_pop_to(scratch, mark);
+-        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+-        stage = outcome.stage;
+-        pre_blocks = schedule_stats.segments;
+-        pre_moved = schedule_stats.moved;
+-    }
+-    IrOptimizeResult optimized = { 0 };
+-    IrVerifiedRevision revision = { 0 };
+-    IrVerifiedAnalysis analysis = { 0 };
+-    if (stage == CHECK_TIER1_COMPILED)
++        const uint32_t piece = ir_typed_vector_piece(it->target->features);
++        const IrCheck check = scalar ? ir_vector_split_scalar(&it->wide.function, piece, &lane->steps[6], scratch, &pieces) : ir_vector_split(&it->wide.function, piece, &lane->steps[6], scratch, &pieces);
++        it->outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++        it->outcome.operation = check.instruction < it->wide.function.instruction_count ? it->wide.function.op[check.instruction] : IR_OP_COUNT;
++        it->stage = it->outcome.stage;
++        it->wide.function = it->stage == CHECK_TIER1_COMPILED ? pieces.function : it->wide.function;
++        t1_lap(T1_VECTOR_SPLIT);
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_TRUTH) && it->stage == CHECK_TIER1_COMPILED)
++    {
++        ir_truth_simplify(&it->wide.function, scalar);
++        t1_lap(T1_TRUTH);
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_IF_CONVERT))
++    {
++        if (it->stage == CHECK_TIER1_COMPILED)
++        {
++            IrIfConvertResult converted = { 0 };
++            const IrCheck check = ir_if_convert(&it->wide.function, &lane->steps[6], scratch, scalar, &converted);
++            it->outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++            it->outcome.operation = check.instruction < it->wide.function.instruction_count ? it->wide.function.op[check.instruction] : IR_OP_COUNT;
++            it->stage = it->outcome.stage;
++            it->wide.function = it->stage == CHECK_TIER1_COMPILED ? converted.function : it->wide.function;
++            t1_lap(T1_IF_CONVERT);
++        }
++        // --tier1-schedule=pre (#172), as check_tier1_compile ran it.
++        if (it->stage == CHECK_TIER1_COMPILED && lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_PRE)
++        {
++            const uint64_t mark = scratch->length;
++            Tier1ScheduleIrOriginal original = { 0 };
++            uint32_t* order = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)it->wide.function.instruction_count + 1) : 0;
++            uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)it->wide.function.instruction_count + 1) : 0;
++            const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(&it->wide.function, scratch, &original));
++            Tier1ScheduleIrStats schedule_stats = { 0 };
++            IrError error = copied ? tier1_schedule_ir_function(&it->wide.function, scratch, order, &schedule_stats) : IR_ERROR_MEMORY;
++            error = error == IR_OK && certify && !tier1_schedule_ir_verify(&original, &it->wide.function, order, place) ? IR_ERROR_STRUCTURE : error;
++            arena_pop_to(scratch, mark);
++            it->outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
++            it->stage = it->outcome.stage;
++            it->pre_blocks = schedule_stats.segments;
++            it->pre_moved = schedule_stats.moved;
++        }
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_OPTIMIZE) && it->stage == CHECK_TIER1_COMPILED)
+     {
+         IrOptimizeOptions options = ir_optimize_options();
+         options.passes |= BUSTER_IR_OPTIMIZE_LAYOUT;
+         options.scalar = scalar;
+-        const IrCheck check = ir_optimize_verified(&wide.function, &lane->steps[2], &lane->steps[3], scratch, options, &revision, &optimized, &analysis);
+-        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+-        outcome.dominance_checked = check.dominance_checked;
+-        outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-    }
+-    // #866's congruence solver's result, if it ran, is `unssa`; `ir` is what the plan below reads.
+-    const IrFunction* ir = &optimized.function;
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        const bool current = ir_verified_current(&analysis, &revision, ir);
+-        outcome = check_tier1_step(CHECK_TIER1_ANALYSIS, CHECK_TIER1_CAUSE_IR, current ? 0 : IR_ERROR_METADATA, BUSTER_IR_NONE, 0,
+-                                   fault != NULL && fault->cause == CHECK_TIER1_CAUSE_IR ? fault : NULL);
+-        stage = outcome.stage;
++        const IrCheck check = ir_optimize_verified_first(&it->wide.function, &lane->steps[2], scratch, options, &it->revision, &it->optimized, &it->verify_scalar);
++        it->outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, check.error != IR_OK ? fault : NULL);
++        it->outcome.dominance_checked = check.dominance_checked;
++        it->outcome.operation = check.instruction < it->wide.function.instruction_count ? it->wide.function.op[check.instruction] : IR_OP_COUNT;
++        it->stage = it->outcome.stage;
+     }
+-    if (stage == CHECK_TIER1_COMPILED)
++    const IrFunction* ir = &it->optimized.function;
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_VERIFY))
+     {
+-        // The optimizer's rewrite owns all supported columns, including labels, calls and ABI side tables. Lowered,
+-        // GVN's rewritten function (steps[7], when enabled), promoted IR and its 128-bit integers' halves (steps[6]) may
+-        // borrow from each other, but none is a dependency of the optimized function. Reuse lowered and promoted arenas
+-        // for the plan and emitted records; retain optimized IR and analyses through emission.
+-        arena_pop_to(&lane->steps[0], 0);
+-        arena_pop_to(&lane->steps[1], 0);
++        if (it->stage == CHECK_TIER1_COMPILED)
++        {
++            const IrCheck check = ir_optimize_verified_second(&lane->steps[3], scratch, it->verify_scalar, &it->revision, &it->optimized, &it->analysis);
++            it->outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
++            it->outcome.dominance_checked = check.dominance_checked;
++            it->outcome.operation = check.instruction < it->wide.function.instruction_count ? it->wide.function.op[check.instruction] : IR_OP_COUNT;
++            it->stage = it->outcome.stage;
++            t1_row()->optimized_instructions = it->optimized.function.instruction_count;
++            t1_row()->optimized_blocks = it->optimized.function.block_count;
++        }
++        if (it->stage == CHECK_TIER1_COMPILED)
++        {
++            const bool current = ir_verified_current(&it->analysis, &it->revision, ir);
++            it->outcome = check_tier1_step(CHECK_TIER1_ANALYSIS, CHECK_TIER1_CAUSE_IR, current ? 0 : IR_ERROR_METADATA, BUSTER_IR_NONE, 0,
++                                           fault != NULL && fault->cause == CHECK_TIER1_CAUSE_IR ? fault : NULL);
++            it->stage = it->outcome.stage;
++        }
++        if (it->stage == CHECK_TIER1_COMPILED && alone)
++        {
++            // Alone, the lowered and promoted arenas are free for the plan and the emitted records, as before.
++            arena_pop_to(&lane->steps[0], 0);
++            arena_pop_to(&lane->steps[1], 0);
++        }
+     }
+-    Tier1SelectPlan plan = { 0 };
+-    if (stage == CHECK_TIER1_COMPILED)
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_SELECT) && it->stage == CHECK_TIER1_COMPILED)
+     {
+         const IrDominance dominance = {
+-            .enter = analysis.dominators.preorder,
+-            .leave = analysis.dominators.subtree_end,
+-            .block_count = analysis.dominators.block_count,
++            .enter = it->analysis.dominators.preorder,
++            .leave = it->analysis.dominators.subtree_end,
++            .block_count = it->analysis.dominators.block_count,
+         };
+         uint32_t node = BUSTER_IR_NONE;
+-        // Full final SSA verification produced this exact revision and these intervals. No intervening pass mutates
+-        // it; the revision and both owners remain live until selection and emission have finished (#1055).
+-        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[0], scratch, !scalar, &plan, &node);
++        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, &lane->steps[0], scratch, !scalar, &it->plan, &node);
+         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
+-        outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
+-        outcome.operation = refused;
+-        outcome.call_kinds = selected == TIER1_SELECT_ERROR_UNSUPPORTED ? check_tier1_call_kinds(ir, node) : 0;
+-        stage = outcome.stage;
+-    }
+-    Tier1EmitResult emitted = { 0 };
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        Tier1EmitDiagnostic diagnostic = { 0 };
+-        // The frame pointer the options ask for (#177, Tier0Function.frame_pointer), as Tier 0's frame keeps it, and
+-        // stack-clash protection's probes (Tier0Function.probe_stack): the prologue's and the dynamic allocations'.
+-        const Tier1EmitOptions options = {
+-            .diagnostic = &diagnostic,
+-            .register_mask = tier1_liveness_register_mask(),
+-            .frame_flags = (function->frame_pointer != BUSTER_TIER0_FRAME_POINTER_NONE ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0) |
+-                           (function->probe_stack ? BUSTER_TIER1_FRAME_PROBE_STACK : 0),
+-            .omit_leaf_frame_pointer = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF,
+-            .vector = !scalar,
+-            .rematerialize = rematerialize,
+-            .symbol_access = function->symbol_access,
+-            .symbol_count = function->symbol_count,
+-            .certify = certify,
+-            .sources = sources,
+-        };
+-        uint32_t node = BUSTER_IR_NONE;
+-        Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
+-        bool forced_nested = false;
+-        if (error == TIER1_EMIT_OK && fault != NULL && fault->stage == CHECK_TIER1_EMISSION && fault->cause != CHECK_TIER1_CAUSE_EMISSION)
+-        {
+-            // The regression control's nested cause: replace the successful handoff with the raw diagnostic and its
+-            // wrapper, as a real nested liveness/IR/allocation/CFG/frame failure would leave them.
+-            diagnostic.cause = check_tier1_fault_emission_cause(fault->cause);
+-            diagnostic.error = fault->error;
+-            error = TIER1_EMIT_MEMORY;
+-            forced_nested = true;
+-        }
+-        const bool nested = error != TIER1_EMIT_OK && diagnostic.cause != TIER1_EMIT_CAUSE_NONE;
+-        outcome = check_tier1_step(CHECK_TIER1_EMISSION, nested ? check_tier1_emission_causes[diagnostic.cause] : CHECK_TIER1_CAUSE_EMISSION,
+-                                   nested ? diagnostic.error : (uint32_t)error, node, 0, fault);
+-        if (forced_nested)
+-        {
+-            outcome.instruction = fault->instruction;
+-            outcome.detail = fault->detail;
+-        }
+-        outcome.emission_error = error != TIER1_EMIT_OK ? (uint32_t)error : outcome.cause == CHECK_TIER1_CAUSE_EMISSION ? outcome.error : 0;
+-        outcome.operation = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
+-        stage = outcome.stage;
+-    }
+-    // The code in `output`, as Tier 0's is: its records, branch columns and references.
+-    const uint64_t mark = output->length;
+-    const Tier1SelectCode* selected = &emitted.code;
+-    X86Instruction* records = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)selected->count + 1) : 0;
+-    uint32_t* branches = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
+-    uint32_t* targets = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
+-    LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
+-    // Each label's first record, where the emission defines its symbol (#789).
+-    uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
+-    // Its frame's events (#1056); with -g, source/storage ranges are published only after final record scheduling.
+-    EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
+-    if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0))
+-    {
+-        arena_pop_to(output, mark);
+-        outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
+-        stage = outcome.stage;
+-    }
+-    if (stage == CHECK_TIER1_COMPILED)
+-    {
+-        // An empty column's producer may hold no pointer at all: copying nothing from null is still undefined behavior.
+-        if (selected->count != 0)
+-        {
+-            memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
+-        }
+-        if (selected->branch_count != 0)
+-        {
+-            memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
+-            memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
+-        }
+-        if (emitted.reference_count != 0)
+-        {
+-            memcpy(references, emitted.references, (uint64_t)emitted.reference_count * sizeof(LinkReference));
+-        }
+-        if (emitted.label_count != 0)
+-        {
+-            memcpy(labels, emitted.label_records, (uint64_t)emitted.label_count * sizeof(uint32_t));
+-        }
+-        *counts = (CheckTier1Counts){
+-            .records = selected->count,
+-            .spill_stores = emitted.spill_stores,
+-            .spill_loads = emitted.spill_loads,
+-            .call_stores = emitted.call_stores,
+-            .call_loads = emitted.call_loads,
+-            .rematerializations = emitted.rematerializations,
+-            .dropped_definitions = emitted.dropped_definitions,
+-            .edge_moves = emitted.edge_moves,
+-            .spill_slots = emitted.allocation.spill_count,
+-            .frame_bytes = emitted.frame.maximum_stack_bytes,
+-            .red_zones = emitted.frame.red_zone && emitted.frame.red_zone_bytes != 0,
+-            .code_certified = emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK,
+-            .code_uncertified = emitted.code_checked && emitted.code_reason != TIER1_CERT_EMITTED_OK,
+-            .machine_rows = emitted.machine_rows,
+-            .row_moves = emitted.row_moves,
+-            .inlined_calls = inlined_calls,
+-            .schedule_blocks = pre_blocks,
+-            .schedule_moved = pre_moved,
+-        };
+-        if (emitted.frame_event_count != 0)
++        it->outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
++        it->outcome.operation = refused;
++        it->outcome.call_kinds = selected == TIER1_SELECT_ERROR_UNSUPPORTED ? check_tier1_call_kinds(ir, node) : 0;
++        it->stage = it->outcome.stage;
++        t1_row()->effective_uses = it->plan.effective_use_count;
++    }
++    for (uint32_t phase = 0; phase < BUSTER_TIER1_EMIT_PHASES; phase += 1)
++    {
++        if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_EMIT + phase) && it->stage == CHECK_TIER1_COMPILED && !it->emit_finished)
++        {
++            if (phase == 0)
++            {
++                it->diagnostic = (Tier1EmitDiagnostic){ 0 };
++                it->options = (Tier1EmitOptions){
++                    .diagnostic = &it->diagnostic,
++                    .register_mask = tier1_liveness_register_mask(),
++                    .frame_flags = (function->frame_pointer != BUSTER_TIER0_FRAME_POINTER_NONE ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0) |
++                                   (function->probe_stack ? BUSTER_TIER1_FRAME_PROBE_STACK : 0),
++                    .omit_leaf_frame_pointer = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF,
++                    .vector = !scalar,
++                    .rematerialize = rematerialize,
++                    .symbol_access = function->symbol_access,
++                    .symbol_count = function->symbol_count,
++                    .certify = certify,
++                    .sources = sources,
++                };
++                it->emit_node = BUSTER_IR_NONE;
++            }
++            it->emit_error = tier1_emit_function_phase(phase, &it->plan, &it->options, lane->allowed, &lane->steps[1], scratch, &it->emitted, &it->emit_node, &it->emit_done);
++            if (it->emit_error != TIER1_EMIT_OK || it->emit_done || phase + 1 == BUSTER_TIER1_EMIT_PHASES)
++            {
++                Tier1EmitError error = it->emit_error;
++                bool forced_nested = false;
++                if (error == TIER1_EMIT_OK && fault != NULL && fault->stage == CHECK_TIER1_EMISSION && fault->cause != CHECK_TIER1_CAUSE_EMISSION)
++                {
++                    it->diagnostic.cause = check_tier1_fault_emission_cause(fault->cause);
++                    it->diagnostic.error = fault->error;
++                    error = TIER1_EMIT_MEMORY;
++                    forced_nested = true;
++                }
++                const bool nested = error != TIER1_EMIT_OK && it->diagnostic.cause != TIER1_EMIT_CAUSE_NONE;
++                it->outcome = check_tier1_step(CHECK_TIER1_EMISSION, nested ? check_tier1_emission_causes[it->diagnostic.cause] : CHECK_TIER1_CAUSE_EMISSION,
++                                               nested ? it->diagnostic.error : (uint32_t)error, it->emit_node, 0, fault);
++                if (forced_nested)
++                {
++                    it->outcome.instruction = fault->instruction;
++                    it->outcome.detail = fault->detail;
++                }
++                it->outcome.emission_error = error != TIER1_EMIT_OK ? (uint32_t)error : it->outcome.cause == CHECK_TIER1_CAUSE_EMISSION ? it->outcome.error : 0;
++                it->outcome.operation = it->emit_node < ir->instruction_count ? ir->op[it->emit_node] : IR_OP_COUNT;
++                it->stage = it->outcome.stage;
++                it->emit_finished = true;
++                T1Function* row = t1_row();
++                row->chain = !it->emitted.general;
++                row->records = it->emitted.code.count;
++                row->branches = it->emitted.code.branch_count;
++                row->cfg_values = it->emitted.cfg_input.value_count;
++                row->cfg_blocks = it->emitted.cfg_input.block_count;
++                row->cfg_edges = it->emitted.cfg_input.edge_count;
++                row->cfg_positions = it->emitted.cfg_input.position_count;
++                row->cfg_phis = it->emitted.cfg_input.phi_count;
++                row->cfg_uses = it->emitted.cfg_input.use_count;
++                row->dense_values = it->emitted.cfg.cross_block_values;
++                row->liveness_iterations = (uint32_t)it->emitted.cfg.liveness_iterations;
++                row->intervals = it->emitted.general ? it->emitted.cfg.intervals.count : 0;
++            }
++        }
++    }
++    if (BUSTER_CHECK_TIER1_PHASE(CHECK_TIER1_PHASE_PUBLISH))
++    {
++        const Tier1EmitResult* emitted = &it->emitted;
++        EmittedCode* code = it->code;
++        CheckTier1Counts* counts = it->counts;
++        // The code in `output`, as Tier 0's is: its records, branch columns and references.
++        const uint64_t mark = output->length;
++        const Tier1SelectCode* selected = &emitted->code;
++        const bool compiled = it->stage == CHECK_TIER1_COMPILED;
++        X86Instruction* records = compiled ? BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, (uint64_t)selected->count + 1) : 0;
++        uint32_t* branches = compiled ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
++        uint32_t* targets = compiled ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)selected->branch_count + 1) : 0;
++        LinkReference* references = compiled ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted->reference_count + 1) : 0;
++        uint32_t* labels = compiled ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted->label_count + 1) : 0;
++        EmissionFrameEvent* frames = compiled ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted->frame_event_count + 1) : 0;
++        if (compiled && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0))
+         {
+-            memcpy(frames, emitted.frame_events, (uint64_t)emitted.frame_event_count * sizeof(EmissionFrameEvent));
++            arena_pop_to(output, mark);
++            it->outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
++            it->stage = it->outcome.stage;
+         }
+-        uint32_t epilogue = selected->count;
+-        const bool published = check_tier1_frame(&emitted, selected->count, &epilogue);
+-        // --tier1-schedule=post (#172): each block's records reordered, within the cuts the code's columns and events
+-        // make; the body's start and the epilogue's are cuts with or without -g, so that -g doesn't change the code.
+-        CheckTier1ScheduleResult scheduled = { .verified = true, .ready = true };
+-        uint32_t* record_order = NULL;
+-        if (lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_POST)
++        if (it->stage == CHECK_TIER1_COMPILED)
+         {
+-            record_order = sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)selected->count + 1) : NULL;
+-            const uint32_t anchors[2] = { emitted.body_record, epilogue };
+-            const CheckTier1ScheduleCode schedule = {
++            if (selected->count != 0)
++            {
++                memcpy(records, selected->records, (uint64_t)selected->count * sizeof(X86Instruction));
++            }
++            if (selected->branch_count != 0)
++            {
++                memcpy(branches, selected->branches, (uint64_t)selected->branch_count * sizeof(uint32_t));
++                memcpy(targets, selected->targets, (uint64_t)selected->branch_count * sizeof(uint32_t));
++            }
++            if (emitted->reference_count != 0)
++            {
++                memcpy(references, emitted->references, (uint64_t)emitted->reference_count * sizeof(LinkReference));
++            }
++            if (emitted->label_count != 0)
++            {
++                memcpy(labels, emitted->label_records, (uint64_t)emitted->label_count * sizeof(uint32_t));
++            }
++            *counts = (CheckTier1Counts){
++                .records = selected->count,
++                .spill_stores = emitted->spill_stores,
++                .spill_loads = emitted->spill_loads,
++                .call_stores = emitted->call_stores,
++                .call_loads = emitted->call_loads,
++                .rematerializations = emitted->rematerializations,
++                .dropped_definitions = emitted->dropped_definitions,
++                .edge_moves = emitted->edge_moves,
++                .spill_slots = emitted->allocation.spill_count,
++                .frame_bytes = emitted->frame.maximum_stack_bytes,
++                .red_zones = emitted->frame.red_zone && emitted->frame.red_zone_bytes != 0,
++                .code_certified = emitted->code_checked && emitted->code_reason == TIER1_CERT_EMITTED_OK,
++                .code_uncertified = emitted->code_checked && emitted->code_reason != TIER1_CERT_EMITTED_OK,
++                .machine_rows = emitted->machine_rows,
++                .row_moves = emitted->row_moves,
++                .inlined_calls = it->inlined_calls,
++                .schedule_blocks = it->pre_blocks,
++                .schedule_moved = it->pre_moved,
++            };
++            if (emitted->frame_event_count != 0)
++            {
++                memcpy(frames, emitted->frame_events, (uint64_t)emitted->frame_event_count * sizeof(EmissionFrameEvent));
++            }
++            uint32_t epilogue = selected->count;
++            const bool published = check_tier1_frame(emitted, selected->count, &epilogue);
++            CheckTier1ScheduleResult scheduled = { .verified = true, .ready = true };
++            uint32_t* record_order = NULL;
++            if (lane->schedule == BUSTER_CHECK_TIER1_SCHEDULE_POST)
++            {
++                record_order = sources ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)selected->count + 1) : NULL;
++                const uint32_t anchors[2] = { emitted->body_record, epilogue };
++                const CheckTier1ScheduleCode schedule = {
++                    .records = records,
++                    .count = selected->count,
++                    .branches = branches,
++                    .targets = targets,
++                    .branch_count = selected->branch_count,
++                    .references = references,
++                    .reference_count = emitted->reference_count,
++                    .labels = labels,
++                    .label_count = emitted->label_count,
++                    .frames = frames,
++                    .frame_count = emitted->frame_event_count,
++                    .anchors = anchors,
++                    .anchor_count = 2,
++                    .record_order = record_order,
++                };
++                scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, !scalar, certify || sources);
++                counts->schedule_blocks = scheduled.blocks;
++                counts->schedule_moved = scheduled.moved;
++            }
++            CheckTier1Debug debug = { 0 };
++            const bool debug_ready = !sources || !published || !scheduled.ready || !scheduled.verified ||
++                                     check_tier1_debug(function, ir, emitted, record_order, epilogue, !scalar, output, scratch, &debug);
++            *code = (EmittedCode){
+                 .records = records,
+                 .count = selected->count,
+                 .branches = branches,
+                 .targets = targets,
+                 .branch_count = selected->branch_count,
+                 .references = references,
+-                .reference_count = emitted.reference_count,
+-                .labels = labels,
+-                .label_count = emitted.label_count,
+-                .frames = frames,
+-                .frame_count = emitted.frame_event_count,
+-                .anchors = anchors,
+-                .anchor_count = 2,
+-                .record_order = record_order,
++                .reference_count = emitted->reference_count,
++                .label_records = labels,
++                .label_count = emitted->label_count,
++                .local_count = sources ? function->local_count : 0,
++                .local_ranges = debug.local_ranges,
++                .local_range_count = debug.local_range_count,
++                .source_records = debug.source_records,
++                .source_origins = debug.source_origins,
++                .source_count = debug.source_count,
++                .frames = emitted->frame_event_count != 0 ? frames : 0,
++                .frame_count = emitted->frame_event_count,
++                .frame_status = EMITTED_FRAME_DESCRIBED,
++                .assembly = tier0_asm_stack(function),
+             };
+-            scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, !scalar, certify || sources);
+-            counts->schedule_blocks = scheduled.blocks;
+-            counts->schedule_moved = scheduled.moved;
+-        }
+-        CheckTier1Debug debug = { 0 };
+-        const bool debug_ready = !sources || !published || !scheduled.ready || !scheduled.verified ||
+-                                 check_tier1_debug(function, ir, &emitted, record_order, epilogue, !scalar, output, scratch, &debug);
+-        *code = (EmittedCode){
+-            .records = records,
+-            .count = selected->count,
+-            .branches = branches,
+-            .targets = targets,
+-            .branch_count = selected->branch_count,
+-            .references = references,
+-            .reference_count = emitted.reference_count,
+-            .label_records = labels,
+-            .label_count = emitted.label_count,
+-            .local_count = sources ? function->local_count : 0,
+-            .local_ranges = debug.local_ranges,
+-            .local_range_count = debug.local_range_count,
+-            .source_records = debug.source_records,
+-            .source_origins = debug.source_origins,
+-            .source_count = debug.source_count,
+-            .frames = emitted.frame_event_count != 0 ? frames : 0,
+-            .frame_count = emitted.frame_event_count,
+-            .frame_status = EMITTED_FRAME_DESCRIBED,
+-            // An asm body that moves a value into rsp (#1846) leaves the frame to the program, which the verifier doesn't read.
+-            .assembly = tier0_asm_stack(function),
+-        };
+-        // Its unwind table's shape (#177): open where its code doesn't end in its last return's ret, and the returns
+-        // whose epilogues' rules are brackets of their own (all of an open frame's, all but the last of a closed one's).
+-        const bool closed = selected->count != 0 && emitted.exit_count != 0 && emitted.exits[emitted.exit_count - 1] == selected->count - 1;
+-        const bool framed = emitted.frame_event_count != 0;
+-        counts->open_frames = framed && !closed;
+-        counts->return_tails = !framed ? 0 : closed ? emitted.exit_count - 1 : emitted.exit_count;
+-        outcome = !debug_ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0) :
+-                  !scheduled.ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_SCHEDULE, BUSTER_IR_NONE, 0) :
+-                                     check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
+-                                                      !published            ? BUSTER_CHECK_TIER1_FRAME_PUBLICATION :
+-                                                      !scheduled.verified ? BUSTER_CHECK_TIER1_SCHEDULE : 0,
+-                                                      BUSTER_IR_NONE, 0, fault);
+-        if (outcome.category != CHECK_TIER1_SUCCESS)
++            const bool closed = selected->count != 0 && emitted->exit_count != 0 && emitted->exits[emitted->exit_count - 1] == selected->count - 1;
++            const bool framed = emitted->frame_event_count != 0;
++            counts->open_frames = framed && !closed;
++            counts->return_tails = !framed ? 0 : closed ? emitted->exit_count - 1 : emitted->exit_count;
++            it->outcome = !debug_ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0) :
++                          !scheduled.ready ? check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_SCHEDULE, BUSTER_IR_NONE, 0) :
++                                             check_tier1_step(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_PUBLICATION,
++                                                              !published            ? BUSTER_CHECK_TIER1_FRAME_PUBLICATION :
++                                                              !scheduled.verified ? BUSTER_CHECK_TIER1_SCHEDULE : 0,
++                                                              BUSTER_IR_NONE, 0, fault);
++            if (it->outcome.category != CHECK_TIER1_SUCCESS)
++            {
++                arena_pop_to(output, mark);
++                *code = (EmittedCode){ 0 };
++                *counts = (CheckTier1Counts){ 0 };
++                it->stage = it->outcome.stage;
++            }
++        }
++        const bool success = it->outcome.category == CHECK_TIER1_SUCCESS;
++        t1_row()->tier1 = success;
++        t1_lap(T1_PUBLISH);
++        if (!success)
+         {
+             arena_pop_to(output, mark);
+             *code = (EmittedCode){ 0 };
+             *counts = (CheckTier1Counts){ 0 };
+-            stage = outcome.stage;
+         }
++        // Only the copies in output may escape, on success as on a refusal: invalidate before the arenas are emptied.
++        ir_verified_invalidate(&it->revision);
++        if (alone)
++        {
++            for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
++            {
++                arena_pop_to(&lane->steps[k], 0);
++            }
++            if (!success)
++            {
++                arena_pop_to(&lane->scratch, 0);
++                if (it->outcome.stage == CHECK_TIER1_RESOURCE)
++                {
++                    check_tier1_lane_release(lane);
++                }
++            }
++        }
++        t1_lap(T1_REST);
+     }
+-    const bool success = outcome.category == CHECK_TIER1_SUCCESS;
+-    if (!success)
++#undef BUSTER_CHECK_TIER1_PHASE
++}
++
++static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Function* function, uint8_t result_class, const X86Target* target, bool scalar,
++                                             bool rematerialize, bool gvn, bool certify, bool sources, Arena* output, EmittedCode* code,
++                                             CheckTier1Counts* counts, const CheckTier1Fault* fault)
++{
++    CheckTier1Item item = { .function = function, .target = target, .fault = fault, .code = code, .counts = counts, .result_class = result_class };
++    check_tier1_item_run(lane, &item, 0, CHECK_TIER1_PHASE_COUNT - 1, true, scalar, rematerialize, gvn, certify, sources, output);
++    return item.outcome;
++}
++
++// A batch: `count` items, each through one phase before any goes through the next. The caller has prepared the lane for
++// the items' target, and empties its arenas after (check_program_emit_tier1_batch).
++static void check_tier1_batch(CheckTier1Lane* lane, CheckTier1Item* items, uint32_t count, bool scalar, bool rematerialize, bool gvn, bool certify, bool sources, Arena* output)
++{
++    for (uint32_t phase = 0; phase < CHECK_TIER1_PHASE_COUNT; phase += 1)
+     {
+-        arena_pop_to(output, mark);
+-        *code = (EmittedCode){ 0 };
+-        *counts = (CheckTier1Counts){ 0 };
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            check_tier1_item_run(lane, &items[k], phase, phase, false, scalar, rematerialize, gvn, certify, sources, output);
++        }
+     }
+-    // Only the copies in output may escape this invocation, on success as on a refusal. Invalidate before retiring
+-    // the optimized columns or graph, so no live capability authorizes recycled storage.
+-    ir_verified_invalidate(&revision);
+-    for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+-    {
+-        arena_pop_to(&lane->steps[k], 0);
++}
++
++// MEASUREMENT PROTOTYPE (laps4.patch): the emission's bodies from `first` on, up to `end`, as one batch through Tier 1's
++// pipeline (check_tier1_batch): at most BUSTER_T1_BATCH bodies of one target, closed once their typed entries reach
++// BUSTER_T1_BATCH_ENTRIES. Each body's outcome goes to run->tier1_outcomes and its code to run->codes, as
++// check_program_emit_tier1 leaves them; a naked function's is its refusal, and an assembled unit's stays the caller's.
++// Returns the first body past the batch. One lane only: the items are one static array.
++static uint32_t check_program_emit_tier1_batch(CheckEmitRun* run, CheckEmitLane* lane, uint32_t first, uint32_t end)
++{
++    static CheckTier1Item* items;
++    static uint32_t* bodies;
++    static uint32_t capacity;
++    const uint32_t limit = buster_t1.batch;
++    if (capacity < limit)
++    {
++        free(items);
++        free(bodies);
++        items = malloc((size_t)limit * sizeof(CheckTier1Item));
++        bodies = malloc((size_t)limit * sizeof(uint32_t));
++        capacity = items != 0 && bodies != 0 ? limit : 0;
++    }
++    const CheckProgram* program = run->program;
++    const CheckTier1Fault* faults = run->lanes->tier1_fault;
++    lane->tier1->inlining = run->tier1_inline;
++    lane->tier1->schedule = run->lanes->tier1_schedule;
++    uint32_t count = 0;
++    uint64_t entries = 0;
++    const X86Target* batch_target = NULL;
++    uint32_t b = first;
++    bool open = capacity != 0;
++    while (open && b < end && count < limit && (count == 0 || entries < buster_t1.batch_entries))
++    {
++        const Tier0Function* function = &run->lowered->functions[b];
++        const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
++        const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
++        const X86Target* target = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? &program->target : &program->targets[body_target - 1];
++        if (naked != 0 && naked->unit_assembled)
++        {
++            b += 1;
++        }
++        else if (naked != 0)
++        {
++            const CheckTier1Outcome refused = check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0);
++            run->tier1_outcomes[b] = check_tier1_policy(refused, run->lanes->tier1_strict);
++            b += 1;
++        }
++        else if (batch_target != NULL && target != batch_target)
++        {
++            open = false;
++        }
++        else
++        {
++            batch_target = target;
++            const CheckTier1Fault* fault = faults != NULL && faults->body == b + 1 ? faults : NULL;
++            items[count] = (CheckTier1Item){ .function = function, .target = target, .fault = fault, .code = &run->codes[b], .counts = &run->tier1_counts[b],
++                                             .result_class = check_program_result_class(function, program, b, false) };
++            bodies[count] = b;
++            entries += function->count;
++            count += 1;
++            b += 1;
++        }
+     }
+-    if (!success)
++    if (count != 0)
+     {
+-        arena_pop_to(&lane->scratch, 0);
+-        if (outcome.stage == CHECK_TIER1_RESOURCE)
++        if (!check_tier1_lane_prepare(lane->tier1, batch_target, run->lanes->tier1_gvn))
++        {
++            fprintf(stderr, "check_program_emit_tier1_batch: the lane's arenas could not be prepared\n");
++            abort();
++        }
++        check_tier1_batch(lane->tier1, items, count, run->scalar, !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch);
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            run->tier1_outcomes[bodies[k]] = check_tier1_policy(items[k].outcome, run->lanes->tier1_strict);
++        }
++        for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STEPS; k += 1)
+         {
+-            check_tier1_lane_release(lane);
++            arena_pop_to(&lane->tier1->steps[k], 0);
+         }
++        arena_pop_to(&lane->tier1->scratch, 0);
+     }
+-    return outcome;
++    return capacity != 0 ? b : first;
+ }
+ 
+ static void check_tier1_print_refusal(FILE* stream, const uint8_t* name, uint32_t length, CheckTier1Outcome outcome)
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 91a3a01f..b55b6cd9 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12511,6 +12511,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         arena_release(&arena);
+     }
+     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
++    t1_dump();
+     if (stage_clock != NULL)
+     {
+         check_clock_report(stage_clock, pp_ticks, PP_PHASE_COUNT, stderr);
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index 61b95f19..c1c86a36 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -1628,6 +1628,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
+ #define BUSTER_IR_TYPED_EMIT_NAME ir_typed_count_function
+ #define BUSTER_IR_TYPED_EMIT_COUNT 1
+ #define BUSTER_IR_TYPED_EMIT_SOURCES 0
++#include "tier1_laps.h"
+ #include "ir_lower_emit.c"
+ #undef BUSTER_IR_TYPED_EMIT_SOURCES
+ #undef BUSTER_IR_TYPED_EMIT_COUNT
+@@ -2243,6 +2244,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
+     uint8_t* types = 0;
+     uint8_t* classes = 0;
+     uint32_t* stack = 0;
++    t1_lap(T1_LOWER_VALIDATE);
+     if (check.error == IR_OK)
+     {
+         plan = ir_typed_plan(input, scratch);
+@@ -2276,6 +2278,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
+         }
+     }
+     IrFunction candidate = {0};
++    t1_lap(T1_LOWER_PLAN);
+     if (check.error == IR_OK)
+     {
+         ir_typed_classify(input, ops, types, BUSTER_VECTOR_PATH(vector));
+@@ -2293,6 +2296,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
+         }
+         const IrSizes sizes = ir_typed_count_function(input, result_type, &plan, scratch, ops, types, stack, classes, 0);
+         check.error = ir_create(output, &sizes, &candidate);
++        t1_lap(T1_LOWER_COUNT);
+         if (check.error == IR_OK && sources)
+         {
+             const IrDebugInfo source = { .entry_count = input->count, .local_count = input->local_count };
+@@ -2316,10 +2320,12 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
+                 ir_typed_emit_function(input, result_type, &plan, scratch, ops, types, stack, classes, &candidate);
+             }
+             candidate.symbol_count = symbol_count;
++            t1_lap(T1_LOWER_EMIT);
+             if (check.error == IR_OK)
+             {
+                 check = BUSTER_VECTOR_PATH(vector) ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+             }
++            t1_lap(T1_LOWER_VERIFY);
+         }
+     }
+     if (check.error == IR_OK)
+diff --git a/src/buster/compiler/ir_optimize.c b/src/buster/compiler/ir_optimize.c
+index 0c733908..2098286c 100644
+--- a/src/buster/compiler/ir_optimize.c
++++ b/src/buster/compiler/ir_optimize.c
+@@ -6,6 +6,7 @@
+ // out-of-range shift. Unknown analysis state and an IR undef are different: undef must enter as overdefined.
+ // The 16-item fold boundary uses bounded columns; it has no padding, alignment or inactive-lane read contract.
+ 
++#include "tier1_laps.h"
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <string.h>
+@@ -1390,6 +1391,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
+     work->scratch = scratch;
+     work->scalar = scalar;
+     IrCheck check = BUSTER_SCALAR_PATH(verify_scalar) ? ir_verify_scalar(function, scratch, 0) : ir_verify(function, scratch, 0);
++    t1_lap(T1_OPT_VERIFY_INPUT);
+     if (check.error == IR_OK && !simd && ir_function_has_simd_path(function, !scalar))
+     {
+         check.error = IR_ERROR_UNSUPPORTED;
+@@ -1410,6 +1412,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
+     {
+         check.error = BUSTER_SCALAR_PATH(verify_scalar) ? ir_uses_validated_scalar(function, scratch, output, &work->uses) : ir_uses_validated(function, scratch, output, &work->uses);
+     }
++    t1_lap(T1_OPT_CFG_USES);
+     if (check.error == IR_OK)
+     {
+         const DominatorCfg cfg = {
+@@ -1427,6 +1430,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
+         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
+         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+     }
++    t1_lap(T1_OPT_DOMINATORS);
+     // Dead regions are valid IR. Check SSA for executable source regions without rejecting dead cross-block uses;
+     // their instructions disappear before the final full dominance verifier runs.
+     for (uint32_t i = 0; check.error == IR_OK && i < function->instruction_count; i += 1)
+@@ -1456,6 +1460,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare_twins(IrOptimize
+             check.error = IR_ERROR_MEMORY;
+         }
+     }
++    t1_lap(T1_OPT_DOMINANCE);
+     return check;
+ }
+ 
+diff --git a/src/buster/compiler/ir_optimize_verified.c b/src/buster/compiler/ir_optimize_verified.c
+index 231336e0..c8c928ba 100644
+--- a/src/buster/compiler/ir_optimize_verified.c
++++ b/src/buster/compiler/ir_optimize_verified.c
+@@ -8,6 +8,7 @@
+ // side table or analysis arena. Counts and addresses are not revision identities. The scope and both arenas must
+ // outlive every consumer; scopes must not be copied, reinitialized or moved while a handle can still be used.
+ 
++#include "tier1_laps.h"
+ #ifndef BUSTER_IR_OPTIMIZE_VERIFIED_INCLUDED
+ #define BUSTER_IR_OPTIMIZE_VERIFIED_INCLUDED
+ 
+@@ -81,6 +82,7 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
+         candidate.row_checks += 1;
+         check = ir_check_rows(function, !BUSTER_SCALAR_PATH(scalar));
+     }
++    t1_lap(T1_FINAL_ROWS);
+     if (check.error == IR_OK)
+     {
+         candidate.cfg_builds += 1;
+@@ -91,6 +93,7 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
+         candidate.graph_checks += 1;
+         check = ir_check_graph(function, &candidate.cfg, scratch, 0, !BUSTER_SCALAR_PATH(scalar));
+     }
++    t1_lap(T1_FINAL_CFG);
+     arena_pop_to(scratch, scratch_mark);
+     if (check.error == IR_OK)
+     {
+@@ -110,6 +113,7 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
+         const DominatorStatus status = dominators_analyze(analyses, scratch, &graph, options, &candidate.dominators);
+         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+     }
++    t1_lap(T1_FINAL_DOMINATORS);
+     if (check.error == IR_OK)
+     {
+         const IrDominance dominance = {
+@@ -120,6 +124,7 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
+         candidate.graph_checks += 1;
+         check = ir_check_graph(function, &candidate.cfg, scratch, &dominance, !BUSTER_SCALAR_PATH(scalar));
+     }
++    t1_lap(T1_FINAL_DOMINANCE);
+     if (check.error == IR_OK)
+     {
+         candidate.arena = analyses;
+@@ -208,10 +213,13 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
+             }
+         }
+         check.error = work.simd_error;
++        t1_lap(T1_OPT_SCCP);
+         if (check.error == IR_OK)
+         {
+             ir_optimize_dce(&work, options);
++            t1_lap(T1_OPT_DCE);
+             check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
++            t1_lap(T1_OPT_REWRITE);
+         }
+     }
+     // The rewrite copies every supported side table into output. None of the work's scratch is a dependency of the
+@@ -239,4 +247,110 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
+     return check;
+ }
+ 
++// MEASUREMENT PROTOTYPE (laps4.patch, buster#138): ir_optimize_verified in two halves, so that a batch of functions can
++// run the first half (preparation, SCCP, dead code, the rewrite) for each and then the second (the final verification,
++// whose CFG and dominators selection keeps) for each. Run one after the other they are ir_optimize_verified, but that a
++// failure of the second half leaves the first's rewritten function in `output`: the batch's arenas are emptied together.
++static __attribute__((unused)) IrCheck ir_optimize_verified_first(const IrFunction* function, Arena* output, Arena* scratch, IrOptimizeOptions options, IrVerifiedRevision* revision, IrOptimizeResult* result, bool* verified_scalar)
++{
++    const uint64_t output_mark = output->length;
++    const uint64_t scratch_mark = scratch->length;
++    ir_verified_invalidate(revision);
++    IrOptimizeWork work = { 0 };
++    IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
++    const bool verify_scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR || (options.path == BUSTER_IR_OPTIMIZE_AUTO && options.scalar);
++    *verified_scalar = verify_scalar;
++    if (revision->number != UINT64_MAX && output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR &&
++        (options.passes & ~(BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT)) == 0)
++    {
++        options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
++                         (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
++        check = ir_optimize_prepare_twins(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), BUSTER_SCALAR_PATH(verify_scalar), true);
++    }
++    if (check.error == IR_OK)
++    {
++        const uint32_t block_count = function->block_count;
++        const uint32_t instruction_count = function->instruction_count;
++        if (block_count != 0)
++        {
++            work.blocks[0] = 1;
++        }
++        if ((options.passes & BUSTER_IR_OPTIMIZE_SCCP) != 0)
++        {
++            if (options.scalar)
++            {
++                ir_optimize_sccp_worklist(&work);
++            }
++            else
++            {
++                ir_optimize_sccp_sweeps(&work, options.sweep_limit);
++            }
++        }
++        else
++        {
++            const uint32_t* const offsets = work.cfg.successor_offsets;
++            const uint32_t* const ranks = work.dominators.rpo_index;
++            const uint8_t* const operations = function->op;
++            const uint32_t* const operands = function->a;
++            const IrConstant* const constants = function->constants;
++            for (uint32_t block = 0; block < block_count; block += 1)
++            {
++                const uint8_t reachable = ranks[block] != BUSTER_DOMINATOR_NONE;
++                work.blocks[block] = reachable;
++                for (uint32_t edge = offsets[block]; edge < offsets[(uint64_t)block + 1]; edge += 1)
++                {
++                    work.edges[edge] = reachable;
++                }
++            }
++            for (uint32_t i = 0; i < instruction_count; i += 1)
++            {
++                work.states[i] = operations[i] == IR_CONST ? IROPT_CONSTANT : IROPT_OVERDEFINED;
++                if (operations[i] == IR_CONST)
++                {
++                    work.values[i] = constants[operands[i]];
++                }
++            }
++        }
++        check.error = work.simd_error;
++        t1_lap(T1_OPT_SCCP);
++        if (check.error == IR_OK)
++        {
++            ir_optimize_dce(&work, options);
++            t1_lap(T1_OPT_DCE);
++            check.error = ir_optimize_rewrite(&work, output, scratch, options, &work.statistics.function);
++            t1_lap(T1_OPT_REWRITE);
++        }
++    }
++    work.statistics.scratch_bytes = scratch->length - scratch_mark;
++    arena_pop_to(scratch, scratch_mark);
++    if (check.error == IR_OK)
++    {
++        *result = work.statistics;
++    }
++    else
++    {
++        arena_pop_to(output, output_mark);
++    }
++    return check;
++}
++
++static __attribute__((unused)) IrCheck ir_optimize_verified_second(Arena* analyses, Arena* scratch, bool verify_scalar, IrVerifiedRevision* revision, IrOptimizeResult* result, IrVerifiedAnalysis* analysis)
++{
++    const uint64_t analysis_mark = analyses->length;
++    IrVerifiedAnalysis candidate = { 0 };
++    const IrCheck check = ir_verified_build(&result->function, analyses, scratch, BUSTER_SCALAR_PATH(verify_scalar), &candidate);
++    if (check.error == IR_OK)
++    {
++        revision->function = &result->function;
++        candidate.owner = revision;
++        candidate.revision = revision->number;
++        *analysis = candidate;
++    }
++    else
++    {
++        arena_pop_to(analyses, analysis_mark);
++    }
++    return check;
++}
++
+ #endif
+diff --git a/src/buster/compiler/ssa_ir.c b/src/buster/compiler/ssa_ir.c
+index 76269d14..bafd6a8d 100644
+--- a/src/buster/compiler/ssa_ir.c
++++ b/src/buster/compiler/ssa_ir.c
+@@ -14,6 +14,7 @@
+ // final IR with scalar and vector dominance checks. Existing phis are preserved after removing dead incoming edges;
+ // the SSA constructor's trivial-phi cleanup applies to its newly created phis.
+ 
++#include "tier1_laps.h"
+ _Static_assert(IR_VOID == BUSTER_SSA_TYPE_VOID && IR_I1 == BUSTER_SSA_TYPE_I1 && IR_I8 == BUSTER_SSA_TYPE_I8 && IR_I16 == BUSTER_SSA_TYPE_I16 && IR_I32 == BUSTER_SSA_TYPE_I32 && IR_I64 == BUSTER_SSA_TYPE_I64 && IR_I128 == BUSTER_SSA_TYPE_I128 && IR_F32 == BUSTER_SSA_TYPE_F32 && IR_F64 == BUSTER_SSA_TYPE_F64 && IR_F80 == BUSTER_SSA_TYPE_F80 && IR_PTR == BUSTER_SSA_TYPE_PTR, "SSA and IR scalar types must agree");
+ _Static_assert(IR_V4I32 == BUSTER_SSA_TYPE_V4I32 && IR_V8I32 == BUSTER_SSA_TYPE_V8I32 && IR_V16I32 == BUSTER_SSA_TYPE_V16I32 && IR_M8 == BUSTER_SSA_TYPE_M8 &&
+                    IR_M16 == BUSTER_SSA_TYPE_M16 && IR_M32 == BUSTER_SSA_TYPE_M32 && IR_M64 == BUSTER_SSA_TYPE_M64 && IR_TYPE_COUNT == BUSTER_SSA_TYPE_AGGREGATE,
+@@ -852,10 +853,12 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+     {
+         check = ir_check(IR_ERROR_STRUCTURE, input->block_offsets[0], 0);
+     }
++    t1_lap(T1_SSA_CFG);
+     if (check.error == IR_OK)
+     {
+         check.error = ssa_ir_classify(&work);
+     }
++    t1_lap(T1_SSA_CLASSIFY);
+     if (check.error == IR_OK)
+     {
+         // Match the builder's combined reserved-frontier/temporary-matrix cap, a memory bound; and past
+@@ -867,20 +870,25 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
+         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
+         check.error = ssa_ir_error(ssa_prepare(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector)));
++        t1_row()->promoted_locals = work.source.local_count;
+     }
++    t1_lap(T1_SSA_PREPARE);
+     if (check.error == IR_OK)
+     {
+         check = ssa_ir_check_dominance(&work);
+     }
++    t1_lap(T1_SSA_DOMINANCE);
+     if (check.error == IR_OK)
+     {
+         ssa_ir_accesses(&work);
+         check.error = ssa_ir_error(ssa_definitions(&work.work));
+     }
++    t1_lap(T1_SSA_DEFINITIONS);
+     if (check.error == IR_OK)
+     {
+         check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
+     }
++    t1_lap(T1_SSA_CONSTRUCT);
+     if (check.error == IR_OK)
+     {
+         check.error = ssa_ir_error(ssa_simplify(&work.work));
+@@ -900,6 +908,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+             check = ir_check(verified->error == SSA_ERROR_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_PHI, verified->instruction, 0);
+         }
+     }
++    t1_lap(T1_SSA_SIMPLIFY);
+     if (check.error == IR_OK)
+     {
+         check.error = ssa_ir_layout(&work);
+@@ -908,6 +917,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+     {
+         check.error = ir_create(output, &work.sizes, &candidate);
+     }
++    t1_lap(T1_SSA_LAYOUT);
+     if (check.error == IR_OK && !ir_debug_create(output, &candidate, input->debug))
+     {
+         check.error = IR_ERROR_MEMORY;
+@@ -938,10 +948,12 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+             }
+         }
+         check.error = ssa_ir_debug_regions(&work, &candidate);
++        t1_lap(T1_SSA_FILL);
+         if (check.error == IR_OK)
+         {
+             check = ssa_ir_verify_output(&work, &candidate, vector);
+         }
++        t1_lap(T1_SSA_VERIFY);
+     }
+     if (check.error == IR_OK)
+     {
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 90ff0353..bb4080cd 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -69,6 +69,7 @@
+ // Inputs are borrowed and immutable. Output and scratch are distinct arenas; failure restores both lengths and leaves
+ // the result unchanged.
+ 
++#include "tier1_laps.h"
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <stdlib.h>
+@@ -1128,6 +1129,9 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+     const bool arguments = input != 0 && output != 0 && scratch != 0 && output != scratch && result != 0;
+     if (arguments && tier1_cfg_input_valid(input, scratch))
+     {
++        const uint32_t t1_base = buster_t1.allocate_base;
++        t1_lap(t1_base + 0);
++        t1_row()->allocations += 1;
+         error = TIER1_CFG_CAPACITY;
+         const uint32_t blocks = input->block_count;
+         const uint32_t values = input->value_count;
+@@ -1234,6 +1238,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+                 }
+             }
+         }
++        t1_lap(t1_base + 1);
+         Dataflow liveness = { 0 };
+         ready = ready && dataflow_create(scratch, blocks, dense_count, input->edge_count, &liveness);
+         const uint64_t words = liveness.row_words;
+@@ -1304,6 +1309,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+                 error = TIER1_CFG_INVALID;
+             }
+         }
++        t1_lap(t1_base + 2);
+         // Blocks whose entry state continues from their layout predecessor (see 2. above), and each block's entry
+         // state's size, for the edges' moves.
+         uint8_t* merges = ready ? arena_push(scratch, blocks, 1) : 0;
+@@ -1465,6 +1471,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+         }
+         // Intervals, counted, then filled, by value and position; and the splits, each piece of a range after the
+         // first in its block, by the position it starts at and its value.
++        t1_lap(t1_base + 3);
+         candidate.value_interval_offsets = ready ? arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         ready = ready && candidate.value_interval_offsets != 0;
+         Tier1CfgPieces pieces = { 0 };
+@@ -1628,9 +1635,20 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+                 };
+             }
+         }
++        t1_lap(t1_base + 4);
++        if (ready && buster_t1.intervals_only != 0)
++        {
++            // The prototype's first call: the intervals alone, which the callee-saved preference reads.
++            candidate.retained_bytes = output->length - output_saved;
++            candidate.scratch_bytes = scratch->length - scratch_saved;
++            arena_pop_to(scratch, scratch_saved);
++            *result = candidate;
++            return TIER1_CFG_OK;
++        }
+         if (ready)
+         {
+             const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
++            t1_lap(t1_base + 5);
+             ready = allocated == TIER1_ALLOCATION_OK;
+             error = allocated == TIER1_ALLOCATION_OK ? error : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
+             if (ready)
+@@ -1640,6 +1658,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+                 error = ready ? error : TIER1_CFG_CAPACITY;
+             }
+         }
++        t1_lap(t1_base + 6);
+         // Splits by position, counted then filled: the values whose ranges are cut there, and the distinct positions.
+         const uint32_t splits = ready ? (uint32_t)pieces.splits : 0;
+         uint32_t* split_offsets = ready ? arena_push_array(scratch, (uint64_t)input->position_count + 2, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+@@ -1855,6 +1874,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena*
+             candidate.move_destinations[m] = staged[(uint64_t)m * 3 + 1];
+             candidate.move_values[m] = staged[(uint64_t)m * 3 + 2];
+         }
++        t1_lap(t1_base + 7);
+     }
+     if (error == TIER1_CFG_OK)
+     {
+diff --git a/src/buster/compiler/tier1_emit.c b/src/buster/compiler/tier1_emit.c
+index 827fb6b5..540de42e 100644
+--- a/src/buster/compiler/tier1_emit.c
++++ b/src/buster/compiler/tier1_emit.c
+@@ -26,6 +26,7 @@
+ // unused capacity. The arenas are disjoint. Failure restores both lengths and preserves the result. All retained
+ // columns have their exact logical length, without required padding. The existing encoder owns its output padding.
+ 
++#include "tier1_laps.h"
+ #include <stdbool.h>
+ #include <stdint.h>
+ #include <string.h>
+@@ -1832,17 +1833,20 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
+     if (error == TIER1_EMIT_OK && chain)
+     {
+         const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, BUSTER_VECTOR_PATH(options->vector), &emitted.liveness);
++        t1_lap(T1_CHAIN_LIVENESS);
+         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, live);
+         error = live == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : live == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : live == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : live == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
+     }
+     if (error == TIER1_EMIT_OK && chain)
+     {
+         error = tier1_emit_prepare(plan, &emitted.liveness, options, output, &emitted.prepared);
++        t1_lap(T1_CHAIN_PREPARE);
+     }
+     Tier1AllocationError allocated = TIER1_ALLOCATION_OK;
+     if (error == TIER1_EMIT_OK && chain)
+     {
+         allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
++        t1_lap(T1_CHAIN_ALLOCATE);
+         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_ALLOCATION, allocated);
+         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
+     }
+@@ -1875,6 +1879,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
+         error = buffer == 0 || certified == TIER1_CERT_CAPACITY ? TIER1_EMIT_MEMORY : certified == TIER1_CERT_OK ? TIER1_EMIT_OK : TIER1_EMIT_CERTIFICATE;
+         emitted.certified = error == TIER1_EMIT_OK;
+         arena_pop_to(scratch, mark);
++        t1_lap(T1_CERTIFY);
+     }
+     if (error == TIER1_EMIT_OK && chain)
+     {
+@@ -1934,7 +1939,9 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
+     }
+     if (error == TIER1_EMIT_OK && chain)
+     {
++        t1_lap(T1_CHAIN_FRAME);
+         error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->sources, output, scratch, &emitted, error_node);
++        t1_lap(T1_CHAIN_RECORDS);
+     }
+     if (error == TIER1_EMIT_OK && chain && options->sources)
+     {
+@@ -1962,6 +1969,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
+             tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);
+             error = reason == TIER1_CERT_EMITTED_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
+         }
++        t1_lap(T1_CERTIFY);
+     }
+     if (arguments)
+     {
+@@ -1978,3 +1986,127 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
+     }
+     return error;
+ }
++
++// MEASUREMENT PROTOTYPE (laps4.patch, buster#138): tier1_emit_function a phase at a time, so that a batch of functions
++// can run each phase for every function before the next. Phase 0 is the checks, and a straight-line chain's whole
++// emission (tier1_emit_function itself, *done set); for any other function, the CFG consumer's problem. Phase 1 is its
++// first allocation, 2 the callee-saved preference with its allocation, 3 the saves and the frame, 4 the records. The
++// phases write `emitted` in place, which the caller zeroes first; nothing is popped: the batch empties the arenas
++// together. An error ends the function's phases.
++#define BUSTER_TIER1_EMIT_PHASES 5
++static __attribute__((unused)) Tier1EmitError tier1_emit_function_phase(uint32_t phase, const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch,
++                                                                    Tier1EmitResult* emitted, uint32_t* error_node, bool* done)
++{
++    Tier1EmitError error = TIER1_EMIT_OK;
++    if (phase == 0)
++    {
++        const bool arguments = plan && plan->function && options && allowed_forms && output && scratch && output != scratch && output->base != scratch->base && emitted;
++        error = arguments ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
++        if (options != NULL && options->diagnostic != NULL)
++        {
++            *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
++        }
++        *error_node = BUSTER_IR_NONE;
++        *done = false;
++        if (error == TIER1_EMIT_OK)
++        {
++            const uint32_t flags = BUSTER_TIER1_FRAME_KEEP_POINTER | BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK;
++            if ((options->frame_flags & ~flags) != 0)
++            {
++                error = TIER1_EMIT_UNSUPPORTED;
++            }
++            else if ((options->register_mask & ~tier1_liveness_register_mask()) != 0)
++            {
++                error = TIER1_EMIT_INVALID;
++            }
++        }
++        if (error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan))
++        {
++            error = tier1_emit_function(plan, options, allowed_forms, output, scratch, emitted, error_node);
++            *done = true;
++        }
++        else if (error == TIER1_EMIT_OK)
++        {
++            emitted->general = true;
++            emitted->prepared.vex = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_X_XM128);
++            emitted->prepared.avx2 = x86_target_form_allowed(allowed_forms, X86_FORM_VPCMPEQD_Y_Y_YM256);
++            emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
++            emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
++            error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
++            t1_lap(T1_CFG_PROBLEM);
++        }
++    }
++    else if (phase == 1)
++    {
++        buster_t1.allocate_base = T1_A_VALIDATE;
++        Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
++        buster_t1.allocate_base = T1_B_VALIDATE;
++        if (allocated == TIER1_CFG_CONSTRAINT)
++        {
++            emitted->cfg_input.definition_registers = 0;
++            allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
++        }
++        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
++        error = allocated == TIER1_CFG_OK ? TIER1_EMIT_OK : allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : allocated == TIER1_CFG_CONSTRAINT ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_INVALID;
++        error = error != TIER1_EMIT_OK || (emitted->cfg.split_count == 0 && (emitted->cfg.temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0) ? error : TIER1_EMIT_ALLOCATION;
++    }
++    else if (phase == 2)
++    {
++        buster_t1.allocate_base = T1_B_VALIDATE;
++        error = tier1_emit_cfg_callee(plan, options, output, scratch, emitted);
++        t1_lap(T1_CFG_CALLEE);
++    }
++    else if (phase == 3)
++    {
++        if (options->certify)
++        {
++            Tier1CertReport report = { 0 };
++            Tier1CertCfgStats stats = { 0 };
++            const Tier1CertError certified = tier1_certificate_cfg_check(&emitted->cfg_input, &emitted->cfg, output, scratch, &report, &stats);
++            tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, certified);
++            error = certified == TIER1_CERT_OK ? TIER1_EMIT_OK : certified == TIER1_CERT_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
++            emitted->certified = error == TIER1_EMIT_OK;
++            emitted->certificate_facts = stats.facts;
++            emitted->certificate_edits = stats.transitions + stats.split_moves + stats.edge_moves;
++            t1_lap(T1_CERTIFY);
++        }
++        if (error == TIER1_EMIT_OK)
++        {
++            error = tier1_emit_cfg_saves(plan, scratch, emitted);
++            t1_lap(T1_CFG_SAVES);
++        }
++        if (error == TIER1_EMIT_OK)
++        {
++            emitted->allocation = emitted->cfg.allocation;
++            error = tier1_emit_cfg_frame(plan, options, output, scratch, emitted);
++            t1_lap(T1_CFG_FRAME);
++        }
++    }
++    else
++    {
++        error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
++        t1_lap(T1_CFG_RECORDS);
++        if (error == TIER1_EMIT_OK && (options->certify || options->sources))
++        {
++            bool room = true;
++            Tier1DebugDefinition* definitions = options->sources ? ir_allocate(output, plan->function->instruction_count, sizeof(Tier1DebugDefinition), &room) : NULL;
++            Tier1DebugPhi* phis = options->sources ? ir_allocate(output, plan->function->instruction_count, sizeof(Tier1DebugPhi), &room) : NULL;
++            Tier1CertReport report = { 0 };
++            Tier1CertEmittedStats stats = { 0 };
++            const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_check_debug(plan, emitted, output, scratch, definitions, phis, &report, &stats) : TIER1_CERT_EMITTED_CAPACITY;
++            emitted->code_checked = true;
++            emitted->code_reason = reason;
++            emitted->code_edits = stats.edits + stats.edge_edits;
++            emitted->code_originals = stats.originals;
++            emitted->debug_definitions = reason == TIER1_CERT_EMITTED_OK ? definitions : NULL;
++            emitted->debug_phis = reason == TIER1_CERT_EMITTED_OK ? phis : NULL;
++            if (reason >= TIER1_CERT_EMITTED_REFUSED)
++            {
++                tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CERTIFICATE, BUSTER_TIER1_EMIT_CODE_CERTIFICATE | reason);
++                error = reason == TIER1_CERT_EMITTED_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_CERTIFICATE;
++            }
++            t1_lap(T1_CERTIFY);
++        }
++    }
++    return error;
++}
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 42cbc785..84ed709e 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -4126,11 +4126,13 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
+         crossing += pass == 1 && general && (crosses || avoid != 0);
+     }
+     Tier1EmitError error = ok || callee == 0 ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
++    t1_row()->crossing = crossing;
+     if (error == TIER1_EMIT_OK && crossing != 0)
+     {
+         const Tier1CfgInput first_input = *input;
+         input->allowed_registers = allowed;
+         input->registers[0] = caller | callee;
++        t1_lap(T1_CFG_CALLEE);
+         Tier1CfgAllocation second;
+         const Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(input, output, scratch, &second) : tier1_cfg_allocate_scalar(input, output, scratch, &second);
+         // This second pass only tries to prefer callee-saved registers. A constraint or exhausted arena discards the
+@@ -4142,6 +4144,15 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
+             error = TIER1_EMIT_INVALID;
+         }
+         const bool taken = allocated == TIER1_CFG_OK && second.split_count == 0 && (second.temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0;
++        {
++            T1Function* row = t1_row();
++            row->second = taken ? 1 : allocated == TIER1_CFG_OK && second.split_count != 0 ? 2 : allocated == TIER1_CFG_OK ? 3 : allocated == TIER1_CFG_CONSTRAINT ? 4 : allocated == TIER1_CFG_CAPACITY ? 5 : 6;
++            const Tier1AllocationInput* one = &emitted->cfg.intervals;
++            const Tier1AllocationInput* two = &second.intervals;
++            row->same_intervals = allocated == TIER1_CFG_OK && one->count == two->count &&
++                                  (one->count == 0 || (memcmp(one->starts, two->starts, (uint64_t)one->count * 4) == 0 && memcmp(one->ends, two->ends, (uint64_t)one->count * 4) == 0 &&
++                                                       memcmp(one->values, two->values, (uint64_t)one->count * 4) == 0));
++        }
+         if (taken)
+         {
+             emitted->cfg = second;
+@@ -4152,6 +4163,19 @@ static Tier1EmitError tier1_emit_cfg_callee(const Tier1SelectPlan* plan, const T
+             *input = first_input;
+         }
+     }
++    if (error == TIER1_EMIT_OK && buster_t1.preferred_first != 0 && callee != 0 && emitted->crossing_values == 0)
++    {
++        // The prototype's plain allocation, put off until the preference was refused or had nothing to prefer.
++        Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(input, output, scratch, &emitted->cfg);
++        if (allocated == TIER1_CFG_CONSTRAINT)
++        {
++            input->definition_registers = 0;
++            allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(input, output, scratch, &emitted->cfg);
++        }
++        tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_CFG_ALLOCATION, allocated);
++        error = allocated == TIER1_CFG_OK ? TIER1_EMIT_OK : allocated == TIER1_CFG_CAPACITY ? TIER1_EMIT_MEMORY : allocated == TIER1_CFG_CONSTRAINT ? TIER1_EMIT_ALLOCATION : TIER1_EMIT_INVALID;
++        error = error != TIER1_EMIT_OK || (emitted->cfg.split_count == 0 && (emitted->cfg.temp_slots & ~((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1)) == 0) ? error : TIER1_EMIT_ALLOCATION;
++    }
+     // The callee-saved registers the general class's fragments took (a mask's k3 is no rbx).
+     emitted->callee_used = 0;
+     const Tier1Allocation* allocation = &emitted->cfg.allocation;
+@@ -4179,9 +4203,33 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
+     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
+     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
+     Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
++    t1_lap(T1_CFG_PROBLEM);
+     if (error == TIER1_EMIT_OK)
+     {
++        buster_t1.allocate_base = T1_A_VALIDATE;
++        buster_t1.intervals_only = buster_t1.preferred_first != 0 && emitted->callee_registers != 0;
+         Tier1CfgError allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_cfg_allocate(&emitted->cfg_input, output, scratch, &emitted->cfg) : tier1_cfg_allocate_scalar(&emitted->cfg_input, output, scratch, &emitted->cfg);
++        buster_t1.allocate_base = T1_B_VALIDATE;
++        if (allocated == TIER1_CFG_OK && buster_t1.intervals_only == 0)
++        {
++            T1Function* row = t1_row();
++            const Tier1CfgInput* problem = &emitted->cfg_input;
++            row->pressure[0] = emitted->cfg.allocation.peak_pressure[0];
++            row->pressure[1] = emitted->cfg.allocation.peak_pressure[1];
++            row->pressure[2] = emitted->cfg.allocation.peak_pressure[2];
++            row->registers0 = (uint32_t)__builtin_popcount(problem->registers[0]);
++            uint32_t taken = 0;
++            for (uint32_t r = 0; r < problem->fixed.count; r += 1)
++            {
++                taken |= problem->fixed.classes[r] == BUSTER_TIER1_ALLOCATE_GPR ? problem->fixed.registers[r] : 0;
++            }
++            row->fixed_general = (uint32_t)__builtin_popcount(taken & problem->registers[0]);
++            for (uint32_t v = 0; problem->definition_registers != 0 && v < problem->value_count; v += 1)
++            {
++                row->pinned += problem->definition_registers[v] != 0;
++            }
++        }
++        buster_t1.intervals_only = 0;
+         // A parameter bound to its incoming register over its definition's interval may leave a use there no register:
+         // then every parameter is free, the entry's moves bringing each where its allocation has it.
+         if (allocated == TIER1_CFG_CONSTRAINT)
+@@ -4197,6 +4245,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
+     if (error == TIER1_EMIT_OK)
+     {
+         error = tier1_emit_cfg_callee(plan, options, output, scratch, emitted);
++        t1_lap(T1_CFG_CALLEE);
+     }
+     if (error == TIER1_EMIT_OK && options->certify)
+     {
+@@ -4209,19 +4258,32 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
+         emitted->certified = error == TIER1_EMIT_OK;
+         emitted->certificate_facts = stats.facts;
+         emitted->certificate_edits = stats.transitions + stats.split_moves + stats.edge_moves;
++        t1_lap(T1_CERTIFY);
+     }
+     if (error == TIER1_EMIT_OK)
+     {
+         error = tier1_emit_cfg_saves(plan, scratch, emitted);
++        t1_lap(T1_CFG_SAVES);
+     }
+     if (error == TIER1_EMIT_OK)
+     {
+         emitted->allocation = emitted->cfg.allocation;
+         error = tier1_emit_cfg_frame(plan, options, output, scratch, emitted);
++        t1_lap(T1_CFG_FRAME);
+     }
+     if (error == TIER1_EMIT_OK)
+     {
+         error = tier1_emit_cfg_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
++        t1_lap(T1_CFG_RECORDS);
++        T1Function* row = t1_row();
++        row->calls = emitted->prepared.call_count;
++        row->fixed_ranges = emitted->cfg_input.fixed.count;
++        row->fragments = emitted->cfg.allocation.fragment_count;
++        row->moves = emitted->cfg.move_count;
++        row->spills = emitted->cfg.allocation.spill_count;
++        row->scan_intervals = emitted->cfg.allocation.scalar_intervals;
++        row->common_intervals = emitted->cfg.allocation.vector_intervals;
++        row->splits = emitted->cfg.split_count;
+     }
+     return error;
+ }
+diff --git a/src/buster/compiler/tier1_laps.h b/src/buster/compiler/tier1_laps.h
+new file mode 100644
+index 00000000..b54d7108
+--- /dev/null
++++ b/src/buster/compiler/tier1_laps.h
+@@ -0,0 +1,314 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// MEASUREMENT ONLY (buster#138's compile-cost attribution, 2026-11-12): not for main. A lap log of Tier 1's pipeline:
++// with BUSTER_T1_LAPS=PATH in the environment, every t1_lap(STAGE) appends the TSC and the stage that the time since
++// the previous lap belongs to, with the function being compiled, and the driver's final stage writes the log to PATH:
++// the TSC's anchors on CLOCK_MONOTONIC_RAW (which `perf record -k CLOCK_MONOTONIC_RAW` stamps its samples with, so a
++// reducer can put each sample in the lap its time falls in), one row per function with its sizes, and the laps.
++// Without the variable a lap is a load and a branch. One thread only: run it on one lane (--lanes 1, or one CPU).
++// The state is one weak object, so that main.c's units share it.
++
++#ifndef BUSTER_TIER1_LAPS_H
++#define BUSTER_TIER1_LAPS_H
++
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++#include <sys/mman.h>
++#include <x86intrin.h>
++
++typedef enum T1Stage
++{
++    T1_OTHER,
++    T1_ARENAS,
++    T1_LOWER_VALIDATE,
++    T1_LOWER_PLAN,
++    T1_LOWER_COUNT,
++    T1_LOWER_EMIT,
++    T1_LOWER_VERIFY,
++    T1_INLINE,
++    T1_GVN,
++    T1_SSA_CFG,
++    T1_SSA_CLASSIFY,
++    T1_SSA_PREPARE,
++    T1_SSA_DOMINANCE,
++    T1_SSA_DEFINITIONS,
++    T1_SSA_CONSTRUCT,
++    T1_SSA_SIMPLIFY,
++    T1_SSA_LAYOUT,
++    T1_SSA_FILL,
++    T1_SSA_VERIFY,
++    T1_WIDE,
++    T1_VECTOR_SPLIT,
++    T1_TRUTH,
++    T1_IF_CONVERT,
++    T1_OPT_VERIFY_INPUT,
++    T1_OPT_CFG_USES,
++    T1_OPT_DOMINATORS,
++    T1_OPT_DOMINANCE,
++    T1_OPT_SCCP,
++    T1_OPT_DCE,
++    T1_OPT_REWRITE,
++    T1_FINAL_ROWS,
++    T1_FINAL_CFG,
++    T1_FINAL_DOMINATORS,
++    T1_FINAL_DOMINANCE,
++    T1_SELECT_PREPARE,
++    T1_SELECT_FACTS,
++    T1_SELECT_LABEL,
++    T1_SELECT_PATTERNS,
++    T1_SELECT_USES,
++    T1_CHAIN_LIVENESS,
++    T1_CHAIN_PREPARE,
++    T1_CHAIN_ALLOCATE,
++    T1_CHAIN_FRAME,
++    T1_CHAIN_RECORDS,
++    T1_CFG_PROBLEM,
++    // tier1_cfg_allocate_impl's parts, the first allocation's; the second's (the callee-saved preference's, or a
++    // constraint's retry) are these plus T1_ALLOCATE_PARTS.
++    T1_A_VALIDATE,
++    T1_A_PREPARE,
++    T1_A_LIVENESS,
++    T1_A_LISTS,
++    T1_A_INTERVALS,
++    T1_A_ASSIGN,
++    T1_A_LOOKUP,
++    T1_A_EDGES,
++    T1_B_VALIDATE,
++    T1_B_PREPARE,
++    T1_B_LIVENESS,
++    T1_B_LISTS,
++    T1_B_INTERVALS,
++    T1_B_ASSIGN,
++    T1_B_LOOKUP,
++    T1_B_EDGES,
++    T1_CFG_CALLEE,
++    T1_CFG_SAVES,
++    T1_CFG_FRAME,
++    T1_CFG_RECORDS,
++    T1_CERTIFY,
++    T1_PUBLISH,
++    T1_REST,
++    T1_STAGE_COUNT,
++    // The driver's own stages (c_check_clock.c's CheckStage), from 100: its laps and marks.
++    T1_DRIVER = 100,
++} T1Stage;
++#define T1_ALLOCATE_PARTS (T1_B_VALIDATE - T1_A_VALIDATE)
++
++#define T1_STAGE_NAMES \
++    "other", "arenas", "lower.validate", "lower.plan", "lower.count", "lower.emit", "lower.verify", "inline", "gvn", \
++    "ssa.cfg", "ssa.classify", "ssa.prepare", "ssa.dominance", "ssa.definitions", "ssa.construct", "ssa.simplify", "ssa.layout", "ssa.fill", "ssa.verify", \
++    "wide", "vector-split", "truth", "if-convert", \
++    "opt.verify-input", "opt.cfg-uses", "opt.dominators", "opt.dominance", "opt.sccp", "opt.dce", "opt.rewrite", \
++    "final.rows", "final.cfg", "final.dominators", "final.dominance", \
++    "select.prepare", "select.facts", "select.label", "select.patterns", "select.uses", \
++    "chain.liveness", "chain.prepare", "chain.allocate", "chain.frame", "chain.records", \
++    "cfg.problem", \
++    "alloc1.validate", "alloc1.prepare", "alloc1.liveness", "alloc1.lists", "alloc1.intervals", "alloc1.assign", "alloc1.lookup", "alloc1.edges", \
++    "alloc2.validate", "alloc2.prepare", "alloc2.liveness", "alloc2.lists", "alloc2.intervals", "alloc2.assign", "alloc2.lookup", "alloc2.edges", \
++    "cfg.callee", "cfg.saves", "cfg.frame", "cfg.records", "certify", "publish", "rest"
++
++typedef struct T1Lap
++{
++    uint64_t tsc;
++    uint32_t stage;
++    uint32_t function;
++} T1Lap;
++
++// One compiled function's sizes, as the pipeline's steps saw them. `function` 0 is "no function".
++typedef struct T1Function
++{
++    uint32_t unit;
++    uint32_t body;
++    uint32_t typed_entries;
++    uint32_t typed_locals;
++    uint32_t lowered_instructions;
++    uint32_t lowered_blocks;
++    uint32_t promoted_locals;
++    uint32_t promoted_instructions;
++    uint32_t promoted_blocks;
++    uint32_t optimized_instructions;
++    uint32_t optimized_blocks;
++    uint32_t effective_uses;
++    uint32_t cfg_values;
++    uint32_t cfg_blocks;
++    uint32_t cfg_edges;
++    uint32_t cfg_positions;
++    uint32_t cfg_phis;
++    uint32_t cfg_uses;
++    uint32_t dense_values;
++    uint32_t liveness_iterations;
++    uint32_t intervals;
++    uint32_t allocations;
++    uint32_t records;
++    uint32_t branches;
++    uint32_t chain;
++    uint32_t tier1;
++    // The callee-saved preference's second allocation (tier1_emit_cfg_callee): the values it constrains, what became of
++    // it (0 none asked, 1 taken, 2 refused for splits, 3 for a temporary slot, 4 a constraint, 5 capacity, 6 another
++    // error), and whether its intervals' values, starts and ends were the first allocation's.
++    uint32_t crossing;
++    uint32_t second;
++    uint32_t same_intervals;
++    uint32_t calls;
++    uint32_t fixed_ranges;
++    uint32_t fragments;
++    uint32_t moves;
++    uint32_t spills;
++    uint32_t scan_intervals;
++    uint32_t common_intervals;
++    uint32_t splits;
++    // The first allocation's peak pressure by class, the general class's registers then, the general registers its fixed
++    // ranges take, and the values bound to a definition's register (parameters).
++    uint32_t pressure[3];
++    uint32_t registers0;
++    uint32_t fixed_general;
++    uint32_t pinned;
++    const uint8_t* name;
++    uint32_t name_length;
++} T1Function;
++
++typedef struct T1State
++{
++    T1Lap* laps;
++    uint64_t lap_count;
++    uint64_t lap_capacity;
++    T1Function* functions;
++    uint64_t function_count;
++    uint64_t function_capacity;
++    // The first function of the unit being compiled, and the units so far.
++    uint64_t unit_first;
++    uint32_t units;
++    // tier1_cfg_allocate_impl's stage base: T1_A_VALIDATE, or T1_B_VALIDATE for a function's later allocations.
++    uint32_t allocate_base;
++    uint64_t anchor_tsc[2];
++    uint64_t anchor_ns[2];
++    const char* path;
++    uint32_t dumped;
++    // A prototype of one allocation (BUSTER_T1_PREFERRED_FIRST in the environment): in a function that calls, the first
++    // tier1_cfg_allocate stops after its intervals (intervals_only), the callee-saved preference's allocation runs from
++    // them, and the plain allocation runs only where that one is refused or has nothing to prefer.
++    uint32_t preferred_first;
++    uint32_t intervals_only;
++    // A prototype of the pipeline a phase at a time over a batch of functions (BUSTER_T1_BATCH: the most functions a
++    // batch, 0 for none; BUSTER_T1_BATCH_ENTRIES: the typed entries that close one).
++    uint32_t batch;
++    uint64_t batch_entries;
++} T1State;
++
++__attribute__((weak)) T1State buster_t1;
++
++static inline __attribute__((always_inline, unused)) void t1_lap(uint32_t stage)
++{
++    if (__builtin_expect(buster_t1.laps != 0, 0))
++    {
++        T1Lap* lap = buster_t1.laps + buster_t1.lap_count;
++        lap->tsc = __rdtsc();
++        lap->stage = stage;
++        lap->function = (uint32_t)buster_t1.function_count;
++        buster_t1.lap_count += buster_t1.lap_count + 1 < buster_t1.lap_capacity;
++    }
++}
++
++// The function being compiled from here on: body `body` of the current unit. The time since the last lap is no stage's.
++static inline __attribute__((unused)) void t1_function(uint32_t body)
++{
++    if (__builtin_expect(buster_t1.laps != 0, 0))
++    {
++        t1_lap(T1_OTHER);
++        buster_t1.function_count += buster_t1.function_count + 1 < buster_t1.function_capacity;
++        buster_t1.functions[buster_t1.function_count] = (T1Function){ .unit = buster_t1.units, .body = body };
++        buster_t1.allocate_base = T1_A_VALIDATE;
++    }
++}
++
++// The current function's row, or a spare one where the log is off, so that a caller writes fields without a test.
++static inline __attribute__((unused)) T1Function* t1_row(void)
++{
++    static T1Function spare;
++    return buster_t1.laps != 0 ? buster_t1.functions + buster_t1.function_count : &spare;
++}
++
++static inline __attribute__((unused)) uint64_t t1_now_ns(void)
++{
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC_RAW, &now);
++    return (uint64_t)now.tv_sec * UINT64_C(1000000000) + (uint64_t)now.tv_nsec;
++}
++
++static __attribute__((unused)) void t1_dump(void)
++{
++    if (buster_t1.laps != 0 && buster_t1.dumped == 0)
++    {
++        buster_t1.dumped = 1;
++        buster_t1.anchor_tsc[1] = __rdtsc();
++        buster_t1.anchor_ns[1] = t1_now_ns();
++        static const char* const names[] = { T1_STAGE_NAMES };
++        FILE* file = fopen(buster_t1.path, "w");
++        if (file != 0)
++        {
++            fprintf(file, "A\t%llu\t%llu\t%llu\t%llu\n", (unsigned long long)buster_t1.anchor_tsc[0], (unsigned long long)buster_t1.anchor_ns[0],
++                    (unsigned long long)buster_t1.anchor_tsc[1], (unsigned long long)buster_t1.anchor_ns[1]);
++            for (uint32_t s = 0; s < T1_STAGE_COUNT; s += 1)
++            {
++                fprintf(file, "S\t%u\t%s\n", s, names[s]);
++            }
++            for (uint64_t f = 1; f <= buster_t1.function_count; f += 1)
++            {
++                const T1Function* row = buster_t1.functions + f;
++                fprintf(file, "F\t%llu\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%.*s\n", (unsigned long long)f, row->unit, row->body,
++                        row->typed_entries, row->typed_locals, row->lowered_instructions, row->lowered_blocks, row->promoted_locals, row->promoted_instructions, row->promoted_blocks,
++                        row->optimized_instructions, row->optimized_blocks, row->effective_uses, row->cfg_values, row->cfg_blocks, row->cfg_edges, row->cfg_positions, row->cfg_phis,
++                        row->cfg_uses, row->dense_values, row->liveness_iterations, row->intervals, row->allocations, row->records, row->branches, row->chain, row->tier1,
++                        (int)row->name_length, row->name != 0 ? (const char*)row->name : "");
++            }
++            for (uint64_t f = 1; f <= buster_t1.function_count; f += 1)
++            {
++                const T1Function* row = buster_t1.functions + f;
++                fprintf(file, "G\t%llu\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\n", (unsigned long long)f, row->crossing, row->second, row->same_intervals, row->calls, row->fixed_ranges,
++                        row->fragments, row->moves, row->spills, row->scan_intervals, row->common_intervals, row->splits, row->pressure[0], row->pressure[1], row->pressure[2], row->registers0,
++                        row->fixed_general, row->pinned);
++            }
++            for (uint64_t k = 0; k < buster_t1.lap_count; k += 1)
++            {
++                fprintf(file, "L\t%llu\t%u\t%u\n", (unsigned long long)buster_t1.laps[k].tsc, buster_t1.laps[k].stage, buster_t1.laps[k].function);
++            }
++            fclose(file);
++        }
++    }
++}
++
++// Before main: the log's room, touched, where the environment asks for it. Every unit's copy runs; the first one acts.
++static __attribute__((constructor, unused)) void t1_initialize(void)
++{
++    const char* path = getenv("BUSTER_T1_LAPS");
++    buster_t1.preferred_first = getenv("BUSTER_T1_PREFERRED_FIRST") != 0;
++    const char* batch = getenv("BUSTER_T1_BATCH");
++    const char* batch_entries = getenv("BUSTER_T1_BATCH_ENTRIES");
++    buster_t1.batch = batch != 0 ? (uint32_t)strtoul(batch, 0, 10) : 0;
++    buster_t1.batch_entries = batch_entries != 0 ? strtoull(batch_entries, 0, 10) : UINT64_MAX;
++    if (path != 0 && buster_t1.laps == 0)
++    {
++        const uint64_t lap_capacity = UINT64_C(1) << 21;
++        const uint64_t function_capacity = UINT64_C(1) << 16;
++        void* laps = mmap(0, lap_capacity * sizeof(T1Lap), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
++        void* functions = mmap(0, function_capacity * sizeof(T1Function), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
++        if (laps != MAP_FAILED && functions != MAP_FAILED)
++        {
++            buster_t1.functions = functions;
++            buster_t1.function_capacity = function_capacity;
++            buster_t1.lap_capacity = lap_capacity;
++            buster_t1.path = path;
++            buster_t1.allocate_base = T1_A_VALIDATE;
++            buster_t1.anchor_tsc[0] = __rdtsc();
++            buster_t1.anchor_ns[0] = t1_now_ns();
++            buster_t1.laps = laps;
++            atexit(t1_dump);
++        }
++    }
++}
++
++#endif
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index 6a2c797a..aa231810 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -10,6 +10,7 @@
+ // semantic failures never select Tier 0 silently. docs/tier1-selection.md records the supported rules and boundaries.
+ // Include after ir.c, lane.c, x86_64_encoder.c, x86_semantics.c, x86_target.c, x86_target_forms.c and x86_zen5.c.
+ 
++#include "tier1_laps.h"
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <string.h>
+@@ -6660,12 +6661,14 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
+     {
+         tier1_select_barriers_scalar(function, count, barriers);
+     }
++    t1_lap(T1_SELECT_PREPARE);
+     if (error == TIER1_SELECT_OK)
+     {
+         tier1_select_known_bits(function, dominance, blocks, positions, known_bits, vector);
+         tier1_select_canonical(function, blocks, known_bits, canonical, positions, vector);
+         tier1_select_scoped_ranges(function, dominance, blocks, known_bits, canonical, positions, pending, vector);
+     }
++    t1_lap(T1_SELECT_FACTS);
+     if (error == TIER1_SELECT_OK)
+     {
+         bool ok = effective_capacity <= UINT32_MAX;
+@@ -6755,6 +6758,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
+             plan.patterns[node] = none;
+         }
+     }
++    t1_lap(T1_SELECT_LABEL);
+     for (uint32_t position = 0; burs && error == TIER1_SELECT_OK && position < count; position += 1)
+     {
+         const uint32_t node = level_nodes[position];
+@@ -6818,6 +6822,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
+             }
+             pending_count = error == TIER1_SELECT_OK ? tier1_select_need_values(function, &plan.patterns[node], node, true, needed, pending, pending_count) : pending_count;
+         }
++        t1_lap(T1_SELECT_PATTERNS);
+         for (uint32_t node = 0; node < count; node += 1)
+         {
+             plan.covered[node] = needed[node] ^ 1;
+@@ -6861,6 +6866,7 @@ static Tier1SelectError tier1_select_plan_checked(const IrFunction* function, co
+         {
+             *result = plan;
+         }
++        t1_lap(T1_SELECT_USES);
+     }
+     if (arguments)
+     {
