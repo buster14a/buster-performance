@@ -38,7 +38,7 @@ built with `BUSTER_TIER1_MEASURE_KINDS`, whose executables' `.text` is the timed
 | Path | Contents |
 | --- | --- |
 | `scripts/` | every script that ran: `host.sh`, `build.sh`, `programs.sh` (the placements), `oracle.sh` (clang -O2's Lua and the scripts' expected outputs), `runs.sh` (the timed runs), `compile.sh` (compile time), `verify.sh` (`--verify`'s certification), `profile.sh` (perf's cycles by symbol), `test.sh` (`head2`'s tests on the 9700X, its escape scan's vector path), `kinds-build.sh` and `kinds.sh` (the tagged builds), `cg9.sh` and `count9.sh` (callgrind and the counts, in the container), `tables.sh`, `lock.sh`, `tools/proto_table.py` (#138's record's) and `tools/compile_table.py` |
-| `9700x/` | the 9700X's `results/`: `host.txt` (host, governor, tools, every compiler's and input's SHA-256), `holders.txt` (the lock's holder line at each run), placements' digests and `--tier1-report`s, `checks.txt`, `runs.tsv`, `compile*.tsv`, `verify-*`, `profile-*`, `test-head2.txt` and the tagged builds' identities; `builds/` the builds' logs and commits; `results-first-head/` the first head's. The lock's own messages, which name other sessions, are left out (their wrapper logs are not here) |
+| `9700x/` | the 9700X's `results/`: `host.txt` (host, governor, tools, every compiler's and input's SHA-256), `holders.txt` (the lock's holder line at each run), placements' digests and `--tier1-report`s, `checks.txt`, `runs.tsv` (the five builds; the 9700X wrote `main2`'s and `final`'s rows into the same file, here `runs-merged.tsv`), `compile*.tsv`, `verify-*`, `profile-*`, `test-head2.txt` and the tagged builds' identities; `builds/` the builds' logs and commits; `results-first-head/` the first head's. The lock's own messages, which name other sessions, are left out (their wrapper logs are not here) |
 | `callgrind/NAME/` | each build's callgrind runs (`runs.txt`: instructions, speedtest1's verification hash, each script's output's MD5), its executables' digests, and `patterns.py`'s counts: `*.patterns` without origin tags, `*-tagged.patterns` with them (main and head, whose `*.kinds.gz` are the tags) |
 | `tables/` | the tables below, as the scripts print them |
 
@@ -141,6 +141,23 @@ Each step against the build before it:
 - `test.sh head2` on the 9700X (the vector paths): `test-ir-optimize` (271,490 checks), `test-tier1-select`,
   `test-tier1-emit`, `test-tier1-pipeline --cross-check` and the #2554 and #1218 driver regressions, all passing
   (`test-head2.txt`).
+
+## Against the current main, after the merge
+
+The branch then merged main `090b0faa8c591869b45903111e1cf845c32d7e97` (#2573's rip-relative symbols, among others):
+`final` is the merge, `57a0339cafd45c4232a3e4706a84d5f8d432bcb6`, against that main, `main2`. `runs.sh 11 main2
+final` timed them as above, in a run of their own (`9700x/results/runs-merged.tsv`, `tables/runs-merged.txt`; 56
+check lines, every one the hash or "same"), and callgrind counted them (`callgrind/main2`, `callgrind/final`).
+
+| | main2 | final | |
+| --- | ---: | ---: | ---: |
+| speedtest1, own instructions | 3,060.5 M | 2,861.7 M | -6.5% |
+| Lua's scripts, own instructions | 5,469.9 M | 5,123.7 M | -6.3% |
+| speedtest1, user cycles, 100 ln(final / main2) | | **-4.32** (-4.81 to -3.83 over placements) | faster at 8 of 8 |
+| Lua, user cycles, 100 ln(final / main2) | | **-8.31** (-9.09 to -7.54 over placements) | faster at 4 of 4 |
+
+The pattern counts by `final` are `head`'s (`callgrind/final/*.patterns`, without tags): the constants stored stay
+2.8 M on speedtest1, now as `mov $imm, sym(%rip)` where a global is stored.
 
 ## Limits
 
