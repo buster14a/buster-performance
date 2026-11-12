@@ -197,8 +197,9 @@ merges it, with the updates moved onto the split files. Its baseline is main
 | calls compared | 13,473 | 4,064 | 5,357 |
 | differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
 
-- **Nothing is refused by code any more.** What is left is templates: on `sqlite3.c` 159 expressions, among them the
-  pointer differences and unsigned divisions by powers of two. Lua refuses one call as `callee`.
+- **Nothing is refused by code any more.** What is left is templates: on `sqlite3.c` 159 expressions, most stopping at
+  a `-` (101) or a `/` (25), the shapes step 1 named (a pointer difference, an unsigned division by a power of two).
+  Lua refuses one call as `callee`.
 - **`main.c` and c-testsuite**, run locally (`measure-node-machine --shadow --verify`, not on the 9700X): 98.38% and
   99.79% of their census-taken nodes are taken, with no difference, `-g` included.
 
