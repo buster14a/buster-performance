@@ -133,7 +133,7 @@ tests the census's pointer, null, at its reader's call and its unit's end, and r
 | page faults | 343,030, 343,031, 343,031 | 343,029 each |
 
 The objects are the same bytes (1,336) and so are the diagnostics (`results/ab/compare.txt`). `ee5b39b9` takes 0.11%
-more user instructions and 1.0% fewer user cycles than the base's last two rounds (its first, the first run after its
+more user instructions and 0.9% fewer user cycles than the base's last two rounds (its first, the first run after its
 build, is the slowest). The instructions are the checker unit's code moving as the new file joins it, not new work: by
 `perf record -e instructions:u -c 200003` (`scripts/abp.sh`, `results/ab/report-*.txt`, each command's top 400
 functions), `check_input_declarator_step` gains 73 M where `check_input_specifiers` loses 54 M and
