@@ -26,12 +26,14 @@ The change answers both from per-unit state:
     decayed to a pointer. An integer constant's hit answers only where every integer constant of its type converts
     alike: not for a pointer parameter, where a null pointer constant is taken and another isn't.
 
-**Main moved twice under the work.** It was developed and measured on #2575's head ("The development", below).
+**Main moved three times under the work.** It was developed and measured on #2575's head ("The development", below).
 #2575 then merged into [buster#2571](https://github.com/buster14a/buster/pull/2571)'s branch, which merged into main
 with the machine's `&&`, `||` and `?:`, and the baked C and X tables followed. The branch merged that main (`head`) and
 was measured against it (`main`). Main then took the increments and compound assignments
-([buster#2577](https://github.com/buster14a/buster/pull/2577)). The branch merged it too (`head2`), and the final
-figures compare it with that main (`main2`).
+([buster#2577](https://github.com/buster14a/buster/pull/2577)), and the branch merged them (`head2`, against `main2`).
+Last, main took T's records as columns ([buster#2580](https://github.com/buster14a/buster/pull/2580)), which
+replaced the records the memo read. The branch merged that main too, with the memo ported to the columns (`head3`), and
+buster#2584 merged `head3`. "The merged code" compares it with that main (`main3`).
 
 Everything ran on the Ryzen 7 9700X (`benchpress`), each run in a hold of the lock, pinned to CPU 2, with the scripts in
 `scripts/`. These are #2575's record's scripts, plus `annotate.sh`, `summary.sh`, `medians.py` and the run drivers.
@@ -41,8 +43,10 @@ Everything ran on the Ryzen 7 9700X (`benchpress`), each run in a hold of the lo
 
 | label | buster commit | what |
 | --- | --- | --- |
-| `main2` | [`f006224ef99a3340ebdaa1c7b0d67af0c8b118bc`](https://github.com/buster14a/buster/commit/f006224ef99a3340ebdaa1c7b0d67af0c8b118bc) | main with the updates (#2577): the pull request's parent |
-| `head2` | [`21ce5d931e1e4b0a2345e53669c43a977c904857`](https://github.com/buster14a/buster/commit/21ce5d931e1e4b0a2345e53669c43a977c904857) | the branch with `main2` merged: the pull request's code |
+| `main3` | [`c3eb40fc4877a05107a84f172540bb0c8f6902e1`](https://github.com/buster14a/buster/commit/c3eb40fc4877a05107a84f172540bb0c8f6902e1) | main with T's records as columns (#2580): the merged pull request's parent |
+| `head3` | [`142ccffc644d69ef95ca09fbab852be95107945f`](https://github.com/buster14a/buster/commit/142ccffc644d69ef95ca09fbab852be95107945f) | the branch with `main3` merged and the memo on the columns: the code buster#2584 merged |
+| `main2` | [`f006224ef99a3340ebdaa1c7b0d67af0c8b118bc`](https://github.com/buster14a/buster/commit/f006224ef99a3340ebdaa1c7b0d67af0c8b118bc) | main with the updates (#2577) |
+| `head2` | [`21ce5d931e1e4b0a2345e53669c43a977c904857`](https://github.com/buster14a/buster/commit/21ce5d931e1e4b0a2345e53669c43a977c904857) | the branch with `main2` merged |
 | `main` | [`afcb185e01ab0259a77972d5daa3f2079de26ade`](https://github.com/buster14a/buster/commit/afcb185e01ab0259a77972d5daa3f2079de26ade) | main with the split, calls, `&&`, `\|\|`, `?:` and the baked tables |
 | `head` | [`28e59f90c307d42aca1ee163c83073a9af6a6c76`](https://github.com/buster14a/buster/commit/28e59f90c307d42aca1ee163c83073a9af6a6c76) | the branch with `main` merged |
 | `parent` | [`01801c143e8b142aab6baceed41fa85d67278b19`](https://github.com/buster14a/buster/commit/01801c143e8b142aab6baceed41fa85d67278b19) | #2575's head, the development's baseline (the same code as its record's `4b0e3cb5`) |
@@ -52,12 +56,58 @@ Everything ran on the Ryzen 7 9700X (`benchpress`), each run in a hold of the lo
 
 - **Builds:** each commit was checked out by its id in a worktree of a fresh clone and built by its `./build.sh`
   (Release), as `results/LABEL/build.log` shows.
-- **Binary hashes:** `results/LABEL/compiler.sha256`. `head2`'s executable is 6,472 bytes larger than `main2`'s,
+- **Binary hashes:** `results/LABEL/compiler.sha256`. `head3`'s executable is 11,512 bytes larger than `main3`'s,
+  `head2`'s 6,472 larger than `main2`'s,
   `head`'s 6,440 larger than `main`'s, and `v3`'s 5,632 larger than `parent`'s.
 - **Host:** `results/env.txt` (Linux 6.18.50-2-lts, clang 23.1.1, perf 7.2.9-1, the performance governor).
-- **Inputs' hashes:** `results/head2/corpora-inputs.txt`. The inputs are #2575's record's.
+- **Inputs' hashes:** `results/head3/corpora-inputs.txt`. The inputs are #2575's record's.
 
 The pull request's other commits change only the fixture and the documentation, or merge main.
+
+## The merged code, on T's records as columns (`run9.sh`)
+
+#2580 keeps each record's type, flags and standing (category and constant kind) in columns, and a value the columns
+can't hold whole in `wides`. The memo now reads an argument's standing, type, flags and type word from the columns. A
+wide record (a fault, an overload set, a bit-field's width, an integer past 64 bits) is no key, so a hit adds the
+record's inherited flags alone: a record that isn't wide has no fault to carry.
+
+**The comparison.** `--verify` by `head3`'s compiler, each input without and with `-g`, shows 0 differences in values,
+entries and the twin, with `main3`'s counts (`results/head3/verify-*.txt`):
+
+| | machine-taken evaluated nodes | calls compared | memo entries filled | arguments by the rule | taken calls' arguments |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 258,466 (99.36%) | 13,473 | 1,900 | 726 | 33,565 |
+| Lua 5.4.8, 34 files | 57,954 (94.69%) | 4,064 | 1,346 | 220 | 9,712 |
+| musl, 1,336 units | 110,248 (91.62%) | 5,357 | 5,127 | 116 | 11,068 |
+
+The timing runs' comparison pass gives the same report lines by both compilers on `sqlite3.c` and Lua. The rule takes
+36 more of `sqlite3.c`'s arguments than at `head2`: the wide records'.
+
+**T a taken node,** ten runs each, alternating (`results/medians-main3-head3.txt`):
+
+| | `main3` | `head3` | change |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` cycles | 119.0 (118.1 to 119.6) | 107.3 (106.2 to 108.3) | −9.8% |
+| `sqlite3.c` instructions | 438.1 | 391.2 | −10.7% |
+| `sqlite3.c` `--repeat 2` cycles | 211.9 (210.5 to 213.0) | 189.2 (188.4 to 190.4) | −10.7% |
+| `sqlite3.c` `--repeat 2` instructions | 873.8 | 775.6 | −11.2% |
+| Lua cycles | 126.3 (125.7 to 127.4) | 116.8 (115.9 to 120.6) | −7.5% |
+| Lua instructions | 609.4 | 555.1 | −8.9% |
+| Lua `--repeat 2` cycles | 247.2 (245.1 to 254.8) | 224.8 (222.4 to 231.2) | −9.1% |
+| Lua `--repeat 2` instructions | 1,216.6 | 1,093.3 | −10.1% |
+
+All three sweeps, `sqlite3.c`: 218.6 cycles and 751.7 instructions a node against 204.0 and 704.8. Lua: 203.9 and
+920.4 against 192.5 and 866.1. C runs 199.7 instructions a node and X 113.9 in both.
+
+**The profile** (`perf-symbols.txt`, 40 passes on `sqlite3.c`): `type_index_find` + `type_find_or_add` fall from
+1.35% + 1.17% of the run to 0.57% + 0.56%, `check_action_convert_plain` from 2.90% to 1.16%, and
+`node_machine_call_rule` from 5.41% to 4.26%. On the columns an argument the rule takes is made whole first
+(`node_machine_operand_whole`), which a hit doesn't do.
+
+**`-c sqlite3.c`** (`results/ab-main3-head3/time-runs.txt`): 124.080 ms (123.512 to 124.902) against 124.480 ms
+(123.843 to 125.295), +0.32%. `head3` runs 1,351,335,380 instructions against 1,351,324,809: 10,571 more, 0.0008%,
+the same in every run (1,351,335,369 to 1,351,335,552 against 1,351,324,797 to 1,351,324,957). The machine doesn't run
+under `-c`, and I haven't traced the difference. The earlier merges moved the count by −250 to +341 instructions.
 
 ## The comparison (`corpora.sh`)
 
@@ -202,8 +252,9 @@ These ran on an Intel Xeon in the session's container, not here. They are counts
 
 ## Incidents
 
-- **Main moved twice under the work** (above). Each time the branch merged main and was measured again against it.
-  The earlier figures are kept as they ran.
+- **Main moved three times under the work** (above). Each time the branch merged main and was measured again against
+  it. The earlier figures are kept as they ran. The last run (`run9.sh`) waited for the lock between another session's
+  holds.
 - **Waiting messages.** The lock's messages naming other sessions' holds were removed from the logs and build logs (the
   `exclusive.sh: waiting` lines and their command, title and link lines). The logs held nothing else, so none is kept.
 
