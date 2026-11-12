@@ -1,0 +1,307 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index fc65220f..129b9e20 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -22,6 +22,106 @@
+ 
+ #include "c_check_clock_rss.c"
+ 
++// ---- PROBE (measurement patch of the #672 file-scope record; not for merging) -------------------------------------
++// BUSTER_PROBE=1: every lap also reads five hardware counters with rdpmc (user cycles, user instructions, kernel
++// cycles, kernel instructions, demand fills from DRAM) and charges their growth to the lap's stage; a many-unit
++// command's units run on one lane share one clock (c_checker_units.c), whose marks are laps (no getrusage, no /proc).
++// BUSTER_PROBE=2: the marks also read the minor-fault count (a read() of a software event), charged to their stage.
++#include <linux/perf_event.h>
++#include <sys/mman.h>
++#include <sys/syscall.h>
++
++#define BUSTER_PROBE_COUNTERS 5u
++static const char* const probe_names[BUSTER_PROBE_COUNTERS] = { "cycles-u", "instructions-u", "cycles-k", "instructions-k", "dram-fills" };
++static struct perf_event_mmap_page* probe_pages[BUSTER_PROBE_COUNTERS];
++static int probe_fds[BUSTER_PROBE_COUNTERS];
++static int probe_fault_fd = -1;
++static uint64_t probe_last[BUSTER_PROBE_COUNTERS];
++static uint64_t probe_fault_last;
++static int probe_mode = -1;
++static bool probe_ready;
++static uint64_t probe_reads_slow;
++
++static uint64_t probe_read(uint32_t i)
++{
++    struct perf_event_mmap_page* page = probe_pages[i];
++    uint64_t count = 0;
++    bool done = false;
++    while (!done)
++    {
++        const uint32_t sequence = __atomic_load_n(&page->lock, __ATOMIC_ACQUIRE);
++        const uint32_t index = page->index;
++        const int64_t offset = page->offset;
++        if (index != 0 && page->cap_user_rdpmc)
++        {
++            uint64_t pmc = __rdpmc((int)index - 1);
++            const uint32_t shift = 64u - page->pmc_width;
++            pmc = (uint64_t)((int64_t)(pmc << shift) >> shift);
++            count = (uint64_t)offset + pmc;
++            done = __atomic_load_n(&page->lock, __ATOMIC_ACQUIRE) == sequence;
++        }
++        else
++        {
++            uint64_t value = 0;
++            if (read(probe_fds[i], &value, sizeof(value)) != (ssize_t)sizeof(value))
++            {
++                value = 0;
++            }
++            probe_reads_slow += 1;
++            count = value;
++            done = true;
++        }
++    }
++    return count;
++}
++
++static int probe_open(uint32_t type, uint64_t config, bool user, bool kernel)
++{
++    struct perf_event_attr attribute = { 0 };
++    attribute.type = type;
++    attribute.size = sizeof(attribute);
++    attribute.config = config;
++    attribute.exclude_user = !user;
++    attribute.exclude_kernel = !kernel;
++    attribute.exclude_hv = 1;
++    return (int)syscall(SYS_perf_event_open, &attribute, 0, -1, -1, 0);
++}
++
++static void probe_start(void)
++{
++    const char* value = getenv("BUSTER_PROBE");
++    probe_mode = value != NULL ? atoi(value) : 0;
++    if (probe_mode > 0)
++    {
++        probe_fds[0] = probe_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, true, false);
++        probe_fds[1] = probe_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, true, false);
++        probe_fds[2] = probe_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES, false, true);
++        probe_fds[3] = probe_open(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS, false, true);
++        probe_fds[4] = probe_open(PERF_TYPE_RAW, 0x843, true, true);
++        probe_ready = true;
++        for (uint32_t i = 0; i < BUSTER_PROBE_COUNTERS; i += 1)
++        {
++            void* page = probe_fds[i] >= 0 ? mmap(NULL, 4096, PROT_READ, MAP_SHARED, probe_fds[i], 0) : MAP_FAILED;
++            probe_ready = probe_ready && page != MAP_FAILED;
++            probe_pages[i] = page != MAP_FAILED ? page : NULL;
++        }
++        if (probe_mode > 1)
++        {
++            probe_fault_fd = probe_open(PERF_TYPE_SOFTWARE, PERF_COUNT_SW_PAGE_FAULTS_MIN, true, true);
++        }
++        if (!probe_ready)
++        {
++            fprintf(stderr, "probe: counters unavailable\n");
++            probe_mode = 0;
++        }
++        for (uint32_t i = 0; probe_ready && i < BUSTER_PROBE_COUNTERS; i += 1)
++        {
++            probe_last[i] = probe_read(i);
++        }
++    }
++}
++// ---- end of PROBE ---------------------------------------------------------------------------------------------------
++
+ typedef enum CheckStage
+ {
+     // The options, and the intern table's, the preprocessor's and the parser's initialization.
+@@ -192,6 +292,11 @@ struct CheckClock
+     uint64_t start;
+     uint64_t last;
+     uint64_t ticks[CHECK_STAGE_COUNT];
++    // PROBE: marks are laps (no resource reads); each stage's counters; its faults (mode 2); its laps.
++    bool laps_only;
++    uint64_t probe_stage[CHECK_STAGE_COUNT][BUSTER_PROBE_COUNTERS];
++    uint64_t probe_faults[CHECK_STAGE_COUNT];
++    uint64_t probe_laps[CHECK_STAGE_COUNT];
+     // CLOCK_MONOTONIC at the start, which the report reads again at the last lap to measure the TSC's rate.
+     struct timespec monotonic;
+     // The process's system time, minor faults and peak resident set at the last mark, and what each stage's marks added.
+@@ -299,6 +404,14 @@ static void check_clock_start(CheckClock* stage_clock)
+                                                    &stage_clock->peak_kb);
+     stage_clock->initial_peak_kb = stage_clock->peak_kb;
+     clock_gettime(CLOCK_MONOTONIC, &stage_clock->monotonic);
++    if (probe_mode < 0)
++    {
++        probe_start();
++    }
++    for (uint32_t i = 0; probe_mode > 0 && i < BUSTER_PROBE_COUNTERS; i += 1)
++    {
++        probe_last[i] = probe_read(i);
++    }
+     stage_clock->start = __rdtsc();
+     stage_clock->last = stage_clock->start;
+ }
+@@ -310,7 +423,21 @@ static inline void check_clock_lap(CheckClock* stage_clock, CheckStage stage)
+     {
+         const uint64_t now = __rdtsc();
+         stage_clock->ticks[stage] += now - stage_clock->last;
+-        stage_clock->last = now;
++        if (probe_mode > 0)
++        {
++            for (uint32_t i = 0; i < BUSTER_PROBE_COUNTERS; i += 1)
++            {
++                const uint64_t value = probe_read(i);
++                stage_clock->probe_stage[stage][i] += value - probe_last[i];
++                probe_last[i] = value;
++            }
++            stage_clock->probe_laps[stage] += 1;
++            stage_clock->last = __rdtsc();
++        }
++        else
++        {
++            stage_clock->last = now;
++        }
+     }
+ }
+ 
+@@ -328,7 +455,17 @@ static inline void check_clock_lower(CheckClock* stage_clock, CheckClockLower ph
+ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ {
+     check_clock_lap(stage_clock, stage);
+-    if (stage_clock != NULL)
++    if (stage_clock != NULL && probe_mode > 1 && probe_fault_fd >= 0)
++    {
++        uint64_t faults = 0;
++        if (read(probe_fault_fd, &faults, sizeof(faults)) == (ssize_t)sizeof(faults))
++        {
++            stage_clock->probe_faults[stage] += faults - probe_fault_last;
++            probe_fault_last = faults;
++        }
++        check_clock_lap(stage_clock, stage);
++    }
++    if (stage_clock != NULL && !stage_clock->laps_only)
+     {
+         uint64_t system_us = 0;
+         uint64_t minor_faults = 0;
+@@ -411,6 +548,34 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
+         }
+     }
+     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
++    if (probe_mode > 0)
++    {
++        fprintf(stream, "probe-stage\tstage\tms\tlaps\tfaults");
++        for (uint32_t i = 0; i < BUSTER_PROBE_COUNTERS; i += 1)
++        {
++            fprintf(stream, "\t%s", probe_names[i]);
++        }
++        fputc('\n', stream);
++        for (uint32_t s = 0; s < CHECK_STAGE_COUNT; s += 1)
++        {
++            fprintf(stream, "probe-stage\t%s\t%.3f\t%llu\t%llu", check_stage_names[s], (double)stage_clock->ticks[s] / ticks_per_millisecond,
++                    (unsigned long long)stage_clock->probe_laps[s], (unsigned long long)stage_clock->probe_faults[s]);
++            for (uint32_t i = 0; i < BUSTER_PROBE_COUNTERS; i += 1)
++            {
++                fprintf(stream, "\t%llu", (unsigned long long)stage_clock->probe_stage[s][i]);
++            }
++            fputc('\n', stream);
++        }
++        fprintf(stream, "probe-process\tslow-reads\t%llu\n", (unsigned long long)probe_reads_slow);
++        if (pp_ticks != NULL)
++        {
++            const char* const phases[] = { "read", "lex", "refine", "directives" };
++            for (uint32_t p = 0; p < pp_phase_count && p < 4; p += 1)
++            {
++                fprintf(stream, "probe-pp\t%s\t%.3f\n", phases[p], (double)pp_ticks[p] / ticks_per_millisecond);
++            }
++        }
++    }
+     const double expressions = (double)stage_clock->expression_ticks / ticks_per_millisecond;
+     fprintf(stream, "time-check\texpressions\t%.3f\t%.1f\n", expressions, total > 0 ? expressions * 100.0 / total : 0.0);
+     for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+diff --git a/src/buster/compiler/c_check_program_asm.c b/src/buster/compiler/c_check_program_asm.c
+index d553c93a..d6bae7bf 100644
+--- a/src/buster/compiler/c_check_program_asm.c
++++ b/src/buster/compiler/c_check_program_asm.c
+@@ -1960,7 +1960,20 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
+ // lowering of a unit with asm statements (the assembler guide measures its initialization), or 0 without room.
+ static const X86MatchIndex* check_asm_matches(Arena* scratch)
+ {
+-    X86MatchIndex* index = BUSTER_ARENA_PUSH_ARRAY(scratch, X86MatchIndex, 1);
++    // PROBE (measurement patch of the #672 file-scope record; not for merging): with BUSTER_PROBE_ASM_CACHE set, the
++    // index is made once a process and kept from one unit to the next (one lane), to measure what its making costs.
++    static X86MatchIndex* probe_cached;
++    static int probe_cache = -1;
++    if (probe_cache < 0)
++    {
++        probe_cache = getenv("BUSTER_PROBE_ASM_CACHE") != NULL;
++    }
++    if (probe_cache != 0 && probe_cached != NULL)
++    {
++        return probe_cached;
++    }
++    X86MatchIndex* index = probe_cache != 0 ? malloc(sizeof(X86MatchIndex)) : BUSTER_ARENA_PUSH_ARRAY(scratch, X86MatchIndex, 1);
++    probe_cached = probe_cache != 0 ? index : NULL;
+     if (index != 0)
+     {
+         const X86Target everything = { .features = (UINT64_C(1) << X86_FEATURE_COUNT) - 1, .architecture = X86_ARCH_OTHER };
+diff --git a/src/buster/compiler/c_checker_units.c b/src/buster/compiler/c_checker_units.c
+index cbf3f1f1..c5947758 100644
+--- a/src/buster/compiler/c_checker_units.c
++++ b/src/buster/compiler/c_checker_units.c
+@@ -78,6 +78,12 @@ struct CheckUnitsUnit
+     DependencyOutput dependency;
+ };
+ 
++// PROBE (measurement patch): the units' shared clock on one lane.
++static CheckClock probe_units_clock;
++static bool probe_units_started;
++static uint64_t probe_units_pp_ticks[PP_PHASE_COUNT];
++static uint64_t probe_units_count;
++
+ static bool check_units_keep_object(CheckUnitsKept* kept, const Object* object)
+ {
+     char* bytes = object->error == OBJECT_ERROR_NONE ? arena_push(kept->bytes, object->size, 16) : NULL;
+@@ -2269,8 +2275,33 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane,
+         }
+         else
+         {
++            // PROBE: one clock for every unit of a one-lane command; the time between two units is `lanes-start`'s.
++            if (probe_mode < 0)
++            {
++                probe_start();
++            }
++            CheckClock* probe_clock = NULL;
++            if (probe_mode > 0)
++            {
++                if (!probe_units_started)
++                {
++                    check_clock_start(&probe_units_clock);
++                    probe_units_clock.laps_only = true;
++                    probe_units_started = true;
++                }
++                else
++                {
++                    check_clock_lap(&probe_units_clock, CHECK_STAGE_LANES_START);
++                }
++                probe_clock = &probe_units_clock;
++            }
+             unit->status = check_driver_unit(command, &options, unit->path, &lane->identifiers, &lane->pp, &lane->parser, &lane->arena, &lane->scratch, &lane->output,
+-                                             &lane->functions, NULL, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL, &unit->fatal);
++                                             &lane->functions, probe_clock, ticks, errors, command->link ? &unit->kept : NULL, true, &unit->dependency, &lane->kept, NULL, &unit->fatal);
++            for (uint32_t p = 0; probe_mode > 0 && p < PP_PHASE_COUNT; p += 1)
++            {
++                probe_units_pp_ticks[p] += ticks[p];
++            }
++            probe_units_count += probe_mode > 0;
+         }
+         arena_small_floor = 0;
+         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
+@@ -2682,6 +2713,13 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs,
+             lane_restore(caller);
+             lanes->active = active;
+             check_clock_mark(stage_clock, CHECK_STAGE_LANES);
++            // PROBE: the units' report.
++            if (probe_mode > 0 && probe_units_started)
++            {
++                check_clock_lap(&probe_units_clock, CHECK_STAGE_LANES_START);
++                fprintf(stderr, "probe-process\tunits\t%llu\n", (unsigned long long)probe_units_count);
++                check_clock_report(&probe_units_clock, probe_units_pp_ticks, PP_PHASE_COUNT, stderr);
++            }
+             // All jobs have finished: publish input order's prefix through its first fatal, including that unit's notes
+             // and summary. A later job's fatal cannot cancel an earlier job. Release every buffer even past the cutoff.
+             result = 0;
