@@ -180,6 +180,42 @@ Lua's 3,885 and musl's 5,141. `e02cecd7` measured the same counts and no differe
 - **The inlining of `node_machine_put_truth`** changed no instruction count (714.7 and 714.8). It restores main's set of
   out-of-line functions: `nm` of `58ca4ea7`'s compiler lists main's and the updates' own.
 
+## After the second merge: the split files and calls
+
+Main then gained the machine's split into one file a sweep with record accessors (buster#2571) and calls (buster#2575).
+[`5200426ee7718ea5f470295ca151d857c1c42fdd`](https://github.com/buster14a/buster/commit/5200426ee7718ea5f470295ca151d857c1c42fdd)
+merges it, with the updates moved onto the split files. Its baseline is main
+[`5f75ea52`](https://github.com/buster14a/buster/commit/5f75ea52846e96d717ffcbf3d3e05c276d197783) (`results/main-5f75ea52`).
+
+| | `sqlite3.c` | Lua 5.4.8 | musl, 1,336 units |
+| --- | ---: | ---: | ---: |
+| machine-taken evaluated nodes, main `5f75ea52` | 242,002 (93.03%) | 53,385 (87.22%) | 98,763 (82.08%) |
+| machine-taken evaluated nodes, `5200426e` | **258,466 (99.36%)** | **57,954 (94.69%)** | **110,248 (91.62%)** |
+| machine-taken expressions, main and `5200426e` | 92.69%, 99.69% | 88.88%, 96.57% | 83.17%, 93.86% |
+| refused by code, main and `5200426e` | 3,616, 0 | 837, 0 | 2,630, 0 |
+| entries compared | 353,246 | 70,723 | 149,651 |
+| calls compared | 13,473 | 4,064 | 5,357 |
+| differences: values, entries, twin; with `-g` | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 | 0, 0, 0; 0, 0, 0 |
+
+- **Nothing is refused by code any more.** What is left is templates: on `sqlite3.c` 159 expressions, among them the
+  pointer differences and unsigned divisions by powers of two. Lua refuses one call as `callee`.
+- **`main.c` and c-testsuite**, run locally (`measure-node-machine --shadow --verify`, not on the 9700X): 98.38% and
+  99.79% of their census-taken nodes are taken, with no difference, `-g` included.
+
+| label | T | C | X | T, C and X | taken nodes | Lua, T, C and X |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| main `5f75ea52` | 120.0, 446.7 | 59.9, 204.4 | 39.5, 113.0 | 219.4, 764.1 | 242,002 | 201.7, 909.2 |
+| `5200426e` | 121.1, 453.3 | 56.6, 208.9 | 40.1, 117.3 | 217.8, 779.5 | 258,466 | 201.2, 924.5 |
+| `5200426e-off`, main's expressions | 120.2, 447.0 | 54.6, 204.9 | 37.2, 115.0 | 212.0, 766.9 | 242,002 | 196.1, 912.6 |
+
+- **What the code costs main's expressions:** 2.8 instructions a node (766.9 against 764.1), most of it X's (2.0):
+  - the test for an update's destination after each evaluated record's row;
+  - the test for a destination read by name at each record that isn't evaluated.
+
+  Folding both under the one test of whether a state has more than `EVALUATED` would leave main's count of tests.
+- **What the new expressions cost:** 779.5 instructions a node against 764.1, on 6.8% more nodes.
+- **Out-of-line functions:** `nm` of `5200426e`'s compiler lists main's and the updates' own.
+
 ## Mishaps, and what was kept of them
 
 - **The host's `/home` filled up** at 18:22 UTC. `v5-off`'s first build failed ("No space left on device"), and
