@@ -132,6 +132,20 @@ The key has to be a few byte loads, not ~25 computed bits. The design's 28-byte 
 That is about 11 bits beside the class and the facts. With them in the record, C's row is one lookup on (code, context,
 standing, class), and X's row can be C's choice at no extra cost. This record is the baseline that version should beat.
 
+The 28-byte records' pull request, [buster#2580](https://github.com/buster14a/buster/pull/2580) (open when this record
+was written), already carries part of this in its `standings` byte:
+- the category and the constant kind (`standing & 0x1f`);
+- a nonzero offset (`(standing & 0x60) == 0x20`);
+- whether the value may have a fault or an overload set (`standing & 0x80`, a whole value kept apart);
+- and the class and facts, in their own columns.
+
+The rest isn't in it, and the standing byte has no spare bit:
+- the purity beyond the fault (`SIDE_EFFECT`, `FP_ENVIRONMENT`, which are in its value flags);
+- the object's kind and a compound literal's;
+- `void`.
+
+Its author suggests a second byte column written where T writes a value.
+
 ## Correctness
 
 - **Against the pipeline:** every timing run compares each taken expression's records with the stream and its tape
