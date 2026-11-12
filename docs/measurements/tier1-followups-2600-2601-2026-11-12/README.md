@@ -18,15 +18,13 @@ The record follows [`tier1-symbols-2573-2026-11-12`](../tier1-symbols-2573-2026-
 
 | Role | Commit | What |
 | --- | --- | --- |
-| base | `9750b3f03067f113533a8ae0cf847e9cf41412ea` | buster's main when the work began |
-| head | `0035a7fd255ce952a369452bcc01c02c2e33e561` | buster#2605's head: both changes, tests and documentation |
-| first head | `7f7b7ef70438b90162fb765d0ddb0380db5b2167` | the pull request's first head, superseded (below) |
+| base | `85b832ecf536547dffa209483b8264738362292d` | buster's main with #2574 (hoisted symbol addresses) and #2554 merged |
+| head | `7e24f8be667929217583342a3e3f83e76e59f3d7` | buster#2605's head: both changes, tests and documentation, with that main merged |
 
-**The first head.** It also shared a block's first sign or zero extension to I32. The pull request's CI found that wrong: SQLite's `autoindex5.test` segfaulted in `--tier1`'s testfixture. In `sqlite3LogEstAdd`'s `a + x[a - b]`, the lowering extends `a` to int once for each use. `tier1_select_storage.c` keeps each I32 sign-extended, zero-extended or neither above its 32 bits according to its own users, so the two extensions differ: the index's is sign-extended and the addition's is not. Reading the addition's for both made the index `0xffffffff` for −1. The head shares only extensions to I64, whose register has one form.
+Two earlier comparisons are kept, measured the same way, and not quoted below:
 
-This record measures the head. The first head's 9700X files and analyses are kept in `9700x/first-7f7b7ef7/`, measured the same way. Its numbers were within a few tenths of a percent of the head's, and they are not quoted below.
-
-The callgrind counts in part 1 use `fb049c07`, #2587's head, as main. Between it and `9750b3f0`, no source the `--tier1` code path compiles changed; the only changes are checker tests and the node machine's shadow code.
+- **`0035a7fd` against `9750b3f0`** (`9700x/vs-9750b3f0/`, `counts/vs-9750b3f0/`). This is the PR's head before main's merge, against main when the work began. Main's #2574 then hoisted symbol addresses across blocks itself, so this record measures again on top of it.
+- **The first head, `7f7b7ef7`** (`9700x/first-7f7b7ef7/`). It also shared a block's first extension to I32. The PR's CI found that wrong: SQLite's `autoindex5.test` segfaulted in `--tier1`'s testfixture. `tier1_select_storage.c` keeps each I32 sign-extended, zero-extended or neither above its 32 bits according to its own users. In `sqlite3LogEstAdd`'s `a + x[a - b]`, the index read the addition's zero-extended `a` as sign-extended, so −1 became `0xffffffff`. The head shares only extensions to I64, whose register has one form.
 
 ## Inputs
 
@@ -39,37 +37,41 @@ Tier 1 builds use `--tier1 -fno-asynchronous-unwind-tables` at the default targe
 
 ## 1. Counts in the container
 
-**Host.** A cloud container: an Intel Xeon with AVX-512 under KVM, clang 23.1.6, valgrind 3.22.0 and GNU objdump 2.42 (`counts/host-and-identities.txt`, which also has the executables', the head compiler's and the tools' hashes).
+**Host.** A cloud container: an Intel Xeon with AVX-512 under KVM, clang 23.1.6, valgrind 3.22.0 and GNU objdump 2.42. `counts/host-and-identities.txt` also has the executables', the compilers' and the tools' hashes. Each compiler was built natively there by `./build.sh` (Release).
 
 ### Static: the frozen sqlite3.c
 
-Each compiler was built natively in the container, by `./build.sh` (Release). `counts/static-sqlite3.txt` has the commands, the objects' hashes and the counts, the first head's too. `scripts/cmpclass.py` classifies objdump's memory comparisons by their immediate's value at their width and by opcode.
+`counts/static-sqlite3.txt` has the commands, the objects' hashes and the counts. `scripts/cmpclass.py` classifies objdump's memory comparisons by their immediate's value at their width and by opcode.
 
-| | main `9750b3f0` | head `0035a7fd` |
+| | main `85b832ec` | head `7e24f8be` |
 | --- | ---: | ---: |
-| `.text` | 1,034,232 B | 1,026,104 B (−8,128 B, −0.79%) |
-| instructions | 290,479 | 290,158 |
-| rip-relative `lea`s | 2,042 | 2,022 |
-| memory comparisons with a constant that fits a signed byte | 2,517 by `81` | 2,517 by `83` |
+| `.text` | 1,003,592 B | 995,560 B (−8,032 B, −0.80%) |
+| instructions | 274,591 | 274,495 |
+| rip-relative `lea`s | 2,094 | 2,087 |
+| memory comparisons with a constant that fits a signed byte | 2,519 by `81` | 2,519 by `83` |
 | memory comparisons with a larger constant | 78 by `81` | 78 by `81` |
 
 ### Dynamic: speedtest1
 
-`scripts/count.sh` built speedtest1 by each compiler and ran it once under callgrind. #1189's [`gap.c`](../tier1-gap-1189-2026-11-03/tools/gap.c) (SHA-256 `81856ce1…`) joined the counts with the disassembly, as in #2573's record. `scripts/tally.py` sums the rows, and writes `counts/leas-*.tsv` (rip-relative `lea`s by symbol). Both executables gave speedtest1's verification hash natively.
+`scripts/count.sh` built speedtest1 by each compiler and ran it once under callgrind. #1189's [`gap.c`](../tier1-gap-1189-2026-11-03/tools/gap.c) (SHA-256 `81856ce1…`) joined the counts with the disassembly, as in #2573's record. Both executables gave speedtest1's verification hash natively. Two scripts sum the rows:
+- `scripts/tally.py` writes `counts/leas-*.tsv`, the rip-relative `lea`s by symbol.
+- `scripts/mnemonics.py` writes `counts/mnemonics.tsv`, the change by mnemonic.
 
-| | main (`fb049c07`) | head (`0035a7fd`) |
+| | main | head |
 | --- | ---: | ---: |
-| speedtest1's own code | 3,060.5 M | 3,051.5 M (−0.30%) |
-| whole process | 3,233.3 M | 3,224.2 M |
-| every rip-relative `lea` | 46.46 M | 45.29 M |
-| `lea` of `sqlite3Stat` | 1.73 M | 0.97 M |
-| register-to-register 64-bit `mov`s | 289.81 M | 286.49 M |
+| speedtest1's own code | 2,867.5 M | 2,859.5 M (−0.28%) |
+| whole process | 3,040.3 M | 3,032.2 M |
+| every rip-relative `lea` | 46.65 M | 46.65 M |
+| `lea` of `sqlite3Stat` | 0.96 M | 0.96 M |
+| `mov` | 1,076.5 M | 1,069.3 M (−7.2 M) |
+| `movslq` | 60.6 M | 59.5 M (−1.1 M) |
+| `lea` (all) | 168.03 M | 168.39 M (+0.35 M) |
 
-`sqlite3StatusUp` goes from five `lea`s of `sqlite3Stat` to two, one per block. Its accesses `nowValue[op]` and `mxValue[op]` are indexed, so they still need the symbol's address in a register. clang -O2 inlines the function with a constant `op` instead.
+On this main, #2574's hoist already keeps `sqlite3StatusUp`'s `sqlite3Stat` address in a register for both of its blocks (0.96 M, down from 1.73 M before it). So the head's shared symbol addresses add no further rip-relative `lea`s. What remains of #2601 is the shared index extensions: 1.1 M fewer `movslq`s. There are also 7.2 M fewer `mov`s; this record doesn't attribute them further.
 
 ## 2. Run time on the 9700X
 
-`scripts/run2600.sh` ran on benchpress under its lock, with each step and each run one hold, every run pinned to CPU 2. It is #2573's `run2573.sh` with its paths, lock identity and comment changed. The head's run reused the first run's base tree; `9700x/build-base.log` is its build.
+`scripts/run2600.sh` ran on benchpress under its lock, each step and each run one hold, every run pinned to CPU 2. It is #2573's `run2573.sh` with its paths, lock identity and comment changed.
 
 **Host.** `9700x/host.txt`: Linux 6.18.50, clang 23.1.1, perf 7.2.9, CPU 2's governor `performance`, `/home` 75% full.
 
@@ -86,15 +88,15 @@ Each compiler was built natively in the container, by `./build.sh` (Release). `c
 
 | | head / base | interval or range |
 | --- | ---: | --- |
-| Lua's five scripts, time | 0.9978 | 95% over the layouts: 0.9865 to 1.0092 |
-| Lua's five scripts, user cycles | 0.9978 | 0.9859 to 1.0097 |
-| Lua's five scripts, user instructions | 1.0000 | 0.9997 to 1.0003 |
-| speedtest1, time | 0.9903 | paired rounds: 0.9741 to 1.0149 |
-| speedtest1, user cycles | 0.9877 | paired rounds: 0.9817 to 0.9940 |
-| speedtest1, user instructions | 0.9972 | paired rounds: 0.9972 |
+| Lua's five scripts, time | 0.9941 | 95% over the layouts: 0.9842 to 1.0042 |
+| Lua's five scripts, user cycles | 0.9938 | 0.9838 to 1.0038 |
+| Lua's five scripts, user instructions | 0.9999 | 0.9997 to 1.0001 |
+| speedtest1, time | 0.9938 | paired rounds: 0.9844 to 1.0207 |
+| speedtest1, user cycles | 0.9931 | paired rounds: 0.9876 to 1.0023 |
+| speedtest1, user instructions | 0.9973 | paired rounds: 0.9973 to 0.9974 |
 
-- **Lua.** Its instructions don't move, and its times stay within the layouts' spread. Its hot paths reach few global tables.
-- **speedtest1.** It runs 0.28% fewer instructions and 1.2% fewer user cycles. Every paired round's cycles are lower; one of eleven rounds' times isn't. Its time includes the database's syncs on `/home`; part 4 repeats it in `/tmp`.
+- **Lua.** Its instructions don't move, and its times stay within the layouts' spread.
+- **speedtest1.** It runs 0.27% fewer instructions and 0.7% fewer user cycles. Ten of the eleven paired rounds' cycles are lower; three rounds' times aren't. Its time includes the database's syncs on `/home`; part 4 repeats it in `/tmp`.
 
 ## 3. Compile time on the 9700X
 
@@ -106,12 +108,12 @@ It ran 11 rounds after one warm-up of each, the builds' order alternating, one l
 
 | Compile | base | head | head / base, paired median (range) |
 | --- | ---: | ---: | ---: |
-| sqlite3.c, time | 390.38 ms | 390.69 ms | 1.0001 (0.9976 to 1.0024) |
-| sqlite3.c, user instructions | 4,765.2 M | 4,766.1 M | 1.0002 |
-| Lua, time | 166.91 ms | 162.46 ms | 0.9719 (0.9675 to 0.9934) |
-| Lua, user instructions | 1,938.2 M | 1,933.8 M | 0.9977 |
+| sqlite3.c, time | 394.91 ms | 396.03 ms | 1.0026 (0.9994 to 1.0060) |
+| sqlite3.c, user instructions | 4,683.46 M | 4,683.38 M | 1.0000 |
+| Lua, time | 165.38 ms | 164.20 ms | 0.9911 (0.9880 to 1.0145) |
+| Lua, user instructions | 1,933.7 M | 1,929.1 M | 0.9976 |
 
-On sqlite3.c, the head's compile runs 0.9 M more instructions (0.02%): the leaves' scan and table, and the comparisons' form choice. Its time is unchanged within its spread. Lua's compile ran 2.2% fewer cycles but only 0.23% fewer instructions. That gap is more likely the two compilers' code layout than the change itself: #2573's record saw Lua's compile time move the same way (0.9853) with a comparable instruction change.
+On sqlite3.c the head runs the same number of instructions, but 0.27% more cycles, slower in ten of the eleven rounds. The scan and table add their instructions, and the smaller output saves about as many. A cycle cost without an instruction cost points to the compilers' code layout, which this record doesn't measure. Lua's compile runs 0.24% fewer instructions and its time moves within its spread.
 
 ## 4. speedtest1 with its files in `/tmp`
 
@@ -119,15 +121,15 @@ On sqlite3.c, the head's compile runs 0.9 M more instructions (0.02%): the leave
 
 | Metric | base | head | head / base | paired rounds' ratio, median (range) |
 | --- | ---: | ---: | ---: | ---: |
-| time (task-clock), ms | 184.47 | 182.94 | 0.9917 | 0.9913 (0.9815 to 0.9956) |
-| user cycles, M | 930.01 | 919.78 | 0.9890 | 0.9890 (0.9779 to 0.9926) |
-| user instructions, M | 3,182.80 | 3,173.75 | 0.9972 | 0.9972 |
+| time (task-clock), ms | 178.42 | 176.78 | 0.9908 | 0.9908 (0.9866 to 1.0015) |
+| user cycles, M | 893.84 | 884.46 | 0.9895 | 0.9885 (0.9848 to 0.9988) |
+| user instructions, M | 2,989.78 | 2,981.74 | 0.9973 | 0.9973 |
 
-The head runs 0.28% fewer instructions and 0.8% less time, and every one of the eleven pairs is faster.
+The head runs 0.27% fewer instructions and 0.9% less time. Every pair's cycles are lower; one pair's time isn't.
 
 ## Limitations
 
 - **Lock receipts.** The scripts log their own steps and the lock's identity, but not the holder line `exclusive.sh` writes when a run takes the lock.
-- **Host-run logs.** The scripts' stdout is included as `9700x/run.out`, `compile.out` and `rerun.out`. It holds the lock's waiting lines and `exclusive.sh`'s lists of processes busy as a run took the lock. The head's runs found none busy. In the first head's run, a short-lived `sha256sum` was busy twice in round 8 (`9700x/first-7f7b7ef7/run.out`). Every number above comes from the `perf stat` lines in the scripts' run files.
-- **Mixed revisions in part 1.** The callgrind builds are `fb049c07` and `0035a7fd`, not `9750b3f0` and `0035a7fd`. The reasons they count the same code are under "Revisions"; the 9700X's user instructions confirm a comparable difference on the pull request's own revisions (3,182.8 M to 3,173.8 M, against callgrind's 3,233.3 M to 3,224.2 M for the whole process).
+- **Host-run logs.** The scripts' stdout is included as `9700x/run.out`, `compile.out` and `rerun.out`. It holds the lock's waiting lines and `exclusive.sh`'s lists of processes busy as a run took the lock. This run found none busy. In the first head's run, a short-lived `sha256sum` was busy twice in round 8 (`9700x/first-7f7b7ef7/run.out`). Every number above comes from the `perf stat` lines in the scripts' run files.
+- **The compile's cycles.** sqlite3.c's compile cycles rose 0.27% with no instruction change. Neither earlier comparison saw that (1.0014 and 1.0001), so it more likely tracks the two compilers' layouts than the change itself; no counter here separates the two.
 - **Host paths.** On main as on the head, the default and `--scalar` host paths give different sqlite3.c objects: in `sqlite3_str_vappendf`, two spilled values swap slots. This record doesn't cause or measure that; it's [buster#2606](https://github.com/buster14a/buster/issues/2606).
