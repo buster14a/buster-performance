@@ -10,7 +10,9 @@
 # it into results/NAME-clear/ (run.sh's layout). With `busy`, tools/spin computes on the last of those CPUs all the
 # while, and the results go to results/NAME-clear-busy/: lanes one CPU short, on purpose. CLEAR_TAG=T in the
 # environment adds -T to the directory's name: a list run again, where that process moved onto one of the seven CPUs
-# during the first run.
+# during the first run. CLEAR_NEED=N waits (up to 30 s, 2 s at a time) for N of the eight cores to be free of other
+# processes and runs nothing without them (status 3): the eight-core pass after that process was gone
+# (CLEAR_TAG=8 CLEAR_NEED=8).
 set -u
 cd "$(dirname "$0")"
 . ./common.sh
@@ -20,16 +22,31 @@ busy=${3:-}
 out=$here/results/$name-clear${busy:+-busy}${CLEAR_TAG:+-$CLEAR_TAG}
 mkdir -p "$out"
 head -1 /var/lib/buster-9700x/owner >> "$out/holder.txt"
-taken=$(ps -eo psr,pcpu,comm --sort=-pcpu | awk 'NR > 1 && $2 > 50 { print $1 % 8 }' | sort -u | tr '\n' ' ')
-set=""
-count=0
-last=0
-for cpu in 0 1 2 3 4 5 6 7; do
-    case " $taken " in
-        *" $cpu "*) ;;
-        *) set="${set:+$set+}$cpu"; count=$((count + 1)); last=$cpu ;;
-    esac
+need=${CLEAR_NEED:-0}
+tries=0
+while :; do
+    # A process above half a CPU that has run for a second or more (not this pipeline's own).
+    taken=$(ps -eo psr,pcpu,etimes,comm --sort=-pcpu | awk 'NR > 1 && $2 > 50 && $3 >= 1 { print $1 % 8 }' | sort -u | tr '\n' ' ')
+    set=""
+    count=0
+    last=0
+    for cpu in 0 1 2 3 4 5 6 7; do
+        case " $taken " in
+            *" $cpu "*) ;;
+            *) set="${set:+$set+}$cpu"; count=$((count + 1)); last=$cpu ;;
+        esac
+    done
+    if ((count >= need || tries >= 15)); then break; fi
+    tries=$((tries + 1))
+    sleep 2
 done
+if ((count < need)); then
+    {
+        echo "## $(date -u +%FT%TZ): $count cores free of other processes, $need needed: nothing run"
+        ps -eo psr,pcpu,etime,comm --sort=-pcpu | sed -n '2,4p'
+    } >> "$out/others.txt"
+    exit 3
+fi
 {
     echo "## $(date -u +%FT%TZ): cores taken by other processes: ${taken:-none}; CPUs used: $set ($count)"
     ps -eo psr,pcpu,etime,comm --sort=-pcpu | sed -n '2,4p'

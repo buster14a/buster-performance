@@ -23,7 +23,8 @@ nothing and changes no compiler code.
 - **The outputs** go to tmpfs (`/tmp`), over the files of the run before, as the linker design's numbers do; section 3
   has the tree's own file system (btrfs with zstd) beside it. The runtime's snapshot is in a cache directory of the
   record's own (`XDG_CACHE_HOME`), so that no other tree's compiler rewrites it between runs.
-- **Another process computed on the host all day**, outside the lock and not this record's: section 4 and "Limits".
+- **Another process computed on the host until 13:51 UTC**, outside the lock and not this record's (buster#2555 has
+  its account): section 4 and "Limits".
 
 **The workloads**, all from the frozen corpus (`/var/lib/buster-9700x/corpora/preprocessor-391e729af658`) and the
 repository's own tests:
@@ -57,8 +58,8 @@ CPU 2, 15 runs of each for this compiler and tcc and 5 for clang and GCC.
 
 `-c` is 2.92 times tcc's time and `-c -g` 3.10 times tcc's `-gdwarf`; clang `-O0` takes 4.62 times as long as `-c`
 and 5.50 times with `-g`. `-MD -MF` costs nothing that shows (124.57 against 124.53 ms, 0.1 M instructions), and
-`-fsyntax-only` takes 102.1 ms, so the backend and the object are 22.4 ms of `-c`. On seven lanes (section 4), the
-lanes the bodies' tokens pay for: 113.9 ms and 141.7 ms, 24.4% more, since the stage that holds `-g`'s cost runs on
+`-fsyntax-only` takes 102.1 ms, so the backend and the object are 22.4 ms of `-c`. On eight lanes (section 4), the
+lanes the bodies' tokens pay for: 113.4 ms and 141.4 ms, 24.7% more, since the stage that holds `-g`'s cost runs on
 one lane, after the others.
 
 ### By stage
@@ -339,88 +340,96 @@ The link is 2.1% of the build, and `-g` 14% of a `-g` build.
 
 ## 4. Eight cores
 
-The lists of this section were written for CPUs 0 to 7 and eight lanes. The host's other process (see "Limits") sat
-on one of those CPUs in most of their rounds, and the runs fall in two groups by it: the shell from sources in 139 or
-168 ms, its link in 3 or 62 (`tables/shell-8.tsv`). So `scripts/clear.sh` ran each list again on the seven cores that
-process was not on as the list began, with seven lanes or threads (`raw/*-clear/`; each `others.txt` says where it was
-before and after), and the first table here is those runs': **seven lanes, each with a CPU**. What the first runs met
-by accident, the second table measures on purpose.
+The lists of this section were written for CPUs 0 to 7 and eight lanes, and they ran three times:
 
-### Whole builds on seven lanes
+1. **Beside another process.** A test program of another session looped at 100% of a CPU on the host, outside the
+   lock, from 08:16 to 13:51 UTC (buster#2555 has its account; see "Limits"). It sat on one of CPUs 0 to 7 in most
+   rounds of the first runs, whose results fall in two groups by it: the shell from sources in 139 or 168 ms, its
+   link in 3 or 62 (`raw/shell-8/`, `tables/shell-8.tsv`).
+2. **On the seven cores it wasn't on**, while it still ran: `scripts/clear.sh` with seven lanes or threads
+   (`raw/*-clear/`; each `others.txt` says where it was before and after). `shell-8` ran twice there, since it moved
+   onto one of the seven during the first (`raw/shell-8-clear/`; the second is `raw/shell-8-clear-2/`).
+3. **On all eight, after it was gone**: `CLEAR_TAG=8 CLEAR_NEED=8 scripts/clear.sh`, which runs a list only with
+   eight cores free of other processes (`raw/*-clear-8/`; every `others.txt` there says none before and none after).
 
-`clear.sh` on `sqlite-g-8` (15 runs), `clocks-8` and `shell-8` (11), `link-shell-8` (21), `musl-g-8` (15),
-`musl-build-8`, `synth-8` and `synth-clocks-8` (7), and `run.sh shell-refs-8 5` for clang; medians, ms. `shell-8` ran
-twice: that process moved onto one of the seven CPUs during the first run (`raw/shell-8-clear/`), so the table has
-the second (`CLEAR_TAG=2`, `raw/shell-8-clear-2/`).
+The first table is the third pass's, with the second's beside it. What the first pass met by accident, the second
+table measures on purpose.
 
-| | one lane, CPU 2 | seven lanes | seven lanes, `-g` | `-g` there |
-| --- | ---: | ---: | ---: | ---: |
-| `-c sqlite3.c` | 124.5 | 113.9 | 141.7 | 1.24 times |
-| **SQLite's shell, one command**, dynamic | 185.0 | 139.7 | 172.9 | 1.24 |
-| … static | 187.9 | 141.8 | 177.6 | 1.25 |
-| … its units (`lanes`); its link, dynamic | 182.5; 2.1 | 136.4; 1.7 | 170.0; 2.4 | |
-| its steps: `-c shell.c`; `-c sqlite3.c` | 39.8; 145.7 | 37.0; 132.2 | 44.7; 164.8 | |
-| … the link of the two objects, by the driver; lld; mold | 1.6; 8.6; 4.6 | 2.3; 8.0; 5.2 | 4.0; 8.5; 5.5 | |
-| … the steps in turn; the two compiles at once, then the link | 187.8 | 172.6; 142.1 | 214.6; 177.1 | |
-| clang `-O0`: the two compiles at once, then lld | 870.5 in turn | 691.4 | 1,040.3 | 1.50 |
-| **musl's 1,336 units, one command** | 1,046.5 | 221.5 | 229.2 | 1.03 |
-| **musl's library and a program** | 1,062.9 | 234.8 | 250.2 | 1.07 |
-| … the library's two commands; the link | 1,053.0; 5.3 | 226.1; 6.2 | 233.7; 11.7 | |
-| … the link by lld; mold | 9.5; 6.3 | 9.8; 5.7 | 14.7; 7.5 | |
-| **synth, one command** | 1,821.5 | 491.8 | 565.7 | 1.15 |
-| … its units (`lanes`); its link | 1,779.8; 38.7 | 475.0; 18.3 | 547.2; 30.6 | |
+### Whole builds on eight lanes
 
-- **The shell's build is its larger unit's.** `-c sqlite3.c` with the shell's options takes 132.2 ms on seven lanes
-  and the whole build 139.7, 1.32 times less than on one lane: within a unit only the functions' emission runs on
-  lanes, which is the all-core claim's subject on buster#672. The link is 1.7 ms of it.
-- **`-g` costs a build on lanes what it costs on one**, 1.24 times: its `debug` stage runs on one lane after the
-  others have finished, and is 23.8 ms of the 27.8 ms that `-g` adds to `-c sqlite3.c` there
-  (`tables/clocks/clocks-8-clear/8ts-c-g.tsv`).
-- **A link of this size gains nothing from lanes.** The two objects' link by the driver takes 2.28 ms on seven lanes
-  against 1.58 on one (`link-foreign`, which takes the lanes its objects' bytes pay for, 1.93); lld's seven threads
-  take 8.0 ms against one's 8.6, and mold's 5.2 against 4.6.
-- **musl's units scale 4.7 times, synth's 3.7 times.** musl's link is 6.2 ms of a 234.8 ms build. mold on seven
-  threads links musl's 1,341 objects sooner than `link-foreign` does, 5.7 against 6.2 ms and 7.5 against 11.7 with
-  `-g`: the one link of this record that a system linker wins.
+`clear.sh` on `sqlite-g-8` (15 runs), `clocks-8` and `shell-8` (11), `link-shell-8` (21), `musl-g-8` (11; 15 on seven
+lanes), `musl-build-8`, `synth-8` and `synth-clocks-8` (7), and `shell-refs-8` (5) for clang; medians, ms.
+
+| | one lane, CPU 2 | seven lanes | eight lanes | eight lanes, `-g` | `-g` there |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `-c sqlite3.c` | 124.5 | 113.9 | 113.4 | 141.4 | 1.25 times |
+| **SQLite's shell, one command**, dynamic | 185.0 | 139.7 | 139.1 | 171.6 | 1.23 |
+| … static | 187.9 | 141.8 | 141.8 | 176.3 | 1.24 |
+| … its units (`lanes`); its link, dynamic | 182.5; 2.1 | 136.4; 1.7 | 136.1; 1.7 | 168.3; 2.3 | |
+| its steps: `-c shell.c`; `-c sqlite3.c` | 39.8; 145.7 | 37.0; 132.2 | 36.6; 131.4 | 44.7; 163.4 | |
+| … the link of the two objects, by the driver; lld; mold | 1.6; 8.6; 4.6 | 2.3; 8.0; 5.2 | 2.3; 8.1; 5.3 | 4.0; 8.4; 5.6 | |
+| … the steps in turn; the two compiles at once, then the link | 187.8 | 172.6; 142.1 | 172.5; 141.9 | 213.4; 176.8 | |
+| clang `-O0`: the two compiles at once, then lld | 870.5 in turn | | 689.3 | 1,039.5 | 1.51 |
+| **musl's 1,336 units, one command** | 1,046.5 | 221.5 | 203.4 | 207.7 | 1.02 |
+| **musl's library and a program** | 1,062.9 | 234.8 | 218.7 | 230.4 | 1.05 |
+| … the library's two commands; the link | 1,053.0; 5.3 | 226.1; 6.2 | 208.5; 5.9 | 213.1; 11.1 | |
+| … the link by lld; mold | 9.5; 6.3 | 9.8; 5.7 | 9.6; 5.9 | 14.4; 7.8 | |
+| **synth, one command** | 1,821.5 | 491.8 | 479.8 | 545.8 | 1.14 |
+| … its units (`lanes`); its link | 1,779.8; 38.7 | 475.0; 18.3 | 461.4; 17.8 | 510.3; 30.5 | |
+
+- **The shell's build is its larger unit's.** `-c sqlite3.c` with the shell's options takes 131.4 ms on eight lanes
+  and the whole build 139.1, 1.33 times less than on one lane: within a unit only the functions' emission runs on
+  lanes, which is the all-core design's subject (buster#2536). The link is 1.7 ms of it. An eighth lane changes
+  nothing here: seven give 139.7.
+- **`-g` costs a build on lanes what it costs on one**, 1.23 times: its `debug` stage runs on one lane after the
+  others have finished, and is 23.8 ms of the 28.0 ms that `-g` adds to `-c sqlite3.c` there
+  (`tables/clocks/clocks-8-clear-8/8ts-c-g.tsv`).
+- **A link of this size gains nothing from lanes.** The two objects' link by the driver takes 2.28 ms on eight lanes
+  against 1.58 on one (`link-foreign`, which takes the lanes its objects' bytes pay for, 1.93); lld's eight threads
+  take 8.1 ms against one's 8.6, and mold's 5.3 against 4.6.
+- **musl's units scale 5.1 times on eight lanes, synth's 3.8 times** (4.7 and 3.7 on seven). musl's link is 5.9 ms
+  of a 218.7 ms build, the same as mold's on eight threads; with `-g` mold links the 1,341 objects in 7.8 ms and
+  `link-foreign` in 11.1, the one link of this record that a system linker wins.
 
 ### A lane without a CPU
 
-`scripts/clear.sh busy 11` and `clear.sh busy 11 busy` (`tables/busy-clear.tsv`, `busy-clear-busy.tsv`,
-`tables/clocks/busy-clear*/`): the shell's links and builds on CPUs 1 to 7 with seven lanes or threads, alone, and
-beside one process that computes on CPU 7 all the while (`tools/spin`). 11 runs of each; a link's line runs twice in a
-row and its first run is left out. Wall ms, dynamic and static:
+`scripts/clear.sh busy 11` and `clear.sh busy 11 busy`: the shell's links and builds with a lane or a thread a CPU,
+alone, and beside one process that computes on the last of those CPUs all the while (`tools/spin` on CPU 7). The
+pair ran on the seven free cores (CPUs 1 to 7, seven lanes: `tables/busy-clear.tsv`, `busy-clear-busy.tsv`) and
+again on all eight (`busy-clear-8.tsv`, `busy-clear-busy-8.tsv`); `tables/clocks/busy-clear*/` have the clocks. 11
+runs of each; a link's line runs twice in a row and its first run is left out. Wall ms, dynamic and static:
 
-| | every lane a CPU | one CPU busy |
-| --- | ---: | ---: |
-| the link by the driver, `compiler shell.o sq.o -lm` (its session's 7 lanes) | 2.25, 4.33 | **63.1, 127.1** |
-| … `--lanes 1` | 2.06, 4.33 | 2.12, 4.18 |
-| … `--lanes 2` | 2.09, 3.86 | 2.07, 3.97 |
-| `link-foreign`, the lanes its objects pay for (2) | 1.86, 3.56 | 1.89, 3.65 |
-| `link-foreign --lanes 7` | 2.02, 3.82 | **62.8, 126.5** |
-| lld, 7 threads | 7.99, 12.16 | 8.11, 11.79 |
-| mold, 7 threads | 5.00, 8.37 | 5.09, 8.70 |
-| **the shell from sources, one command** | 139.9, 143.6 | **173.2, 269.3** |
-| … `--lanes 1` | 185.1, 187.6 | 187.8, 190.2 |
-| `-c sqlite3.c` (the functions' lanes) | 131.8 | 136.4 |
-| … `--lanes 1` | 145.0 | 146.6 |
+| | seven lanes: every lane a CPU | one CPU busy | eight lanes: every lane a CPU | one CPU busy |
+| --- | ---: | ---: | ---: | ---: |
+| the link by the driver, `compiler shell.o sq.o -lm` (its session's lanes) | 2.25, 4.33 | **63.1, 127.1** | 2.33, 4.54 | **61.8, 126.7** |
+| … `--lanes 1` | 2.06, 4.33 | 2.12, 4.18 | 2.02, 4.20 | 1.97, 4.30 |
+| … `--lanes 2` | 2.09, 3.86 | 2.07, 3.97 | 2.13, 3.87 | 2.14, 3.86 |
+| `link-foreign`, the lanes its objects pay for (2) | 1.86, 3.56 | 1.89, 3.65 | 1.84, 3.62 | 1.97, 3.62 |
+| `link-foreign` with a lane a CPU (`--lanes 7`, `--lanes 8`) | 2.02, 3.82 | **62.8, 126.5** | 2.19, 4.09 | **62.1, 125.6** |
+| lld, a thread a CPU | 7.99, 12.16 | 8.11, 11.79 | 8.18, 12.15 | 8.01, 11.93 |
+| mold, a thread a CPU | 5.00, 8.37 | 5.09, 8.70 | 5.24, 8.77 | 5.21, 8.75 |
+| **the shell from sources, one command** | 139.9, 143.6 | **173.2, 269.3** | 140.1, 142.6 | **170.2, 267.2** |
+| … `--lanes 1` | 185.1, 187.6 | 187.8, 190.2 | 185.5, 187.6 | 187.4, 190.1 |
+| `-c sqlite3.c` (the functions' lanes) | 131.8 | 136.4 | 131.8 | 136.7 |
+| … `--lanes 1` | 145.0 | 146.6 | 145.4 | 146.4 |
 
 The one command from sources, dynamic, by its clock (`z-s-dyn`), ms:
 
-| stage | every lane a CPU | one CPU busy |
-| --- | ---: | ---: |
-| the units (`lanes`) | 136.9 | 141.2 |
-| `code-atoms` | 0.47 | 14.31 |
-| `runtime` | 0.45 | 0.46 |
-| `executable` | 0.33 | 4.25 |
-| `write` | 0.43 | 11.47 |
-| … its `count`; `layout`; `symbols`; `dynamic`; `open`; `chunks` | 0.08; 0.03; 0.01; 0.02; 0.01; 0.28 | 4.06; 1.03; 1.01; 1.03; 1.00; 2.25 |
-| the build (`total`) | 139.2 | 172.1 |
+| stage | seven lanes: every lane a CPU | one CPU busy | eight lanes: every lane a CPU | one CPU busy |
+| --- | ---: | ---: | ---: | ---: |
+| the units (`lanes`) | 136.9 | 141.2 | 137.1 | 138.4 |
+| `code-atoms` | 0.47 | 14.31 | 0.39 | 14.29 |
+| `runtime` | 0.45 | 0.46 | 0.44 | 0.46 |
+| `executable` | 0.33 | 4.25 | 0.35 | 4.25 |
+| `write` | 0.43 | 11.47 | 0.47 | 11.38 |
+| … its `count`; `layout`; `symbols`; `dynamic`; `open`; `chunks` | 0.08; 0.03; 0.01; 0.02; 0.01; 0.28 | 4.06; 1.03; 1.01; 1.03; 1.00; 2.25 | 0.06; 0.03; 0.01; 0.02; 0.01; 0.35 | 4.06; 1.03; 1.01; 1.03; 1.00; 2.22 |
+| the build (`total`) | 139.2 | 172.1 | 139.4 | 169.4 |
 
-- **With one of its seven CPUs busy, the driver's link of the shell takes 28 times as long**: 63 ms where it takes
-  2.3, and 127 where 4.3 static. The static build from sources is then slower on seven lanes than on one, 269 ms
-  against 190.
-- **It holds the other CPUs meanwhile**: 336 ms of user time for the 63 ms link (10.6 ms with a CPU a lane), 714 ms
-  for the static one.
+- **With one of its CPUs busy, the driver's link of the shell takes 27 or 28 times as long**: 63 ms where it takes
+  2.3, and 127 where 4.3 static, on seven lanes as on eight. The static build from sources is then slower on lanes
+  than on one lane, 269 ms against 190.
+- **It holds the other CPUs meanwhile**: 336 ms of user time for the 63 ms link on seven lanes (10.6 ms with a CPU a
+  lane), 714 ms for the static one; 404 and 835 ms on eight.
 - **Every lane sync costs a millisecond.** A waiting lane holds its CPU in `mwaitx` for up to 1 ms
   (`BUSTER_LANE_WAIT_NANOSECONDS`, `lane.c`) before it sleeps, and the lane it waits for has no CPU to arrive on:
   the write's `layout`, `symbols`, `dynamic` and `open`, a sync each, are 1.0 ms each, and `link-foreign --lanes 7`'s
@@ -434,15 +443,15 @@ The one command from sources, dynamic, by its clock (`z-s-dyn`), ms:
 - **A compile barely notices**: `-c sqlite3.c` goes from 131.8 to 136.4 ms, and the units of the one command from
   136.9 to 141.2. A unit syncs its lanes a few times; a link's phases sync at every step.
 - **lld and mold don't change** with their threads a CPU short.
-- **The first runs of this section were in that state**, with eight lanes on CPUs 0 to 7 and the other process on one
-  of them in most rounds (`tables/shell-8.tsv`, medians): the one command 168.3 ms and 263.4 static, the link by
-  the driver 62.0 and 126.1, the steps in turn 234.0, synth 529.8 where seven lanes with a CPU each take 491.8. A
-  machine that is doing anything else is in it, and so is a build tool that runs several of these commands at once.
+- **The first pass was in that state** in most of its rounds (`tables/shell-8.tsv`, medians): the one command
+  168.3 ms and 263.4 static, the link by the driver 62.0 and 126.1, the steps in turn 234.0, synth 529.8 where eight
+  lanes with a CPU each take 479.8. A machine that is doing anything else is in it, and so is a build tool that runs
+  several of these commands at once.
 
 ## 5. The ranking
 
 Each cell is a part's time and, after it, the bound: the build's time over the build's time less the part's. `-g`'s
-rows are the `-g` build's time over the plain build's. One lane on CPU 2, but for the last row.
+rows are the `-g` build's time over the plain build's. One lane on CPU 2, but for the last two rows.
 
 | part | SQLite's shell, 185.0 ms | … static, 187.9 ms | musl's library and a program, 1,062.9 ms | synth, 1,821.5 ms | a hello world, 1.57 ms | … static, 2.35 ms |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -454,21 +463,22 @@ rows are the `-g` build's time over the plain build's. One lane on CPU 2, but fo
 | … `-lm`'s import, in it | 0.41, 1.002 | | | | | |
 | process start, setup, release and exit | 0.4, 1.002 | 1.2, 1.006 | | | 0.13, 1.09 | |
 | dependency files | under 0.1 | | | | | |
-| a lane without a CPU: seven lanes and one of their CPUs busy, of 173.2 and 269.3 ms | 33.2, **1.24** | 125.7, **1.88** | | | | |
+| a lane without a CPU: one of seven lanes' CPUs busy, of 173.2 and 269.3 ms | 33.2, **1.24** | 125.7, **1.88** | | | | |
+| … one of eight lanes' CPUs busy, of 170.2 and 267.2 ms | 30.1, **1.21** | 124.6, **1.87** | | | | |
 
 Ranked, with the issue filed for each:
 
 1. **A lane without a CPU, 1.88 and 1.24.** With one of its seven CPUs busy, the shell's static build from sources
-   takes 269.3 ms where it takes 143.6, and the dynamic one 173.2 where 139.9; the link of the two objects alone 28
-   times as long. Section 4. buster#2545.
+   takes 269.3 ms where it takes 143.6, and the dynamic one 173.2 where 139.9 (on eight lanes 267.2 where 142.6, and
+   170.2 where 140.1); the link of the two objects alone 27 or 28 times as long. Section 4. buster#2545.
 2. **A static hello world's link, 1.71.** 0.98 ms of a 2.35 ms build, where the same link warm in one process takes
    0.29 ms (`raw/linkbench/`: `benchmark-link`'s one worker in four units) and a dynamic hello world's 0.11 ms.
    Section 3. buster#2546.
-3. **`-g`, 1.26.** 1.27 on `-c sqlite3.c`, 1.26 on the shell, 1.16 on synth, 1.06 on musl, and on seven lanes 1.24,
-   1.15 and 1.07; 85% of it one stage on one lane. Sections 1 and 3. buster#2540, and its three concrete defects apart:
-   the value DWARF built twice (buster#2542), the statement ends derived again (buster#2544), a lexical block for every
-   brace pair (buster#2543).
-4. **Everything else is under 1.03.** The driver's link is 1.005 to 1.024 of these builds (1.012 to 1.038 on seven
+3. **`-g`, 1.26.** 1.27 on `-c sqlite3.c`, 1.26 on the shell, 1.16 on synth, 1.06 on musl, and on eight lanes 1.25,
+   1.23, 1.14 and 1.05; 85% of it one stage on one lane. Sections 1 and 3. buster#2540, and its three concrete
+   defects apart: the value DWARF built twice (buster#2542), the statement ends derived again (buster#2544), a
+   lexical block for every brace pair (buster#2543).
+4. **Everything else is under 1.04.** The driver's link is 1.005 to 1.024 of these builds (1.012 to 1.038 on eight
    lanes), process start and exit 1.002 to 1.006, `-lm`'s import 1.002; dependency files, the exit helper and the
    output's file system don't show. The first link of a new compiler pays the runtime's import and the snapshot's
    write once: 1.2 ms on the shell, 1.1 ms on a hello world (1.7 times that one build) and 3.8 ms on a static one.
@@ -530,11 +540,12 @@ need be this (buster#2532 has 4,496 M user cycles at `ecaf57b5`, two merges befo
 
 - **One host, one day, one revision.** Each table is `4c8c3c9c`'s on the 9700X; the lines of a list are run in turn,
   round by round, but tables taken in different holds are not an A/B of anything.
-- **Another process computed on the host throughout** (`raw/stray.txt`): another session's orphan, started at 08:16
-  UTC outside the lock, free to run on any CPU but the offline one. CPU 2's figures are medians of runs that agree
-  within 1% (`tables/*.tsv`'s least and greatest), and the one-core record's `-c` is reproduced within 0.6%; a few
-  runs are 20% slow (the greatest of `s-dyn-g`, of `q-static-g`). The eight-core lists are another matter (section
-  4): their figures are of seven lanes on the seven cores it was not on, and no figure here is of eight free cores.
+- **Another process computed on the host until 13:51 UTC** (`raw/stray.txt`; buster#2555 has its account): another
+  session's orphan, started at 08:16 UTC outside the lock, free to run on any CPU but the offline one. Every one-core
+  figure here was taken beside it. CPU 2's figures are medians of runs that agree within 1% (`tables/*.tsv`'s least
+  and greatest), and the one-core record's `-c` is reproduced within 0.6%; a few runs are 20% slow (the greatest of
+  `s-dyn-g`, of `q-static-g`). The eight-core lists are another matter (section 4): their figures are of seven lanes
+  on the seven cores it was not on, and of eight lanes after it was gone.
 - **musl's command has two page states** (buster#2532's correction describes them): two of `m-c`'s seven runs took
   418,189 page faults and 30 to 60 ms more than the others' 343,106. The medians are of the commoner state, which is
   also the one-core record's (343,019 faults), so section 7 compares like with like; instructions don't depend on it.
@@ -562,9 +573,10 @@ need be this (buster#2532 has 4,496 M user cycles at `ecaf57b5`, two merges befo
   `stage_reduce.py` in C) and `spin.c`. `scripts/inputs/`: the record's own small programs.
 - `raw/`: every run's output as written, by list: `runs.tsv` (a line a run), the captured reports of the clocks'
   lists, `holder.txt` (the lock's line of each hold) and `others.txt` (the busiest other processes before and after
-  a run). `raw/lists/` has the lists as they ran. A list's first run on CPUs 0 to 7 is `raw/NAME/` and its run on
-  the seven free cores `raw/NAME-clear/` (`busy-free` and `busy-busy` are the first runs of the pair that
-  `busy-clear` and `busy-clear-busy` repeat on seven cores). `raw/stagecounters/*.samples.gz` and
-  `raw/muslprofile/*.samples.gz` are `perf script`'s samples.
+  a run). `raw/lists/` has the lists as they ran. A list's first run on CPUs 0 to 7 is `raw/NAME/`, its run on
+  the seven free cores `raw/NAME-clear/`, and its run on all eight after the other process was gone
+  `raw/NAME-clear-8/` (`busy-free` and `busy-busy` are the first runs of the pair that `busy-clear` and
+  `busy-clear-busy` repeat on seven cores, and `busy-clear-8` and `busy-clear-busy-8` on eight).
+  `raw/stagecounters/*.samples.gz` and `raw/muslprofile/*.samples.gz` are `perf script`'s samples.
   `llvm-dwarfdump --verify`'s outputs are cut to their counts (`raw/dwarfcensus/*.verify.txt`).
 - `tables/`: the reductions.
