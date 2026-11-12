@@ -26,10 +26,17 @@ with this session's lock identity (`lock.sh`); `tests.sh` and `fncmp.sh` are new
   `logs/build-c34748d6.log` shows.
 - **`v1`:** the working tree before that commit, applied as a patch to a worktree of `0af27a30`. The commit differs from
   it in two comments and one statement's line wrapping (`node_machine_child_context`'s ternary).
+- **`27ee009a`:** the pull request's head,
+  [`27ee009a3959de4d2c533021b289e969eecf91a2`](https://github.com/buster14a/buster/commit/27ee009a3959de4d2c533021b289e969eecf91a2).
+  Over `34748d68` it adds a design note and routes the shadow's comparison (`node_shadow_same_value`, untimed) through
+  the accessors, with a new `node_machine_record_value`. It was checked out by its id into a clean worktree, and built
+  afresh as `logs/build-c27ee009.log` shows. Every run below was repeated on it (`results/27ee009a/`,
+  `logs/tests-c27ee009-*.log`).
 - **Binary hashes:** each `results/*/commit.txt`.
 - **Host** (`results/env.txt`): Linux 6.18.50-2-lts, clang 23.1.1, the performance governor.
 
-The `exclusive.sh: waiting` messages, which name other sessions' holds, were removed from the logs.
+The `exclusive.sh: waiting` messages, which name other sessions' holds and quote their commands, were removed from the
+logs: each log starts at this session's own holder line.
 
 ## The sweeps' cost (`results/*/sqlite3.txt`, `lua.txt`)
 
@@ -40,10 +47,14 @@ Instructions a taken evaluated node, each sweep set the least of 11 passes of on
 | `sqlite3.c`, main | 368.1 | 557.1 | 669.9 | 112.8 |
 | `sqlite3.c`, `v1` | 368.1 | 557.1 | 659.9 | 102.8 |
 | `sqlite3.c`, `34748d68` | 368.1 | 557.1 | 659.9 | 102.8 |
+| `sqlite3.c`, `27ee009a` | 368.1 | 557.1 | 659.9 | 102.8 |
 | Lua 5.4.8, main | 539.8 | 727.9 | 838.6 | 110.7 |
 | Lua 5.4.8, `34748d68` | 539.8 | 727.9 | 828.5 | 100.6 |
+| Lua 5.4.8, `27ee009a` | 539.8 | 727.9 | 828.5 | 100.6 |
 
 - **T is the same code.** It runs 48,053,559 instructions in each build on `sqlite3.c`, and 13,533,317 on Lua.
+- **`27ee009a` runs the sweeps' instructions of `34748d68`** (86,160,066 on `sqlite3.c`, 20,772,285 on Lua; T+C 2 more
+  in the whole of `sqlite3.c`): its change is outside the timed sweeps.
 - **C is the same to 0.001 instructions a node.** T and C run 123 fewer instructions in the whole of `sqlite3.c`
   (72,738,398 against 72,738,521) and 25 fewer in Lua.
 - **X runs 10 fewer instructions a node,** 9% of its own. That is register allocation, not skipped work: the tapes are
@@ -71,7 +82,8 @@ and immediates, then reports each function's instruction count and whether the r
 ## The comparison (`results/*/verify-*.txt`)
 
 `corpora.sh`: `--verify --passes 0` on each corpus, without and with `-g`. Each run exited 0, and each hold's owner line
-is in `verify-holds.txt`. The commit's counts are main's:
+is in `verify-holds.txt`. The counts of `34748d68` and of `27ee009a`, whose comparison reads the records by the
+accessors, are main's:
 
 | | `sqlite3.c` | Lua 5.4.8 | musl, 1,336 units |
 | --- | ---: | ---: | ---: |
@@ -83,7 +95,7 @@ is in `verify-holds.txt`. The commit's counts are main's:
 
 ## The tests (`logs/tests-c34748d6-*.log`)
 
-`tests.sh` ran each test on the commit's tree:
+`tests.sh` ran each test on each commit's tree, with the same results on `34748d68` and `27ee009a`:
 
 - `test-checker`: 829,506 checks, 0 failures.
 - `./build.sh check-call-graph`: 43 units, 0 cycles beyond the 3 allowed ones, 0 split variables.
