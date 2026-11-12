@@ -1,0 +1,5 @@
+append() { printf '\nconst char* buster_stability_probe_%s(void);\nconst char* buster_stability_probe_%s(void)\n{\n    return "stability probe %s";\n}\n' "$2" "$2" "$2" >> "$1/src/buster/compiler/$3"; }
+none() { :; }
+top() { f="$1/src/buster/compiler/$3"; { printf 'const char* buster_stability_probe_top(void);\nconst char* buster_stability_probe_top(void)\n{\n    return "stability probe top";\n}\n'; cat "$f"; } > "$f.new"; mv "$f.new" "$f"; }
+header() { f="$1/src/buster/compiler/host_isa.h"; last=$(grep -n '^#endif' "$f" | tail -1 | cut -d: -f1); head -n $((last-1)) "$f" > "$f.new"; printf 'static inline int buster_stability_probe_header(void)\n{\n    return 7;\n}\n' >> "$f.new"; tail -n +$last "$f" >> "$f.new"; mv "$f.new" "$f"; }
+anon() { f="$1/src/buster/compiler/c_types.c"; { printf 'static struct { int a; } buster_stability_anon;\nint buster_stability_probe_anon(void);\nint buster_stability_probe_anon(void)\n{\n    return buster_stability_anon.a;\n}\n'; cat "$f"; } > "$f.new"; mv "$f.new" "$f"; }
