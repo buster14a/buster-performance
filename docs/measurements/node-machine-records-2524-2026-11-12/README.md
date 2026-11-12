@@ -33,8 +33,8 @@ by cycles and, from `s4` on, by retired instructions too.
     a record whose payload is a floating value with a zero significand (-0.0) now makes the value whole; on
     `27ee009a3`;
   - `s4`: `s2` with T's loop inputs held in locals and `restrict` on its machine pointer, on `27ee009a3`.
-- **Binary hashes:** `results/compilers.txt`. Only `main-0af27a30`'s, `a7554651`'s and `2044025c`'s compilers were kept
-  (`results/compilers-kept.txt`): the host's disk filled during these runs (below).
+- **Binary hashes:** `results/compilers.txt`. Only `main-0af27a30`'s, `a7554651`'s, `2044025c`'s and `04abc91b`'s
+  compilers were kept (`results/compilers-kept.txt`): the host's disk filled during these runs (below).
 - **Host:** `results/env.txt` (Linux 6.18.50-2-lts, clang 23.1.1, perf 7.2.9-1, the performance governor).
 
 ## Results (`sqlite3.c`, a taken evaluated node)
@@ -82,6 +82,42 @@ Warm, `2044025c`'s T costs 68.2 cycles a node, its C 35.1 and its X 20.1; main's
   moves these figures.
 - **Against the gate's 120:** 150.2 cycles in one run and 123.4 warm. The warm figure is the reader's position in step
   2: 3% over.
+
+## With the new codes: the split's head `f5b919f2` (calls, `&&`, `||`, `?:`)
+
+[buster#2571](https://github.com/buster14a/buster/pull/2571)'s head moved to
+[`f5b919f20`](https://github.com/buster14a/buster/commit/f5b919f20): main's `&&`, `||` and `?:` (buster#2569) and the
+calls (buster#2575) in the split files. [buster#2580](https://github.com/buster14a/buster/pull/2580) merged it at
+[`04abc91bb`](https://github.com/buster14a/buster/commit/04abc91bb): the split's new per-record columns join
+`NodeMachineColumns`, the logical operator's rule reads and writes the columns, and a call's arguments still convert by
+the action's functions on values made whole. The machine now takes 93.0% of `sqlite3.c`'s evaluated nodes (242,002),
+against 50.2% before, so these figures don't compare with the tables above.
+
+- `split-f5b919f2`: the split's head, clean.
+- `stagger-f5b919f2`: the split's head with its columns staggered alone (`patches/stagger2.patch`, two cache lines a
+  column, the whole values' column last).
+- `04abc91b`: buster#2580's merge, clean.
+
+| `sqlite3.c` | T: cycles, instructions | C | X | all three | all three, warm |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the split's head | 119.1, 446.7 | 55.6, 204.4 | 37.7, 113.0 | 212.4, 764.1 | 167.1, 761.8 |
+| the split's head, staggered | 119.0, 446.7 | 54.3, 204.4 | 36.3, 113.0 | 209.6, 764.1 | 159.3, 761.8 |
+| **`04abc91b`** | **116.2, 434.5** | **56.1, 191.6** | **39.0, 107.0** | **211.3, 733.1** | **160.5, 730.7** |
+
+| Lua 5.4.8, all three sweeps, one run | cycles, instructions |
+| --- | ---: |
+| the split's head | 194.5, 909.2 |
+| the split's head, staggered | 191.8, 909.2 |
+| `04abc91b` | 195.8, 903.0 |
+
+- **The stagger is worth 2.8 cycles in one run and 7.8 warm here,** against 16.5 and 19.8 before. With the new codes the
+  sweeps cost 43 cycles a node more, the calls most (their record, buster-performance#460).
+- **The columns cut 31 of the 764 instructions** (T 12, C 13, X 6), but cost 1.7 cycles in one run and 1.2 warm against
+  the staggered whole values, and 4.0 on Lua. More of the typed nodes go to the action now (12,942 of 147,250 on
+  `sqlite3.c`), and a call's arguments are made whole for its conversions.
+- **Against the gate's 120:** 211.3 cycles in one run and 160.5 warm.
+- **The comparison** at `04abc91b`: `--verify` on `sqlite3.c`, Lua and musl, without and with `-g`, 0 differences and
+  every run exited 0 (`results/04abc91b/verify-*.txt`).
 
 ## Where T's cost is (`results/*/perf-*.txt`, `annotate-*.txt`)
 
