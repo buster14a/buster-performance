@@ -2,7 +2,7 @@
 
 For [buster#2144](https://github.com/buster14a/buster/issues/2144), PR
 [buster#2470](https://github.com/buster14a/buster/pull/2470): the #1839 record's
-six asm kernels ([tier1-asm-bodies-1839-2026-11-11](../tier1-asm-bodies-1839-2026-11-11/README.md),
+six asm kernels ([tier1-asm-bodies-1839-2026-11-11](../../tier1-asm-bodies-1839-2026-11-11/README.md),
 the same `kernels.c`, sha256 `043774e1…5deb5c`) built by `--tier1` with base and
 head, and by head's default Tier 0 for reference.
 
