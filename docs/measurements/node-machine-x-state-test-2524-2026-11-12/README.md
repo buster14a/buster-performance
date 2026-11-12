@@ -31,6 +31,13 @@ wraps `~/buster-fast-bench/exclusive.sh`), pinned to CPU 2. `results/env.txt` ha
   compilers aren't kept.
 - `scripts/run-all.sh` ran everything, from the work directory's root (`main/`, `src/`, `results/` and the scripts sat
   side by side on the host).
+- **After main moved,** the PR's branch merged main
+  [`c3eb40fc`](https://github.com/buster14a/buster/commit/c3eb40fc4877a05107a84f172540bb0c8f6902e1), which has
+  buster#2580 (T's records as columns, staggered). `scripts/pair.sh` built main `c3eb40fc` and the merged head
+  [`e95cf48d`](https://github.com/buster14a/buster/commit/e95cf48d5918dd8315dac46524d51540411dd274), each checked
+  out by its id with no local change. It listed their out-of-line `node_machine_` functions (`nm.txt`), ran the
+  comparison on both and timed both three times in turn. `scripts/profile-x.sh` then profiled both
+  (`results/LABEL/perf-*.txt`, `x-*.txt`).
 
 What each step measures:
 - **The comparison** (`scripts/corpora.sh LABEL`, the updates' record's own) runs
@@ -41,7 +48,8 @@ What each step measures:
   11 passes are kept and divided by the taken evaluated nodes. X's cost is the third set's less the second's. The
   three compilers were timed three times each, in turn: main, `v1`, `v2`, then again (`results/LABEL-timeN/`).
 
-No hold waited for another session's, so the logs have no lock messages to remove.
+The pair's two builds waited for other sessions' holds. The lock's messages naming those sessions were removed from
+their build logs; the series before had none.
 
 ## The comparison
 
@@ -80,6 +88,40 @@ and 208.4 on Lua).
   it moves two of the records' column pointers with it, so the rows address those columns without the index.
 - The whole three sweeps' cycles move less than one binary's do between processes (about 4%, the updates' record
   found), so X's own cycles, taken within one process, are the figure to read.
+
+## After main's merge: fewer instructions, the same cycles
+
+Against main `c3eb40fc`, the merged head `e95cf48d` reports main's lines exactly in all six comparison runs, with no
+difference, `-g` included (`results/main-c3eb40fc/verify-*.txt`, `results/e95cf48d/verify-*.txt`). Both compilers
+list the same 34 out-of-line `node_machine_` functions. The timing, per taken evaluated node (T's and C's instructions
+are the same in both: 438.1 and 199.7 on `sqlite3.c`, 609.4 and 199.1 on Lua):
+
+| | X's instructions | X's cycles, rounds 1, 2, 3 | T, C and X: instructions | T, C and X: cycles |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, main `c3eb40fc` | 113.9 | 43.1, 43.6, 42.9 | 751.7 | 222.0, 220.6, 219.0 |
+| `sqlite3.c`, `e95cf48d` | **103.9** | 42.8, 43.2, 42.6 | **741.7** | 219.6, 219.3, 219.6 |
+| Lua, main `c3eb40fc` | 111.9 | 30.2, 29.9, 30.0 | 920.4 | 204.8, 204.6, 204.6 |
+| Lua, `e95cf48d` | **101.5** | 30.4, 30.4, 30.4 | **910.0** | 205.5, 206.3, 205.6 |
+
+- **X runs 10.0 fewer instructions a node on `sqlite3.c` (8.8%) and 10.4 on Lua (9.3%),** more than on `f006224e`.
+- **Its cycles don't follow.** They are 0.8% lower on `sqlite3.c` (43.2 to 42.9 on average) and 1.2% higher on Lua
+  (30.0 to 30.4), the same in each round. On `f006224e` they fell 5.8% and 10%. With buster#2580, main's own X takes
+  43.2 cycles a node on `sqlite3.c` against 40.3, for 3.4 fewer instructions.
+- **The profiles say why** (`perf-stat.txt`, `perf-symbols.txt`, `x-hottest.txt`). A run of 40 timing passes on
+  `sqlite3.c`:
+
+  | | main `c3eb40fc` | `e95cf48d` |
+  | --- | ---: | ---: |
+  | instructions | 20,733 M | 20,631 M |
+  | branches | 3,671 M | 3,634 M |
+  | branch misses | 45.2 M | 45.4 M |
+  | cycles | 6,161 M | 6,208 M |
+  | `node_machine_expand`'s share of the cycles samples | 5.89% | 5.97% |
+
+  X's hottest samples sit after its data-dependent branches and the loads they wait on: the record's state, its
+  template and whether it has a conversion. The change removes branches X predicts well and leaves those, so on
+  this main X's cycles are set by its mispredictions and loads, not its instruction count. perf counted in turns
+  (about 86% of the run each), so its totals are scaled.
 
 ## Where the instructions went: callgrind, locally
 
