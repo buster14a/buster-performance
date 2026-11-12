@@ -1,0 +1,479 @@
+diff --git a/src/buster/compiler/ir_lower_emit.c b/src/buster/compiler/ir_lower_emit.c
+index 22f8ba26..7260cb8f 100644
+--- a/src/buster/compiler/ir_lower_emit.c
++++ b/src/buster/compiler/ir_lower_emit.c
+@@ -150,6 +150,57 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+         const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, symbol, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+         ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+     }
++    // EXPERIMENT (#2574): every direct U64 symbol address the function takes at least twice, once, in the preheader.
++    uint32_t hoist_symbols[64];
++    uint32_t hoist_counts[64];
++    uint32_t hoist_count = 0;
++    const char* hoist_env = getenv("BUSTER_EXP_HOIST");
++    if (hoist_env != 0 && hoist_env[0] == '1')
++    {
++        for (uint32_t i = 0; i < input->count; i += 1)
++        {
++            if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && input->classes[i] == BUSTER_TYPED_CLASS_U64)
++            {
++                const uint64_t symbol = input->values[i];
++                bool direct = symbol != 0 && symbol <= UINT32_MAX && (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT));
++                for (uint32_t t = 0; direct && t < hoisted_tables; t += 1)
++                {
++                    direct = table_addresses[t] != i;
++                }
++                uint32_t k = 0;
++                while (k < hoist_count && hoist_symbols[k] != (uint32_t)symbol)
++                {
++                    k += 1;
++                }
++                if (direct && k == hoist_count && hoist_count < 64)
++                {
++                    hoist_symbols[k] = (uint32_t)symbol;
++                    hoist_counts[k] = 0;
++                    hoist_count += 1;
++                }
++                if (direct && k < hoist_count)
++                {
++                    hoist_counts[k] += 1;
++                }
++            }
++        }
++        uint32_t kept = 0;
++        for (uint32_t k = 0; k < hoist_count; k += 1)
++        {
++            if (hoist_counts[k] >= 2)
++            {
++                hoist_symbols[kept] = hoist_symbols[k];
++                kept += 1;
++            }
++        }
++        hoist_count = kept;
++    }
++    const uint32_t hoist_first = (uint32_t)sink.sizes.instruction_count;
++    for (uint32_t k = 0; k < hoist_count; k += 1)
++    {
++        const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, hoist_symbols[k], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++        ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++    }
+     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+ 
+     // The next jump table, whose jump (Tier0Function.table_jumps, in entry order) is a br_indirect of its own (#785).
+@@ -239,11 +290,20 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+                 {
+                     table_address += 1;
+                 }
++                uint32_t hoisted = hoist_count;
++                for (uint32_t k = 0; kind == BUSTER_TYPED_GLOBAL_ADDRESS && class == BUSTER_TYPED_CLASS_U64 && k < hoist_count; k += 1)
++                {
++                    hoisted = hoist_symbols[k] == (uint32_t)value && hoisted == hoist_count ? k : hoisted;
++                }
+                 if (table_address < hoisted_tables && table_addresses[table_address] == i)
+                 {
+                     stack[depth] = table_first + 2 * table_address + 1;
+                     table_address += 1;
+                 }
++                else if (hoisted < hoist_count)
++                {
++                    stack[depth] = hoist_first + 2 * hoisted + 1;
++                }
+                 else
+                 {
+                     const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+diff --git a/src/buster/compiler/tier1_allocate.c b/src/buster/compiler/tier1_allocate.c
+index fd13daf4..8d0d268e 100644
+--- a/src/buster/compiler/tier1_allocate.c
++++ b/src/buster/compiler/tier1_allocate.c
+@@ -84,6 +84,13 @@ struct Tier1AllocationInput
+     // operand. Required uses trigger reload/resplit in the scalar path. A position denotes one simultaneous phase;
+     // a producer uses separate input/output phases when the instruction may reuse a dying input register.
+     const uint8_t* use_required;
++    // Optional, with use_required (#2574): positions, nondecreasing, where the registers clobber_registers[class] lose
++    // their values, as a call's definition phase does the caller-saved ones. Only a rematerializable interval there leaves
++    // its register, for a recomputation where a required use next needs it; the consumer saves every other value around
++    // the clobber itself. A clobber at an interval's start doesn't reach it: the clobber comes first.
++    const uint32_t* clobbers;
++    uint32_t clobber_count;
++    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+     uint32_t use_count;
+     uint32_t count;
+     uint32_t value_count;
+@@ -160,6 +167,15 @@ static bool tier1_allocation_input_valid(const Tier1AllocationInput* input)
+         valid = valid && (input->fixed.count == 0 || (input->fixed.starts != 0 && input->fixed.ends != 0 && input->fixed.registers != 0 && input->fixed.classes != 0));
+         valid = valid && ((input->use_offsets == 0 && input->use_positions == 0 && input->use_count == 0) || (input->use_offsets != 0 && (input->use_count == 0 || input->use_positions != 0)));
+         valid = valid && (input->use_required == 0 || input->use_offsets != 0);
++        valid = valid && (input->clobber_count == 0 || (input->clobbers != 0 && input->use_required != 0 && input->clobber_count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS));
++        for (uint32_t k = 0; valid && k < input->clobber_count; k += 1)
++        {
++            valid = input->clobbers[k] < input->position_count && (k == 0 || input->clobbers[k - 1] <= input->clobbers[k]);
++        }
++        for (uint32_t c = 0; valid && c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
++        {
++            valid = input->clobber_count == 0 || (input->clobber_registers[c] & ~input->registers[c]) == 0;
++        }
+         if (valid && input->use_offsets != 0)
+         {
+             valid = input->use_offsets[0] == 0 && input->use_offsets[input->count] == input->use_count;
+@@ -228,6 +244,20 @@ static uint8_t tier1_allocation_spill_kind(const Tier1AllocationInput* input, ui
+     return input->rematerializable != 0 && input->rematerializable[interval] != 0 ? BUSTER_TIER1_ALLOCATE_REMATERIALIZE : BUSTER_TIER1_ALLOCATE_SPILL;
+ }
+ 
++// Whether a clobber (#2574) lies inside (start, end): one at the start precedes the interval's start event.
++static bool tier1_allocation_clobbered(const Tier1AllocationInput* input, uint32_t start, uint32_t end)
++{
++    uint32_t low = 0;
++    uint32_t high = input->clobber_count;
++    while (low < high)
++    {
++        const uint32_t middle = low + (high - low) / 2;
++        low = input->clobbers[middle] <= start ? middle + 1 : low;
++        high = input->clobbers[middle] <= start ? high : middle;
++    }
++    return low < input->clobber_count && input->clobbers[low] < end;
++}
++
+ // Scalar decisions are bounded by 32 physical registers, not by the number of previously seen intervals. An interval
+ // frees its register at its end event, unless an eviction gave the register to another interval (active[r] says
+ // whose it is); ends precede starts at one position, so adjacent half-open intervals still share registers.
+@@ -453,9 +483,31 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+     {
+         const bool use_event = (events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) != 0;
+         const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
+-        const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
++        // A clobber (#2574): its event follows the uses' (use_count + its index), before the starts at its position.
++        const bool clobber_event = use_event && use >= columns.use_count;
++        const uint32_t interval = clobber_event ? UINT32_MAX : use_event ? use_intervals[use] : events[e] >> 1;
+         const bool end_event = !use_event && (events[e] & 1) == 0;
+-        if (last != 0 && !use_event && !end_event && columns.classes[interval] == class && columns.starts[interval] != claims_at)
++        if (clobber_event)
++        {
++            // Each recomputable value in a clobbered register leaves it, as an eviction does: a recomputation, no store,
++            // where its next required use takes a register again. A value required here keeps it, which its consumer saves.
++            const uint32_t position = columns.clobbers[use - columns.use_count];
++            for (uint32_t left = occupied & columns.clobber_registers[class]; left != 0; left &= left - 1)
++            {
++                const uint32_t r = (uint32_t)__builtin_ctz(left);
++                const uint32_t victim = active[r];
++                if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
++                {
++                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
++                    begins[victim] = position;
++                    kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
++                    regs[victim] = UINT8_MAX;
++                    active[r] = UINT32_MAX;
++                    occupied &= ~(1u << r);
++                }
++            }
++        }
++        else if (last != 0 && !use_event && !end_event && columns.classes[interval] == class && columns.starts[interval] != claims_at)
+         {
+             // Ends precede starts at a position, so the run of starts from here is every one at it.
+             claims_at = columns.starts[interval];
+@@ -482,7 +534,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 occupied &= ~(1u << r);
+             }
+         }
+-        else if (!end_event && columns.classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
++        else if (!clobber_event && !end_event && columns.classes[interval] == class && (!use_event || kinds[interval] != BUSTER_TIER1_ALLOCATE_REGISTER))
+         {
+             const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
+             const bool required = tier1_allocation_required_at(&columns, interval, position);
+@@ -822,6 +874,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
+                 event_count += columns.use_required[use];
+             }
+         }
++        event_count += columns.clobber_count;
+         allocation.interval_count = columns.count;
+         allocation.fragment_offsets = arena_push_array(arena, (uint64_t)columns.count + 1, sizeof(uint32_t), 4);
+         allocation.starts = arena_push_array(arena, fragment_capacity, sizeof(uint32_t), 4);
+@@ -884,6 +937,10 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
+         memset(value_active_end, 0, (uint64_t)columns.value_count * sizeof(uint32_t));
+         memset(allocation.value_registers, UINT8_MAX, columns.value_count);
+         memset(allocation.spill_ids, 0xff, (uint64_t)columns.value_count * sizeof(uint32_t));
++        for (uint32_t k = 0; k < columns.clobber_count; k += 1)
++        {
++            buckets[columns.clobbers[k] + 1] += 1;
++        }
+         for (uint32_t i = 0; i < columns.count; i += 1)
+         {
+             buckets[columns.starts[i] + 1] += 1;
+@@ -914,6 +971,12 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
+             events[buckets[columns.ends[i]]] = i * 2;
+             buckets[columns.ends[i]] += 1;
+         }
++        // Clobbers (#2574) follow the ends and precede the starts, so that an interval starting at one keeps its register.
++        for (uint32_t k = 0; k < columns.clobber_count; k += 1)
++        {
++            events[buckets[columns.clobbers[k]]] = BUSTER_TIER1_ALLOCATE_USE_EVENT | (columns.use_count + k);
++            buckets[columns.clobbers[k]] += 1;
++        }
+         for (uint32_t i = 0; i < columns.count; i += 1)
+         {
+             events[buckets[columns.starts[i]]] = i * 2 + 1;
+@@ -1020,8 +1083,13 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
+                 {
+                     const bool use_event = (events[e] & BUSTER_TIER1_ALLOCATE_USE_EVENT) != 0;
+                     const uint32_t use = events[e] & ~BUSTER_TIER1_ALLOCATE_USE_EVENT;
+-                    const uint32_t interval = use_event ? use_intervals[use] : events[e] >> 1;
+-                    if (columns.classes[interval] == class && use_event)
++                    // A clobber (#2574) is no use and changes no pressure.
++                    const bool clobber_event = use_event && use >= columns.use_count;
++                    const uint32_t interval = use_event ? (clobber_event ? 0 : use_intervals[use]) : events[e] >> 1;
++                    if (clobber_event)
++                    {
++                    }
++                    else if (columns.classes[interval] == class && use_event)
+                     {
+                         here = columns.use_positions[use] == at ? here + 1 : 1;
+                         at = columns.use_positions[use];
+@@ -1074,6 +1142,11 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
+                 {
+                     class_count += 1;
+                     regular &= allowed[i] == columns.registers[class];
++                    // A recomputable interval a clobber reaches (#2574) leaves its register there, which only the scan does.
++                    if (regular && columns.clobber_registers[class] != 0 && tier1_allocation_spill_kind(&columns, i) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
++                    {
++                        regular = !tier1_allocation_clobbered(&columns, columns.starts[i], columns.ends[i]);
++                    }
+                 }
+             }
+             for (uint32_t e = 0; class_count != 0 && e < event_count; e += 1)
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 783bf7bb..2052bd08 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -132,6 +132,12 @@ struct Tier1CfgInput
+     // Optional, per value: its slot's width. A phi and an operand of its class and width then share a slot where
+     // neither is live at the other's definition (tier1_cfg_share_slots, #1216); without it each value has its own.
+     const uint8_t* slot_widths;
++    // Optional (#2574): the allocator's clobbers (Tier1AllocationInput.clobbers), nondecreasing positions where
++    // clobber_registers lose their values, as at a call: a recomputable value there leaves its register, to be recomputed
++    // where a required use next needs it. The consumer saves every other value around them.
++    const uint32_t* clobbers;
++    uint32_t clobber_count;
++    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+     uint32_t block_count;
+     uint32_t edge_count;
+     uint32_t value_count;
+@@ -1754,6 +1760,13 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                     .use_offsets = use_offsets,
+                     .use_positions = input->use_positions,
+                     .use_required = input->use_required,
++                    .clobbers = input->clobbers,
++                    .clobber_count = input->clobber_count,
++                    .clobber_registers = {
++                        input->clobber_registers[BUSTER_TIER1_ALLOCATE_GPR],
++                        input->clobber_registers[BUSTER_TIER1_ALLOCATE_VECTOR],
++                        input->clobber_registers[BUSTER_TIER1_ALLOCATE_MASK],
++                    },
+                     .use_count = input->use_count,
+                     .count = count,
+                     .value_count = values,
+@@ -1800,6 +1813,19 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+     return error;
+ }
+ 
++// A problem's registers in the prepared intervals' allocator input: its classes' registers and its clobbers, which
++// differ between problems over the same intervals (the CFG consumer's preferred problem has clobbers, #2574).
++static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1AllocationInput* intervals)
++{
++    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
++    {
++        intervals->registers[c] = input->registers[c];
++        intervals->clobber_registers[c] = input->clobber_registers[c];
++    }
++    intervals->clobbers = input->clobbers;
++    intervals->clobber_count = input->clobber_count;
++}
++
+ // One assignment (3. above) over the prepared intervals, for `input`'s registers and `column`, the registers each
+ // interval may take: null for the prepared column, the input the preparation was given; else tier1_cfg_column's for
+ // another problem over the same values. Failure leaves the result unchanged; tier1_allocate restores the output arena.
+@@ -1807,10 +1833,7 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
+ {
+     Tier1CfgAllocation candidate = prepared->candidate;
+     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
+-    for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+-    {
+-        candidate.intervals.registers[c] = input->registers[c];
+-    }
++    tier1_cfg_problem_registers(input, &candidate.intervals);
+     const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(prepared->vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
+     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
+     if (error == TIER1_CFG_OK)
+@@ -2188,9 +2211,9 @@ static Tier1CfgError tier1_cfg_assign_verdict(const Tier1CfgInput* input, const
+         .allowed_registers = other_column != 0 ? other_column : candidate.intervals.allowed_registers,
+     };
+     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
++    tier1_cfg_problem_registers(input, &candidate.intervals);
+     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+     {
+-        candidate.intervals.registers[c] = input->registers[c];
+         verdict.registers[c] = other->registers[c];
+     }
+     const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, prepared->vector, &verdict, &candidate.allocation);
+@@ -2213,6 +2236,10 @@ struct Tier1CfgPreference
+ {
+     const uint32_t* sets;
+     uint32_t registers[BUSTER_TIER1_ALLOCATE_CLASSES];
++    // The preferred problem's clobbers (Tier1CfgInput.clobbers, #2574), or none.
++    const uint32_t* clobbers;
++    uint32_t clobber_count;
++    uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
+     bool verdict;
+ };
+ 
+@@ -2227,9 +2254,12 @@ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* inp
+     }
+     *preferred = *input;
+     preferred->allowed_registers = allowed;
++    preferred->clobbers = preference->clobbers;
++    preferred->clobber_count = preference->clobber_count;
+     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+     {
+         preferred->registers[c] = preference->registers[c];
++        preferred->clobber_registers[c] = preference->clobber_registers[c];
+     }
+     return allowed != 0;
+ }
+@@ -2376,10 +2406,11 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
+     const uint64_t values = input->value_count;
+     const uint64_t edges = input->edge_count;
+     uint32_t differs = 0;
+-    bool same = a->count == b->count && a->value_count == b->value_count && a->position_count == b->position_count && a->use_count == b->use_count && a->fixed.count == b->fixed.count;
++    bool same = a->count == b->count && a->value_count == b->value_count && a->position_count == b->position_count && a->use_count == b->use_count && a->fixed.count == b->fixed.count &&
++                a->clobber_count == b->clobber_count && tier1_cfg_same_column(a->clobbers, b->clobbers, (uint64_t)a->clobber_count * 4);
+     for (uint32_t c = 0; same && c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+     {
+-        same = a->registers[c] == b->registers[c];
++        same = a->registers[c] == b->registers[c] && a->clobber_registers[c] == b->clobber_registers[c];
+     }
+     differs = same ? differs : 1;
+     same = same && tier1_cfg_same_column(a->starts, b->starts, count * 4) && tier1_cfg_same_column(a->ends, b->ends, count * 4) && tier1_cfg_same_column(a->values, b->values, count * 4) &&
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 7c97c203..90285b29 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -936,7 +936,28 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+                 }
+             }
+         }
++        // EXPERIMENT (#2574): each call's definition phase clobbers the caller-saved registers, where a recomputable
++        // value leaves its register.
++        const char* clobber_env = getenv("BUSTER_EXP_CLOBBER");
++        const bool clobbering = clobber_env != 0 && (clobber_env[0] == '1' || clobber_env[0] == '2') && prepared->call_count != 0;
++        uint32_t* clobbers = clobbering ? ir_allocate(output, (uint64_t)prepared->call_count + 1, 4, &ok) : 0;
++        uint32_t clobber_count = 0;
++        error = ok ? error : TIER1_EMIT_MEMORY;
++        for (uint32_t node = 0; error == TIER1_EMIT_OK && clobbers != 0 && node < count && clobber_count < prepared->call_count; node += 1)
++        {
++            if (tier1_select_function_call(function, node))
++            {
++                clobbers[clobber_count++] = base + 2 * node + 1;
++            }
++        }
+         emitted->cfg_input = (Tier1CfgInput){
++            .clobbers = clobbers,
++            .clobber_count = clobber_count,
++            .clobber_registers = {
++                clobber_count != 0 ? registers : 0,
++                0,
++                0,
++            },
+             .edge_copies = edge_copies,
+             .block_starts = block_starts,
+             .successor_offsets = successor_offsets,
+@@ -4192,7 +4213,13 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
+         crosses = crossed[root] != 0;
+         avoided[root] |= pass == 0 ? avoid : 0;
+         avoid = avoided[root];
+-        allowed[v] = general ? (crosses ? callee : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
++        // EXPERIMENT (#2574): a recomputable value stays in the caller-saved registers, which a call evicts it from.
++        const char* clobber_mode = getenv("BUSTER_EXP_CLOBBER");
++        const bool symbol_only = clobber_mode != 0 && clobber_mode[0] == '2';
++        const bool recomputed = input->clobber_count != 0 && input->rematerializable != 0 && input->rematerializable[v] != 0 && (!symbol_only || emitted->prepared.recipes.operations[node] == BUSTER_TIER1_REMAT_SYMBOL);
++        const char* high_env = getenv("BUSTER_EXP_HIGH");
++        const uint32_t high = high_env == 0 ? caller : high_env[0] == '1' ? caller & 0x700u : high_env[0] == '2' ? caller & 0x400u : high_env[0] == '3' ? (caller & 0x700u) | callee : caller;
++        allowed[v] = general ? (crosses && !recomputed ? callee : crosses && recomputed ? high : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
+         count += pass == 1 && general && (crosses || avoid != 0);
+     }
+     *preferred = allowed;
+@@ -4399,6 +4426,77 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
+     {
+         error = tier1_emit_cfg_order_check(plan, options, emitted, &problem, output, scratch);
+     }
++    // EXPERIMENT (#2574): dump the symbol recipes' intervals of a big function.
++    if (error == TIER1_EMIT_OK && getenv("BUSTER_EXP_DUMP") != 0 && emitted->cfg_input.block_count > 300)
++    {
++        const Tier1CfgAllocation* dc = &emitted->cfg;
++        const Tier1CfgInput* di = &emitted->cfg_input;
++        for (uint32_t v = 0; v < di->value_count; v += 1)
++        {
++            const uint32_t node = emitted->value_nodes[v];
++            if (di->rematerializable == 0 || di->rematerializable[v] == 0 || di->classes[v] != BUSTER_TIER1_ALLOCATE_GPR)
++            {
++                continue;
++            }
++            uint32_t with_uses = 0;
++            uint32_t registered = 0;
++            for (uint32_t i = dc->value_interval_offsets[v]; i < dc->value_interval_offsets[v + 1]; i += 1)
++            {
++                with_uses += dc->intervals.use_offsets[i + 1] != dc->intervals.use_offsets[i];
++                registered += dc->allocation.kinds[dc->allocation.fragment_offsets[i]] == 0;
++            }
++            fprintf(stderr, "value %u node %u op %u recipe %u allowed %#x uses %u intervals %u with-uses %u entering-in-register %u\n", v, node, emitted->prepared.function->op[node], emitted->prepared.recipes.operations[node], di->allowed_registers[v], di->use_offsets[v + 1] - di->use_offsets[v],
++                    dc->value_interval_offsets[v + 1] - dc->value_interval_offsets[v], with_uses, registered);
++            if (getenv("BUSTER_EXP_DUMP")[0] != '2')
++            {
++                continue;
++            }
++            for (uint32_t i = dc->value_interval_offsets[v]; i < dc->value_interval_offsets[v + 1]; i += 1)
++            {
++                uint32_t b = 0;
++                while (b + 1 < di->block_count && di->block_starts[b + 1] <= dc->intervals.starts[i])
++                {
++                    b += 1;
++                }
++                fprintf(stderr, "  b%u [%u,%u) uses %u:", b, dc->intervals.starts[i], dc->intervals.ends[i], dc->intervals.use_offsets[i + 1] - dc->intervals.use_offsets[i]);
++                for (uint32_t f = dc->allocation.fragment_offsets[i]; f < dc->allocation.fragment_offsets[i + 1]; f += 1)
++                {
++                    const uint8_t k = dc->allocation.kinds[f];
++                    fprintf(stderr, " %c%d@%u", k == 0 ? 'R' : k == 1 ? 'S' : 'M', k == 0 ? (int)dc->allocation.registers[f] : -1, dc->allocation.starts[f]);
++                }
++                fprintf(stderr, "\n");
++            }
++        }
++    }
++    if (error == TIER1_EMIT_OK && getenv("BUSTER_EXP_BLOCK") != 0 && emitted->cfg_input.block_count > 300)
++    {
++        const Tier1CfgAllocation* dc = &emitted->cfg;
++        const Tier1CfgInput* di = &emitted->cfg_input;
++        const uint32_t b = (uint32_t)atoi(getenv("BUSTER_EXP_BLOCK"));
++        const uint32_t from = di->block_starts[b];
++        const uint32_t to = di->block_starts[b + 1];
++        fprintf(stderr, "block %u [%u,%u)\n", b, from, to);
++        for (uint32_t i = 0; i < dc->intervals.count; i += 1)
++        {
++            if (dc->intervals.starts[i] < to && dc->intervals.ends[i] > from && dc->intervals.classes[i] == 0)
++            {
++                const uint32_t v = dc->intervals.values[i];
++                const uint32_t node = emitted->value_nodes[v];
++                fprintf(stderr, "  v%u n%u op%u remat%u allowed %#x valueuses %u [%u,%u) uses:", v, node, emitted->prepared.function->op[node], di->rematerializable[v], dc->intervals.allowed_registers[i], di->use_offsets[v + 1] - di->use_offsets[v], dc->intervals.starts[i], dc->intervals.ends[i]);
++                for (uint32_t u = dc->intervals.use_offsets[i]; u < dc->intervals.use_offsets[i + 1]; u += 1)
++                {
++                    fprintf(stderr, " %u%s", dc->intervals.use_positions[u], dc->intervals.use_required[u] ? "r" : "");
++                }
++                fprintf(stderr, " |");
++                for (uint32_t f = dc->allocation.fragment_offsets[i]; f < dc->allocation.fragment_offsets[i + 1]; f += 1)
++                {
++                    const uint8_t k = dc->allocation.kinds[f];
++                    fprintf(stderr, " %c%d@%u", k == 0 ? 'R' : k == 1 ? 'S' : 'M', k == 0 ? (int)dc->allocation.registers[f] : -1, dc->allocation.starts[f]);
++                }
++                fprintf(stderr, "\n");
++            }
++        }
++    }
+     emitted->callee_used = error == TIER1_EMIT_OK ? tier1_emit_cfg_callee_used(&emitted->cfg, emitted->callee_registers) : 0;
+     if (error == TIER1_EMIT_OK && options->certify)
+     {
