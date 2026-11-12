@@ -116,6 +116,29 @@ up its runtime functions by name (`memcpy`, `memset`, the libgcc helpers, the el
 with a body, and a runtime call's symbol comes from the name's first declaration, so the census reaches those
 declarations in every such unit; the emulation had no such rule.
 
+## The driver's hook: the census's base against its commit
+
+`scripts/ab.sh`, `results/ab/`: the plain compile of musl's command (`-c`, one lane, CPU 2, `setarch -R`) by main's
+`0af27a30`, the census branch's base (`results/ab/tree-main.sha256` is the host's tree, line for line its
+`git archive`, 1,567 files; built as `ee5b39b9` was, `results/ab/main-build.log`), and by `ee5b39b9`, three rounds
+each, interleaved, each in its own hold (`results/ab/holds.txt`, `results/ab/queue-ab.log`). Every other command
+tests the census's pointer, null, at its reader's call and its unit's end, and runs nothing of it.
+
+| | `0af27a30`, rounds 1, 2, 3 | `ee5b39b9`, rounds 1, 2, 3 |
+| --- | ---: | ---: |
+| user cycles (M) | 4,919.6, 4,848.1, 4,845.8 | 4,793.2, 4,811.5, 4,799.6 |
+| kernel cycles (M) | 1,211.2, 1,167.9, 1,170.7 | 1,173.0, 1,177.4, 1,172.2 |
+| task clock (ms) | 1,111.81, 1,086.31, 1,086.42 | 1,077.21, 1,081.37, 1,078.18 |
+| user instructions (M) | 12,789.6 each | 12,804.1 each |
+| page faults | 343,030, 343,031, 343,031 | 343,029 each |
+
+The objects are the same bytes (1,336) and so are the diagnostics (`results/ab/compare.txt`). `ee5b39b9` takes 0.11%
+more user instructions and 1.0% fewer user cycles than the base's last two rounds (its first, the first run after its
+build, is the slowest). The instructions are the checker unit's code moving as the new file joins it, not new work: by
+`perf record -e instructions:u -c 200003` (`scripts/abp.sh`, `results/ab/report-*.txt`, each command's top 400
+functions), `check_input_declarator_step` gains 73 M where `check_input_specifiers` loses 54 M and
+`check_input_capture_names` 18 M, the rest within the sampling's noise, and no function of the census's appears.
+
 ## Limitations
 
 - The census runs the passes beside the reader; it skips nothing. Its gates are the design's step 0; the compile with
