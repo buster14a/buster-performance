@@ -11,7 +11,7 @@ Both heads branch from main `a221f633246aeb99bf5c33d27cee76b719e4a4a7`, the `bas
 
 ## Host and method
 
-- **Host:** Ryzen 7 9700X (`benchpress`), CPU 2 (`taskset -c 2`).
+- **Host:** Ryzen 7 9700X (`benchpress`), CPU 2 (`taskset -c 2`); the builds' compiler: clang version 23.1.1.
 - **Builds:** `setup.sh NAME REVISION` clones and checks out a tree. `build.sh NAME` builds it with `BUSTER_HOST_ARCH=znver5 ./build.sh` (Release) under its own `exclusive.sh` hold.
 - **Timing:** `run.sh BASE HEAD LINK` builds both trees, then runs one `time-runs` comparison under a single `exclusive.sh` hold: 21 runs and 3 warm-ups per build, interleaved. It times four command lists:
   1. `-fsyntax-only` of `sqlite3.c`, copied from `~/buster-fast-bench/frontend-baseline-claude/baseline/sqlite3.c`;
