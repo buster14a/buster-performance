@@ -1,7 +1,7 @@
 # What a compile does outside the bodies' path, ranked, and the file scope read once per command: the measurements behind buster#2531's design (2026-11-12)
 
 These are the measurements that [buster#2531](https://github.com/buster14a/buster/issues/2531)'s design
-(`docs/attested-declarations.md` in buster) rests on, taken for
+(`docs/attested-declarations.md` in buster, [buster#2533](https://github.com/buster14a/buster/pull/2533)) rests on, taken for
 [buster#672](https://github.com/buster14a/buster/issues/672)'s one-core target beside
 [buster#2524](https://github.com/buster14a/buster/issues/2524)'s, whose record is
 [`one-core-design-672-2026-11-12`](../one-core-design-672-2026-11-12/README.md). That design takes the function
@@ -156,7 +156,8 @@ switch, `BUSTER_PROBE_ASM_CACHE`, that makes it once a process. `scripts/asm.sh`
 | once a unit with asm statements, as main | 4,533 M | 1,165 M | 1,029.4 |
 | once a process | 4,046 M | 1,095 M | 928.7 |
 
-All 1,336 objects are the same bytes both ways. This is outside the design; buster has an issue for it.
+All 1,336 objects are the same bytes both ways. This is outside the design:
+[buster#2532](https://github.com/buster14a/buster/issues/2532) has it.
 
 ## 6. The same declarations, read again and again
 
