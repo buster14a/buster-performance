@@ -1,0 +1,403 @@
+diff --git a/src/buster/compiler/c_check_tier1_inline.c b/src/buster/compiler/c_check_tier1_inline.c
+index 5ca9b964..fe46a8e4 100644
+--- a/src/buster/compiler/c_check_tier1_inline.c
++++ b/src/buster/compiler/c_check_tier1_inline.c
+@@ -17,7 +17,7 @@
+ // (the typed stream's objects, which a vector passed or returned by value is) into fields that promotion makes values.
+ // Any failure here keeps the lowered body as it was: inlining is an optimization, never a refusal.
+ 
+-#define BUSTER_CHECK_TIER1_INLINE_CALLEES 64u
++#define BUSTER_CHECK_TIER1_INLINE_CALLEES 512u
+ #define BUSTER_CHECK_TIER1_INLINE_UNPREPARED 0u
+ #define BUSTER_CHECK_TIER1_INLINE_READY 1u
+ #define BUSTER_CHECK_TIER1_INLINE_REFUSED 2u
+@@ -25,17 +25,43 @@
+ // The emission's generations of its inlining tables, which a lane's cache is valid for.
+ static uint64_t check_tier1_inline_generations = 0;
+ 
++// EXPERIMENT: BUSTER_EXP_INLINE_STATIC's cost limit, or 0 without it.
++static uint32_t check_tier1_inline_experiment(void)
++{
++    const char* text = getenv("BUSTER_EXP_INLINE_STATIC");
++    return text != NULL && text[0] != 0 ? (uint32_t)strtoul(text, NULL, 10) : 0;
++}
++
++// EXPERIMENT: with BUSTER_EXP_INLINE_EXTERNAL=1, the unit's functions of external linkage are candidates too, as clang
++// inlines a function it has the body of whatever its linkage (their own code stays).
++static bool check_tier1_inline_experiment_linkage(uint32_t linkage)
++{
++    const char* text = getenv("BUSTER_EXP_INLINE_EXTERNAL");
++    return linkage == 1 || (linkage != 0 && text != NULL && text[0] == '1');
++}
++
++// EXPERIMENT: BUSTER_EXP_INLINE_GROWTH's limit of the instructions a caller may gain, or the default.
++static uint32_t check_tier1_inline_experiment_growth(void)
++{
++    const char* text = getenv("BUSTER_EXP_INLINE_GROWTH");
++    return text != NULL && text[0] != 0 ? (uint32_t)strtoul(text, NULL, 10) : BUSTER_IR_INLINE_MAX_ITEMS / 4;
++}
++
+ // The table of `program`'s inline callees (CheckTier1Inline), in `arena`: none (false, *table untouched) in a unit without
+ // a defined always_inline function of internal linkage, the usual one.
+ static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, Arena* arena, CheckTier1Inline* table)
+ {
+     const CheckInput* input = program->input;
+     uint32_t candidates = 0;
+-    for (uint32_t b = 0; program->object_inline != 0 && b < program->body_count; b += 1)
++    // EXPERIMENT (#138's design record, not for main): BUSTER_EXP_INLINE_STATIC=COST makes every internal function
++    // without an inline attribute a candidate too, at that cost limit (check_tier1_inline).
++    const bool experiment = check_tier1_inline_experiment() != 0;
++    for (uint32_t b = 0; (experiment || program->object_inline != 0) && b < program->body_count; b += 1)
+     {
+         const CheckProgramBody body = program->bodies[b];
+-        const uint8_t bits = body.object <= input->token_count ? program->object_inline[body.object] : 0;
+-        candidates += bits == BUSTER_CHECK_PROGRAM_INLINE_ALWAYS && check_input_linkage(input->declaration_bits, body.declaration) == 1;
++        const uint8_t bits = program->object_inline != 0 && body.object <= input->token_count ? program->object_inline[body.object] : 0;
++        candidates += (bits == BUSTER_CHECK_PROGRAM_INLINE_ALWAYS && check_input_linkage(input->declaration_bits, body.declaration) == 1) ||
++                      (experiment && bits == 0 && check_tier1_inline_experiment_linkage(check_input_linkage(input->declaration_bits, body.declaration)));
+     }
+     uint32_t* bodies = candidates != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, symbol_count) : 0;
+     uint8_t* ready = bodies != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)program->body_count + 1) : 0;
+@@ -46,9 +72,10 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
+         for (uint32_t b = 0; b < program->body_count; b += 1)
+         {
+             const CheckProgramBody body = program->bodies[b];
+-            const uint8_t bits = body.object <= input->token_count ? program->object_inline[body.object] : 0;
++            const uint8_t bits = program->object_inline != 0 && body.object <= input->token_count ? program->object_inline[body.object] : 0;
+             const SymbolId symbol = body.object <= input->token_count ? program->object_symbols[body.object] : 0;
+-            if (bits == BUSTER_CHECK_PROGRAM_INLINE_ALWAYS && check_input_linkage(input->declaration_bits, body.declaration) == 1 && symbol != 0 && symbol < symbol_count)
++            const uint32_t linkage = check_input_linkage(input->declaration_bits, body.declaration);
++            if (((bits == BUSTER_CHECK_PROGRAM_INLINE_ALWAYS && linkage == 1) || (experiment && bits == 0 && check_tier1_inline_experiment_linkage(linkage))) && symbol != 0 && symbol < symbol_count)
+             {
+                 bodies[symbol] = b + 1;
+             }
+@@ -180,7 +207,9 @@ static void check_tier1_inline_reach(CheckTier1Lane* lane, const CheckTier1Inlin
+         {
+             const X86Target* own = check_tier1_inline_target(inlining->program, b - 1);
+             const bool features = (own->features & ~target->features) == 0 && (own->extensions & ~target->extensions) == 0;
+-            if (features && check_tier1_inline_prepare(lane, inlining, b - 1, scalar))
++            const uint32_t experiment = check_tier1_inline_experiment();
++            if (features && check_tier1_inline_prepare(lane, inlining, b - 1, scalar) &&
++                (experiment == 0 || lane->inline_functions[b - 1].instruction_count <= 4u * experiment))
+             {
+                 bodies[*count] = b - 1;
+                 *count += 1;
+@@ -271,8 +300,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
+         };
+         // An always_inline callee's size is no reason to keep its call; the growth bounds keep a pathological unit's.
+         IrInlineOptions options = ir_inline_options();
+-        options.maximum_cost = UINT32_MAX - 1;
+-        options.maximum_function_growth = BUSTER_IR_INLINE_MAX_ITEMS / 4;
++        options.maximum_cost = check_tier1_inline_experiment() != 0 ? check_tier1_inline_experiment() : UINT32_MAX - 1;
++        options.maximum_function_growth = check_tier1_inline_experiment_growth();
+         options.scalar = scalar;
+         const uint64_t evex = BUSTER_X86_FEATURE(AVX512F);
+         const uint64_t narrow = evex | BUSTER_X86_FEATURE(AVX512VL);
+diff --git a/src/buster/compiler/ir_optimize_inline.c b/src/buster/compiler/ir_optimize_inline.c
+index e77184b8..ad9cdb4a 100644
+--- a/src/buster/compiler/ir_optimize_inline.c
++++ b/src/buster/compiler/ir_optimize_inline.c
+@@ -116,8 +116,21 @@ struct IrInlineBody
+     uint32_t size;
+     uint32_t cost;
+     bool supported;
++    // EXPERIMENT (#138's design record, not for main): a body of any control flow, spliced with its blocks
++    // (ir_inline_expand_general), and its returns.
++    bool general;
++    uint32_t returns;
+ };
+ 
++// EXPERIMENT: BUSTER_EXP_INLINE_CFG=1 lets a callee of any control flow, with phis and calls of its own, be a
++// candidate: its blocks are spliced into the caller at the call, whose block ends there in a br to the callee's entry
++// and continues in a new block that the callee's returns branch to.
++static bool ir_inline_experiment_general(void)
++{
++    const char* text = getenv("BUSTER_EXP_INLINE_CFG");
++    return text != NULL && text[0] == '1';
++}
++
+ // What one expansion adds to its caller past the callee's cloned body (#1282): the aggregate copies' instructions,
+ // addresses and slots. 64-bit, so that a call's aggregates of up to 4 GiB each sum without wrapping and the bounds refuse
+ // it.
+@@ -537,6 +550,33 @@ static IrInlineBody ir_inline_body(const IrFunction* function)
+         const uint64_t cost = (uint64_t)body.size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->asm_body_count + function->slot_count;
+         body.cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1;
+     }
++    if (!body.supported && ir_inline_experiment_general())
++    {
++        // Any blocks, phis, branches, switches, returns and calls without ABI records; no labels, no dynamic stack, no
++        // aggregate by value. Its size: the br into it, its nodes but its parameters (a ret becomes a br), its result.
++        bool general = function->block_count != 0 && function->instruction_count != 0 && function->label_count == 0 && !function->variadic && slots &&
++                       function->parameter_passed == 0 && function->result_size == 0;
++        uint64_t size = 1 + (function->result_type != IR_VOID ? 1u : 0u);
++        uint32_t returns = 0;
++        for (uint32_t node = 0; general && node < function->instruction_count; node += 1)
++        {
++            const uint32_t op = function->op[node];
++            const bool call = op == IR_CALL || op == IR_CALL_INDIRECT;
++            general = call ? function->calls[function->b[node]].abi == 0 :
++                             op == IR_PHI || op == IR_BR || op == IR_CBR || op == IR_SWITCH || op == IR_RET || op == IR_UNREACHABLE || ir_inline_cloned(op);
++            size += op != IR_PARAM;
++            returns += op == IR_RET;
++        }
++        if (general && size < UINT32_MAX / 2)
++        {
++            const uint64_t cost = size + function->constant_count + function->address_count + function->vector_constant_count + function->row_count + function->asm_body_count + function->slot_count;
++            body.supported = true;
++            body.general = true;
++            body.returns = returns;
++            body.size = (uint32_t)size;
++            body.cost = cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX - 1;
++        }
++    }
+     return body;
+ }
+ 
+@@ -984,6 +1024,129 @@ static void ir_inline_expand(const IrFunction* source, uint32_t node, const IrFu
+     }
+ }
+ 
++// EXPERIMENT: the expansion of the call at `node` of `source` whose callee has any control flow (IrInlineBody.general):
++// a br to the callee's entry, which is the block `*block` (the caller's block ends there); the callee's blocks, their
++// block operands rebased, each ret a br to the continuation; and the continuation block, which starts with the result:
++// a phi of the returned values, a copy of the one, or an undef where the callee never returns.
++static void ir_inline_expand_general(const IrFunction* source, uint32_t node, const IrFunction* callee, const uint32_t* values, uint32_t* inner_values, uint32_t* parameters,
++                                     IrFunction* rewritten, IrInlineBases bases, IrInlineCursor* cursor, uint32_t* block)
++{
++    const IrCall descriptor = source->calls[source->b[node]];
++    if (callee->slot_count != 0)
++    {
++        memcpy(rewritten->slots + bases.slots, callee->slots, (uint64_t)callee->slot_count * sizeof(IrSlot));
++    }
++    for (uint32_t p = 0; p < descriptor.argument_count; p += 1)
++    {
++        parameters[p] = values[source->extra[descriptor.argument_first + p]];
++    }
++    const uint32_t base = *block;
++    const uint32_t continuation = base + callee->block_count;
++    ir_inline_emit(rewritten, cursor, IR_BR, IR_VOID, base, BUSTER_IR_NONE, BUSTER_IR_NONE);
++    // Every node's new id first: a phi may name a later value.
++    uint32_t next = cursor->node;
++    uint32_t returns = 0;
++    for (uint32_t inner = 0; inner < callee->instruction_count; inner += 1)
++    {
++        if (callee->op[inner] == IR_PARAM)
++        {
++            inner_values[inner] = parameters[callee->a[inner]];
++        }
++        else
++        {
++            inner_values[inner] = next++;
++        }
++        returns += callee->op[inner] == IR_RET;
++    }
++    const bool typed = callee->result_type != IR_VOID;
++    const uint32_t result_extra = cursor->extra;
++    cursor->extra += typed && returns >= 2 ? returns * 2 : 0;
++    uint32_t written = 0;
++    uint32_t single = BUSTER_IR_NONE;
++    for (uint32_t inner_block = 0; inner_block < callee->block_count; inner_block += 1)
++    {
++        rewritten->block_offsets[*block] = cursor->node;
++        *block += 1;
++        for (uint32_t inner = callee->block_offsets[inner_block]; inner < callee->block_offsets[inner_block + 1]; inner += 1)
++        {
++            const uint32_t op = callee->op[inner];
++            if (op == IR_PARAM)
++            {
++                continue;
++            }
++            const uint32_t at = cursor->node;
++            if (op == IR_RET)
++            {
++                const uint32_t value = callee->a[inner] != BUSTER_IR_NONE ? inner_values[callee->a[inner]] : BUSTER_IR_NONE;
++                if (typed && returns >= 2)
++                {
++                    rewritten->extra[result_extra + written * 2] = base + inner_block;
++                    rewritten->extra[result_extra + written * 2 + 1] = value;
++                }
++                single = value;
++                written += 1;
++                ir_inline_emit(rewritten, cursor, IR_BR, IR_VOID, continuation, BUSTER_IR_NONE, BUSTER_IR_NONE);
++                continue;
++            }
++            ir_inline_node(callee, inner, rewritten, at, inner_values, bases);
++            if (op == IR_BR)
++            {
++                rewritten->a[at] = callee->a[inner] + base;
++            }
++            else if (op == IR_CBR)
++            {
++                rewritten->b[at] = callee->b[inner] + base;
++                rewritten->c[at] = callee->c[inner] + base;
++            }
++            else if (op == IR_PHI)
++            {
++                rewritten->a[at] = cursor->extra;
++                for (uint32_t p = 0; p < callee->b[inner]; p += 1)
++                {
++                    rewritten->extra[cursor->extra++] = callee->extra[callee->a[inner] + p * 2] + base;
++                    rewritten->extra[cursor->extra++] = inner_values[callee->extra[callee->a[inner] + p * 2 + 1]];
++                }
++            }
++            else if (op == IR_SWITCH)
++            {
++                rewritten->b[at] = cursor->extra;
++                rewritten->extra[cursor->extra++] = callee->extra[callee->b[inner]] + base;
++                for (uint32_t k = 0; k < callee->c[inner]; k += 1)
++                {
++                    rewritten->extra[cursor->extra++] = callee->extra[callee->b[inner] + 1 + k * 2] + bases.constants;
++                    rewritten->extra[cursor->extra++] = callee->extra[callee->b[inner] + 2 + k * 2] + base;
++                }
++            }
++            else if (op == IR_CALL || op == IR_CALL_INDIRECT)
++            {
++                ir_inline_descriptor(callee, inner, rewritten, at, inner_values, bases, cursor);
++            }
++            else if (ir_ternary_instruction(callee, inner))
++            {
++                ir_inline_third(callee, inner, rewritten, at, inner_values, cursor);
++            }
++            cursor->node += 1;
++        }
++    }
++    rewritten->block_offsets[*block] = cursor->node;
++    *block += 1;
++    if (typed)
++    {
++        if (returns >= 2)
++        {
++            ir_inline_emit(rewritten, cursor, IR_PHI, callee->result_type, result_extra, returns, BUSTER_IR_NONE);
++        }
++        else if (returns == 1)
++        {
++            ir_inline_emit(rewritten, cursor, IR_COPY, callee->result_type, single, BUSTER_IR_NONE, BUSTER_IR_NONE);
++        }
++        else
++        {
++            ir_inline_emit(rewritten, cursor, IR_UNDEF, callee->result_type, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
++        }
++    }
++}
++
+ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result)
+ {
+     const IrFunction* source = &unit->functions[function];
+@@ -1005,15 +1168,32 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+         .asm_body_count = source->asm_body_count,
+     };
+     uint32_t call = result->call_offsets[function];
++    // EXPERIMENT: each caller block's first and last segments' new indices (a general expansion splits its block).
++    uint32_t* block_first = ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok);
++    uint32_t* block_last = ir_allocate(scratch, (uint64_t)source->block_count + 1, 4, &ok);
++    uint32_t walk_block = 0;
++    uint32_t added_blocks = 0;
+     for (uint32_t node = 0; ok && node < source->instruction_count; node += 1)
+     {
+         const uint32_t op = source->op[node];
+         const bool site = ir_inline_site(source, node);
+         const bool selected = site && result->decisions[call] == IR_INLINE_SELECTED;
++        while (walk_block < source->block_count && source->block_offsets[walk_block] == node)
++        {
++            block_first[walk_block] = walk_block + added_blocks;
++            walk_block += 1;
++        }
+         if (selected)
+         {
+             const IrFunction* callee = &result->functions[result->callees[call]];
+             const IrInlineCopies copies = ir_inline_copies(source, node, callee, options.vector_copies);
++            const IrInlineBody shape = ir_inline_body(callee);
++            if (shape.general)
++            {
++                added_blocks += callee->block_count + 1;
++                sizes.block_count += (uint64_t)callee->block_count + 1;
++                sizes.extra_count += (uint64_t)shape.returns * 2;
++            }
+             sizes.instruction_count += result->expanded_sizes[call];
+             values[node] = source->type[node] == IR_VOID ? BUSTER_IR_NONE : (uint32_t)sizes.instruction_count - 1;
+             sizes.constant_count += callee->constant_count;
+@@ -1056,6 +1236,11 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+                 sizes.extra_count += 1;
+             }
+         }
++        // The block this node ends, if it is its last: its last segment's new index.
++        if (ok && walk_block != 0 && node + 1 == source->block_offsets[walk_block])
++        {
++            block_last[walk_block - 1] = walk_block - 1 + added_blocks;
++        }
+         call += site;
+     }
+     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
+@@ -1120,6 +1305,10 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+         if (source->label_count != 0)
+         {
+             memcpy(rewritten.labels, source->labels, (uint64_t)source->label_count * 4);
++            for (uint32_t label = 0; label < source->label_count; label += 1)
++            {
++                rewritten.labels[label] = source->labels[label] < source->block_count ? block_first[source->labels[label]] : source->labels[label];
++            }
+         }
+         if (source->abi_call_count != 0)
+         {
+@@ -1145,9 +1334,11 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+             .slots = source->slot_count,
+         };
+         call = result->call_offsets[function];
++        uint32_t new_block = 0;
+         for (uint32_t block = 0; block < source->block_count; block += 1)
+         {
+-            rewritten.block_offsets[block] = cursor.node;
++            rewritten.block_offsets[new_block] = cursor.node;
++            new_block += 1;
+             for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
+             {
+                 const uint32_t op = source->op[node];
+@@ -1180,7 +1371,14 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+                     bases.slots = cursor.slots;
+                     cursor.addresses += callee->address_count;
+                     cursor.slots += callee->slot_count;
+-                    ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, bases, options.vector_copies, &cursor);
++                    if (ir_inline_body(callee).general)
++                    {
++                        ir_inline_expand_general(source, node, callee, values, inner_values, parameters, &rewritten, bases, &cursor, &new_block);
++                    }
++                    else
++                    {
++                        ir_inline_expand(source, node, callee, values, inner_values, parameters, &rewritten, bases, options.vector_copies, &cursor);
++                    }
+                     bases.constants += callee->constant_count;
+                     bases.vectors += callee->vector_constant_count;
+                     bases.rows += callee->row_count;
+@@ -1199,7 +1397,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+                         rewritten.a[cursor.node] = cursor.extra;
+                         for (uint32_t p = 0; p < source->b[node]; p += 1)
+                         {
+-                            rewritten.extra[cursor.extra++] = source->extra[source->a[node] + p * 2];
++                            // A predecessor's edge leaves its last segment.
++                            rewritten.extra[cursor.extra++] = block_last[source->extra[source->a[node] + p * 2]];
+                             rewritten.extra[cursor.extra++] = values[source->extra[source->a[node] + p * 2 + 1]];
+                         }
+                     }
+@@ -1208,8 +1407,22 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+                         rewritten.b[cursor.node] = cursor.extra;
+                         const uint32_t count = source->c[node] * 2 + 1;
+                         memcpy(rewritten.extra + cursor.extra, source->extra + source->b[node], (uint64_t)count * 4);
++                        rewritten.extra[cursor.extra] = block_first[rewritten.extra[cursor.extra]];
++                        for (uint32_t k = 0; k < source->c[node]; k += 1)
++                        {
++                            rewritten.extra[cursor.extra + 2 + k * 2] = block_first[rewritten.extra[cursor.extra + 2 + k * 2]];
++                        }
+                         cursor.extra += count;
+                     }
++                    else if (op == IR_BR)
++                    {
++                        rewritten.a[cursor.node] = block_first[source->a[node]];
++                    }
++                    else if (op == IR_CBR)
++                    {
++                        rewritten.b[cursor.node] = block_first[source->b[node]];
++                        rewritten.c[cursor.node] = block_first[source->c[node]];
++                    }
+                     else if (op == IR_BR_INDIRECT && source->b[node] != BUSTER_IR_NONE)
+                     {
+                         // Its labels' list (#785), the caller's label indices, as its blocks are.
