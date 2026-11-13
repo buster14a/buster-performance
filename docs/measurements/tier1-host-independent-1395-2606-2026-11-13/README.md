@@ -102,8 +102,8 @@ scalar one on this host: that is main's state, outside this PR.
 `test-tier1-frame` and `test-tier1-frame-execution`. On the 9700X, main: 2,277,543 checks and 14,619 checks, 0
 failures (`9700x/frame-tests-main-65ab5d8f.log`). Head on the container: 2,277,958 checks (main's plus the PR's
 identity checks and fixture) and 14,619, 0 failures; with the old first-free colorer restored, 44 failures, and with
-`--count 1` the PR's two checks alone fail. Head's 9700X run was still waiting for the lock when this record was
-written; a later commit adds it.
+`--count 1` the PR's two checks alone fail. Head on the 9700X: 2,277,958 and 14,619 checks, 0 failures
+(`9700x/frame-tests-head-1c734269.log`).
 
 ## Limitations
 
