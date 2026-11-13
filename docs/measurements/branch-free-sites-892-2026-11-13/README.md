@@ -1,6 +1,6 @@
 # Branch-free forms at `-c sqlite3.c`'s mispredicted sites, Buster #892
 
-Compiler issue: [#892](https://github.com/buster14a/buster/issues/892). Compiler branch: `claude/upbeat-shannon-nu1fs0`.
+Compiler issue: [#892](https://github.com/buster14a/buster/issues/892). Compiler PR: [#2655](https://github.com/buster14a/buster/pull/2655) (branch `claude/upbeat-shannon-nu1fs0`).
 
 ## Sources
 
