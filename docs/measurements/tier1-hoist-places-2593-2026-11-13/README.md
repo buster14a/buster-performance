@@ -65,9 +65,49 @@ valgrind can't run the native compiler, so `e22f84ea` and `971fe320` were built 
 
 ## 3. Run time and compile time on the 9700X
 
-To follow.
+`scripts/run2593.sh` is #2574's record's `run2574.sh` with its speedtest1 layouts (`stobj.sh` and `stlay.sh`) appended, run on benchpress for `e22f84ea` (base) and `971fe320` (head), each step and each run one hold of the lock, every run pinned to CPU 2:
+- each compiler built at its commit (`BUSTER_DEBUG_INFO=0`, native target znver5; `9700x/compilers.sha256`);
+- Lua's 33 objects by each compiler's `--tier1`, linked by cc in six recorded orders (`9700x/orders.txt`), the same for both builds; speedtest1 as one unity unit by the driver's link;
+- before any timing, every Lua executable printed clang -O0's output for every script, and both speedtest1 builds gave the verification hash (`9700x/run.log`: checks status 0; `9700x/verify-*.txt`);
+- eleven rounds with the builds rotating, each run one `perf stat` of task-clock, user cycles and user instructions (`9700x/runs.txt`), then the compile times (`9700x/compile-runs.txt`), then speedtest1's unity unit compiled to an object by each compiler and linked by cc after a pad of 0, 16, 32, 48, 1,072 and 3,088 bytes, every executable's hash checked (`9700x/layouts/verify.txt`), in eleven rounds (`9700x/layouts/runs.txt`).
+
+#2574's record's `scripts/analyze.py` makes `9700x/analysis.md`; `scripts/layouts.py` makes `9700x/layouts/analysis.md` and `scripts/compile.py` `9700x/compile-analysis.md`. `9700x/run.log` is the script's own log; the lock's messages, which name other sessions, aren't kept.
+
+**Lua** (`9700x/analysis.md`):
+
+| | head / base | 95% interval over the six orders |
+| --- | ---: | ---: |
+| time | 0.9996 | 0.9966 to 1.0026 |
+| user cycles | 0.9998 | 0.9969 to 1.0027 |
+| user instructions | 0.9999 | 0.9998 to 1.0001 |
+
+**speedtest1 at six layouts** (`9700x/layouts/analysis.md`):
+
+| Pad, bytes | 0 | 16 | 32 | 48 | 1,072 | 3,088 | mean (95% interval) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| time, head / base | 0.9889 | 0.9953 | 1.0038 | 0.9979 | 0.9954 | 0.9991 | 0.9967 (0.9915 to 1.0019) |
+| user cycles, head / base | 0.9824 | 0.9940 | 1.0013 | 0.9944 | 0.9896 | 0.9989 | 0.9934 (0.9863 to 1.0006) |
+
+User instructions are 0.9973 at every layout (2,960.22 M and 2,952.09 M). At the driver's own link, one layout, speedtest1 ran 1.0071 in time and 1.0053 in user cycles (paired rounds 0.9953 to 1.0121), with the same 0.9973 in instructions.
+
+**Compile time** (`9700x/compile-analysis.md`; eleven rounds after one warm-up of each, outputs stable):
+
+| Input | Metric | base | head | head / base | paired ratios, median (range) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| sqlite3.c | time, ms | 399.27 | 399.35 | 1.0002 | 1.0000 (0.9966 to 1.0031) |
+| sqlite3.c | cycles, M | 2,118.93 | 2,118.95 | 1.0000 | 0.9999 (0.9957 to 1.0035) |
+| sqlite3.c | instructions, M | 4,709.26 | 4,715.70 | 1.0014 | 1.0014 (1.0014 to 1.0014) |
+| Lua | time, ms | 166.28 | 164.97 | 0.9921 | 0.9906 (0.9872 to 1.0168) |
+| Lua | cycles, M | 817.91 | 819.50 | 1.0019 | 1.0020 (0.9983 to 1.0063) |
+| Lua | instructions, M | 1,939.60 | 1,935.81 | 0.9980 | 0.9980 (0.9980 to 1.0029) |
+
+**Reading.**
+- **Lua.** `luaV_execute`'s code is unchanged, and so is Lua's time, within ±0.3%.
+- **speedtest1.** Its instructions fall 0.27% at every layout, as callgrind counts them. Its cycles fall 0.66% on the mean of the six layouts, an interval that just includes no change; the driver's own link is one layout, at which they rose 0.5%, the spread #2574's record found between layouts of the same code.
+- **Compile time.** `sqlite3.c`'s `--tier1 -c` runs 6.4 M more instructions (0.14%), the placement's dominators and walks (section 2), in no more time or cycles. Lua's 33 short compiles run fewer instructions and their times don't resolve a change.
 
 ## Limitations
 
 - The counts come from one container's runs of deterministic programs, at that container's target; the 9700X's builds target znver5.
+- The 9700X's rounds ran while other sessions and CI took the lock between runs, as every run there does.
 - The experiment's compilers `x1`, `x2` and `x3` were built from successive states of `experiment-modes.patch`; only its last state is kept, which has every mode.
