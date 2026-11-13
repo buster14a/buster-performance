@@ -16,6 +16,8 @@ The evidence has three parts:
 
 ## Revisions
 
+#2636's later commits change documentation alone: `b9b68dfe` and the one that adds this record's numbers to buster's docs.
+
 | Role | Commit | What |
 | --- | --- | --- |
 | main | `26f0bb0e1ab0ae8fc0a7c119064796dfd4b0d5fa` | buster's main when the work began, and the base of every measurement |
@@ -115,7 +117,62 @@ The rows without symbols are the same code at other addresses.
 
 ## 3. Run time and compile time on the 9700X
 
-(Filled in when `scripts/run2618.sh` finishes.)
+**Method.** This is #2593's record's (#2574's method), with one change to how the lock was held. Base is main `26f0bb0e`, head #2636's `c68fa771`, every run pinned to CPU 2.
+
+- **`scripts/run2618.sh`** is #2593's `run2593.sh` with its paths renamed. It built:
+  - both compilers, each at its commit in a tree of its own (`BUSTER_DEBUG_INFO=0`, native target znver5; `9700x/compilers.sha256`);
+  - Lua's 33 objects by each compiler's `--tier1`, linked by cc in six recorded orders (`9700x/orders.txt`), the same for both builds;
+  - speedtest1 as one unity unit, by the driver's link;
+  - clang -O0's Lua.
+
+  Each step was one hold of the lock. It was then stopped, before its checks: that afternoon each hold waited three to nine minutes behind the other sessions' runs, and its 900 holds would have taken days. It was stopped by PID, its `exclusive.sh` waiter before that waiter's `flock`, so nothing ran outside the lock.
+- **`scripts/run2618b.sh`** reused those files (`9700x/executables.sha256`) and took the lock fourteen times:
+  - once to build speedtest1's six layouts, each compiler's unity unit as one object linked after a pad of 0, 16, 32, 48, 1,072 or 3,088 bytes (`scripts/build-layouts.sh`, `9700x/layouts/executables.sha256`);
+  - once for every check (`scripts/checks.sh`, `9700x/checks.txt`): each Lua executable's five scripts against clang -O0's outputs, and every speedtest1 executable's verification hash. All 74 matched.
+  - once per round, twelve rounds, round 0 a warm-up kept apart (`scripts/round.sh`). Each round ran every order's two Lua builds on all five scripts, speedtest1's two builds at the driver's link and at each of the six layouts, and the two compilers' `--tier1 -c` of `sqlite3.c` and `--tier1` of Lua's 33 sources into an executable. The builds' order rotated by round and by order or layout as in `run2593.sh`. Each process was one `perf stat` of task-clock, user cycles and user instructions, its exit status recorded beside it; all 862 exited 0.
+
+  A round's processes take about 9 s, so a hold stays far inside the ten minutes a CI job waits for the lock. Each hold first wrote the lock's owner line, its own, to `9700x/holds.txt`. The compile outputs were the same in every round (`9700x/compile-outputs.sha256`: one object and one executable per compiler).
+- **Logs and analysis.** `9700x/run.log` has both scripts' own lines; the lock's waiting messages, which name other sessions, aren't kept. #2574's record's `analyze.py` makes `9700x/analysis.md`, and #2593's `layouts.py` and `compile.py` make `9700x/layouts/analysis.md` and `9700x/compile-analysis.md`.
+
+**Lua** (`9700x/analysis.md`):
+
+| | head / base | 95% interval over the six orders |
+| --- | ---: | ---: |
+| time | 0.9979 | 0.9902 to 1.0057 |
+| user cycles | 0.9975 | 0.9892 to 1.0058 |
+| user instructions | 0.9909 | 0.9906 to 0.9912 |
+
+By script, as the median of the orders' medians: `calls` 1.0000 in time (−3.8% instructions), `tables` 0.9913, `strings` 1.0006, `closures` 0.9920, and `arithmetic` 1.0385.
+
+**speedtest1 at six layouts** (`9700x/layouts/analysis.md`):
+
+| Pad, bytes | 0 | 16 | 32 | 48 | 1,072 | 3,088 | mean (95% interval) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| time, head / base | 0.9995 | 0.9871 | 0.9968 | 1.0056 | 0.9882 | 0.9879 | 0.9942 (0.9862 to 1.0022) |
+| user cycles, head / base | 0.9990 | 0.9749 | 0.9974 | 1.0030 | 0.9941 | 0.9879 | 0.9927 (0.9821 to 1.0034) |
+
+User instructions are 0.9987 at every layout (2,947.24 M and 2,943.51 M). At the driver's own link, one layout, speedtest1 ran 1.0007 in time and 1.0024 in user cycles (paired rounds 0.9964 to 1.0097), with the same 0.9987 in instructions.
+
+**Compile time** (`9700x/compile-analysis.md`, eleven rounds after the warm-up):
+
+| Input | Metric | base | head | head / base | paired ratios, median (range) |
+| --- | --- | ---: | ---: | ---: | ---: |
+| sqlite3.c | time, ms | 400.07 | 400.94 | 1.0022 | 1.0025 (0.9416 to 1.0351) |
+| sqlite3.c | cycles, M | 2,120.61 | 2,125.69 | 1.0024 | 1.0018 (0.9697 to 1.0154) |
+| sqlite3.c | instructions, M | 4,720.50 | 4,722.14 | 1.0003 | 1.0003 (1.0003 to 1.0003) |
+| Lua | time, ms | 155.72 | 155.89 | 1.0011 | 0.9994 (0.9552 to 1.0055) |
+| Lua | cycles, M | 755.28 | 756.75 | 1.0019 | 1.0020 (0.9634 to 1.0112) |
+| Lua | instructions, M | 1,741.02 | 1,742.13 | 1.0006 | 1.0006 (1.0006 to 1.0006) |
+
+**The arithmetic script.** It ran slower at five of the six orders (+3.2% to +6.2% in time) and faster at order 0 (−2.9%), with 0.83% fewer instructions at each.
+- **Its code.** In callgrind's counts (`counts/kinds.tar.zst`, `arithmetic.tsv`), the only change in its `luaV_execute` is 8.27 M fewer moves and 1.24 M fewer frame addresses' `lea`s. In its hottest handler tails, the same values are rotated through one move fewer.
+- **Its counters.** `9700x/arithmetic/` has one hold's `perf stat -r 11` of each build at orders 0, 1 and 5 (`arith.sh`, `counters.txt`), measuring user cycles, instructions, mispredicted indirect and all branches, ops from the x86 decoder, and cycles retiring nothing while a load is incomplete. At order 1 the head takes 12.1 M more cycles (182.98 M against 170.84 M). Yet its branch mispredictions differ by 4 K, its decoder's ops by 0.05 M, and its load-incomplete cycles fall by 0.2 M. At order 0 it takes 4.0 M fewer.
+- **Reading.** The same build's cycles on this script vary by 4% (base, 170.1 M to 177.0 M) to 6% (head) between link orders, as much as the two builds differ. The code gives no reason for it, and placement does, as speedtest1's layouts' spread shows.
+
+**Reading.**
+- **Lua.** Its instructions fall 0.91% at each of six link orders, mostly `luaV_execute`'s edge moves, as callgrind counts them. Its time doesn't move measurably: the mean ratio is 0.9979, an interval that includes no change.
+- **speedtest1.** Its instructions fall 0.13% at every layout. Its cycles fall 0.73% on the mean of the six layouts, an interval that includes no change. The driver's own link is one layout, at which they rose 0.24%.
+- **Compile time.** `sqlite3.c`'s `--tier1 -c` runs 1.6 M more instructions (0.03%), as callgrind counts them (section 2). Its time and cycles are 1.0022 and 1.0024, inside rounds whose paired ratios range over ±3%: wider than #2593's record's, whose holds each held one process. Lua's 33 compiles run 0.06% more instructions.
 
 ## Tests
 
@@ -124,4 +181,6 @@ The rows without symbols are the same code at other addresses.
 ## Limitations
 
 - The counts come from one container's runs of deterministic programs, at that container's target. The 9700X's builds target znver5.
+- On the 9700X, each round ran under one hold of the lock, not each process under its own, as #2593's record did. A round's 78 processes then ran back to back, each still measured by its own `perf stat`.
+- The 9700X's rounds ran while other sessions and CI took the lock between them.
 - The experiment's compilers were built from successive states of `experiment-modes.patch`; only its last state is kept, which has every bit.
