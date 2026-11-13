@@ -30,9 +30,11 @@ and perf versions, taken under the lock.
 
 ## Method
 
-Every command ran under the 9700X's lock, one hold per run, through `harness/lock.sh`. Each hold appends the
-holder's line to `results/holds.txt` and the busiest processes and the load, before and after, to
-`results/busy.txt`.
+Every build and timed run held the 9700X's lock, one hold per run; the exceptions, which time nothing, are under
+"Limitations". The compilers' builds took it through `exclusive.sh` itself (`results/builds.log`), and every later
+run through `harness/lock.sh`, whose holds append the holder's line to `results/holds.txt` and the busiest
+processes and the load, before and after, to `results/busy.txt`. `harness/host-manifests.sh` wrote `results/host.txt` and the host trees' manifests in a hold
+of its own.
 
 **Kernels** (`harness/kernels.c`): each sums over an array of 4,096 elements. `harness/driver.c`, built by clang
 `-O2`, calls each one 20,000 times and prints the milliseconds. `harness/ab.sh` builds `kernels.c` with main's and
@@ -73,16 +75,40 @@ So is the cause of the third kernel's gap to clang -O0: its `* 8`.
 
 ## Compile results
 
-COMPILE-RESULTS
+`results/compile.txt` and `results/compile-round3.txt`; each `perf stat -r 11`'s CSV is in `results/compile/`.
+
+| | main | head |
+| --- | ---: | ---: |
+| user instructions, rounds 1, 2, 3 | 1,340,879,270 / 1,340,879,285 / 1,340,879,273 | 1,340,946,685 / 1,340,951,544 / 1,340,946,682 |
+| user cycles, rounds 1, 2, 3 | 595.48 M / 595.45 M / 594.23 M | 596.43 M / *611.50 M (±1.50%)* / 595.60 M |
+| task-clock, rounds 1, 2, 3 | 121.69 / 122.53 / 121.63 ms | 122.54 / *127.52 (±2.72%)* / 121.89 ms |
+| Tier 0 object: text, `div`/`idiv` | 1,511,450 B, 405 | 1,508,586 B, 281 |
+| Tier 1 object: text, `div`/`idiv` | 1,263,385 B, 116 | 1,263,273 B, 116 |
+
+The head runs 67,410 more user instructions (+0.0050%) and, in its clean rounds, 0.16% and 0.23% more cycles than
+the main round before each, against perf's ±0.08% to ±0.26% for each round: a difference at the edge of the noise.
+Its Tier 0 object has 124 fewer divisions. clang `-O0`'s object of the same source (clang 23.1.6 in the cloud
+container where #2679's tests ran, with the same headers) has 318.
+
+The head's round 2 (in italics) has ten times the others' spread. Its hold's snapshots in `results/busy.txt` show
+nothing busy, so its cause isn't in the record; `harness/perf-round.sh` ran round 3, a hold for each side, in its
+place.
 
 ## Limitations
 
-- A Tier 0 kernel's time comes in whole cycles per iteration (one cycle is 14.8 ms of 81.92 M iterations here) and
-  moves with code placement. In an exploratory run of the same main objects, linked with an earlier driver, the third
-  kernel took 44.5 ms rather than 59.2.
+- A Tier 0 kernel's time comes in whole cycles an iteration (one cycle an iteration is about 14.8 ms over the 81.92 M
+  iterations) and moves with code placement. In an exploratory run of main's compiler on an earlier `kernels.c`,
+  without the last two kernels, and its driver, the third kernel took 44.5 ms rather than 59.2.
 - The head's Tier 0 pointer-difference kernel is bimodal: 31.8 ms in most rounds, up to 36.5.
 - The exploratory runs before this record, which held the lock across a whole A/B, are not part of it. They gave the
   same numbers from objects with the same SHA-256.
+- Outside the lock: after its last round, `ab.sh` ran each of the six binaries once more for its checksum (about 4 s
+  of one core, unpinned), and both scripts' final `sha256sum`. `exclusive.sh` listed this record's `m0` as busy when
+  another session's hold began (`/var/lib/buster-9700x/busy.log`, 20:56:58 UTC). The checksums belong inside a
+  hold; this record's own holds were not affected.
+- `exclusive.sh` listed a `sha256sum` (PID 2158487, parent 2131633, user `david`) busy as the compile A/B's objects
+  hold took the lock (`results/compile.txt`'s first lines). That hold times nothing; which session's process it was
+  isn't recorded.
 - The correctness tests listed in #2679 ran in a cloud container, not on this host.
 - The logs leave out the lines `exclusive.sh` printed while waiting for other sessions' holds (their commands, titles
   and links): `grep -v -E '^exclusive.sh: waiting|^  (title|link|pull request):'`. Every holder's command was one
