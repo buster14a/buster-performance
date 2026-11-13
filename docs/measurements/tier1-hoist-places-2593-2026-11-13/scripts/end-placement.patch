@@ -1,0 +1,161 @@
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index cdaa6217..7d3d0b4f 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -131,16 +131,17 @@ struct IrTypedPlan
+     uint8_t vector_copies;
+     // The direct U64 symbol addresses the function takes at least twice (GLOBAL_ADDRESS entries, #2574), each defined once
+     // (ir_typed_plan_hoisted): hoisted_symbols[k] in order of first use; and the entries that take one, hoisted_takes of
+-    // them in entry order, each's symbol's k in hoisted_numbers. Each definition's block (#2593, ir_typed_plan_places):
+-    // node n's (0 the preheader, after its jump tables', or b + 1 source block b's start, after its reloads) are
+-    // hoisted_starts[hoisted_start_offsets[n]] to before hoisted_start_offsets[n + 1]. The emission writes each
+-    // definition's value in hoisted_values[k] as it emits it.
++    // them in entry order, each's symbol's k in hoisted_numbers. Each definition's block (#2593, ir_typed_plan_places) is
++    // hoisted_blocks[k]: at its first entry that takes it, or, in a block that takes it nowhere, at the block's end, which
++    // the end lists give (the preheader's at its jump tables'). The emission writes each definition's value in
++    // hoisted_values[k] as it emits it, BUSTER_IR_NONE before.
+     uint32_t* hoisted_symbols;
+     uint32_t* hoisted_entries;
+     uint32_t* hoisted_numbers;
++    uint32_t* hoisted_blocks;
+     uint32_t* hoisted_values;
+-    uint32_t* hoisted_start_offsets;
+-    uint32_t* hoisted_starts;
++    uint32_t* hoisted_end_offsets;
++    uint32_t* hoisted_ends;
+     uint32_t hoisted_count;
+     uint32_t hoisted_takes;
+     uint32_t error_entry;
+@@ -1524,10 +1525,11 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+     const uint32_t symbols = plan->hoisted_count;
+     const uint32_t nodes = plan->block_count + 1 + (plan->indirect != 0);
+     uint32_t* blocks = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
++    plan->hoisted_blocks = blocks;
+     plan->hoisted_values = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+-    plan->hoisted_start_offsets = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 2) : 0;
+-    plan->hoisted_starts = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
+-    ok = symbols == 0 || (blocks != 0 && plan->hoisted_values != 0 && plan->hoisted_start_offsets != 0 && plan->hoisted_starts != 0);
++    plan->hoisted_end_offsets = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 2) : 0;
++    plan->hoisted_ends = symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1) : 0;
++    ok = symbols == 0 || (blocks != 0 && plan->hoisted_values != 0 && plan->hoisted_end_offsets != 0 && plan->hoisted_ends != 0);
+     // The CFG's two CSR views: the successors by ir_typed_successors, counted and then filled, and the predecessors by a
+     // counting sort of them.
+     uint32_t* offsets = ok && symbols != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
+@@ -1698,25 +1700,36 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+         plan->hoisted_entries[takes] = plan->hoisted_entries[t];
+         plan->hoisted_numbers[takes] = k;
+         takes += !own;
++        // A block that takes it holds its definition there (its first take); a block that doesn't, at its end.
++        const uint32_t node = plan->entry_blocks[plan->hoisted_entries[t]] + 1;
++        if (!own && blocks[k] == node)
++        {
++            blocks[k] |= 0x80000000u;
++        }
+     }
+-    // The start lists, a counting sort of the definitions by their blocks.
++    // The end lists, a counting sort of the definitions at a block's end (or the preheader's) by their blocks.
+     if (numbers != 0)
+     {
+         plan->hoisted_count = count;
+         plan->hoisted_takes = takes;
+-        memset(plan->hoisted_start_offsets, 0, ((uint64_t)nodes + 2) * sizeof(uint32_t));
++        memset(plan->hoisted_end_offsets, 0, ((uint64_t)nodes + 2) * sizeof(uint32_t));
+         for (uint32_t k = 0; k < count; k += 1)
+         {
+-            plan->hoisted_start_offsets[blocks[k] + 2] += 1;
++            plan->hoisted_end_offsets[(blocks[k] & 0x7fffffffu) + 2] += (blocks[k] & 0x80000000u) == 0;
+         }
+         for (uint32_t n = 0; n < nodes; n += 1)
+         {
+-            plan->hoisted_start_offsets[n + 2] += plan->hoisted_start_offsets[n + 1];
++            plan->hoisted_end_offsets[n + 2] += plan->hoisted_end_offsets[n + 1];
+         }
+         for (uint32_t k = 0; k < count; k += 1)
+         {
+-            plan->hoisted_starts[plan->hoisted_start_offsets[blocks[k] + 1]] = k;
+-            plan->hoisted_start_offsets[blocks[k] + 1] += 1;
++            const uint32_t node = blocks[k] & 0x7fffffffu;
++            if ((blocks[k] & 0x80000000u) == 0)
++            {
++                plan->hoisted_ends[plan->hoisted_end_offsets[node + 1]] = k;
++                plan->hoisted_end_offsets[node + 1] += 1;
++            }
++            blocks[k] = node;
+         }
+     }
+     arena_pop_to(output, mark);
+@@ -2073,13 +2086,13 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_labels(IrTypedSin
+ 
+ // The hoisted symbols' addresses that node `node` defines (#2593, IrTypedPlan.hoisted_starts), each a symbol_addr and its
+ // ptrtoint, whose value its takes then read: the preheader's after its jump tables', a source block's after its reloads.
+-static __attribute__((always_inline)) inline void ir_typed_hoisted_starts(IrTypedSink* sink, const IrTypedPlan* plan, uint32_t node)
++static __attribute__((always_inline)) inline void ir_typed_hoisted_ends(IrTypedSink* sink, const IrTypedPlan* plan, uint32_t node)
+ {
+-    const uint32_t first = plan->hoisted_count != 0 ? plan->hoisted_start_offsets[node] : 0;
+-    const uint32_t end = plan->hoisted_count != 0 ? plan->hoisted_start_offsets[node + 1] : 0;
++    const uint32_t first = plan->hoisted_count != 0 ? plan->hoisted_end_offsets[node] : 0;
++    const uint32_t end = plan->hoisted_count != 0 ? plan->hoisted_end_offsets[node + 1] : 0;
+     for (uint32_t x = first; x < end; x += 1)
+     {
+-        const uint32_t k = plan->hoisted_starts[x];
++        const uint32_t k = plan->hoisted_ends[x];
+         const uint32_t address = ir_typed_emit(sink, IR_SYMBOL_ADDR, IR_PTR, plan->hoisted_symbols[k], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+         plan->hoisted_values[k] = ir_typed_emit(sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+     }
+diff --git a/src/buster/compiler/ir_lower_emit.c b/src/buster/compiler/ir_lower_emit.c
+index b8c6dfd5..815f1397 100644
+--- a/src/buster/compiler/ir_lower_emit.c
++++ b/src/buster/compiler/ir_lower_emit.c
+@@ -152,7 +152,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+     }
+     // The symbols' addresses the function takes at least twice (#2574, ir_typed_plan_hoisted), each defined at the start
+     // of the block ir_typed_plan_places gives it (#2593): those in the preheader here, as the tables' are.
+-    ir_typed_hoisted_starts(&sink, plan, 0);
++    for (uint32_t k = 0; k < plan->hoisted_count; k += 1)
++    {
++        plan->hoisted_values[k] = BUSTER_IR_NONE;
++    }
++    ir_typed_hoisted_ends(&sink, plan, 0);
+     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+ 
+     // The next jump table, whose jump (Tier0Function.table_jumps, in entry order) is a br_indirect of its own (#785).
+@@ -183,8 +187,6 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+                                          ir_typed_alignment(classes[d]));
+             }
+         }
+-        // The hoisted addresses this block defines (#2593), which its takes and the blocks it dominates read.
+-        ir_typed_hoisted_starts(&sink, plan, b + 1);
+         bool terminated = false;
+         for (uint32_t i = first; i < end; i += 1)
+         {
+@@ -192,6 +194,10 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+             const uint32_t source_first = (uint32_t)sink.sizes.instruction_count;
+ #endif
+             const uint8_t kind = input->kinds[i];
++            if (i + 1 == end && (ir_typed_control(kind) || kind == BUSTER_TYPED_JUMP_INDIRECT))
++            {
++                ir_typed_hoisted_ends(&sink, plan, b + 1);
++            }
+             const uint8_t class = ir_typed_stack_class(input, i);
+             const IrType type = (IrType)types[i];
+             const uint64_t value = input->values[i];
+@@ -258,6 +264,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+                 }
+                 else if (hoisted != UINT32_MAX)
+                 {
++                    if (plan->hoisted_values[hoisted] == BUSTER_IR_NONE)
++                    {
++                        const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, (uint32_t)value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++                        plan->hoisted_values[hoisted] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++                    }
+                     stack[depth] = plan->hoisted_values[hoisted];
+                 }
+                 else
+@@ -530,6 +541,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+             }
+             else
+             {
++                ir_typed_hoisted_ends(&sink, plan, b + 1);
+                 ir_typed_spill(&sink, plan, stack, classes, depth, input->local_count);
+                 ir_typed_emit(&sink, IR_BR, IR_VOID, b + 2, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+             }

@@ -1,0 +1,637 @@
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index 141a5639..88e67521 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -135,6 +135,9 @@ struct IrTypedPlan
+     uint32_t* hoisted_symbols;
+     uint32_t* hoisted_entries;
+     uint32_t* hoisted_numbers;
++    uint32_t* hoisted_blocks;
++    uint32_t* hoisted_ids;
++    uint32_t* hoisted_order;
+     uint32_t hoisted_count;
+     uint32_t hoisted_takes;
+     uint32_t error_entry;
+@@ -1288,6 +1291,7 @@ static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* si
+ // A GLOBAL_ADDRESS entry whose address the preheader may compute once (#2574): a U64 of a symbol accessed directly, as
+ // a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for. The tables' own entries
+ // stay theirs.
++static uint32_t ir_x2593_mode(void);
+ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
+ {
+     const uint64_t symbol = input->values[entry];
+@@ -1313,8 +1317,9 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+     {
+         globals += input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS;
+     }
+-    uint32_t* taken = globals >= 2 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)globals + 1) : 0;
+-    bool ok = globals < 2 || taken != 0;
++    const uint32_t minimum = ir_x2593_mode() == 6 ? 1 : 2;
++    uint32_t* taken = globals >= minimum ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)globals + 1) : 0;
++    bool ok = globals < minimum || taken != 0;
+     // The entries that may take a hoisted address, in entry order: a jump table's stays the table's.
+     uint32_t addresses = 0;
+     uint32_t table = 0;
+@@ -1330,7 +1335,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+             addresses += 1;
+         }
+     }
+-    if (ok && addresses >= 2)
++    if (ok && addresses >= minimum)
+     {
+         uint32_t capacity = 4;
+         while (capacity < 2 * addresses)
+@@ -1342,7 +1347,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+         uint32_t* numbers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
+         plan->hoisted_entries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses + 1);
+         plan->hoisted_numbers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses + 1);
+-        plan->hoisted_symbols = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses / 2 + 1);
++        plan->hoisted_symbols = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)addresses + 1);
+         ok = keys != 0 && counts != 0 && numbers != 0 && plan->hoisted_entries != 0 && plan->hoisted_numbers != 0 && plan->hoisted_symbols != 0;
+         if (ok)
+         {
+@@ -1367,13 +1372,13 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+                     numbers[slot] = UINT32_MAX;
+                 }
+                 counts[slot] += pass == 0;
+-                if (pass == 1 && counts[slot] >= 2 && numbers[slot] == UINT32_MAX)
++                if (pass == 1 && counts[slot] >= minimum && numbers[slot] == UINT32_MAX)
+                 {
+                     numbers[slot] = plan->hoisted_count;
+                     plan->hoisted_symbols[plan->hoisted_count] = key;
+                     plan->hoisted_count += 1;
+                 }
+-                if (pass == 1 && counts[slot] >= 2)
++                if (pass == 1 && counts[slot] >= minimum)
+                 {
+                     plan->hoisted_entries[plan->hoisted_takes] = i;
+                     plan->hoisted_numbers[plan->hoisted_takes] = numbers[slot];
+@@ -1385,6 +1390,515 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+     return ok;
+ }
+ 
++
++// EXPERIMENT #2593: BUSTER_X2593 selects the hoisted definitions' placement.
++static uint32_t ir_x2593_mode(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2593");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
++static uint32_t ir_x2593_ncd(const Dominators* d, uint32_t a, uint32_t b)
++{
++    while (a != b)
++    {
++        while (d->rpo_index[a] > d->rpo_index[b])
++        {
++            a = d->idom[a];
++        }
++        while (d->rpo_index[b] > d->rpo_index[a])
++        {
++            b = d->idom[b];
++        }
++    }
++    return a;
++}
++
++static bool ir_x2593_place(const Tier0Function* input, IrTypedPlan* plan, Arena* output, Arena* scratch)
++{
++    const uint32_t mode = ir_x2593_mode();
++    bool ok = true;
++    if (mode == 1)
++    {
++        plan->hoisted_takes = 0;
++        plan->hoisted_count = 0;
++    }
++    if (plan->hoisted_takes == 0)
++    {
++        return ok;
++    }
++    const uint32_t* keys_of = plan->hoisted_symbols;
++    const uint32_t dispatch = plan->indirect != 0;
++    const uint32_t nodes = plan->block_count + 1 + dispatch;
++    const uint32_t dispatch_node = plan->block_count + 1;
++    uint32_t* counts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1);
++    uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1);
++    uint32_t* poffsets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1);
++    ok = counts != 0 && offsets != 0 && poffsets != 0;
++    // Two passes: count, then fill.
++    uint32_t* succ = 0;
++    uint32_t* pred = 0;
++    uint32_t edges = 0;
++    for (uint32_t pass = 0; ok && pass < 2; pass += 1)
++    {
++        uint32_t e = 0;
++        uint32_t table = 0;
++#define X2593_EDGE(from, to) do { if (pass == 1) { succ[e] = (to); } e += 1; (void)(from); } while (0)
++        for (uint32_t n = 0; n < nodes; n += 1)
++        {
++            if (pass == 1)
++            {
++                offsets[n] = e;
++            }
++            if (n == 0)
++            {
++                X2593_EDGE(n, 1);
++            }
++            else if (n == dispatch_node && dispatch)
++            {
++                uint32_t listed = 0;
++                for (uint32_t k = 0; input->table_count != 0 && k < input->label_count; k += 1)
++                {
++                    listed += input->label_tables[k] == 0;
++                }
++                for (uint32_t k = 0; k < input->label_count; k += 1)
++                {
++                    if (listed == 0 || input->label_tables[k] == 0)
++                    {
++                        X2593_EDGE(n, plan->entry_blocks[input->label_entries[k]] + 1);
++                    }
++                }
++            }
++            else
++            {
++                const uint32_t b = n - 1;
++                const uint32_t first = plan->block_firsts[b];
++                const uint32_t end = plan->block_firsts[b + 1];
++                if (first < end)
++                {
++                    const uint32_t last = end - 1;
++                    const uint8_t kind = input->kinds[last];
++                    const uint32_t target = (uint32_t)input->values[last];
++                    if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
++                    {
++                        X2593_EDGE(n, plan->entry_blocks[target] + 1);
++                        X2593_EDGE(n, b + 2);
++                    }
++                    else if (kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_JUMP_VALUE)
++                    {
++                        X2593_EDGE(n, plan->entry_blocks[target] + 1);
++                    }
++                    else if (kind == BUSTER_TYPED_RETURN)
++                    {
++                    }
++                    else if (kind == BUSTER_TYPED_JUMP_INDIRECT)
++                    {
++                        while (table < input->table_count && input->table_jumps[table] < last)
++                        {
++                            table += 1;
++                        }
++                        const bool tabled = table < input->table_count && input->table_jumps[table] == last;
++                        if (tabled)
++                        {
++                            for (uint32_t k = 0; k < input->label_count; k += 1)
++                            {
++                                if (input->label_tables[k] == table + 1)
++                                {
++                                    X2593_EDGE(n, plan->entry_blocks[input->label_entries[k]] + 1);
++                                }
++                            }
++                        }
++                        else
++                        {
++                            X2593_EDGE(n, dispatch_node);
++                        }
++                    }
++                    else
++                    {
++                        X2593_EDGE(n, b + 2);
++                    }
++                }
++            }
++        }
++#undef X2593_EDGE
++        if (pass == 0)
++        {
++            edges = e;
++            succ = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1);
++            pred = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1);
++            ok = succ != 0 && pred != 0;
++        }
++        else
++        {
++            offsets[nodes] = e;
++        }
++    }
++    if (ok)
++    {
++        memset(counts, 0, ((uint64_t)nodes + 1) * 4);
++        for (uint32_t e = 0; e < edges; e += 1)
++        {
++            counts[succ[e]] += 1;
++        }
++        uint32_t sum = 0;
++        for (uint32_t n = 0; n < nodes; n += 1)
++        {
++            poffsets[n] = sum;
++            sum += counts[n];
++            counts[n] = poffsets[n];
++        }
++        poffsets[nodes] = sum;
++        for (uint32_t n = 0; n < nodes; n += 1)
++        {
++            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
++            {
++                pred[counts[succ[e]]++] = n;
++            }
++        }
++    }
++    const uint64_t mark = output->length;
++    Dominators d = { 0 };
++    if (ok)
++    {
++        const DominatorCfg graph = {
++            .block_count = nodes,
++            .edge_count = edges,
++            .entry = 0,
++            .successor_offsets = offsets,
++            .successors = succ,
++            .predecessor_offsets = poffsets,
++            .predecessors = pred,
++        };
++        DominatorOptions options = dominators_options();
++        options.outputs = mode >= 3 ? BUSTER_DOMINATOR_LOOPS : 0;
++        ok = dominators_analyze(output, scratch, &graph, options, &d) == DOMINATOR_OK;
++    }
++    // Per take: its slot, or UINT32_MAX for un-hoisted. Slots: (symbol, group).
++    uint32_t* slot_symbol = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes * 2 + 1) : 0;
++    uint32_t* slot_block = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes * 2 + 1) : 0;
++    uint32_t* slot_key = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes * 2 + 1) : 0;
++    uint32_t* slot_low = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes * 2 + 1) : 0;
++    uint32_t* take_slot = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)plan->hoisted_takes + 1) : 0;
++    ok = ok && slot_symbol != 0 && slot_block != 0 && slot_key != 0 && slot_low != 0 && take_slot != 0;
++    uint32_t slots = 0;
++    for (uint32_t t = 0; ok && t < plan->hoisted_takes; t += 1)
++    {
++        const uint32_t block = plan->entry_blocks[plan->hoisted_entries[t]] + 1;
++        const uint32_t symbol = plan->hoisted_numbers[t];
++        const bool reachable = d.rpo_index[block] != BUSTER_DOMINATOR_NONE;
++        uint32_t key = 0;
++        bool hoist = reachable;
++        if (hoist && mode == 4)
++        {
++            uint32_t loop = d.block_loop != 0 ? d.block_loop[block] : BUSTER_DOMINATOR_NONE;
++            hoist = loop != BUSTER_DOMINATOR_NONE;
++            while (hoist && d.loop_parent[loop] != BUSTER_DOMINATOR_NONE)
++            {
++                loop = d.loop_parent[loop];
++            }
++            key = hoist ? loop : 0;
++        }
++        uint32_t s = 0;
++        while (hoist && s < slots && !(slot_symbol[s] == symbol && slot_key[s] == key))
++        {
++            s += 1;
++        }
++        if (hoist && s == slots)
++        {
++            slot_symbol[s] = symbol;
++            slot_key[s] = key;
++            slot_block[s] = block;
++            slot_low[s] = block;
++            slots += 1;
++        }
++        if (hoist)
++        {
++            slot_block[s] = ir_x2593_ncd(&d, slot_block[s], block);
++            slot_low[s] = block < slot_low[s] ? block : slot_low[s];
++        }
++        take_slot[t] = hoist ? s : UINT32_MAX;
++    }
++    // Modes 5-7: per symbol (one slot each), lift only where a take is in the loop; outside loops, the NCD where the
++    // address is anticipated (5, 6) or always (7); otherwise every take its own.
++    uint8_t* unhoist = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)plan->hoisted_takes * 2 + 1) : 0;
++    uint8_t* split = ok ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)plan->hoisted_takes * 2 + 1) : 0;
++    uint32_t* reads = ok && mode >= 5 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
++    uint32_t* seen = ok && mode >= 5 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
++    uint32_t* stack = ok && mode >= 5 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)nodes + 1) : 0;
++    ok = ok && unhoist != 0 && split != 0 && (mode < 5 || (reads != 0 && seen != 0 && stack != 0));
++    if (ok)
++    {
++        memset(unhoist, 0, (uint64_t)plan->hoisted_takes * 2 + 1);
++        memset(split, 0, (uint64_t)plan->hoisted_takes * 2 + 1);
++    }
++    if (ok && mode >= 5)
++    {
++        memset(reads, 0, ((uint64_t)nodes + 1) * 4);
++        memset(seen, 0, ((uint64_t)nodes + 1) * 4);
++        for (uint32_t s = 0; s < slots; s += 1)
++        {
++            uint32_t takes = 0;
++            bool looped = false;
++            uint32_t loop = d.block_loop[slot_block[s]];
++            bool irreducible = false;
++            while (loop != BUSTER_DOMINATOR_NONE)
++            {
++                irreducible |= d.loop_irreducible[loop] != 0;
++                if (d.loop_parent[loop] == BUSTER_DOMINATOR_NONE)
++                {
++                    break;
++                }
++                loop = d.loop_parent[loop];
++            }
++            bool inside = false;
++            for (uint32_t t = 0; t < plan->hoisted_takes; t += 1)
++            {
++                if (take_slot[t] == s)
++                {
++                    const uint32_t block = plan->entry_blocks[plan->hoisted_entries[t]] + 1;
++                    takes += 1;
++                    looped |= d.block_loop[block] != BUSTER_DOMINATOR_NONE;
++                    inside |= loop != BUSTER_DOMINATOR_NONE && dominators_loop_contains(&d, loop, block);
++                    reads[block] = s + 1;
++                }
++            }
++            uint32_t place = slot_block[s];
++            bool keep = true;
++            if (loop != BUSTER_DOMINATOR_NONE)
++            {
++                keep = inside && !irreducible;
++                place = keep ? (d.loop_header[loop] == 0 ? 0 : d.idom[d.loop_header[loop]]) : place;
++            }
++            else if (takes < 2)
++            {
++                keep = false;
++            }
++            else if (!looped && mode != 7 && reads[place] != s + 1)
++            {
++                // Anticipated: no path from place reaches an exit without passing a block that takes it.
++                uint32_t depth = 0;
++                uint32_t budget = 8 * nodes;
++                seen[place] = s + 1;
++                stack[depth++] = place;
++                bool exits = false;
++                while (!exits && depth != 0 && budget != 0)
++                {
++                    const uint32_t b = stack[--depth];
++                    exits = offsets[b] == offsets[b + 1];
++                    for (uint32_t e = offsets[b]; !exits && budget != 0 && e < offsets[b + 1]; e += 1)
++                    {
++                        const uint32_t next = succ[e];
++                        budget -= 1;
++                        if (seen[next] != s + 1 && reads[next] != s + 1)
++                        {
++                            seen[next] = s + 1;
++                            stack[depth++] = next;
++                        }
++                    }
++                }
++                keep = !exits && budget != 0;
++            }
++            if (mode == 6 && takes < 2 && !looped)
++            {
++                keep = false;
++            }
++            unhoist[s] = !keep;
++            slot_block[s] = place;
++            // Mode 8: outside loops, takes in loops, not anticipated: one definition per outermost loop instead.
++            if (mode == 8 && loop == BUSTER_DOMINATOR_NONE && looped && takes >= 2 && reads[place] != s + 1)
++            {
++                uint32_t depth = 0;
++                uint32_t budget = 8 * nodes;
++                seen[place] = s + 1;
++                stack[depth++] = place;
++                bool exits = false;
++                while (!exits && depth != 0 && budget != 0)
++                {
++                    const uint32_t b = stack[--depth];
++                    exits = offsets[b] == offsets[b + 1];
++                    for (uint32_t e = offsets[b]; !exits && budget != 0 && e < offsets[b + 1]; e += 1)
++                    {
++                        const uint32_t next = succ[e];
++                        budget -= 1;
++                        if (seen[next] != s + 1 && reads[next] != s + 1)
++                        {
++                            seen[next] = s + 1;
++                            stack[depth++] = next;
++                        }
++                    }
++                }
++                split[s] = exits || budget == 0;
++            }
++        }
++        // Split symbols: new slots per outermost loop; a take outside loops uses a slot whose block dominates it, or none.
++        const uint32_t before = slots;
++        for (uint32_t s = 0; mode == 8 && s < before; s += 1)
++        {
++            if (split[s] == 0)
++            {
++                continue;
++            }
++            unhoist[s] = 1;
++            const uint32_t first = slots;
++            for (uint32_t t = 0; t < plan->hoisted_takes; t += 1)
++            {
++                if (take_slot[t] != s)
++                {
++                    continue;
++                }
++                const uint32_t block = plan->entry_blocks[plan->hoisted_entries[t]] + 1;
++                uint32_t loop = d.block_loop[block];
++                bool irreducible = false;
++                while (loop != BUSTER_DOMINATOR_NONE)
++                {
++                    irreducible |= d.loop_irreducible[loop] != 0;
++                    if (d.loop_parent[loop] == BUSTER_DOMINATOR_NONE)
++                    {
++                        break;
++                    }
++                    loop = d.loop_parent[loop];
++                }
++                if (loop != BUSTER_DOMINATOR_NONE && !irreducible)
++                {
++                    const uint32_t header = d.loop_header[loop];
++                    const uint32_t at = header == 0 ? 0 : d.idom[header];
++                    uint32_t n = first;
++                    while (n < slots && slot_block[n] != at)
++                    {
++                        n += 1;
++                    }
++                    if (n == slots)
++                    {
++                        slot_symbol[n] = slot_symbol[s];
++                        slot_block[n] = at;
++                        slot_low[n] = block;
++                        slot_key[n] = 0;
++                        unhoist[n] = 0;
++                        split[n] = 0;
++                        slots += 1;
++                    }
++                    slot_low[n] = block < slot_low[n] ? block : slot_low[n];
++                    take_slot[t] = n;
++                }
++            }
++            // Non-loop takes: a dominating slot of the symbol's, else their own.
++            for (uint32_t t = 0; t < plan->hoisted_takes; t += 1)
++            {
++                if (take_slot[t] != s)
++                {
++                    continue;
++                }
++                const uint32_t block = plan->entry_blocks[plan->hoisted_entries[t]] + 1;
++                uint32_t n = first;
++                while (n < slots && !dominators_dominates(&d, slot_block[n], block))
++                {
++                    n += 1;
++                }
++                if (n < slots)
++                {
++                    slot_low[n] = block < slot_low[n] ? block : slot_low[n];
++                }
++                take_slot[t] = n < slots ? n : UINT32_MAX;
++            }
++        }
++    }
++    for (uint32_t s = 0; ok && s < slots; s += 1)
++    {
++        uint32_t place = slot_block[s];
++        if (mode == 0)
++        {
++            place = 0;
++        }
++        else if (mode == 4)
++        {
++            const uint32_t header = d.loop_header[slot_key[s]];
++            place = d.loop_irreducible[slot_key[s]] != 0 || header == 0 ? 0 : d.idom[header];
++        }
++        else if (mode == 3)
++        {
++            uint32_t loop = d.block_loop[place];
++            bool irreducible = false;
++            while (loop != BUSTER_DOMINATOR_NONE && d.loop_parent[loop] != BUSTER_DOMINATOR_NONE)
++            {
++                irreducible |= d.loop_irreducible[loop] != 0;
++                loop = d.loop_parent[loop];
++            }
++            if (loop != BUSTER_DOMINATOR_NONE)
++            {
++                irreducible |= d.loop_irreducible[loop] != 0;
++                place = irreducible || d.loop_header[loop] == 0 ? 0 : d.idom[d.loop_header[loop]];
++            }
++        }
++        while (place != 0 && place > slot_low[s])
++        {
++            place = d.idom[place];
++        }
++        slot_block[s] = place;
++    }
++    arena_pop_to(output, mark);
++    if (ok)
++    {
++        // Rewrite the plan: slots become the definitions, un-hoisted takes drop out.
++        uint32_t kept = 0;
++        for (uint32_t t = 0; t < plan->hoisted_takes; t += 1)
++        {
++            if (take_slot[t] != UINT32_MAX && unhoist[take_slot[t]] != 0)
++            {
++                take_slot[t] = UINT32_MAX;
++            }
++            if (take_slot[t] != UINT32_MAX)
++            {
++                plan->hoisted_entries[kept] = plan->hoisted_entries[t];
++                plan->hoisted_numbers[kept] = take_slot[t];
++                kept += 1;
++            }
++        }
++        plan->hoisted_takes = kept;
++        // Compact the slots that stay.
++        uint32_t* remap = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)slots + 1);
++        ok = remap != 0;
++        uint32_t live = 0;
++        for (uint32_t s = 0; ok && s < slots; s += 1)
++        {
++            remap[s] = unhoist[s] == 0 ? live : UINT32_MAX;
++            if (unhoist[s] == 0)
++            {
++                slot_symbol[live] = slot_symbol[s];
++                slot_block[live] = slot_block[s];
++                live += 1;
++            }
++        }
++        for (uint32_t t = 0; ok && t < kept; t += 1)
++        {
++            plan->hoisted_numbers[t] = remap[plan->hoisted_numbers[t]];
++        }
++        slots = live;
++        plan->hoisted_symbols = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)slots + 1);
++        plan->hoisted_blocks = slot_block;
++        plan->hoisted_ids = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)slots + 1);
++        plan->hoisted_order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)slots + 1);
++        ok = plan->hoisted_symbols != 0 && plan->hoisted_ids != 0 && plan->hoisted_order != 0;
++        for (uint32_t s = 0; ok && s < slots; s += 1)
++        {
++            plan->hoisted_symbols[s] = keys_of[slot_symbol[s]];
++            uint32_t at = s;
++            while (at > 0 && slot_block[plan->hoisted_order[at - 1]] > slot_block[s])
++            {
++                plan->hoisted_order[at] = plan->hoisted_order[at - 1];
++                at -= 1;
++            }
++            plan->hoisted_order[at] = s;
++        }
++        plan->hoisted_count = ok ? slots : 0;
++    }
++    return ok;
++}
++
+ static bool ir_typed_plan_depth_slots(IrTypedPlan* plan, Arena* scratch)
+ {
+     const uint64_t cells = (uint64_t)plan->maximum_spill_depth * IR_TYPE_COUNT;
+@@ -2366,7 +2880,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
+             plan.error = "no scratch memory for the depth slots";
+             plan.error_code = IR_ERROR_MEMORY;
+         }
+-        if (plan.error == 0 && !ir_typed_plan_hoisted(input, &plan, scratch))
++        if (plan.error == 0 && !(ir_typed_plan_hoisted(input, &plan, scratch) && ir_x2593_place(input, &plan, output, scratch)))
+         {
+             plan.error = "no scratch memory for the hoisted symbol addresses";
+             plan.error_code = IR_ERROR_MEMORY;
+diff --git a/src/buster/compiler/ir_lower_emit.c b/src/buster/compiler/ir_lower_emit.c
+index 19211944..b1670b20 100644
+--- a/src/buster/compiler/ir_lower_emit.c
++++ b/src/buster/compiler/ir_lower_emit.c
+@@ -151,11 +151,13 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+         ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+     }
+     // The symbols' addresses the function takes at least twice (#2574, ir_typed_plan_hoisted), as the tables' are.
+-    const uint32_t hoisted_first = (uint32_t)sink.sizes.instruction_count;
+-    for (uint32_t k = 0; k < plan->hoisted_count; k += 1)
++    uint32_t hoisted_placed = 0;
++    while (hoisted_placed < plan->hoisted_count && plan->hoisted_blocks[plan->hoisted_order[hoisted_placed]] == 0)
+     {
++        const uint32_t k = plan->hoisted_order[hoisted_placed];
+         const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, plan->hoisted_symbols[k], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+-        ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++        plan->hoisted_ids[k] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++        hoisted_placed += 1;
+     }
+     ir_typed_emit(&sink, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+ 
+@@ -187,6 +189,13 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+                                          ir_typed_alignment(classes[d]));
+             }
+         }
++        while (hoisted_placed < plan->hoisted_count && plan->hoisted_blocks[plan->hoisted_order[hoisted_placed]] == b + 1)
++        {
++            const uint32_t k = plan->hoisted_order[hoisted_placed];
++            const uint32_t address = ir_typed_emit(&sink, IR_SYMBOL_ADDR, IR_PTR, plan->hoisted_symbols[k], BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++            plan->hoisted_ids[k] = ir_typed_emit(&sink, IR_PTRTOINT, IR_I64, address, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
++            hoisted_placed += 1;
++        }
+         bool terminated = false;
+         for (uint32_t i = first; i < end; i += 1)
+         {
+@@ -260,7 +269,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
+                 }
+                 else if (hoisted != UINT32_MAX)
+                 {
+-                    stack[depth] = hoisted_first + 2 * hoisted + 1;
++                    stack[depth] = plan->hoisted_ids[hoisted];
+                 }
+                 else
+                 {
