@@ -82,3 +82,17 @@ units of `./build.sh print-sources` at `--tier1`, with the build's flags without
   - two parts of the integer builtins' Clang comparison require the oracle to be the Clang that built the executable:
     the test compares the `__clang_*` macros it was compiled with, and buster's own predefines say 23.1.3 where the
     release is 23.1.4. A self-build given the release's predefines (`--predefines`) would pass that gate.
+
+**In a build tree, with the release's predefines** (`scripts/selftree.sh`, `selfp/`, `results/inventory2630p/`): step 1
+done.
+
+- **The build.** The same self-build, given `--predefines selfp/predefines.h`, which is `clang -dM -E` with the units'
+  flags by CI's Clang 23.1.4 (`selfp/clang.txt`). Buster's own predefines differ from clang's only in the patch
+  release's version macros and `__BUSTER__`, which no product code tests. 43 units compiled, 0 failed. The executable
+  was copied over the `ci2630` tree's Release executable, the original kept beside it (`selfp/placed.txt`).
+- **The 4 commands that failed** pass (`results/inventory2630p/failed.log`).
+- **The whole inventory**, 12 shards, each its own hold: 141 commands, 138 passed. The 3 that failed open their
+  `--report` files under `build/` for exclusive creation. They are the frozen SQLite source against Clang, the
+  frozen corpus subset, and the oracle's accounting. The first inventory in the same tree had left
+  `build/oracle-{sqlite,libc,musl}.tsv` there (13:31). With those moved aside, the 3 pass
+  (`results/inventory2630p/stale.log`). So **141 of 141** pass.
