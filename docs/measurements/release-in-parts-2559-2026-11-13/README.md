@@ -10,8 +10,9 @@ design is Develop alone."
 **Result: the gate fails, so Release stays whole.** As designed, `benchmark-assembler` runs **+9.57%** user cycles over
 four placements (+9.04% to +10.02%; the base against itself +0.01%, -0.70% to +0.42%), with 10.5% more instructions;
 nine more benchmarks execute 0.7% to 15% more instructions. Five changes to the splitter (section 5) take every
-benchmark but one within about half a percent of the whole build's instructions, and `benchmark-assembler` to
-**+4.55%** (+4.08% to +5.45%; floor -0.50% to +0.60%): still outside. The build itself gains what the design said: a
+benchmark but two within 0.8% of the whole build's instructions (`benchmark-x86-zen5` sizes its own work and doesn't
+count): `benchmark-ir-optimize-passes` (+3.7%) measures inside its floor over the placements, and
+`benchmark-assembler` **+4.55%** (+4.08% to +5.45%; floor -0.50% to +0.60%): still outside. The build itself gains what the design said: a
 clean build 86.4 to 77.6 s, an edit of `c_check_input.c` 75.1 to 32.5 s (15.0 s without debug information).
 
 - **Sources:** buster `main` at `e22f84ea` (the base) and the branch's patches on it: `patches/step5-as-designed.patch`
