@@ -1,0 +1,140 @@
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 8a1e553b..0c8437c7 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -116,6 +116,11 @@ struct Tier1CfgInput
+     // ones, on the interval that holds the definition alone; allowed_registers holds on the others, and on every interval
+     // of a value whose entry is 0.
+     const uint32_t* definition_registers;
++    // Optional: the registers of each value's intervals but the one definition_registers binds, a subset of its allowed
++    // ones, which hold on every interval where this is null (#2553). A preferred problem (tier1_cfg_preferred) keeps a
++    // parameter that crosses a call in its incoming register over its definition's interval only: the others take the
++    // callee-saved registers, as every other value that crosses one does.
++    const uint32_t* rest_registers;
+     // Optional: a value that may be recomputed rather than spilled.
+     const uint8_t* rematerializable;
+     // Ordinary uses, sorted per value: not phi operands. use_required is optional, as tier1_allocate takes it.
+@@ -337,7 +342,8 @@ static bool tier1_cfg_input_valid(const Tier1CfgInput* input, Arena* scratch)
+     for (uint32_t v = 0; valid && v < input->value_count; v += 1)
+     {
+         valid = input->classes[v] < BUSTER_TIER1_ALLOCATE_CLASSES && (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && input->definitions[v] < input->position_count &&
+-                (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
++                (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0) &&
++                (input->rest_registers == 0 || (input->rest_registers[v] & ~input->allowed_registers[v]) == 0);
+         valid = valid && (input->rematerializable == 0 || input->rematerializable[v] <= 1) && input->use_offsets[v] <= input->use_offsets[v + 1];
+         const uint32_t block = valid ? tier1_cfg_block_of(input, input->definitions[v]) : 0;
+         for (uint32_t u = input->use_offsets[v]; valid && u < input->use_offsets[v + 1]; u += 1)
+@@ -877,7 +883,8 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input,
+         pieces->ends[i] = end;
+         pieces->values[i] = v;
+         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
+-        pieces->allowed[i] = defined != 0 && start <= input->definitions[v] && input->definitions[v] < end ? defined : input->allowed_registers[v];
++        const uint32_t rest = input->rest_registers != 0 ? input->rest_registers[v] : input->allowed_registers[v];
++        pieces->allowed[i] = defined != 0 && start <= input->definitions[v] && input->definitions[v] < end ? defined : rest;
+         pieces->classes[i] = input->classes[v];
+         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
+         pieces->hints[i] = hint;
+@@ -2284,9 +2291,9 @@ static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate_scalar(const Tie
+     return tier1_cfg_allocate_impl(input, output, scratch, false, result);
+ }
+ 
+-// Whether each value's registers lie in its class's, and its definition's in its allowed ones: tier1_cfg_input_valid's
+-// two conditions on a value's registers, 16 values a step, the class's registers by an in-register lookup of the three
+-// and each condition an andnot. The classes were validated with the prepared input.
++// Whether each value's registers lie in its class's, and its definition's and other intervals' in its allowed ones:
++// tier1_cfg_input_valid's three conditions on a value's registers, 16 values a step, the class's registers by an
++// in-register lookup of the three and each condition an andnot. The classes were validated with the prepared input.
+ static bool tier1_cfg_sets_valid_vector(const Tier1CfgInput* input)
+ {
+     const __m512i table = _mm512_maskz_loadu_epi32((__mmask16)((1u << BUSTER_TIER1_ALLOCATE_CLASSES) - 1), input->registers);
+@@ -2300,28 +2307,30 @@ static bool tier1_cfg_sets_valid_vector(const Tier1CfgInput* input)
+         const __m512i allowed = _mm512_maskz_loadu_epi32(lanes, input->allowed_registers + v);
+         const __m512i outside = _mm512_andnot_si512(sets, allowed);
+         const __m512i defined = input->definition_registers != 0 ? _mm512_maskz_loadu_epi32(lanes, input->definition_registers + v) : _mm512_setzero_si512();
+-        const __m512i unallowed = _mm512_andnot_si512(allowed, defined);
++        const __m512i rest = input->rest_registers != 0 ? _mm512_maskz_loadu_epi32(lanes, input->rest_registers + v) : _mm512_setzero_si512();
++        const __m512i unallowed = _mm512_andnot_si512(allowed, _mm512_or_si512(defined, rest));
+         bad |= _mm512_mask_test_epi32_mask(lanes, outside, outside) | _mm512_mask_test_epi32_mask(lanes, unallowed, unallowed);
+     }
+     return bad == 0;
+ }
+ 
+-// The scalar twin of tier1_cfg_sets_valid_vector: tier1_cfg_input_valid's two compares per value.
++// The scalar twin of tier1_cfg_sets_valid_vector: tier1_cfg_input_valid's three compares per value.
+ static bool tier1_cfg_sets_valid_scalar(const Tier1CfgInput* input)
+ {
+     bool valid = true;
+     for (uint32_t v = 0; valid && v < input->value_count; v += 1)
+     {
+         valid = (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
++        valid = valid && (input->rest_registers == 0 || (input->rest_registers[v] & ~input->allowed_registers[v]) == 0);
+     }
+     return valid;
+ }
+ 
+ // The registers each prepared interval may take in another problem over the same values (#2538): `input` is the
+-// prepared one but for its registers, allowed_registers and definition_registers. Each value's run of intervals takes its
+-// allowed set, and the interval that holds its definition its definition's registers where some are bound, as
+-// tier1_cfg_piece gives them; the column is on `output`. TIER1_CFG_INVALID where the problem breaks what
+-// tier1_cfg_input_valid checks of those three, or where the input has a fixed range, around which a value's intervals
++// prepared one but for its registers, allowed_registers, definition_registers and rest_registers. Each value's run of
++// intervals takes its rest set (allowed where it has none), and the interval that holds its definition its definition's
++// registers where some are bound, as tier1_cfg_piece gives them; the column is on `output`. TIER1_CFG_INVALID where the
++// problem breaks what tier1_cfg_input_valid checks of those four, or where the input has a fixed range, around which a value's intervals
+ // depend on its registers (2. above), so that no column of the prepared ones fits another problem.
+ static __attribute__((unused)) Tier1CfgError tier1_cfg_column(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Arena* output, uint32_t** column)
+ {
+@@ -2337,12 +2346,12 @@ static __attribute__((unused)) Tier1CfgError tier1_cfg_column(const Tier1CfgInpu
+     uint32_t* written = valid ? arena_push_array(output, (uint64_t)intervals->intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+     for (uint32_t v = 0; written != 0 && v < input->value_count; v += 1)
+     {
+-        const uint32_t allowed = input->allowed_registers[v];
++        const uint32_t rest = input->rest_registers != 0 ? input->rest_registers[v] : input->allowed_registers[v];
+         const uint32_t defined = input->definition_registers != 0 ? input->definition_registers[v] : 0;
+         const uint32_t definition = input->definitions[v];
+         for (uint32_t i = intervals->value_interval_offsets[v]; i < intervals->value_interval_offsets[v + 1]; i += 1)
+         {
+-            written[i] = defined != 0 && intervals->intervals.starts[i] <= definition && definition < intervals->intervals.ends[i] ? defined : allowed;
++            written[i] = defined != 0 && intervals->intervals.starts[i] <= definition && definition < intervals->intervals.ends[i] ? defined : rest;
+         }
+     }
+     *column = written;
+@@ -2395,7 +2404,9 @@ struct Tier1CfgPreference
+ };
+ 
+ // The preferred problem over `input`'s values: the preference's registers, and each value's set with its definition's
+-// registers, input's while bound, on `output`. False where the arena is short.
++// registers, input's while bound, on `output`; its other intervals take the preference's set alone (rest_registers), so
++// that a parameter that crosses a call keeps its incoming register over its definition's interval only (#2553). False
++// where the arena is short.
+ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* input, const Tier1CfgPreference* preference, Arena* output, Tier1CfgInput* preferred)
+ {
+     uint32_t* allowed = arena_push_array(output, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+@@ -2405,6 +2416,7 @@ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* inp
+     }
+     *preferred = *input;
+     preferred->allowed_registers = allowed;
++    preferred->rest_registers = preference->sets;
+     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+     {
+         preferred->registers[c] = preference->registers[c];
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 7c97c203..a7560e3d 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -4329,6 +4329,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
+         if (taken)
+         {
+             input->allowed_registers = preferred;
++            input->rest_registers = preference.sets;
+             input->registers[0] = preference.registers[0];
+             *crossing = moved;
+         }
+@@ -4363,6 +4364,7 @@ static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, co
+     for (uint32_t v = 0; same && differs == 0 && reference == TIER1_EMIT_OK && v < input.value_count; v += 1)
+     {
+         same = input.allowed_registers[v] == kept->allowed_registers[v] && (input.definition_registers == 0 || input.definition_registers[v] == kept->definition_registers[v]);
++        same = same && (input.rest_registers == 0) == (kept->rest_registers == 0) && (input.rest_registers == 0 || input.rest_registers[v] == kept->rest_registers[v]);
+     }
+     differs = same ? differs : 14;
+     arena_pop_to(output, output_mark);
