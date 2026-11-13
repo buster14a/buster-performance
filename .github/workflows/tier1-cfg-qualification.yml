@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and README.md.
+name: Tier 1 CFG scaling fixture qualification
+
+on:
+  pull_request:
+    paths:
+      - 'docs/measurements/tier1-cfg-1356/**'
+      - '.github/workflows/tier1-cfg-qualification.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'docs/measurements/tier1-cfg-1356/**'
+      - '.github/workflows/tier1-cfg-qualification.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier1-cfg-1356-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fixtures:
+    # This qualifies the generator and its execution oracles with hosted Clang.
+    # Buster's scaling measurements run separately on the locked 9700X.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash
+    env:
+      ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Build plain and instrumented fixture generators
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/tier1-cfg-1356"
+          mkdir "$out"
+          git rev-parse HEAD > "$out/commit.txt"
+          clang --version | tee "$out/clang.txt"
+          source=docs/measurements/tier1-cfg-1356/generate.c
+          sha256sum "$source" > "$out/generator.sha256"
+          flags=(-std=c17 -Wall -Wextra -Werror -fno-strict-aliasing)
+          clang "${flags[@]}" -O2 "$source" -o "$out/generate"
+          clang "${flags[@]}" -O1 -g -fno-omit-frame-pointer \
+            -fsanitize=address,undefined -fno-sanitize-recover=all \
+            "$source" -o "$out/generate-sanitize"
+
+      - name: Refuse invalid arguments and report output failures
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/tier1-cfg-1356"
+          refuse()
+          {
+            local status=0
+            "$generator" "$@" > "$out/refused.out" 2> "$out/refused.err" || status=$?
+            test "$status" -eq 2
+            test ! -s "$out/refused.out"
+          }
+          for generator in "$out/generate" "$out/generate-sanitize"; do
+            refuse
+            refuse switch
+            refuse unknown 17
+            refuse switch 17 --unknown
+            refuse switch 17 --driver extra
+            for count in '' 0 -1 +1 1x ' 1' 65537 18446744073709551616; do
+              refuse switch "$count"
+              refuse label-table "$count"
+            done
+            for shape in switch label-table; do
+              "$generator" "$shape" 65536 > /dev/null
+              status=0
+              "$generator" "$shape" 17 > /dev/full 2> "$out/output-failure.err" || status=$?
+              test "$status" -eq 1
+            done
+          done
+
+      - name: Compile and exhaustively execute every generated case
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/tier1-cfg-1356"
+          for shape in switch label-table; do
+            for count in 1 17 4000 8000 16000; do
+              stem="$out/$shape-$count"
+              "$out/generate" "$shape" "$count" > "$stem.c"
+              "$out/generate" "$shape" "$count" --driver > "$stem-driver.c"
+              "$out/generate-sanitize" "$shape" "$count" > "$stem-sanitize.c"
+              "$out/generate-sanitize" "$shape" "$count" --driver > "$stem-driver-sanitize.c"
+              cmp "$stem.c" "$stem-sanitize.c"
+              cmp "$stem-driver.c" "$stem-driver-sanitize.c"
+              sha256sum "$stem.c" "$stem-driver.c" >> "$out/inputs.sha256"
+              clang -std=gnu17 -O0 -Wall -Wextra -Werror \
+                "$stem.c" "$stem-driver.c" -o "$stem-run"
+              timeout --signal=TERM --kill-after=5s 20s "$stem-run"
+              printf '%s\t%s\tpassed\n' "$shape" "$count" | tee -a "$out/execution.tsv"
+            done
+          done
+          git diff --exit-code
+
+      - name: Preserve fixture qualification receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: tier1-cfg-1356-fixtures-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/tier1-cfg-1356/*.txt
+            ${{ runner.temp }}/tier1-cfg-1356/*.sha256
+            ${{ runner.temp }}/tier1-cfg-1356/*.tsv
+            ${{ runner.temp }}/tier1-cfg-1356/*.err
+          if-no-files-found: error
+          retention-days: 14
