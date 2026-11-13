@@ -1,0 +1,164 @@
+#!/bin/bash
+# run.sh STEP ...: one hold of the lock's work for #2531's steps 1 and 2 (the caller takes the lock). The trees are base
+# (main) and head (this branch); results under results/. Pinned to CPU 2 with the address-space randomization off
+# (setarch -R: one page state), as the census's record ran.
+#   compare CORPUS LANES MODE [OPTION...]   head --attested=MODE against head --attested=off: status, every object, the
+#                                           diagnostics; MODE's --time-stages summary
+#   base CORPUS LANES [OPTION...]           base against head --attested=off and on: every object, the diagnostics
+#   time CORPUS LANES ROUND                 one round: base, head off, head on, under perf stat
+#   sqlite ROUND                            one round of -c sqlite3.c: base, head
+set -u
+here=$(cd "$(dirname "$0")" && pwd)
+. "$here/../672-rest-claude/common.sh"
+out=$here/results
+mkdir -p "$out"
+mapfile -t musl_sources < "$here/../672-rest-claude/scratch/musl-units.txt"
+glibc_sources=("$here"/../672-rest-claude/scratch/glibc-src/*.c)
+base=$here/base/build/compiler
+head=$here/head/build/compiler
+step=$1
+shift
+units()
+{
+    case $1 in
+    musl) printf '%s\n' "${musl_options[@]}" "${musl_sources[@]}" ;;
+    glibc) printf '%s\n' "${glibc_sources[@]}" ;;
+    sqlite2) printf '%s\n' "${sqlite_options[@]}" "$sqlite/sqlite3.c" "$sqlite/shell.c" ;;
+    esac
+}
+cpus()
+{
+    # One lane on CPU 2; more on every CPU.
+    if [ "$1" = 1 ]; then echo 2; else echo 0-15; fi
+}
+compile()
+{
+    # compile DIR COMPILER CORPUS LANES [OPTION...]: -c of the corpus into DIR (emptied), its stderr in DIR.err. Every
+    # command runs in the one directory $scratch/work, moved to DIR after it, so that -g's DW_AT_comp_dir is the same.
+    local dir=$1 compiler=$2 corpus=$3 lanes=$4
+    shift 4
+    local arguments
+    mapfile -t arguments < <(units "$corpus")
+    rm -rf "$dir" "$scratch/work"; mkdir -p "$scratch/work"
+    (cd "$scratch/work" && setarch -R taskset -c "$(cpus "$lanes")" "$compiler" "$@" --lanes "$lanes" -c "${arguments[@]}" > /dev/null 2> "$dir.err"; echo $? > "$dir.status")
+    mv "$scratch/work" "$dir"
+}
+same()
+{
+    # same A B LABEL: every object of directory A against B's, and A.err against B.err
+    local a=$1 b=$2 label=$3 same=0 different=0 f
+    for f in "$a"/*.o; do
+        if cmp -s "$f" "$b/${f##*/}"; then same=$((same + 1)); else different=$((different + 1)); echo "$label different ${f##*/}" >> "$out/different.txt"; fi
+    done
+    local diagnostics=different
+    # (The time-stages lines aren't diagnostics.)
+    if cmp -s <(grep -v -e '^time-' -e '^attested declarations' -e '^worker-budget' "$a.err") <(grep -v -e '^time-' -e '^attested declarations' -e '^worker-budget' "$b.err"); then diagnostics=same; fi
+    echo "$label: status $(cat "$a.status") and $(cat "$b.status"); objects $same the same bytes, $different different, of $(ls "$a" | wc -l) and $(ls "$b" | wc -l); diagnostics $diagnostics ($(grep -c 'warning:' "$a.err") warnings, $(grep -c 'error:' "$a.err") errors)"
+}
+scratch=$here/scratch
+mkdir -p "$scratch"
+case $step in
+batch)
+    # batch "STEP ARGS" ...: each step in turn, in this one hold
+    for item in "$@"; do
+        echo "== $item"
+        # (Word splitting is the point: each item is a step and its arguments.)
+        # shellcheck disable=SC2086
+        "$here/run.sh" $item
+    done
+    ;;
+env)
+    # env: the host's and the trees' identity
+    {
+        echo "## date"; date -u +%FT%TZ
+        echo "## uname"; uname -a
+        echo "## cpu"; grep -m1 'model name' /proc/cpuinfo
+        echo "## governor and EPP, CPU 2"; cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor /sys/devices/system/cpu/cpu2/cpufreq/energy_performance_preference
+        echo "## THP"; cat /sys/kernel/mm/transparent_hugepage/enabled
+        echo "## tools"; clang --version | head -1; perf --version
+        echo "## executables"; sha256sum "$base" "$head"
+        echo "## musl units"; printf '%s\n' "${musl_sources[@]}" | sha256sum
+        echo "## glibc units"; cat "${glibc_sources[@]}" | sha256sum
+        echo "## head tree outside build/"; (cd "$here/head" && find . -path ./build -prune -o -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+        echo "## base tree outside build/"; (cd "$here/base" && find . -path ./build -prune -o -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)
+    } > "$out/env.txt" 2>&1
+    cat "$out/env.txt"
+    ;;
+compare)
+    corpus=$1 lanes=$2 mode=$3
+    shift 3
+    label="$corpus lanes=$lanes $mode${*:+ $*}"
+    compile "$scratch/a" "$head" "$corpus" "$lanes" --attested=off "$@"
+    compile "$scratch/b" "$head" "$corpus" "$lanes" --attested="$mode" --time-stages "$@"
+    { same "$scratch/b" "$scratch/a" "$label"; grep '^attested declarations' "$scratch/b.err"; grep 'attested declaration' "$scratch/b.err" | grep -v '^attested declarations' | head -5; } | tee -a "$out/compare.txt"
+    rm -rf "$scratch/a" "$scratch/b"
+    ;;
+base)
+    corpus=$1 lanes=$2
+    shift 2
+    label="$corpus lanes=$lanes base${*:+ $*}"
+    compile "$scratch/a" "$base" "$corpus" "$lanes" "$@"
+    compile "$scratch/b" "$head" "$corpus" "$lanes" --attested=off "$@"
+    compile "$scratch/c" "$head" "$corpus" "$lanes" "$@"
+    { same "$scratch/b" "$scratch/a" "$label: head off against base"; same "$scratch/c" "$scratch/a" "$label: head on against base"; } | tee -a "$out/compare.txt"
+    rm -rf "$scratch/a" "$scratch/b" "$scratch/c"
+    ;;
+scalar)
+    # scalar CORPUS LANES [OPTION...]: head --attested=on against head --scalar, the oracle: every object, the diagnostics
+    corpus=$1 lanes=$2
+    shift 2
+    label="$corpus lanes=$lanes on against --scalar${*:+ $*}"
+    compile "$scratch/a" "$head" "$corpus" "$lanes" --scalar "$@"
+    compile "$scratch/b" "$head" "$corpus" "$lanes" "$@"
+    same "$scratch/b" "$scratch/a" "$label" | tee -a "$out/compare.txt"
+    rm -rf "$scratch/a" "$scratch/b"
+    ;;
+small)
+    # small ROUND: one round of a small unit's process (-c of a function over stdio.h) 50 times: base, head
+    round=$1
+    printf '#include <stdio.h>\nint main(void) { return puts("small") < 0; }\n' > "$scratch/small.c"
+    for way in base head; do
+        compiler=$head
+        if [ "$way" = base ]; then compiler=$base; fi
+        rm -rf "$scratch/t"; mkdir -p "$scratch/t"
+        (cd "$scratch/t" && setarch -R taskset -c 2 perf stat -r 50 -x, -o "$out/stat-small-$way-$round.csv" -e 'cycles:u,instructions:u,cycles:k,instructions:k' -e task-clock,page-faults -- "$compiler" -c "$scratch/small.c" > /dev/null 2>&1)
+    done
+    rm -rf "$scratch/t"
+    ;;
+time)
+    corpus=$1 lanes=$2 round=$3
+    mapfile -t arguments < <(units "$corpus")
+    for way in base off on; do
+        compiler=$head
+        mode=(--attested=$way)
+        if [ "$way" = base ]; then compiler=$base; mode=(); fi
+        rm -rf "$scratch/t"; mkdir -p "$scratch/t"
+        start=$EPOCHREALTIME
+        (cd "$scratch/t" && setarch -R taskset -c "$(cpus "$lanes")" perf stat -x, -o "$out/stat-$corpus-$lanes-$way-$round.csv" -e 'cycles:u,instructions:u,cycles:k,instructions:k' -e task-clock,page-faults -- "$compiler" "${mode[@]}" --lanes "$lanes" -c "${arguments[@]}" > /dev/null 2>&1)
+        end=$EPOCHREALTIME
+        # The command's wall time, perf stat's start and end with it (task-clock is the threads' sum).
+        echo "$start $end" | awk '{ printf "%.1f\n", ($2 - $1) * 1000 }' > "$out/wall-$corpus-$lanes-$way-$round.txt"
+    done
+    rm -rf "$scratch/t"
+    ;;
+profile)
+    # profile CORPUS WAY LABEL: perf record of head --attested=WAY on one lane, its symbols' shares into results/
+    corpus=$1 way=$2 label=$3
+    mapfile -t arguments < <(units "$corpus")
+    rm -rf "$scratch/t"; mkdir -p "$scratch/t"
+    (cd "$scratch/t" && setarch -R taskset -c 2 perf record -q -e cycles:u -c 200003 -o "$scratch/perf.data" -- "$head" --attested="$way" --lanes 1 -c "${arguments[@]}" > /dev/null 2>&1)
+    perf report -i "$scratch/perf.data" --no-children --sort symbol --stdio 2> /dev/null | grep -v '^#' | grep -v '^$' | head -80 > "$out/profile-$corpus-$way-$label.txt"
+    head -40 "$out/profile-$corpus-$way-$label.txt"
+    rm -rf "$scratch/t" "$scratch/perf.data"
+    ;;
+sqlite)
+    round=$1
+    for way in base head; do
+        compiler=$head
+        if [ "$way" = base ]; then compiler=$base; fi
+        rm -rf "$scratch/t"; mkdir -p "$scratch/t"
+        (cd "$scratch/t" && setarch -R taskset -c 2 perf stat -x, -o "$out/stat-sqlite-$way-$round.csv" -e 'cycles:u,instructions:u,cycles:k,instructions:k' -e task-clock,page-faults -- "$compiler" "${sqlite_options[@]}" -c "$sqlite/sqlite3.c" > /dev/null 2>&1)
+    done
+    rm -rf "$scratch/t"
+    ;;
+esac
