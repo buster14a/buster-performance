@@ -1,0 +1,454 @@
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index cdaa6217..8aee0106 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -1308,6 +1308,20 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
+ // are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
+ // order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
+ // alone, a few in a hundred of a function's entries. False where the arena is short.
++// EXPERIMENT #2618: BUSTER_X2618's bits select variants.
++extern char* getenv(const char*);
++extern int atoi(const char*);
++static uint32_t ir_x2618(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2618");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
+ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
+ {
+     const uint32_t* tables = input->table_addresses;
+@@ -1335,7 +1349,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+             addresses += 1;
+         }
+     }
+-    if (ok && addresses >= 2)
++    if (ok && addresses >= 2 && (ir_x2618() & 1) == 0)
+     {
+         uint32_t capacity = 4;
+         while (capacity < 2 * addresses)
+@@ -1493,6 +1507,86 @@ static bool ir_typed_anticipated(const uint32_t* offsets, const uint32_t* succes
+     return anticipated || open;
+ }
+ 
++// EXPERIMENT #2618: whether some loop under `scope` (any loop where it is BUSTER_DOMINATOR_NONE) that holds a take of
++// symbol k reads it on every iteration and has an iteration that calls nothing.
++static bool ir_x2618_worth(const Tier0Function* input, const IrTypedPlan* plan, const Dominators* dominators, const uint32_t* offsets, const uint32_t* successors, const uint32_t* firsts, const uint32_t* order, const uint32_t* reads, uint32_t* seen, uint32_t* stack, uint32_t k, uint32_t scope)
++{
++    bool found = false;
++    for (uint32_t l = 0; !found && l < dominators->loop_count; l += 1)
++    {
++        uint32_t up = l;
++        while (scope != BUSTER_DOMINATOR_NONE && up != BUSTER_DOMINATOR_NONE && up != scope)
++        {
++            up = dominators->loop_parent[up];
++        }
++        bool taking = false;
++        for (uint32_t x = firsts[k]; up == scope || (scope == BUSTER_DOMINATOR_NONE) ? x < firsts[k + 1] && !taking : false; x += 1)
++        {
++            taking = dominators_loop_contains(dominators, l, plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1);
++        }
++        const uint32_t inner = dominators->loop_header[l];
++        taking = taking && dominators->loop_irreducible[l] == 0;
++        // Every iteration reads it: no path back to the header avoids a reader.
++        uint32_t stamp = 0x40000000u + (l & 0xfffff) * 64u + (k & 63u) * 0 + 1u;
++        stamp ^= (k << 20);
++        uint32_t depth = 0;
++        bool open = taking && reads[inner] != k + 1;
++        if (open)
++        {
++            seen[inner] = stamp;
++            stack[depth++] = inner;
++        }
++        while (open && depth != 0)
++        {
++            const uint32_t node = stack[--depth];
++            for (uint32_t e = offsets[node]; open && e < offsets[node + 1]; e += 1)
++            {
++                const uint32_t next = successors[e];
++                open = next != inner;
++                if (open && seen[next] != stamp && reads[next] != k + 1 && dominators_loop_contains(dominators, l, next))
++                {
++                    seen[next] = stamp;
++                    stack[depth++] = next;
++                }
++            }
++        }
++        const bool every = taking && (reads[inner] == k + 1 || open);
++        // Some iteration calls nothing.
++        stamp ^= 0x80000000u;
++        depth = 0;
++        bool quiet = false;
++        if (every)
++        {
++            seen[inner] = stamp;
++            stack[depth++] = inner;
++        }
++        while (!quiet && depth != 0)
++        {
++            const uint32_t node = stack[--depth];
++            bool calls = false;
++            if (node != 0 && node <= plan->block_count)
++            {
++                for (uint32_t i = plan->block_firsts[node - 1]; !calls && i < plan->block_firsts[node]; i += 1)
++                {
++                    calls = input->kinds[i] == BUSTER_TYPED_CALL || input->kinds[i] == BUSTER_TYPED_TAIL_CALL;
++                }
++            }
++            for (uint32_t e = offsets[node]; !calls && !quiet && e < offsets[node + 1]; e += 1)
++            {
++                const uint32_t next = successors[e];
++                quiet = next == inner;
++                if (!quiet && seen[next] != stamp && dominators_loop_contains(dominators, l, next))
++                {
++                    seen[next] = stamp;
++                    stack[depth++] = next;
++                }
++            }
++        }
++        found = quiet;
++    }
++    return found;
++}
++
+ // Where each hoisted address is defined (#2593). The preheader computed every one at the function's entry, so a path
+ // that never read it, as yy_find_shift_action's early return, computed it anyway, and one live across a call took a
+ // callee-saved register that the prologue then saved. Over the typed CFG (ir_typed_successors) and its dominators and
+@@ -1667,8 +1761,41 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+                 inside |= dominators_loop_contains(&dominators, loop, plan->entry_blocks[plan->hoisted_entries[order[x]]] + 1);
+             }
+             kept = reachable >= 2 && (loop != BUSTER_DOMINATOR_NONE ? inside && !irreducible :
+-                                                                      looped || ir_typed_anticipated(offsets, successors, reads, seen, stack, ancestor, k + 1, &budget));
+-            place = loop != BUSTER_DOMINATOR_NONE ? dominators.idom[dominators.loop_header[loop]] : ancestor;
++                                                                      ((ir_x2618() & 65536) == 0 && looped && ((ir_x2618() & 262144) == 0 || ir_x2618_worth(input, plan, &dominators, offsets, successors, firsts, order, reads, seen, stack, k, BUSTER_DOMINATOR_NONE))) || ir_typed_anticipated(offsets, successors, reads, seen, stack, ancestor, k + 1, &budget));
++            // EXPERIMENT #2618 (256, 512): lift out of the loop only where every iteration takes the address.
++            bool every = true;
++            if ((ir_x2618() & (256 | 512)) != 0 && kept && loop != BUSTER_DOMINATOR_NONE)
++            {
++                const uint32_t header = dominators.loop_header[loop];
++                bool open = reads[header] != k + 1;
++                uint32_t depth = 0;
++                const uint32_t walk_stamp = 0x80000000u + k + 1;
++                seen[header] = walk_stamp;
++                stack[depth++] = header;
++                while (open && depth != 0)
++                {
++                    const uint32_t node = stack[--depth];
++                    for (uint32_t e = offsets[node]; open && e < offsets[node + 1]; e += 1)
++                    {
++                        const uint32_t next = successors[e];
++                        open = next != header;
++                        if (open && seen[next] != walk_stamp && reads[next] != k + 1 && dominators_loop_contains(&dominators, loop, next))
++                        {
++                            seen[next] = walk_stamp;
++                            stack[depth++] = next;
++                        }
++                    }
++                }
++                every = reads[header] == k + 1 || open;
++                // EXPERIMENT #2618 (16384): and only where some loop of the nest that takes it has an iteration that calls
++                // nothing.
++                if (every && (ir_x2618() & 16384) != 0)
++                {
++                    every = ir_x2618_worth(input, plan, &dominators, offsets, successors, firsts, order, reads, seen, stack, k, loop);
++                }
++                kept = every || (ir_x2618() & 256) != 0;
++            }
++            place = loop != BUSTER_DOMINATOR_NONE && every ? dominators.idom[dominators.loop_header[loop]] : ancestor;
+             while (kept && place > low)
+             {
+                 place = dominators.idom[place];
+diff --git a/src/buster/compiler/tier1_allocate.c b/src/buster/compiler/tier1_allocate.c
+index e3d235df..80e30838 100644
+--- a/src/buster/compiler/tier1_allocate.c
++++ b/src/buster/compiler/tier1_allocate.c
+@@ -477,6 +477,20 @@ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint
+ // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
+ // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
+ // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
++// EXPERIMENT #2618: BUSTER_X2618's bits select variants.
++extern char* getenv(const char*);
++extern int atoi(const char*);
++static uint32_t tier1_allocate_x2618(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2618");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
+ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const Tier1AllocationInput* input, uint32_t class, const uint32_t* events, uint32_t event_count, const uint32_t* use_intervals, const uint32_t* allowed, const uint32_t* weights, uint8_t* regs, uint32_t* begins, uint8_t* kinds, Tier1AllocationPieces* pieces, uint8_t* last)
+ {
+     // As in tier1_allocate_scan: column pointers in registers, and registers freed at end events. An evicted interval
+@@ -496,6 +510,9 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+         }
+     }
+     uint32_t occupied = 0;
++    // EXPERIMENT #2618 (1024): the registers some interval has held, and the callee-saved ones.
++    uint32_t dirty = 0;
++    const uint32_t callee_x = class == 0 ? (1u << 3) | (1u << 5) | (0xfu << 12) : 0;
+     // The registers the intervals starting at claims_at continue in (their hints), each claimed by the first of them
+     // that wants it while it is free: an interval without one there takes another, so that it doesn't push a value
+     // that keeps its register into another one, and that one's value into a third, as layout order would.
+@@ -542,7 +559,14 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 const uint8_t want = columns.classes[other] == class ? tier1_allocation_value_hint(&columns, last, other) : UINT8_MAX;
+                 const bool unused = columns.use_offsets[other] == columns.use_offsets[other + 1] && !tier1_allocation_required_at(&columns, other, claims_at);
+                 const bool resting = unused && (tier1_allocation_spill_kind(&columns, other) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE || want == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
+-                if (!resting && want < 32 && (((~occupied & allowed[other] & ~claimed) >> want) & 1) != 0)
++                const bool other_recipe = tier1_allocation_spill_kind(&columns, other) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
++                uint32_t soft = 0;
++                for (uint32_t left = (tier1_allocate_x2618() & 32) != 0 && (tier1_allocate_x2618() & 524288) == 0 && !other_recipe ? occupied : 0; left != 0; left &= left - 1)
++                {
++                    const uint32_t r = (uint32_t)__builtin_ctz(left);
++                    soft |= tier1_allocation_spill_kind(&columns, active[r]) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, active[r], claims_at) ? 1u << r : 0;
++                }
++                if (!resting && want < 32 && (((~(occupied & ~soft) & allowed[other] & ~claimed) >> want) & 1) != 0)
+                 {
+                     claimed |= 1u << want;
+                     claimers[want] = other;
+@@ -564,15 +588,29 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+         {
+             const uint32_t position = use_event ? columns.use_positions[use] : columns.starts[interval];
+             const bool required = tier1_allocation_required_at(&columns, interval, position);
+-            const uint32_t free = ~occupied & allowed[interval];
+             const uint8_t follow = tier1_allocation_value_hint(&columns, last, interval);
+             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+             // An unused recipe may keep an unclaimed free register, preserving a hoisted definition without taking
+             // a continuing value's register. It never evicts one; an unused value last in memory stays there.
+             const bool idle = !use_event && !required && columns.use_offsets[interval] == columns.use_offsets[interval + 1] && (recomputed || follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT);
+             const bool starting = !use_event && position == claims_at;
++            // EXPERIMENT #2618 (32): a value without a recipe takes its hinted register from a recipe that isn't required there.
++            if ((tier1_allocate_x2618() & 32) != 0 && !idle && !recomputed && follow < 32 && ((allowed[interval] >> follow) & 1) != 0 && ((occupied >> follow) & 1) != 0 && !(starting && ((claimed >> follow) & 1) != 0 && claimers[follow] != interval))
++            {
++                const uint32_t victim = active[follow];
++                if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
++                {
++                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
++                    begins[victim] = position;
++                    kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
++                    regs[victim] = UINT8_MAX;
++                    active[follow] = UINT32_MAX;
++                    occupied &= ~(1u << follow);
++                }
++            }
++            const uint32_t free = ~occupied & allowed[interval];
+             const uint32_t mine = starting && follow < 32 && ((claimed >> follow) & 1) != 0 && claimers[follow] == interval ? 1u << follow : 0;
+-            const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
++            const uint32_t open = free & ~(starting ? claimed & ~mine : 0) & ((tier1_allocate_x2618() & 1024) != 0 && !use_event && !required && recomputed ? ~(callee_x & ~dirty) : ~0u);
+             claimed &= ~mine;
+             uint32_t chosen = UINT32_MAX;
+             if (idle && (!recomputed || open == 0))
+@@ -582,7 +620,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+             {
+                 const uint32_t pool = open != 0 ? open : free;
+                 const uint32_t hint_pool = idle ? pool : free;
+-                chosen = (uint32_t)__builtin_ctz(pool);
++                // EXPERIMENT #2618 (2048): a recipe takes a callee-saved register first.
++                const uint32_t kept_x = callee_x | (class == 0 ? 7u << 8 : 0);
++                const uint32_t preferred_pool = (tier1_allocate_x2618() & 2048) != 0 && recomputed && (pool & kept_x) != 0 ? pool & kept_x : pool;
++                chosen = (uint32_t)__builtin_ctz(preferred_pool);
+                 if (columns.hints != 0 && columns.hints[interval] != UINT8_MAX && ((hint_pool >> columns.hints[interval]) & 1) != 0)
+                 {
+                     chosen = columns.hints[interval];
+@@ -595,9 +636,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+             else
+             {
+                 // The victim: a recomputable value first, then the farthest next use, then the fewest uses.
+-                uint32_t farthest = tier1_allocation_next_use(&columns, interval, position);
+-                bool cheapest = recomputed;
+-                uint32_t lightest = weights[columns.values[interval]];
++                const bool any_victim = (tier1_allocate_x2618() & 4) != 0 && required;
++                uint32_t farthest = any_victim ? 0 : tier1_allocation_next_use(&columns, interval, position);
++                bool cheapest = any_victim ? false : recomputed;
++                uint32_t lightest = any_victim ? UINT32_MAX : weights[columns.values[interval]];
+                 for (uint32_t r = 0; r < 32; r += 1)
+                 {
+                     const uint32_t victim = active[r];
+@@ -645,6 +687,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 regs[interval] = (uint8_t)chosen;
+                 active[chosen] = interval;
+                 occupied |= 1u << chosen;
++                dirty |= 1u << chosen;
+                 if (last != 0)
+                 {
+                     last[columns.values[interval]] = (uint8_t)chosen;
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 786839f9..8addf929 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -2329,6 +2329,11 @@ static bool tier1_cfg_sets_valid_vector(const Tier1CfgInput* input)
+     return bad == 0;
+ }
+ 
++// EXPERIMENT #2618: per-interval sets of the preferred problem (tier1_emit_cfg_preference), keyed by its sets.
++static _Thread_local const uint32_t* tier1_cfg_x2618_sets_for;
++static _Thread_local const uint32_t* tier1_cfg_x2618_interval_sets;
++static _Thread_local const uint32_t* tier1_cfg_x2618_allowed_for;
++
+ // The scalar twin of tier1_cfg_sets_valid_vector: tier1_cfg_input_valid's two compares per value.
+ static bool tier1_cfg_sets_valid_scalar(const Tier1CfgInput* input)
+ {
+@@ -2366,6 +2371,10 @@ static __attribute__((unused)) Tier1CfgError tier1_cfg_column(const Tier1CfgInpu
+         for (uint32_t i = intervals->value_interval_offsets[v]; i < intervals->value_interval_offsets[v + 1]; i += 1)
+         {
+             written[i] = defined != 0 && intervals->intervals.starts[i] <= definition && definition < intervals->intervals.ends[i] ? defined : allowed;
++            if (tier1_cfg_x2618_allowed_for != 0 && input->allowed_registers == tier1_cfg_x2618_allowed_for && tier1_cfg_x2618_interval_sets[i] != 0 && written[i] == allowed)
++            {
++                written[i] = tier1_cfg_x2618_interval_sets[i];
++            }
+         }
+     }
+     *column = written;
+@@ -2430,6 +2439,7 @@ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* inp
+     {
+         allowed[v] = preference->sets[v] | (input->definition_registers != 0 ? input->definition_registers[v] : 0);
+     }
++    tier1_cfg_x2618_allowed_for = preference->sets == tier1_cfg_x2618_sets_for && tier1_cfg_x2618_interval_sets != 0 ? allowed : 0;
+     *preferred = *input;
+     preferred->allowed_registers = allowed;
+     preferred->clobbers = preference->clobbers;
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 9edac6fc..55eb1863 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -4286,6 +4286,20 @@ static bool tier1_emit_cfg_hot_recipes(const Tier1CfgInput* input, const Tier1Cf
+ // (tier1_emit_cfg_calls_before_vector, or its scalar twin without `vector`): a call in [start, end), unless the first is
+ // the value's own, which only a call's result's interval can start at. Without it, the first call at or past the start
+ // by halving the calls, the form tier1_emit_cfg_two_calls keeps, which --verify compares.
++// EXPERIMENT #2618: BUSTER_X2618's bits select variants.
++extern char* getenv(const char*);
++extern int atoi(const char*);
++static uint32_t tier1_emit_cfg_x2618(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2618");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
+ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const Tier1CfgInput* input, const Tier1CfgAllocation* intervals, bool counted, bool vector, Arena* output, Arena* scratch, uint32_t** preferred, uint32_t* crossing,
+                                       Tier1CfgPreference* clobbering)
+ {
+@@ -4369,6 +4383,11 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
+     uint8_t* hot = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
+     uint32_t candidates = 0;
+     uint32_t hot_count = 0;
++    uint32_t* interval_sets = ok && counted && (tier1_emit_cfg_x2618() & (4096 | 8192)) != 0 ? ir_allocate(output, (uint64_t)intervals->intervals.count + 1, 4, &ok) : 0;
++    if (interval_sets != 0)
++    {
++        memset(interval_sets, 0, ((uint64_t)intervals->intervals.count + 1) * 4);
++    }
+     for (uint32_t pass = 0; ok && pass < 2; pass += 1)
+     {
+         if (pass == 1 && candidates != 0)
+@@ -4441,10 +4460,45 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
+             // A recomputable value read on every iteration of a loop (#2574) may hold a caller-saved register past calls too,
+             // which evict it: recomputed after one, where it is next needed, rather than evicted first from the callee-saved
+             // registers the loop's other values crowd.
+-            const uint32_t across = hot[v] == 1 ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
+-            allowed[v] = general ? (crosses ? across : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
++            const uint32_t x = tier1_emit_cfg_x2618();
++            const uint32_t vop = function->op[node];
++            const bool symbolic = vop == IR_SYMBOL_ADDR || (vop == IR_PTRTOINT && function->op[function->a[node]] == IR_SYMBOL_ADDR);
++            const bool as_hot = hot[v] == 1 || (pass == 1 && recipe && ((x & 8) != 0 || ((x & 16) != 0 && symbolic)));
++            const bool resident_only = pass == 1 && recipe && hot[v] != 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0 && (((x & 64) != 0 && symbolic) || (x & 128) != 0);
++            const uint32_t across = resident_only ? caller & BUSTER_TIER1_EMIT_CFG_RESIDENT : as_hot ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
++            // EXPERIMENT #2618 (4096 symbols, 8192 every recipe): a non-hot recipe that crosses a call is held to the
++            // callee-saved registers only on the intervals that cross one.
++            const bool loose = pass == 1 && recipe && !as_hot && !resident_only && (((x & 4096) != 0 && symbolic) || (x & 8192) != 0) && interval_sets != 0 && avoid == 0;
++            // EXPERIMENT #2618 (2048): a non-hot recipe crossing a call may take any register, the calls evicting it from a
++            // caller-saved one.
++            const bool spare = pass == 1 && recipe && !as_hot && !resident_only && !loose && (x & 2048) != 0;
++            for (uint32_t i = intervals->value_interval_offsets[v]; loose && i < intervals->value_interval_offsets[v + 1]; i += 1)
++            {
++                const uint32_t start = intervals->intervals.starts[i];
++                const uint32_t end = intervals->intervals.ends[i];
++                bool spans = false;
++                if (before != 0)
++                {
++                    spans = before[end] != before[start];
++                }
++                else
++                {
++                    uint32_t low = 0;
++                    uint32_t high = call_count;
++                    while (low < high)
++                    {
++                        const uint32_t middle = low + (high - low) / 2;
++                        low = calls[middle] < start ? middle + 1 : low;
++                        high = calls[middle] < start ? high : middle;
++                    }
++                    spans = low < call_count && calls[low] < end;
++                }
++                interval_sets[i] = spans ? across : caller | callee;
++            }
++            allowed[v] = general ? (loose || spare ? caller | callee : crosses ? across : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
++            hot_count += spare;
+             count += pass == 1 && general && (crosses || avoid != 0);
+-            hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
++            hot_count += pass == 1 && (as_hot || resident_only) && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
+         }
+     }
+     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
+@@ -4465,6 +4519,9 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
+     };
+     *preferred = allowed;
+     *crossing = count;
++    tier1_cfg_x2618_allowed_for = 0;
++    tier1_cfg_x2618_sets_for = interval_sets != 0 ? allowed : 0;
++    tier1_cfg_x2618_interval_sets = interval_sets;
+     return ok;
+ }
+ 
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index f619e2e7..23cb1e49 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -4882,6 +4882,20 @@ static uint32_t tier1_select_index(const Tier1SelectForest* forest, uint32_t roo
+ // node past the walk's bound: the typed stream puts a ptrtoint and an inttoptr around each member's address, so
+ // `sqlite3Config.m.xSize` is eight nodes above its symbol, and taking the leaf there lengthens no value's life. No
+ // narrowed address or speculative load is introduced: the walk stops at the base, the first node it can't take.
++// EXPERIMENT #2618: BUSTER_X2618's bits select variants.
++extern char* getenv(const char*);
++extern int atoi(const char*);
++static uint32_t tier1_select_x2618(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2618");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
+ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest, uint32_t root, Tier1SelectAddress address, bool shared)
+ {
+     const IrFunction* function = forest->function;
+@@ -4953,6 +4967,15 @@ static Tier1SelectAddress tier1_select_address(const Tier1SelectForest* forest,
+             next.base = BUSTER_IR_NONE;
+             taken = true;
+         }
++        else if ((tier1_select_x2618() & 2) != 0 && shared && op == IR_PTRTOINT && function->type[node] == IR_I64 && address.index == BUSTER_IR_NONE && function->op[a] == IR_SYMBOL_ADDR &&
++                 tier1_select_direct_symbol(forest, function->a[a]))
++        {
++            // EXPERIMENT #2618: a hoisted symbol's address (ptrtoint of its symbol_addr, in any block) is rip-relative too.
++            next.object = function->a[a];
++            next.rip = true;
++            next.base = BUSTER_IR_NONE;
++            taken = true;
++        }
+         else if (op == IR_SYMBOL_ADDR && address.index == BUSTER_IR_NONE && (shared || forest->uses[node] == 1) && tier1_select_direct_symbol(forest, a))
+         {
+             // A direct symbol's address is rip-relative wherever it is defined (#2573): speedtest1's MEMSYS5 state
