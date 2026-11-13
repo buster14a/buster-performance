@@ -1,0 +1,2 @@
+int g(int x) { int a0 = x,a1 = x,a2 = x,a3 = x,a4 = x,a5 = x,a6 = x,a7 = x,a8 = x,a9 = x,a10 = x,a11 = x,a12 = x,a13 = x,a14 = x,a15 = x,a16 = x,a17 = x,a18 = x,a19 = x,a20 = x,a21 = x,a22 = x,a23 = x,a24 = x,a25 = x,a26 = x,a27 = x,a28 = x,a29 = x,a30 = x,a31 = x,a32 = x,a33 = x,a34 = x,a35 = x,a36 = x,a37 = x,a38 = x,a39 = x,a40 = x,a41 = x,a42 = x,a43 = x,a44 = x,a45 = x,a46 = x,a47 = x,a48 = x,a49 = x,a50 = x,a51 = x,a52 = x,a53 = x,a54 = x,a55 = x,a56 = x,a57 = x,a58 = x,a59 = x,a60 = x,a61 = x,a62 = x,a63 = x
+; return a0 + a63; }
