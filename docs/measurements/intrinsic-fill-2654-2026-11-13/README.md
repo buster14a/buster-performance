@@ -52,9 +52,9 @@ Every object and diagnostic of the three workloads is the same bytes for base, h
 
 | workload | wall time | user cycles | instructions |
 | --- | ---: | ---: | ---: |
-| `-c sqlite3.c` (3 copies × 15) | 124.00 → 123.48 ms, **−0.42%** (−0.52% to −0.21% over copies) | −0.24% (−0.42% to +0.07%) | |
-| musl, one command (2 × 6) | 726.66 → 723.98 ms, **−0.37%** (−0.46% to −0.21%) | −0.38% (−0.48% to −0.35%) | |
-| c-testsuite, one command (3 × 15) | 58.38 → 58.31 ms, −0.11% (−0.41% to +0.30%) | −0.01% | |
+| `-c sqlite3.c` (3 copies × 15) | 124.00 → 123.48 ms, **−0.42%** (−0.52% to −0.21% over copies) | −0.24% (−0.42% to +0.07%) | 1,355.5 → 1,354.1 M, −0.11% |
+| musl, one command (2 × 6) | 726.66 → 723.98 ms, **−0.37%** (−0.46% to −0.21%) | −0.38% (−0.48% to −0.35%) | 7,785.8 → 7,785.0 M, −0.01% |
+| c-testsuite, one command (3 × 15) | 58.38 → 58.31 ms, −0.11% (−0.41% to +0.30%) | −0.01% | 450.0 → 449.6 M, −0.09% |
 | c-testsuite `00050.c`, one process (3 × 21) | 0.829 → 0.822 ms, −0.89% | −0.92% (−3.45% to +2.23%) | |
 | `00100.c` | 0.745 → 0.740 ms, −0.61% | +1.40% (−0.80% to +5.55%) | |
 | `00170.c` | 1.734 → 1.730 ms, −0.21% | +0.30% (−0.41% to +1.05%) | |
