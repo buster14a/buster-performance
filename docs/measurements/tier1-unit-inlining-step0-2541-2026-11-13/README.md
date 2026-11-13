@@ -85,6 +85,16 @@ linked after 0 to 3,696 bytes of padding; every executable's verification hash c
 Mean +0.15, 95% interval -0.33 to +0.63; head faster at 4 of 8; instructions 2,960.2 M and 2,958.8 M; `.text` 1,024,469
 and 1,025,781 bytes. No change measurable.
 
+## Mutants (local, not the 9700X)
+
+`local/mutants.py` applies each mutant to `ir_optimize_inline.c` in a separate worktree, builds it (`--config
+Develop`) and runs `test-ir-inline`, on the session's container (an AVX-512 Xeon, so the vector path runs).
+`local/mutants.log` ran on the working copy that became `081ee91e` (the vector shift's first form did not compile),
+`mutants2.log` at `2bfcfdf7` (the vector shift off by one; the kind table's run was stopped after its first failures
+because a wrong branch looped for the interpreter's default 2 x 10^8 steps a trial; the lifetime ends before the
+result's copy survived), and `mutants3.log` at `fb38e35b`, whose fixtures bound a run at 2^20 steps and check the
+lifetime ends' place: every one of the ten fails the suite.
+
 ## Limitations
 
 - One build of each tree; the self-built compilers' timing is one code layout each (the default workload's -1.1% is
