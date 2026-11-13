@@ -16,6 +16,8 @@ This is the evidence for [buster#1399](https://github.com/buster14a/buster/issue
 | main | `b7a95eedbe16fbd8434654f192f8f7aab76c56e5` | buster's main when the work began; the base of every measurement |
 | head | `beb5de5d9258fec38d584a3bc6e2f8bff9f3c526` | the branch's first commit: validation from the column |
 | head2 | `b27b69d8b80cf258eae8a320e44d776fcf7ff01b` | the second: the fill reads each block's bounds before its stores |
+| main, later | `437ccbbc3b578d724d86139cc3ffa09e61fef390` | main when buster#2689 merged it |
+| merged | `fec9f8d2103614ac7ab62924716f8bf7354a207e` | buster#2689's merge of that main |
 
 ## Workload
 
@@ -37,6 +39,7 @@ On the 9700X, `$SQ` was a copy of that file in another session's directory, whic
 - `ab.sh` builds head and compares its object with main's. It runs six interleaved rounds of `perf stat -r 5` of each binary, order alternating (`9700x/raw/ab.txt`), and records head's profile as `prof2.sh` does (`9700x/raw/srclines-head.txt`). It then runs the tests on head (`9700x/raw/t_*.log`).
 - `instr.sh` samples retired instructions every 20,011 of both binaries (`9700x/raw/instr.txt`, `9700x/raw/*.isyms.txt`).
 - `ab2.sh` builds head2 and compares its object with main's. It runs six rounds of all three binaries, order rotating (`9700x/raw/ab2.txt`), then two tests on head2 (`9700x/raw/t2_*.log`).
+- `ab4.sh` does the same for main `437ccbbc` and the merged head (see "After merging main").
 
 The logs keep only the lines those scripts and the tests print. `exclusive.sh`'s lock messages, which name other sessions' commands and links, were dropped by an allowlist of those line shapes (`scripts/keep_own_lines.py`).
 
@@ -102,6 +105,19 @@ The objects were identical. Six rounds of all three binaries, order rotating (`9
 | head2 − base, each round's cycles | -19.2, -12.0, -27.2, -13.6, -26.3, -8.8 M | | |
 
 head2 retires 4.15 M fewer instructions than main, where head retired 0.86 M more. Both save cycles in this run; head2 does in every round. The gap between head and head2's cycles (3.7 M by the medians) is within the rounds' spread.
+
+### After merging main
+
+buster#2689 merged main `437ccbbc3b578d724d86139cc3ffa09e61fef390` as `fec9f8d2103614ac7ab62924716f8bf7354a207e`. Main's 3e92c492 had changed `tier1_cfg_prepare` beside this change. `scripts/ab4.sh` built both in fresh trees named for their commits, with `--config Release`: `build.sh` now defaults to Develop and stages CI's toolchain, clang 23.1.4. It then ran six rounds of the two, order alternating (`9700x/raw/ab4.txt`), and `test-tier1-cfg` on the merged head (`9700x/raw/t4_tier1-cfg.log`: 111,798 checks, 0 failures). The objects were identical.
+
+| | instructions | cycles | task-clock |
+| --- | ---: | ---: | ---: |
+| main `437ccbbc`, median | 5,319.66 M | 2,353.70 M | 441.36 ms |
+| merged `fec9f8d2`, median | 5,312.49 M | 2,324.33 M | 435.99 ms |
+| difference, median of rounds | −7.17 M (−0.135%) | −30.11 M (−1.28%) | −5.59 ms (−1.27%) |
+| each round's cycles | −25.8, −30.1, −33.5, −30.1, −39.1, −27.2 M | | |
+
+`scripts/summarize.py` computed this table from `ab4.txt`, with `main-437ccbbc` renamed `base` and `merged-fec9f8d2` renamed `head2`. Main's own compile is slower here than `b7a95eed`'s (441 ms against 375 ms): this run differs in the toolchain and in main's 77 later commits. Neither is measured apart.
 
 ## Tests
 

@@ -8,9 +8,10 @@ COMMON = [
     r"^DONE$",
 ]
 SHAPES = {
-    "ab": [r"^base [0-9a-f]{40} head [0-9a-f]{40}( head2 [0-9a-f]{40})?$", r"^[0-9a-f]{64}  [a-z0-9]+/build/compiler$",
+    "ab": [r"^base [0-9a-f]{40} head [0-9a-f]{40}( head2 [0-9a-f]{40})?$", r"^main [0-9a-f]{40} merged [0-9a-f]{40}$", r"^build\.sh: Release: [0-9]+ units compiled", r"^build/compiler$",
+           r"^[0-9a-f]{64}  [a-z0-9-]+/build/compiler$", r"^merged (sqlite3|object)",
            r"^(head2 )?sqlite3\.c --tier1 --lanes=1 object", r"^objects (identical|DIFFER)", r"^head2 (sqlite3|object)",
-           r"^round [0-9]+$", r"^(base|head|head2) [0-9]+,,instructions:u,", r"^[a-z0-9-]+ (ok|FAIL):", r"^build failed$",
+           r"^round [0-9]+$", r"^(base|head|head2|main-437ccbbc|merged-fec9f8d2) [0-9]+,,instructions:u,", r"^[a-z0-9-]+ (ok|FAIL):", r"^build failed$",
            r"^ +[0-9.]+%  \[\.\] "],
     "profile": [r"^ +[0-9.]+%  ", r"^run [0-9]+ [0-9]+us$", r"^== srcline"],
     "instr": [r"^[A-Za-z_0-9.]+ +[+-][0-9.]+M$", r"^== (base|head) tier1 srclines", r"^# symbol: ", r"^ +[0-9.]+%  "],
@@ -32,7 +33,7 @@ def kind(name):
         return "syms"
     if name.startswith("srclines"):
         return "srclines"
-    if name.startswith("t_") or name.startswith("t2_"):
+    if name.startswith("t_") or name.startswith("t2_") or name.startswith("t3_") or name.startswith("t4_"):
         return "test"
     raise SystemExit("unknown file " + name)
 
