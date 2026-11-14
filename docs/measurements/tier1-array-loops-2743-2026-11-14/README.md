@@ -2,7 +2,7 @@
 
 This is the evidence for [buster#2743](https://github.com/buster14a/buster/issues/2743): what `--tier1` makes of loops over arrays, beside clang and gcc, and what its back end makes of the same loops once they are written with vector operations. By Droid in David's directed session (Factory Droid session `5d5f629c-b881-4d75-9267-35567e982c31`, model Fable 5.2 as Droid reports it), from the claim in [comment 6878234250](https://github.com/buster14a/buster/issues/2743#issuecomment-6878234250).
 
-**Status of this record:** the sources, the scripts and the local runs are here, and so are the 9700X's runs of the two intrinsic loops that [buster#2750](https://github.com/buster14a/buster/issues/2750) came from ("By-value vectors' copies below AVX-512" below). The 9700X's runs of the 25 kernels (`scripts/9700x/measure.sh x86-64 znver5`) are added under `9700x/x86-64/` and `9700x/znver5/` when they end; until then every number about the kernels is from the session's desktop and is preliminary.
+**Status of this record:** the sources, the scripts and the local runs are here, and so are the 9700X's runs of the two intrinsic loops that [buster#2750](https://github.com/buster14a/buster/issues/2750) came from ("By-value vectors' copies below AVX-512" below). The 9700X's completed x86-64 matrix for the 25 kernels is under `9700x/x86-64/`; the shorter znver5 run is added under `9700x/znver5/` when it ends. Until then, the explicit-vector and znver4 kernel numbers are from the session's desktop and are preliminary.
 
 ## Revisions and toolchains
 
@@ -48,6 +48,41 @@ The builds:
 | `buster-tier1-licm`, `buster-tier1-all` | with `--tier1-passes=+licm`, `--tier1-passes=+all` |
 | `clang-O2-hand`, `buster-tier1-hand` | `kernels_hand.c` by `clang -O2` and by `--tier1` |
 
+## 9700X kernel results (x86-64)
+
+`9700x/x86-64/results.txt` is the completed four-build, four-placement run:
+400 timing lines and 100 `perf` lines, all with status 0. `tables.md` beside it
+is `scripts/tables.py`'s complete output. The directory also keeps the build
+and run logs, compiler hash, Tier 1 reports and each linked binary's loop
+placements. The lock holds and host are `9700x/holds.txt` and `9700x/env.txt`.
+Every build gives the same digest on every kernel.
+
+Geometric means of the time ratios (larger is slower):
+
+| Ratio | 19 vectorized, as linked | 19 vectorized, best placement | 6 controls, as linked | 6 controls, best placement |
+| --- | ---: | ---: | ---: | ---: |
+| `--tier1` / clang -O2 | 3.32 | 3.39 | 1.08 | 1.08 |
+| `--tier1` / clang -O2, no vectorizer or unroller | 1.08 | 1.10 | 1.03 | 1.03 |
+| clang without vectorizer or unroller / clang without vectorizer | 1.41 | 1.42 | 1.05 | 1.05 |
+| clang without vectorizer / clang -O2 | 2.18 | 2.17 | 1.00 | 1.00 |
+
+So the dominant missing piece is vectorization (2.18), with unrolling a
+separate smaller component (1.41). At this target Tier 1's scalar loops are
+within 1.08 of clang's when clang's vectorizer and unroller are disabled.
+
+Placement does not reproduce the desktop's simple 64-byte-line rule. Most
+Tier 1 loops vary by only a few percent across the four placements. The largest
+worst/best ratios are `matmul_f32` 1.96, `saxpy_f32` 1.89, `clamp_i32` 1.38 and
+`blend_u8` 1.28, but their slow placements are not consistently the ones whose
+innermost loop crosses a 64-byte line. The raw placement tables retain every
+case; no alignment rule is inferred from them.
+
+The original long script was stopped after this x86-64 matrix because the
+shared lock was heavily contended. `scripts/9700x/measure-short.sh` runs the
+smaller znver5 set as linked (placement 0): Tier 1 and clang -O2 on the C and
+explicit-vector units, plus clang's two scalar configurations. Its output is
+added under `9700x/znver5/` when complete. The other builds in
+`scripts/9700x/measure.sh` were not run on the 9700X.
 ## Local results (Zen 4, preliminary)
 
 `local/x86-64/run1.txt` (12 builds), `local/x86-64/pad-*.txt` (two builds at four placements, with `p*-*.loops`), `local/znver4/run1.txt` (four builds); `tables.md` beside each is `tables.py`'s output. The runs weren't pinned and the desktop wasn't idle.
