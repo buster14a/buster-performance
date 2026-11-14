@@ -164,3 +164,23 @@ By section 1's method, that head alone (`counts/pr2766/`) against it merged with
 
 The moves through `r11` left are #2767's divisor in `rax` (3.49 M) and 0.14 M. No Lua function runs more; speedtest1's
 only loss over 0.1 M is `sqlite3WhereEnd` (+0.42 M), as against main.
+
+## 5. At main `6415e300`
+
+main then had #2766, #2767 (avoided registers) and #2618's remainder (#2777: recipes that wait for their read), which
+change the same scan. The pull request's merge of it (`bc298522`) joins #2618's recipe that waits and this change's
+range that continues its value into one condition. By section 1's method, main `6415e300` (`counts/main-6415e300/`)
+against the merge (`counts/head-bc298522/`):
+
+| | main `6415e300` | merge `bc298522` | change |
+| --- | ---: | ---: | ---: |
+| Lua's five scripts | 4,751.4 M | 4,732.8 M | −0.39% |
+| `luaV_execute` | 2,214.9 M | 2,195.7 M | −0.87% |
+| its moves through `r11` | 1.5 M | 0.1 M | |
+| speedtest1 | 2,610.84 M | 2,590.34 M | −0.79% |
+
+`luaV_execute`'s 1.5 M moves through `r11` at main were the `OP_GETTABUP` fetch's two, 0.74 M each; they are gone. One
+Lua function loses: `str_gsub`, 69.9 M → 73.0 M (+3.10 M), where the loop's character path now swaps `r12` and `r13`
+through `r11` ([buster#2784](https://github.com/buster14a/buster/issues/2784)); `rehash` −2.37 M and `luaV_execute`
+−19.24 M. speedtest1's losses over 0.1 M are `sqlite3WhereEnd` +0.42 M and `speedtest1_run` +0.14 M, against
+`balance_nonroot` −8.23 M and `sqlite3VdbeExec` −3.59 M.
