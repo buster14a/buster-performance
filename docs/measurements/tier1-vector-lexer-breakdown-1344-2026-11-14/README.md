@@ -55,6 +55,63 @@ Wall time in this virtual machine, `benchmark-lexer`'s medians on a 46,679-byte 
 timing, and no counters here): `c_tokenize` 0.883 ms by Tier 1, 0.015 ms by clang -O2 (59×); Tier 1's vector lexer is
 2.1× slower than Tier 1's scalar lexer (0.424 ms).
 
+## With buster#2742
+
+The same file and call, by the compiler of [buster14a/buster#2742](https://github.com/buster14a/buster/pull/2742): SROA
+makes a vector load the constant or the splat its block's stores wrote (`sroa`), and a constant whose quadwords are one
+value is `mov r11, imm; vpbroadcastq` (`splat64`). The same pull request stops the crash, so the Tier 1 lexer now agrees
+with the scalar one on `c_lexer.c`, `c_parser.c` and `lane.c`.
+
+| Build | instructions | per byte | immediate stores | vectors built on the stack |
+| --- | ---: | ---: | ---: | ---: |
+| clang -O2 | 27,785 | 3.06 | 50 | |
+| `--tier1`, main `ca2bd994` | 274,120 | 30.20 | 170,752 | 6,815 |
+| `--tier1`, `sroa` | 132,681 | 14.62 | 35,313 | 3,157 |
+| `--tier1`, `sroa` and `splat64` | 122,190 | 13.46 | 23,489 | 1,824 |
+
+`benchmark-lexer`'s `c_tokenize` median in this virtual machine on the 46,679-byte file (wall time, no counters, not a
+9700X timing): 0.883 ms on main, 0.620 ms with `sroa`, 0.392 ms with both; clang -O2 0.015 to 0.020 ms. The second
+step removes 8% of the instructions and 37% of the time: what a vector built on the stack costs is its load, which
+no store forwards to, more than its stores.
+
+What is left of the constants (`results/mid200-tier1-sroa-splat64.runs.txt`): 1,026 written as quadwords and 725 as
+doublewords, 12.8 per 64-byte chunk, which are buster#2744's literal pool's. `v2.c` holds the quadword splats' cases.
+
+## On the 9700X
+
+`9700x/`, 14 November 2026, under the machine's lock, one hold a run (`run.sh`, then `run2-pinned.sh` for the last
+row). The lexer programs are `measure-tier1-rows --base`'s builds (`rows.log`), by Release compilers of buster
+`ca2bd994` (main, the branch's base), `dd71e6a5` (the SROA change) and `6c28f8a7` (with the quadword splats, and the
+head buster#2742 was first queued at), each run pinned to CPU 2, three runs each; `benchmark-lexer`'s medians of 21
+passes. The file is the 46,679-byte one of this record's lines, which needs no scalar lexer; `src` is `dd71e6a5`'s
+source tree.
+
+`c_tokenize`, cycles per byte (the three runs) and instructions per byte:
+
+| Build | file: cycles/B | instructions/B | `src`: cycles/B | instructions/B |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 0 | 52.57, 52.55, 52.57 | 82.12 | 52.57, 52.44, 52.44 | 83.28 |
+| `--tier1`, `ca2bd994` | 26.43, 26.49, 26.47 | 29.71 | 26.76, 26.75, 26.88 | 30.05 |
+| `--tier1`, `dd71e6a5` | 10.96, 10.95, 10.96 | 14.37 | 11.40, 11.40, 11.40 | 14.86 |
+| `--tier1`, `6c28f8a7` | 8.33, 8.33, 8.33 | 13.22 | 8.70, 8.69, 8.69 | 13.69 |
+| clang -O2 | 0.659, 0.650, 0.660 | 2.954 | 0.850, 0.848, 0.856 | 3.006 |
+
+On the source tree Tier 1's `c_tokenize` is 3.08 times faster than main's (26.76 to 8.69 cycles per byte) and 10.2
+times clang's instead of 31.5. The quadword splats take 8% of the instructions and 24% of the cycles. The
+single-stepped counts above (30.20, 14.62, 13.46 and 3.06 on the shorter file) agree with these counters.
+
+`c_tokenize_scalar`, which none of this changes: 16.3 to 16.7 cycles per byte on `src` by every Tier 1 build (58.34
+instructions), 8.2 by clang -O2 (23.92), 26.6 to 27.0 by Tier 0 (150.99).
+
+**The lanes.** main's Tier 1 object of the lexer's unit depends on the lanes that compiled it (`objects.sha256`,
+`objects.memmove.txt`, `lanes.sh`, `lanes-head.sh`, `lanes2.sh`): `ca2bd994`'s compiler on one CPU or with `--lanes 1`
+gives `7817c301`, with 20 `memmove` relocations, and on 4, 8 or 16 CPUs or with `--lanes 4` gives `ac3fe95c`, with 2
+(`tokenize_c`'s two calls go to `c_tokenize_scalar_range+0xfa1`, `where.sh`); pinned to one CPU, `--lanes 4` is one
+lane. `dd71e6a5`'s compiler gives `40b19f8e` at every count. The programs timed above were compiled pinned to one CPU,
+so main's is the correct object; this is why the 9700X's own `measure-tier1-rows` never met the crash this record's
+first section reports. Tier 0's object by `ca2bd994` is the same (`ad51df61`) on 1, 4 and 16 lanes. buster's main
+fixed the symbols itself (`71e9ee75`) while buster#2742 was queued.
+
 ## Method
 
 No performance counters exist in the session's virtual machine, and valgrind has no AVX-512. `stephist.c` counts
@@ -83,17 +140,22 @@ python3 runs.py mid200-tier1.dump
 ## Files
 
 - `host.txt`: the machine, the kernel, clang and the buster revision.
+- `9700x/`: the 9700X's scripts, `run.log` (each run's line), `rows.log` (the harness's output), each run's log
+  (`lexer-BUILD-INPUT-N.log`; `base` is `ca2bd994`, `tier1` `dd71e6a5`, `head2` `6c28f8a7`, `mid` the file), the
+  objects' and programs' hashes and `host.txt` (the kernel, the CPU, the system clang the harness links with, the
+  governor).
 - `stephist.c`, `annotate.py`, `runs.py`: the counter and the two readers.
-- `small.c`, `mid200.c`, `v1.c`: the inputs.
+- `small.c`, `mid200.c`, `v1.c`, `v2.c`: the inputs.
 - `results/*.hist`: `OFFSET COUNT` per executed address; `results/*.summary.txt`: by function and class;
   `results/mid200-*.dump.gz`: every executed instruction with its count and class; `results/mid200-tier1.runs.txt`: the
-  immediate-store runs by shape; `results/binaries.sha256`: the three lexer programs.
+  immediate-store runs by shape; `results/binaries.sha256`: the lexer programs. The `-sroa` and `-sroa-splat64` files
+  are buster#2742's two steps.
 
 ## Limits
 
 - One synthetic input without comments, strings or preprocessor lines, and one call. The classes' shares will move on
   real sources; the constants' count per chunk does not depend on the text.
-- An Intel host (`host.txt`), where `-march=native` is not `znver5`. Instruction counts carry over to the extent the
-  selected rows do; times do not, and the 9700X's are still to be taken.
+- The single-stepped counts are an Intel host's (`host.txt`), where `-march=native` is not `znver5`; the 9700X's
+  section has that machine's counters and times.
 - The classifier reads operands only: a stack store of an immediate that is not part of a vector's construction is
   counted with them (5,922 of the 170,752 are followed by something other than a vector load).
