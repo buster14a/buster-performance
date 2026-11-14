@@ -128,10 +128,34 @@ for +0.4% instructions.
 
 ## 3. Run time on the 9700X
 
-The A/B of base against head4 (#2553's method, #2734's scripts in `9700x/scripts/`: Lua's 33 objects in 33 link orders,
-speedtest1 after 8 pads, 5 rounds of Lua and 7 of speedtest1 after an untimed one, each round one hold of the lock, each
-run `perf stat` on CPU 2) is running; its results follow in a later commit. A first chain against `99ab44a` was stopped in
-its warm-up round when head4 replaced it (`9700x/build-and-chain.log`).
+Base against head4 (`afe31a2`), by #2553's method with #2734's scripts (`9700x/scripts/`):
+
+- Lua's 33 objects are linked in 33 orders (`9700x/orders.txt`), and speedtest1 after 8 pads.
+- 5 rounds of Lua and 7 of speedtest1 follow an untimed one, each round one hold of the shared lock, each run `perf stat`
+  on CPU 2.
+- All 82 executables were checked first (`9700x/checks.txt`): every Lua script printed clang -O0's output and every
+  speedtest1 its hash. 1,762 runs, none failed (`9700x/runs/`). `9700x/analysis.txt` has the analysis by #2592's
+  `analyze.c`.
+
+| Program | Metric | head / base | 95% interval |
+| --- | --- | ---: | ---: |
+| Lua's five scripts, 33 link orders | user cycles | −0.36% | −0.79% to +0.08% |
+| | task-clock | −0.35% | −0.76% to +0.06% |
+| | user instructions | −0.44% | −0.46% to −0.43% |
+| Lua's `arithmetic` | user cycles | −1.51% | −1.94% to −1.08% |
+| speedtest1, 8 layouts | user cycles | +0.09% | −0.66% to +0.83% |
+| | task-clock | +0.04% | −0.60% to +0.68% |
+| | user instructions | −0.53% | |
+
+- **Lua.** `arithmetic`, whose loops run `//` and `%`, is faster at 30 of the 33 orders. The other scripts are within
+  their intervals of zero, and so is the total.
+- **speedtest1.** No layout's difference exceeds its spread: the instructions saved don't show in its time.
+- **Static moves** (`--tier1-report`, `9700x/reports-*.txt`): speedtest1's edge moves 35,590 → 36,035, spill stores
+  12,634 → 12,660 and loads 13,914 → 13,946, where values move out of the registers their webs avoid. Lua's objects'
+  edge moves 2,530 → 2,528.
+
+A first chain against `99ab44a` was stopped in its warm-up round when head4 replaced it
+(`9700x/chain-99ab44a-stopped.log`); its compile times are `9700x/compile-99ab44a/`.
 
 ## 4. Tests
 
