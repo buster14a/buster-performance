@@ -22,6 +22,8 @@ The evidence has three parts:
 | base01 | `01a2d0b33e6a1726615703827c7190310ad45587` | #2688's head, the base of the experiment's compilers |
 | main | `389d25b91a8bbc6faba040125be2ccad51b6815d` | buster's main when the change was rebased on it, the base of the final measurements |
 | head | `282d115794e6940350f0d6d3eefa593a13ec0a89` | the pull request's head as measured: three commits and the documentation's |
+| main2 | `98186d5e39d897ce2e4d11c0025f9f77beaee72e` | buster's main merged into the branch after the merge queue dropped it, with #2592 |
+| head2 | `c69008906fbf87caddc8857769f9b6fe119c6af6` | the branch after that merge, the follow-up's commits and resting on openings alone; its code is the pull request's final head `ceef744e`'s, which changes only the guide |
 
 ## Inputs
 
@@ -161,6 +163,49 @@ The ablation compiler (`c-abl`, a switch `BUSTER_X2714` on the merge, not kept) 
 Resting on closings, not only on openings, cost `luaV_execute` 8.0 M (`lua-norest-to-rest.txt`). By opcode: 52.9 M fewer frame `lea`s, but 14.3 M more `lea`s of `disptab`, 23.7 M more register moves and 21.8 M more other moves. A handler's call takes `disptab`'s register, the ranges hinted to that closing rested, and with them the dispatch join's convention, so every dispatch recomputed it. Resting on openings alone (`c-abl2`, bit 128; the head's code, whose `sqlite3.c` object is the same) keeps `hexFunc`'s header without a register and gains both programs. The closings' case is [buster#2735](https://github.com/buster14a/buster/issues/2735).
 
 The head against main: speedtest1 −12.76 M (−0.44%), Lua −21.87 M (−0.43%; every script −0.14% to −0.88%, `luaV_execute` −7.04 M, no function more; `st-main2-to-final.txt`, `lua-main2-to-final.txt`).
+
+## 6. The 9700X after #2592
+
+`scripts/run2618e.sh` is `run2618d.sh` against main2 (base) and head2, in `~/buster-fast-bench/2618e-claude`; seventeen holds from 12:44 to 13:38 UTC (`9700x-after-2592/holds.txt`). The run's first attempt fetched a mistyped base commit and stopped (`run.log`'s first line). Every check gave clang -O0's output or the verification hash (`checks.txt`), and the compile's outputs were the same in round 0 and round 11. The same scripts made `analysis.md`, `layouts/analysis.md` and `compile-analysis.md`.
+
+| Program | Metric | head2 / main2 | 95% interval over the layouts |
+| --- | --- | ---: | ---: |
+| Lua's five scripts, six link orders | time | 1.0022 | 0.9912 to 1.0133 |
+| | user cycles | 1.0019 | 0.9914 to 1.0125 |
+| | user instructions | 0.9956 | 0.9953 to 0.9960 |
+| speedtest1, six layouts | time | 1.0003 | 0.9934 to 1.0073 |
+| | user cycles | 0.9987 | 0.9928 to 1.0046 |
+| | user instructions | 0.9955 | 0.9955 to 0.9955 |
+
+| Compile | Metric | head2 / main2 | paired rounds, median (range) |
+| --- | --- | ---: | ---: |
+| `sqlite3.c`, `--tier1 -c` | time | 1.0072 | 1.0064 (0.9992 to 1.0096) |
+| | user cycles | 1.0069 | 1.0072 (1.0004 to 1.0108) |
+| | user instructions | 1.0042 | 1.0042 |
+| Lua's 33 sources, `--tier1` | time | 1.0109 | 1.0144 (0.9903 to 1.0195) |
+| | user cycles | 1.0043 | 1.0057 (0.9993 to 1.0091) |
+| | user instructions | 1.0056 | 1.0056 (1.0002 to 1.0056) |
+
+**Reading.**
+- After #2592, the change's run-time gain is its instructions alone: 0.44% fewer for Lua and 0.45% fewer for speedtest1, at every order and layout, and no change in time or cycles that the orders or layouts resolve.
+- Lua's `arithmetic` script depends on the link order: its cycles move by 0.973 to 1.079 over the six orders, for 0.14% fewer instructions (the other scripts 0.97 to 1.05). Before #2592 the same script was 0.945 to 0.981 at every order.
+- The compile costs 0.69% more `sqlite3.c` cycles, for 0.42% more instructions: less than the first head's 1.24% against main.
+
+**Lua's `arithmetic` script, by alignment** (`9700x-after-2592/arithmetic/`; `scripts/luaprof.sh`, `luamisp.sh`, `luapad.sh`, each one hold). At orders 1 and 4 (head 1.079 and 1.071), five runs of each build with the predictor's and the front end's counters give the head 13 M more cycles (183 M against 170 M) and 330 K more retired mispredictions (about 500 K against 167 K) in every run, for 1.44 M fewer instructions. At order 5 (0.973), the head mispredicts as often as main (167 K) and runs 5 M fewer cycles. Sampled every 211 mispredictions, the head's extra ones at order 1 fall in `luaV_mod` (31% of them, 7% at main), whose code is the same in both builds, and in `luaV_execute`'s dispatch near +6600.
+
+Order 1 linked again after a pad of 64 to 960 bytes, every byte of code moved by a multiple of 64 (`arithmetic/pad/`, three runs each, the same output):
+
+| Pad, bytes | `luaV_mod` mod 128, head | head: cycles, M | mispredictions, K | main: cycles, M | mispredictions, K |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0x60 | 184.4 | 498 | 170.0 | 170 |
+| 64 | 0x20 | 171.3 | 204 | 170.1 | 170 |
+| 128 | 0x60 | 184.7 | 500 | 169.6 | 167 |
+| 256 | 0x60 | 183.5 | 499 | 170.0 | 167 |
+| 512 | 0x60 | 185.1 | 499 | 169.9 | 167 |
+| 576 | 0x20 | 171.3 | 204 | 170.5 | 167 |
+| 960 | 0x20 | 171.7 | 213 | 170.7 | 177 |
+
+The cycles are each cell's median. A shift by whole 64-byte lines leaves every line's instructions as they were, so the extra mispredictions are the predictor's tables aliasing at the head's branch addresses: the head's script is 7.9% to 9.0% slower at one phase of address bit 6 and 0.5% to 0.7% slower at the other, where main's is the same at both. That is the placement's noise that the six orders average over, not instructions the change adds.
 
 ## Tests
 
