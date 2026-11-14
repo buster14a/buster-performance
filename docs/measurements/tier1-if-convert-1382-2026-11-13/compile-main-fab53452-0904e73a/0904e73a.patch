@@ -1,0 +1,357 @@
+From 0904e73af00d51f836fb816bde435b6de7dd4604 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 13 Nov 2026 21:02:18 +0000
+Subject: [PATCH] Tier 1 if-conversion: no per-row setup in each round (#1382)
+
+sqlite3.c's --tier1 -c took 1.22% more user cycles at fab53452 than on
+main b7a95eed (9700X, 11 runs each), with ir_if_convert_round at 1.09%
+of the profile. Each round of a function with a branch wrote every row's
+alias and sunk link and zeroed a 12-byte fresh entry per row. The maps
+now store their value plus one, so zeroed storage means "itself" and
+"none"; fresh and moved are sized by the blocks (a row per phi, a
+region's arm rows per head). sqlite3.c's code is byte-identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EgbxnhF8qrFw65jSZZBXme
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/ir_if_convert.c | 110 +++++++++++++++-------------
+ 1 file changed, 60 insertions(+), 50 deletions(-)
+
+diff --git a/src/buster/compiler/ir_if_convert.c b/src/buster/compiler/ir_if_convert.c
+index f351f1c0b..429cac89f 100644
+--- a/src/buster/compiler/ir_if_convert.c
++++ b/src/buster/compiler/ir_if_convert.c
+@@ -153,11 +153,12 @@ struct IrIfConvertWork
+     // A block's reachable predecessors' count, and the only one where there is one.
+     uint32_t* reaching;
+     uint32_t* single;
+-    // Every row's representative: itself, or the earlier row whose value an arm row takes.
++    // Every row's representative plus one, 0 for itself (ir_if_convert_alias).
+     uint32_t* alias;
+     uint32_t* moved;
+     IrIfConvertFresh* fresh;
+-    // A sunk accumulation's phi: its operation row; the operation row: its zero's index in `fresh`.
++    // A sunk accumulation's phi: its operation row; the operation row: its zero's index in `fresh`; each plus one, 0
++    // for none (ir_if_convert_sunk).
+     uint32_t* sunk;
+     // 1 for an accepted region's arm block, 2 for the candidate's while it is analyzed.
+     uint8_t* arms;
+@@ -257,6 +258,21 @@ static const uint8_t ir_if_convert_numbered[BUSTER_IR_OP_TABLE] = {
+     [IR_LOAD] = 1,
+ };
+ 
++// A row's representative: itself, or the earlier row whose value it takes (stored plus one, so that zeroed storage
++// means itself and a round needs no pass over the rows to set it up).
++static uint32_t ir_if_convert_alias(const IrIfConvertWork* work, uint32_t row)
++{
++    const uint32_t stored = work->alias[row];
++    return stored != 0 ? stored - 1 : row;
++}
++
++// A sunk accumulation's link (IrIfConvertWork.sunk), or BUSTER_IR_NONE; stored plus one as the alias is.
++static uint32_t ir_if_convert_sunk(const IrIfConvertWork* work, uint32_t row)
++{
++    const uint32_t stored = work->sunk[row];
++    return stored != 0 ? stored - 1 : BUSTER_IR_NONE;
++}
++
+ static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t count, bool scalar)
+ {
+     uint64_t candidates = 0;
+@@ -384,13 +400,12 @@ static uint32_t ir_if_convert_filter(const IrFunction* f, uint32_t first, uint32
+ static bool ir_if_convert_same(const IrIfConvertWork* work, uint32_t r, uint32_t q)
+ {
+     const IrFunction* const f = work->function;
+-    const uint32_t* const alias = work->alias;
+     const uint32_t op = f->op[r];
+     const uint32_t mask = ir_value_mask(f, r);
+     bool same = f->op[q] == op && f->type[q] == f->type[r] && f->flags[q] == f->flags[r] && ir_value_mask(f, q) == mask;
+     same = same && (op == IR_LOAD || f->alignment_log2[q] == f->alignment_log2[r]);
+-    same = same && ((mask & 1) != 0 ? alias[f->a[r]] == alias[f->a[q]] : f->a[r] == f->a[q]);
+-    same = same && ((mask & 2) != 0 ? alias[f->b[r]] == alias[f->b[q]] : f->b[r] == f->b[q]);
++    same = same && ((mask & 1) != 0 ? ir_if_convert_alias(work, f->a[r]) == ir_if_convert_alias(work, f->a[q]) : f->a[r] == f->a[q]);
++    same = same && ((mask & 2) != 0 ? ir_if_convert_alias(work, f->b[r]) == ir_if_convert_alias(work, f->b[q]) : f->b[r] == f->b[q]);
+     if (same && op == IR_ADDRESS)
+     {
+         const IrAddress left = f->addresses[f->c[r]];
+@@ -399,7 +414,7 @@ static bool ir_if_convert_same(const IrIfConvertWork* work, uint32_t r, uint32_t
+     }
+     else
+     {
+-        same = same && ((mask & 4) != 0 ? alias[f->c[r]] == alias[f->c[q]] : f->c[r] == f->c[q]);
++        same = same && ((mask & 4) != 0 ? ir_if_convert_alias(work, f->c[r]) == ir_if_convert_alias(work, f->c[q]) : f->c[r] == f->c[q]);
+     }
+     return same;
+ }
+@@ -409,7 +424,7 @@ static uint32_t ir_if_convert_field(const IrIfConvertWork* work, uint32_t r, uin
+ {
+     const IrFunction* const f = work->function;
+     const uint32_t raw = field == 0 ? f->a[r] : field == 1 ? f->b[r] : f->c[r];
+-    return (ir_value_mask(f, r) & (1u << field)) != 0 ? work->alias[raw] : raw;
++    return (ir_value_mask(f, r) & (1u << field)) != 0 ? ir_if_convert_alias(work, raw) : raw;
+ }
+ 
+ // The last row of [first, end) that computes row r's value, or BUSTER_IR_NONE; candidates come 16 rows at a time,
+@@ -489,7 +504,7 @@ static uint32_t ir_if_convert_cost(const IrIfConvertWork* work, uint32_t i, uint
+     safe = safe && ((mask & 4) == 0 || ir_if_convert_scalar_type(f->type[f->c[i]]));
+     if (safe && (op == IR_SHL || op == IR_LSHR || op == IR_ASHR))
+     {
+-        const uint32_t count = work->alias[f->b[i]];
++        const uint32_t count = ir_if_convert_alias(work, f->b[i]);
+         safe = f->op[count] == IR_CONST;
+         if (safe)
+         {
+@@ -499,7 +514,7 @@ static uint32_t ir_if_convert_cost(const IrIfConvertWork* work, uint32_t i, uint
+     }
+     if (safe && load)
+     {
+-        safe = ir_if_convert_accessed(work, proven, terminator, work->alias[f->a[i]], ir_type_bits[f->type[i]]);
++        safe = ir_if_convert_accessed(work, proven, terminator, ir_if_convert_alias(work, f->a[i]), ir_type_bits[f->type[i]]);
+     }
+     return safe ? cost : BUSTER_IR_IF_CONVERT_UNSAFE;
+ }
+@@ -633,7 +648,7 @@ static bool ir_if_convert_shared(const IrIfConvertWork* work, const uint32_t* ro
+     {
+         for (uint32_t p = 0; other != phi && p < f->b[other]; p += 1)
+         {
+-            shared = shared || work->alias[f->extra[f->a[other] + p * 2 + 1]] == r;
++            shared = shared || ir_if_convert_alias(work, f->extra[f->a[other] + p * 2 + 1]) == r;
+         }
+     }
+     return shared;
+@@ -650,8 +665,8 @@ static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint
+     for (uint32_t phi = join_first; work->zero != BUSTER_IR_NONE && phi < join_first + phis; phi += 1)
+     {
+         const uint32_t values[2] = {
+-            work->alias[ir_if_convert_incoming(f, phi, true_from)],
+-            work->alias[ir_if_convert_incoming(f, phi, false_from)],
++            ir_if_convert_alias(work, ir_if_convert_incoming(f, phi, true_from)),
++            ir_if_convert_alias(work, ir_if_convert_incoming(f, phi, false_from)),
+         };
+         uint32_t chosen = BUSTER_IR_NONE;
+         uint32_t side = 0;
+@@ -662,9 +677,9 @@ static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint
+             const uint32_t op = f->op[r];
+             const uint32_t type = f->type[r];
+             bool candidate = work->moving[r] != 0 && work->arms[cfg->instruction_blocks[r]] == 2 && work->arms[cfg->instruction_blocks[other]] != 2 &&
+-                             work->sunk[r] == BUSTER_IR_NONE && (op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR) && type == f->type[phi] &&
++                             ir_if_convert_sunk(work, r) == BUSTER_IR_NONE && (op == IR_ADD || op == IR_SUB || op == IR_OR || op == IR_XOR) && type == f->type[phi] &&
+                              type >= IR_I8 && type <= IR_I64;
+-            candidate = candidate && (work->alias[f->a[r]] == other || (op != IR_SUB && work->alias[f->b[r]] == other));
++            candidate = candidate && (ir_if_convert_alias(work, f->a[r]) == other || (op != IR_SUB && ir_if_convert_alias(work, f->b[r]) == other));
+             candidate = candidate && !ir_if_convert_shared(work, rows, row_count, join_first, phis, phi, r);
+             chosen = candidate ? r : BUSTER_IR_NONE;
+             side = s;
+@@ -676,8 +691,8 @@ static void ir_if_convert_sink(IrIfConvertWork* work, const uint32_t* rows, uint
+                 .phi = phi,
+                 .kind = side == 0 ? BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE : BUSTER_IR_IF_CONVERT_FRESH_ZERO_FALSE,
+             };
+-            work->sunk[chosen] = work->fresh_count;
+-            work->sunk[phi] = chosen;
++            work->sunk[chosen] = work->fresh_count + 1;
++            work->sunk[phi] = chosen + 1;
+             work->fresh_count += 1;
+             work->sunk_count += 1;
+         }
+@@ -784,7 +799,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
+             for (uint32_t j = k; j > 0 && representative == BUSTER_IR_NONE; j -= 1)
+             {
+                 const uint32_t q = rows[j - 1];
+-                representative = work->alias[q] == q && ir_if_convert_same(work, r, q) ? q : BUSTER_IR_NONE;
++                representative = ir_if_convert_alias(work, q) == q && ir_if_convert_same(work, r, q) ? q : BUSTER_IR_NONE;
+             }
+             if (representative == BUSTER_IR_NONE)
+             {
+@@ -793,7 +808,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
+         }
+         if (representative != BUSTER_IR_NONE)
+         {
+-            work->alias[r] = representative;
++            work->alias[r] = representative + 1;
+             reused += 1;
+             loads += op == IR_LOAD;
+         }
+@@ -808,7 +823,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
+         safe = incoming[0] != BUSTER_IR_NONE && incoming[1] != BUSTER_IR_NONE;
+         for (uint32_t s = 0; safe && s < 2; s += 1)
+         {
+-            const uint32_t value = work->alias[incoming[s]];
++            const uint32_t value = ir_if_convert_alias(work, incoming[s]);
+             if (work->arms[cfg->instruction_blocks[value]] == 2)
+             {
+                 work->moving[value] = 1;
+@@ -841,7 +856,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
+     for (uint32_t k = 0; safe && k < row_count; k += 1)
+     {
+         const uint32_t r = rows[k];
+-        if (work->alias[r] == r)
++        if (ir_if_convert_alias(work, r) == r)
+         {
+             const uint32_t row_cost = ir_if_convert_cost(work, r, proven, terminator);
+             safe = row_cost != BUSTER_IR_IF_CONVERT_UNSAFE;
+@@ -920,7 +935,7 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
+     {
+         for (uint32_t k = 0; k < row_count; k += 1)
+         {
+-            work->alias[rows[k]] = rows[k];
++            work->alias[rows[k]] = 0;
+             work->moving[rows[k]] = 0;
+         }
+         for (uint32_t s = 0; s < 2; s += 1)
+@@ -939,7 +954,6 @@ static void ir_if_convert_region(IrIfConvertWork* work, uint32_t branch)
+ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view, const uint32_t* values, const uint32_t* fresh, uint32_t i, uint32_t out, uint32_t extra)
+ {
+     const IrFunction* const f = work->function;
+-    const uint32_t* const alias = work->alias;
+     const uint32_t block = work->cfg.instruction_blocks[i];
+     if (view->debug != NULL && work->moving[i] != 0)
+     {
+@@ -952,32 +966,32 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
+     view->type[out] = f->type[i];
+     view->flags[out] = f->flags[i];
+     view->alignment_log2[out] = f->alignment_log2[i];
+-    view->a[out] = (mask & 1) != 0 ? values[alias[f->a[i]]] : f->a[i];
+-    view->b[out] = (mask & 2) != 0 ? values[alias[f->b[i]]] : f->b[i];
+-    view->c[out] = (mask & 4) != 0 ? values[alias[f->c[i]]] : f->c[i];
++    view->a[out] = (mask & 1) != 0 ? values[ir_if_convert_alias(work, f->a[i])] : f->a[i];
++    view->b[out] = (mask & 2) != 0 ? values[ir_if_convert_alias(work, f->b[i])] : f->b[i];
++    view->c[out] = (mask & 4) != 0 ? values[ir_if_convert_alias(work, f->c[i])] : f->c[i];
+     const uint32_t join = f->op[i] == IR_PHI ? work->joins[block] : 0;
+-    const uint32_t sunk = work->sunk[i];
++    const uint32_t sunk = ir_if_convert_sunk(work, i);
+     if (sunk != BUSTER_IR_NONE && f->op[i] != IR_PHI)
+     {
+         // A sunk accumulation's operation selects its other operand x or zero, on the side the operation was.
+         const IrIfConvertFresh zero = work->fresh[sunk];
+         const IrIfConvertRegion region = work->regions[work->joins[work->cfg.instruction_blocks[zero.phi]] - 1];
+         const bool on_true = zero.kind == BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE;
+-        const uint32_t other = alias[ir_if_convert_incoming(f, zero.phi, on_true ? region.false_from : region.true_from)];
+-        const uint32_t x = alias[f->a[i]] == other ? alias[f->b[i]] : alias[f->a[i]];
++        const uint32_t other = ir_if_convert_alias(work, ir_if_convert_incoming(f, zero.phi, on_true ? region.false_from : region.true_from));
++        const uint32_t x = ir_if_convert_alias(work, f->a[i]) == other ? ir_if_convert_alias(work, f->b[i]) : ir_if_convert_alias(work, f->a[i]);
+         view->op[out] = IR_SELECT;
+-        view->a[out] = values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]];
++        view->a[out] = values[ir_if_convert_alias(work, f->a[f->block_offsets[(uint64_t)region.head + 1] - 1])];
+         view->b[out] = on_true ? values[x] : fresh[sunk];
+         view->c[out] = on_true ? fresh[sunk] : values[x];
+     }
+     else if (sunk != BUSTER_IR_NONE)
+     {
+         // Its phi: the operation of the other value and the select.
+-        const IrIfConvertFresh zero = work->fresh[work->sunk[sunk]];
++        const IrIfConvertFresh zero = work->fresh[ir_if_convert_sunk(work, sunk)];
+         const IrIfConvertRegion region = work->regions[join - 1];
+         const bool on_true = zero.kind == BUSTER_IR_IF_CONVERT_FRESH_ZERO_TRUE;
+         view->op[out] = f->op[sunk];
+-        view->a[out] = values[alias[ir_if_convert_incoming(f, i, on_true ? region.false_from : region.true_from)]];
++        view->a[out] = values[ir_if_convert_alias(work, ir_if_convert_incoming(f, i, on_true ? region.false_from : region.true_from))];
+         view->b[out] = values[sunk];
+         view->c[out] = BUSTER_IR_NONE;
+     }
+@@ -997,9 +1011,9 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
+     {
+         const IrIfConvertRegion region = work->regions[join - 1];
+         view->op[out] = IR_SELECT;
+-        view->a[out] = values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]];
+-        view->b[out] = values[alias[ir_if_convert_incoming(f, i, region.true_from)]];
+-        view->c[out] = values[alias[ir_if_convert_incoming(f, i, region.false_from)]];
++        view->a[out] = values[ir_if_convert_alias(work, f->a[f->block_offsets[(uint64_t)region.head + 1] - 1])];
++        view->b[out] = values[ir_if_convert_alias(work, ir_if_convert_incoming(f, i, region.true_from))];
++        view->c[out] = values[ir_if_convert_alias(work, ir_if_convert_incoming(f, i, region.false_from))];
+     }
+     else if (f->op[i] == IR_PHI)
+     {
+@@ -1023,7 +1037,7 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
+             else
+             {
+                 view->extra[extra++] = from;
+-                view->extra[extra++] = values[alias[f->extra[f->a[i] + p * 2 + 1]]];
++                view->extra[extra++] = values[ir_if_convert_alias(work, f->extra[f->a[i] + p * 2 + 1])];
+             }
+         }
+     }
+@@ -1033,14 +1047,14 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
+         view->calls[f->b[i]].argument_first = extra;
+         for (uint32_t a = 0; a < call.argument_count; a += 1)
+         {
+-            view->extra[extra++] = values[alias[f->extra[call.argument_first + a]]];
++            view->extra[extra++] = values[ir_if_convert_alias(work, f->extra[call.argument_first + a])];
+         }
+     }
+     else if (ir_ternary_instruction(f, i))
+     {
+         // A ternary intrinsic's third operand (#1840), in its own appended slot.
+         view->c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
+-        view->extra[extra++] = values[alias[ir_intrinsic_third(f, i)]];
++        view->extra[extra++] = values[ir_if_convert_alias(work, ir_intrinsic_third(f, i))];
+     }
+     return extra;
+ }
+@@ -1048,7 +1062,6 @@ static uint32_t ir_if_convert_row(const IrIfConvertWork* work, IrFunction* view,
+ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output, Arena* scratch, IrFunction* result)
+ {
+     const IrFunction* const f = work->function;
+-    const uint32_t* const alias = work->alias;
+     const uint64_t mark = output->length;
+     const uint32_t count = f->instruction_count;
+     const uint64_t total = (uint64_t)count + work->fresh_count;
+@@ -1166,7 +1179,7 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
+         {
+             IrDebugBinding* binding = view.debug->bindings + k;
+             const uint32_t row = binding->kind == IR_DEBUG_BIND_VALUE && binding->value < total ? order[binding->value] : BUSTER_IR_NONE;
+-            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
++            if (row < count && ir_if_convert_sunk(work, row) != BUSTER_IR_NONE && f->op[row] != IR_PHI)
+             {
+                 binding->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                 binding->value = BUSTER_IR_NONE;
+@@ -1176,7 +1189,7 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
+         {
+             IrDebugRegion* scope = view.debug->regions + k;
+             const uint32_t row = scope->kind == IR_DEBUG_BIND_VALUE && scope->value < total ? order[scope->value] : BUSTER_IR_NONE;
+-            if (row < count && work->sunk[row] != BUSTER_IR_NONE && f->op[row] != IR_PHI)
++            if (row < count && ir_if_convert_sunk(work, row) != BUSTER_IR_NONE && f->op[row] != IR_PHI)
+             {
+                 scope->kind = IR_DEBUG_BIND_UNAVAILABLE;
+                 scope->value = BUSTER_IR_NONE;
+@@ -1196,9 +1209,9 @@ static IrError ir_if_convert_rewrite(const IrIfConvertWork* work, Arena* output,
+                 view.type[out] = f->type[entry.row];
+                 view.flags[out] = 0;
+                 view.alignment_log2[out] = 0;
+-                view.a[out] = select ? values[alias[f->a[f->block_offsets[(uint64_t)region.head + 1] - 1]]] : work->zero;
+-                view.b[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.true_from)]] : BUSTER_IR_NONE;
+-                view.c[out] = select ? values[alias[ir_if_convert_incoming(f, entry.phi, region.false_from)]] : BUSTER_IR_NONE;
++                view.a[out] = select ? values[ir_if_convert_alias(work, f->a[f->block_offsets[(uint64_t)region.head + 1] - 1])] : work->zero;
++                view.b[out] = select ? values[ir_if_convert_alias(work, ir_if_convert_incoming(f, entry.phi, region.true_from))] : BUSTER_IR_NONE;
++                view.c[out] = select ? values[ir_if_convert_alias(work, ir_if_convert_incoming(f, entry.phi, region.false_from))] : BUSTER_IR_NONE;
+                 if (view.debug != NULL)
+                 {
+                     view.debug->origins[out] = BUSTER_IR_NONE;
+@@ -1235,8 +1248,10 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
+     work.arms = ir_allocate(scratch, blocks, 1, &ok);
+     work.reachable = ir_allocate(scratch, blocks, 1, &ok);
+     work.alias = ir_allocate(scratch, count, 4, &ok);
+-    work.moved = ir_allocate(scratch, count, 4, &ok);
+-    work.fresh = ir_allocate(scratch, count, sizeof(IrIfConvertFresh), &ok);
++    // A region moves at most its arms' rows and makes at most a row per phi, and a block heads at most one region.
++    const uint64_t arm_rows = (uint64_t)blocks * 2 * BUSTER_IR_IF_CONVERT_ARM_ROWS;
++    work.moved = ir_allocate(scratch, arm_rows < count ? arm_rows : count, 4, &ok);
++    work.fresh = ir_allocate(scratch, (uint64_t)blocks * BUSTER_IR_IF_CONVERT_PHI_LIMIT, sizeof(IrIfConvertFresh), &ok);
+     work.sunk = ir_allocate(scratch, count, 4, &ok);
+     work.moving = ir_allocate(scratch, count, 1, &ok);
+     uint32_t* queue = ir_allocate(scratch, blocks, 4, &ok);
+@@ -1276,11 +1291,6 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
+             work.reaching[block] = reaching;
+             work.single[block] = reaching == 1 ? single : BUSTER_IR_NONE;
+         }
+-        for (uint32_t i = 0; i < count; i += 1)
+-        {
+-            work.alias[i] = i;
+-            work.sunk[i] = BUSTER_IR_NONE;
+-        }
+         work.zero = BUSTER_IR_NONE;
+         for (uint32_t k = function->constant_count; k > 0; k -= 1)
+         {
+-- 
+2.43.0
+

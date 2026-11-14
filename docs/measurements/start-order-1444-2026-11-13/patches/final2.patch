@@ -1,0 +1,1522 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 0f55325f..0d75fc22 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -466,7 +466,7 @@ index](docs/commands/README.md#detailed-sections).
+ - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
+ - `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
+ - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).
+-- `ab, time-runs, test-profile` — `profile.c` — [guide](docs/commands/profiling.md).
++- `ab, time-runs, start-order, test-profile` — `profile.c` — [guide](docs/commands/profiling.md).
+ - `test-refinement, benchmark-refinement` — `c_intern.c` — [guide](docs/commands/refinement.md).
+ - `test-snapshot, benchmark-snapshot` — `snapshot.c` — [guide](docs/commands/snapshot.md).
+ - `test-ssa, test-ssa-ir, test-ssa-source` — `ssa.c` — [guide](docs/commands/ssa.md).
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c7b22969..46fe952a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -63,7 +63,22 @@ include(cmake/BusterSettings.cmake)
+ buster_settings_normalize()
+ buster_settings_tools("${CMAKE_C_COMPILER}")
+ buster_settings_linker()
+-message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}")
++# The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link by lld, every unit's functions in
++# sections of their own, and the ones small compiles run (cmake/BusterStartOrder.txt) placed together before .text.
++set(buster_start_order FALSE)
++if(buster_static AND buster_lld)
++    set(buster_start_order TRUE)
++    include(cmake/BusterStartOrder.cmake)
++    set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
++    set(start_order_script "${CMAKE_BINARY_DIR}/start-order.ld")
++    set(start_order_symbols "${CMAKE_BINARY_DIR}/start-order.symbols")
++    buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}")
++    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${start_order_list}" "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.cmake")
++    list(APPEND buster_host_flags -ffunction-sections)
++    list(APPEND buster_flags -ffunction-sections)
++    list(APPEND buster_linker_flags "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
++endif()
++message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}, start order: ${buster_start_order}")
+ if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
+     message(FATAL_ERROR "buster: BUSTER_PGO builds the Release configuration alone; configure with CMAKE_CONFIGURATION_TYPES=Release")
+ endif()
+@@ -291,6 +306,9 @@ function(buster_link target)
+         target_link_options(${target} PRIVATE ${before})
+         target_link_libraries(${target} PRIVATE ${after})
+     endif()
++    if(buster_start_order)
++        set_property(TARGET ${target} APPEND PROPERTY LINK_DEPENDS "${start_order_script}" "${start_order_symbols}")
++    endif()
+ endfunction()
+ 
+ # The post-link step (cmake/BusterPostLink.cmake) of `target`'s linked file into `output`: the backend's tables baked
+diff --git a/cmake/BusterSettings.cmake b/cmake/BusterSettings.cmake
+index 5f65633f..026fca88 100644
+--- a/cmake/BusterSettings.cmake
++++ b/cmake/BusterSettings.cmake
+@@ -565,6 +565,8 @@ function(buster_settings_linker)
+         list(APPEND flags -Wl,-O0)
+     endif()
+     set(buster_linker_flags ${flags} PARENT_SCOPE)
++    # Whether the linker is lld, which the start's code order needs (cmake/BusterStartOrder.cmake).
++    set(buster_lld ${lld} PARENT_SCOPE)
+     # Whether the link merges identical constants and strings across objects (SHF_MERGE): every linker but lld at
+     # -O0. The parallel parts' join keeps the flags for one that does (BusterCodegenMerge.cmake).
+     if(lld)
+diff --git a/cmake/BusterStartOrder.cmake b/cmake/BusterStartOrder.cmake
+new file mode 100644
+index 00000000..450f2725
+--- /dev/null
++++ b/cmake/BusterStartOrder.cmake
+@@ -0,0 +1,67 @@
++# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++# Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++#
++# The start's code order (#1444, docs/commands/build.md): the functions that small compiles run, from LIST
++# (cmake/BusterStartOrder.txt, which `compiler start-order` writes), placed together before .text, where the kernel's
++# fault-around maps them in fewer 64 KB windows than where their units' objects have them.
++#
++#   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE)
++#
++# writes SCRIPT, a linker script for lld that places each `UNIT NAME` line's function by its unit's object and its
++# section, which every unit compiled with -ffunction-sections has (.text.NAME, or .text.unlikely.NAME for a cold one,
++# .text.hot.NAME for a hot one): one unit's copy of a static helper moves, the other units' copies don't, as a symbol
++# ordering file, which names symbols, would move all of them. The object is the unit's own (*/UNIT.c.o) or its parallel
++# parts' join (*/UNIT/native.o). A shifted link's padding (build.sh shifts, .text.buster_shift_padding) goes right before
++# SHIFT_SOURCE's first function, so that its placements move that unit's code here too. And SYMBOLS, the `- NAME` lines'
++# names, a symbol ordering file for the global functions and the C library's (which the static link places after every
++# object): lld puts their sections first in .text, right after the units' local ones. The checker's own code
++# (.text.buster_checker, main.c) is one section of each unit, which stays where it is. Each file is written only when
++# its text changes, so that an unchanged list relinks nothing.
++
++function(buster_start_order_write path text)
++    set(current "")
++    if(EXISTS "${path}")
++        file(READ "${path}" current)
++    endif()
++    if(NOT current STREQUAL text)
++        file(WRITE "${path}" "${text}")
++    endif()
++endfunction()
++
++function(buster_start_order_files list script symbols shift_source)
++    file(STRINGS "${list}" lines)
++    set(sections "")
++    set(names "")
++    set(padded FALSE)
++    set(functions 0)
++    foreach(line IN LISTS lines)
++        if(line MATCHES "^#" OR line STREQUAL "")
++            continue()
++        endif()
++        if(line MATCHES "^(main|main_unit_[a-z0-9_]+)\\.c ([A-Za-z_][A-Za-z0-9_.]*)$")
++            set(stem "${CMAKE_MATCH_1}")
++            set(name "${CMAKE_MATCH_2}")
++            if(NOT padded AND "${stem}.c" STREQUAL "${shift_source}")
++                string(APPEND sections "        *(.text.buster_shift_padding)\n")
++                set(padded TRUE)
++            endif()
++            set(wanted ".text.${name} .text.unlikely.${name} .text.hot.${name}")
++            string(APPEND sections "        */${stem}.c.o(${wanted})\n        */${stem}/native.o(${wanted})\n")
++            math(EXPR functions "${functions} + 1")
++        elseif(line MATCHES "^- ([A-Za-z_.][A-Za-z0-9_.@]*)$")
++            string(APPEND names "${CMAKE_MATCH_1}\n")
++        else()
++            message(FATAL_ERROR "buster: ${list} has a line that is neither `UNIT NAME` nor `- NAME`: ${line}")
++        endif()
++    endforeach()
++    if(functions EQUAL 0)
++        message(FATAL_ERROR "buster: ${list} names no function of main.c's units")
++    endif()
++    string(CONCAT text
++        "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
++        "SECTIONS\n{\n    .text.buster_start :\n    {\n${sections}    }\n"
++        "    ASSERT(SIZEOF(.text.buster_start) > 0, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
++        "}\nINSERT BEFORE .text;\n")
++    buster_start_order_write("${script}" "${text}")
++    buster_start_order_write("${symbols}" "${names}")
++endfunction()
+diff --git a/cmake/BusterStartOrder.txt b/cmake/BusterStartOrder.txt
+new file mode 100644
+index 00000000..c580c0cf
+--- /dev/null
++++ b/cmake/BusterStartOrder.txt
+@@ -0,0 +1,678 @@
++# The functions small compiles run, in the order the link places them before .text (#1444): `UNIT NAME` for a
++# function of one of main.c's units, placed by its unit's object and its section, and `- NAME` for one of the C
++# library's, placed by its name (cmake/BusterStartOrder.cmake, docs/commands/build.md, "The start's code order").
++#
++# Written by `compiler start-order` from main at b7a95eedb, built on the 9700X as the benchmark builds are
++# (BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0, Release, clang 23.1.1, lld 23), placement 0 of `build.sh shifts`: its
++# `readelf -sW`, and `perf record -b -e instructions:u -c 4999` of an empty file's -fsyntax-only (300 processes) and
++# -E -P, tiny.c's -c and hello.c's -c (200 processes each; the inputs of buster-performance's
++# docs/measurements/start-order-1444-2026-11-13). Refresh it as that guide says when small compiles' code moves.
++# start-order: 5294065 addresses, 413804 of them in no function; 482 local functions of main.c's units (2634 KB) and 186 by name (99 KB)
++- _start
++main.c tokenize_with_flags
++- c_tokenize
++main.c lane_threads_report
++main.c main_information
++main.c main_preprocessing
++- __wrap___register_frame_info
++- main
++main.c tokenize_c_raw_no_separators
++main.c write_chunk_outlined
++main.c main_source_command
++- pp_diagnostic_summary
++main_unit_frontend.c pp_diagnostic_warning_visible
++- pp_diagnostic_publish
++- pp_location_in_main_file
++- pp_initialize
++main_unit_frontend.c pp_initialize_once
++- pp_release_file_columns
++- pp_release_output
++main_unit_frontend.c arena_release
++main_unit_frontend.c pp_preprocess_file
++- pp_run_input
++main_unit_frontend.c driver_read_nonregular
++main_unit_frontend.c pp_print_vector
++- pp_parse_options
++main_unit_frontend.c pp_parse_options_inputs
++- parse_initialize
++- parse_translation_unit
++main_unit_frontend.c parse_columns
++main_unit_frontend.c parse_tokens_from_output
++main_unit_frontend.c parse_prepare_meanings
++main_unit_frontend.c parse_kernels_reserve_tree
++main_unit_frontend.c parse_vector_buffers_reserve
++- main_preprocessor_command
++main_unit_frontend.c run_preprocessor_command_mode
++main_unit_frontend.c arena_reserve_small
++main_unit_frontend.c pp_warning_flag
++main_unit_frontend.c arena_reserve_tables
++main_unit_frontend.c pp_add_directory
++main_unit_frontend.c pp_clang_resource_directory
++main_unit_frontend.c intern_find_or_add
++main_unit_frontend.c pp_set_macro
++main_unit_frontend.c intern_lay_out
++main_unit_frontend.c pp_scratch_in
++main_unit_frontend.c arena_commit
++main_unit_frontend.c pp_run_prelude
++main_unit_frontend.c pp_lookup_path
++main_unit_frontend.c pp_run_main
++main_unit_frontend.c pp_run_file
++main_unit_frontend.c pp_predefines
++main_unit_frontend.c pp_virtual_file
++main_unit_frontend.c predefines_host_of
++main_unit_frontend.c predefines_apply
++main_unit_frontend.c pp_enter_file
++main_unit_frontend.c pp_run_contexts
++main_unit_frontend.c pp_dependency_observe
++main_unit_frontend.c pp_prepare_data
++main_unit_frontend.c pp_note_system_run
++main_unit_frontend.c pp_prepare_into
++main_unit_frontend.c pp_prepare_whole
++main_unit_frontend.c pp_lex_for_mode
++main_unit_frontend.c pp_scan_named_ucn_chunks
++main_unit_frontend.c pp_record_raw_errors
++main_unit_frontend.c pp_record_named_ucns
++main_unit_frontend.c refine_pass_b_64_plain
++main_unit_frontend.c refine_step_splices
++main_unit_frontend.c pp_directive_arrays
++main_unit_frontend.c pp_finish_directives
++main_unit_frontend.c pp_find_guard
++main_unit_frontend.c refine_tokens_chunks_plain
++main_unit_frontend.c file_cache_arenas
++main_unit_frontend.c pp_finish_capture
++main_unit_frontend.c pp_collect_token
++main_unit_frontend.c pp_directive
++main_unit_frontend.c pp_close_invocation
++main_unit_frontend.c pp_start_with_splices
++main_unit_frontend.c pp_history_fill
++main_unit_frontend.c pp_prepared_directive
++main_unit_frontend.c pp_query_raw_overlap
++main_unit_frontend.c pp_scan_header_bytes
++main_unit_frontend.c pp_recover_header_comment
++main_unit_frontend.c pp_skip_comment
++main_unit_frontend.c pp_define_location
++main_unit_frontend.c pp_reserved_macro_name
++main_unit_frontend.c pp_language_defined
++main_unit_frontend.c pp_line_end_location
++main_unit_frontend.c pp_copy_line
++main_unit_frontend.c pp_pragma
++main_unit_frontend.c pp_scan_body_vector
++main_unit_frontend.c pp_check_replacement_list
++main_unit_frontend.c pp_same_definition
++main_unit_frontend.c pp_same_file_token
++main_unit_frontend.c pp_remove_splices_by
++main_unit_frontend.c pp_literal_header_name
++main_unit_frontend.c pp_header_name_tail
++main_unit_frontend.c pp_include_file
++main_unit_frontend.c pp_find_include
++main_unit_frontend.c pp_start_condition
++main_unit_frontend.c pp_skip_group
++main_unit_frontend.c pp_history_expansion
++main_unit_frontend.c pp_evaluate_value
++main_unit_frontend.c pp_spelling
++main_unit_frontend.c pp_reduce
++main_unit_frontend.c pp_pragma_run
++main_unit_frontend.c pp_header_name
++main_unit_frontend.c pp_feature
++main_unit_frontend.c cbuiltin_source_scope
++main_unit_frontend.c cbuiltin_has_capability
++main_unit_frontend.c cbuiltin_source_intrinsic
++main_unit_frontend.c pp_library_builtin
++main_unit_frontend.c cbuiltin_resolve
++main_unit_frontend.c pp_continue_invocation
++main_unit_frontend.c pp_builtin_value
++main_unit_frontend.c pp_feature_token
++main_unit_frontend.c pp_substitute
++main_unit_frontend.c pp_stringize
++main_unit_frontend.c pp_append_tokens
++main_unit_frontend.c pp_expand_current
++main_unit_frontend.c pp_compile_macro
++main_unit_frontend.c pp_emit_simple_names
++main_unit_frontend.c pp_scan_arguments
++main_unit_frontend.c pp_plan_operators
++main_unit_frontend.c pp_finish_operators
++main_unit_frontend.c pp_emit_template
++main_unit_frontend.c pp_template_find_names
++main_unit_frontend.c pp_template_operators
++main_unit_frontend.c pp_template_make
++main_unit_frontend.c pp_invoke
++main_unit_frontend.c pp_read_token
++main_unit_frontend.c pp_collect_argument_slice
++main_unit_frontend.c pp_history_copy
++main_unit_frontend.c pp_lift_pragma_lines
++main_unit_frontend.c pp_finish_stream
++main_unit_frontend.c file_cache_directory
++main_unit_frontend.c file_cache_probe
++main_unit_frontend.c file_cache_add_path
++main_unit_frontend.c file_cache_identify
++main_unit_frontend.c pp_build_directory
++main_unit_frontend.c pp_markers_initialize
++main_unit_frontend.c c_option_find
++main_unit_frontend.c pp_take_family
++main_unit_frontend.c predefines_target
++main_unit_frontend.c predefines_x86_architecture
++main_unit_frontend.c x86_target_parse
++main_unit_frontend.c parse_brackets_avx512
++main_unit_frontend.c parse_typedefs
++main_unit_frontend.c parse_classify_mask_avx512
++main_unit_frontend.c parse_secondary_avx512
++main_unit_frontend.c parse_fallback
++main_unit_frontend.c parse_roles_starting_avx512
++main_unit_frontend.c parse_roles_block_more_avx512
++main_unit_frontend.c parse_top_parents8_avx512
++main_unit_frontend.c parse_top_prepare8_avx512
++main_unit_frontend.c parse_statements_avx512
++main_unit_frontend.c parse_check_avx512_period
++main_unit_frontend.c intern_initialize_in
++main_unit_frontend.c pp_diagnose_group
++main_unit_frontend.c pp_diagnose_group_text
++main_unit_frontend.c pp_stream_check
++main_unit_checker.c arena_push
++main_unit_checker.c arena_release
++- run_source_check_command
++main_unit_checker.c intern_initialize
++main_unit_checker.c c_option_find
++main_unit_checker.c predefines_host_of
++main_unit_checker.c predefines_apply
++main_unit_checker.c intern_lay_out
++main_unit_checker.c intern_find_or_add
++main_unit_checker.c type_initialize
++main_unit_checker.c arena_reserve_policy
++main_unit_checker.c c_bindings_initialize_zeroed
++main_unit_checker.c parse_tree_columns
++main_unit_checker.c pp_spelling
++main_unit_checker.c pp_without_splices
++main_unit_checker.c builtin_intrinsic_filter_candidates
++main_unit_checker.c pp_system_levels
++main_unit_checker.c c_bindings_restore
++main_unit_checker.c c_bindings_declare
++main_unit_checker.c type_pointer
++main_unit_checker.c type_find_or_add
++main_unit_checker.c type_index_find
++main_unit_checker.c type_function_full
++main_unit_checker.c type_canonical_compare
++main_unit_checker.c type_grow_stack
++main_unit_checker.c type_compatible_at
++main_unit_checker.c type_merge_shallow
++main_unit_checker.c type_conversion_operand
++main_unit_checker.c type_usual_arithmetic
++main_unit_checker.c type_integer_conversion
++main_unit_checker.c type_composite_at
++main_unit_checker.c cbuiltin_resolve
++main_unit_checker.c cbuiltin_sized_entry
++main_unit_checker.c type_tag
++main_unit_checker.c type_record_define
++main_unit_checker.c type_record_layout
++main_unit_checker.c type_check_member
++main_unit_checker.c pp_library_builtin
++main_unit_checker.c lane_session_settle
++main_unit_checker.c c_bindings_sort
++main_unit_checker.c c_lowering_prepare
++main_unit_checker.c c_lowering_vector
++main_unit_checker.c lane_session_asked
++main_unit_checker.c link_initialize
++main_unit_checker.c emitted_from_tier0
++main_unit_checker.c branch_sizing_validate_branches
++main_unit_checker.c unwind_write
++main_unit_checker.c link_add_fixup
++main_unit_checker.c abi_initialize_types
++main_unit_checker.c x86_measure
++main_unit_checker.c branch_sizing_run
++main_unit_checker.c link_check
++main_unit_checker.c link_groups_valid
++main_unit_checker.c link_check_fixups
++main_unit_checker.c abi_classify_levels
++main_unit_checker.c abi_classify
++main_unit_checker.c abi_finish
++main_unit_checker.c abi_simple
++main_unit_checker.c abi_storage
++main_unit_checker.c abi_finish_passing
++main_unit_checker.c abi_assign
++main_unit_checker.c tier0_validate_scalar_entries
++main_unit_checker.c tier0_frame_input_valid
++main_unit_checker.c tier0_parameters_valid
++main_unit_checker.c tier0_validate_tables
++main_unit_checker.c x86_choose_forms
++main_unit_checker.c tier0_compile_entries
++main_unit_checker.c tier0_push_entries
++main_unit_checker.c tier0_generate
++main_unit_checker.c tier0_frame_alignment_vector
++main_unit_checker.c tier0_emit_prologue
++main_unit_checker.c tier0_emit_epilogue
++main_unit_checker.c tier0_preserved_vectors
++main_unit_checker.c tier0_emit_deferred
++main_unit_checker.c tier0_emit_call_record
++main_unit_checker.c tier0_emit_teardown
++main_unit_checker.c emission_metadata_resolve
++main_unit_checker.c link_add_name_hashed
++main_unit_checker.c unwind_tier0_frame_tails
++main_unit_checker.c unwind_function_rows
++main_unit_checker.c x86_encode_16
++main_unit_checker.c unwind_rows_check
++main_unit_checker.c unwind_batch
++main_unit_checker.c arena_commit
++main_unit_checker.c object_write_file
++main_unit_checker.c object_prepare
++main_unit_checker.c object_build
++main_unit_checker.c check_driver_classify
++main_unit_checker.c dependency_check_destinations_counted
++main_unit_checker.c lane_session_run
++main_unit_checker.c check_data_publish
++main_unit_checker.c run_check_command_mode
++main_unit_checker.c check_data_prepare
++main_unit_checker.c check_program
++main_unit_checker.c check_program_select_mode
++main_unit_checker.c check_program_target_features
++main_unit_checker.c check_request_scan_match
++main_unit_checker.c check_request_refusal
++main_unit_checker.c check_request_codegen_option
++main_unit_checker.c check_input_target_supported
++main_unit_checker.c check_graph_run
++main_unit_checker.c check_input_packed_finalize
++main_unit_checker.c check_input_warning_graph
++main_unit_checker.c check_initializers_run_events
++main_unit_checker.c check_diagnostic_first_pragma_error_mode
++main_unit_checker.c check_initializers_warning_context
++main_unit_checker.c check_initializers_warning_uses
++main_unit_checker.c check_warning_undefined_internal
++main_unit_checker.c check_input_run
++main_unit_checker.c check_input_count_tokens
++main_unit_checker.c check_sparse_reserve_wide
++main_unit_checker.c check_graph_initialize
++main_unit_checker.c check_input_expression_commas
++main_unit_checker.c check_input_intrinsic_initialize
++main_unit_checker.c check_input_resolve_range
++main_unit_checker.c check_input_controls
++main_unit_checker.c check_input_diagnostic_recover
++main_unit_checker.c check_input_builtin_capacity
++main_unit_checker.c check_input_packed_members
++main_unit_checker.c check_warning_command_line
++main_unit_checker.c check_literal_strings_by
++main_unit_checker.c check_literal_string_span
++main_unit_checker.c check_literal_string_part
++main_unit_checker.c check_literal_number
++main_unit_checker.c check_literal_number_plain
++main_unit_checker.c check_input_system_token_map
++main_unit_checker.c check_input_bind
++main_unit_checker.c check_input_declaration
++main_unit_checker.c check_input_tag_definition
++main_unit_checker.c check_sparse_set
++main_unit_checker.c check_input_vla_parameters
++main_unit_checker.c check_input_noderef_set
++main_unit_checker.c check_input_specifiers
++main_unit_checker.c check_input_declarator
++main_unit_checker.c check_input_string
++main_unit_checker.c check_input_rare_claim
++main_unit_checker.c check_input_noderef_make
++main_unit_checker.c check_action_integer_type
++main_unit_checker.c check_action_scalar
++main_unit_checker.c check_action_truth
++main_unit_checker.c check_action_convert_value
++main_unit_checker.c check_action_convert_plain
++main_unit_checker.c check_action_fold_integer
++main_unit_checker.c check_action_operand_value
++main_unit_checker.c check_action_source_complete
++main_unit_checker.c check_overload_argument
++main_unit_checker.c check_action_arithmetic
++main_unit_checker.c check_action_query
++main_unit_checker.c check_action_call
++main_unit_checker.c check_const_append
++main_unit_checker.c check_input_constant_read
++main_unit_checker.c check_constant_input_initialize
++main_unit_checker.c check_constant_bind
++main_unit_checker.c check_constant_evaluate
++main_unit_checker.c check_constant_type
++main_unit_checker.c check_constant_mark_type
++main_unit_checker.c check_constant_completed_tag
++main_unit_checker.c check_input_tag_identity
++main_unit_checker.c check_input_read_qualifier
++main_unit_checker.c check_input_attributes
++main_unit_checker.c check_input_predefined_type
++main_unit_checker.c check_input_attribute_read_item
++main_unit_checker.c check_input_attribute_validate
++main_unit_checker.c check_input_attribute_append
++main_unit_checker.c check_input_attribute_gnu_rows
++main_unit_checker.c check_input_attribute_subject_of
++main_unit_checker.c check_input_attribute_count
++main_unit_checker.c check_input_subject_row
++main_unit_checker.c check_input_attribute_string
++main_unit_checker.c check_input_mode_vector
++main_unit_checker.c check_input_attribute_ignored_lists
++main_unit_checker.c check_input_tag_names
++main_unit_checker.c check_input_attribute_subjects
++main_unit_checker.c check_input_attribute_merge
++main_unit_checker.c check_sparse_wide_set
++main_unit_checker.c check_input_generic_undeclared
++main_unit_checker.c check_input_names_drop
++main_unit_checker.c check_input_attribute_kernel
++main_unit_checker.c check_input_attribute_begin
++main_unit_checker.c check_input_attribute_excluding_in
++main_unit_checker.c check_input_gnu_escapes
++main_unit_checker.c check_input_tag_body
++main_unit_checker.c check_constant_builtin_name
++main_unit_checker.c check_input_intrinsic_prepare
++main_unit_checker.c check_action_i64
++main_unit_checker.c check_input_attribute_argument_value
++main_unit_checker.c check_input_constant_fold_warning
++main_unit_checker.c check_input_warning_range
++main_unit_checker.c check_input_warning_add_value
++main_unit_checker.c check_constant_action
++main_unit_checker.c check_warning_ordered_event
++main_unit_checker.c check_input_library_names
++main_unit_checker.c check_constant_enum_mix
++main_unit_checker.c check_constant_specifiers
++main_unit_checker.c check_input_attribute_abi_origin
++main_unit_checker.c check_input_noderef_adjust_parameter
++main_unit_checker.c check_input_attribute_type
++main_unit_checker.c check_input_attribute_conventions
++main_unit_checker.c check_const_storage
++main_unit_checker.c check_input_bind_checked
++main_unit_checker.c check_input_builtin_declaration
++main_unit_checker.c check_input_contract_inherit
++main_unit_checker.c check_input_naked_inherit
++main_unit_checker.c check_input_attribute_late
++main_unit_checker.c check_input_attribute_excludable
++main_unit_checker.c check_input_constant
++main_unit_checker.c check_input_empty_declaration_tag
++main_unit_checker.c check_input_attribute_function
++main_unit_checker.c check_input_alignas_underaligned
++main_unit_checker.c check_input_transparent_union
++main_unit_checker.c check_input_thread_names
++main_unit_checker.c check_input_attribute_expression
++main_unit_checker.c check_input_attribute_unused
++main_unit_checker.c check_input_tag
++main_unit_checker.c check_input_read_attributes
++main_unit_checker.c check_input_tag_frame
++main_unit_checker.c check_input_declarator_step
++main_unit_checker.c check_input_constant_ice
++main_unit_checker.c check_input_attribute_nonnull_parameter
++main_unit_checker.c check_input_attribute_function_typed
++main_unit_checker.c check_input_capture_names
++main_unit_checker.c check_input_local_label_pop
++main_unit_checker.c check_input_unused_labels
++main_unit_checker.c check_input_binding_events
++main_unit_checker.c check_input_binding_answers
++main_unit_checker.c check_input_binding_answer
++main_unit_checker.c check_input_constant_contexts_range
++main_unit_checker.c check_input_expression_classes
++main_unit_checker.c check_graph_record_nodes
++main_unit_checker.c check_input_expressions_coded_range
++main_unit_checker.c check_graph_classes
++main_unit_checker.c check_input_expression_identifiers
++main_unit_checker.c check_input_expression_literals
++main_unit_checker.c check_input_expression_flush
++main_unit_checker.c check_input_expression_call
++main_unit_checker.c check_input_expression_string
++main_unit_checker.c check_input_expression_return
++main_unit_checker.c check_input_asm_labels
++main_unit_checker.c check_input_asm_labelled_tokens
++main_unit_checker.c check_sparse_wide_entries
++main_unit_checker.c check_graph_query_runtime
++main_unit_checker.c check_graph_report_node
++main_unit_checker.c check_init_declarations
++main_unit_checker.c check_program_case_conflicts
++main_unit_checker.c check_diagnostic_first_error
++main_unit_checker.c check_program_openings
++main_unit_checker.c check_program_plans
++main_unit_checker.c check_program_return_facts
++main_unit_checker.c check_program_return_flow
++main_unit_checker.c check_program_alias_number
++main_unit_checker.c check_program_attribute_keys
++main_unit_checker.c check_program_patchable_keys
++main_unit_checker.c check_program_x86_diagnostics
++main_unit_checker.c check_program_case
++main_unit_checker.c check_program_return_library_names
++main_unit_checker.c check_control_drain
++main_unit_checker.c check_control_children
++main_unit_checker.c check_program_reference_roots
++main_unit_checker.c check_program_call_extreme
++main_unit_checker.c check_program_static_object
++main_unit_checker.c check_program_event_push
++main_unit_checker.c check_program_body_eager
++main_unit_checker.c check_target_feature_map
++main_unit_checker.c check_program_emit_timed
++main_unit_checker.c check_clock_mark
++main_unit_checker.c check_lower_prepare
++main_unit_checker.c check_program_object_access
++main_unit_checker.c check_tier1_inline_table
++main_unit_checker.c check_lower_finish
++main_unit_checker.c check_program_body_symbol
++main_unit_checker.c check_program_emit_frame_checked
++main_unit_checker.c check_lower_node_counts
++main_unit_checker.c check_lower_limb_room
++main_unit_checker.c check_program_helpers
++main_unit_checker.c check_program_asm_plan
++main_unit_checker.c check_lower_copy_type_facts
++main_unit_checker.c check_lower_twice_names
++main_unit_checker.c check_lower_writer_begin
++main_unit_checker.c worker_budget_initialize
++main_unit_checker.c worker_budget_release
++main_unit_checker.c check_program_emit_part
++main_unit_checker.c check_lower_part
++main_unit_checker.c check_lower_convention
++main_unit_checker.c check_lower_vector_of
++main_unit_checker.c check_lower_emit
++main_unit_checker.c check_lower_control
++main_unit_checker.c check_lower_drain
++main_unit_checker.c check_lower_preserve
++main_unit_checker.c check_lower_instruction
++main_unit_checker.c check_lower_convert
++main_unit_checker.c check_lower_expression
++main_unit_checker.c check_lower_call_result
++main_unit_checker.c check_lower_operand
++main_unit_checker.c check_lower_address
++main_unit_checker.c check_lower_call
++main_unit_checker.c check_lower_constant
++main_unit_checker.c check_data_emit
++main_unit_checker.c check_data_string_pool
++main_unit_checker.c check_data_plan_object
++main_unit_checker.c check_data_string_candidate
++main_unit_checker.c check_data_plan_header
++main_unit_checker.c check_data_payload
++main_unit_checker.c check_driver_flow
++main_unit_checker.c check_driver_command
++main_unit_checker.c check_driver_unit
++main_unit_checker.c check_driver_warning_promoted
++main_unit_checker.c check_driver_rejected_warnings
++main_unit_checker.c check_driver_unit_end_split
++main_unit_checker.c check_driver_initializer_warning_events
++main_unit_checker.c check_driver_warning_events_at
++main_unit_checker.c check_driver_default_error_warnings
++main_unit_checker.c check_driver_x86_reports
++main_unit_checker.c check_driver_return_reports
++main_unit_checker.c check_driver_flushed_bodies
++main_unit_checker.c check_driver_common_warnings
++main_unit_checker.c check_common_chained_comparisons
++main_unit_checker.c check_common_shift_finish
++main_unit_checker.c check_driver_target_features
++main_unit_checker.c check_driver_aliases
++main_unit_checker.c check_driver_object
++main_unit_checker.c check_driver_reports_from
++main_unit_checker.c check_common_empty_bodies
++main_unit_checker.c check_common_graph_warnings
++main_unit_checker.c check_common_own_reach
++main_unit_checker.c check_common_parents
++main_unit_checker.c check_common_constant_changes
++main_unit_checker.c check_common_unreachable
++main_unit_checker.c check_common_unselected_roots
++main_unit_checker.c check_common_body_reached
++main_unit_checker.c check_common_ignored_prepare
++main_unit_checker.c check_common_root_order_next
++main_unit_checker.c check_common_ignored_statement
++main_unit_checker.c check_common_ignored_of
++main_unit_checker.c check_common_ignored_builtin
++main_unit_checker.c check_common_format_argument_type
++main_unit_checker.c check_common_format_integer_class
++main_unit_checker.c check_program_sections
++main_unit_checker.c check_driver_object_build
++main_unit_checker.c check_program_lanes_release
++- __ieee754_exp_ifunc
++- __ieee754_log_ifunc
++- __ieee754_pow_ifunc
++- __ceil_ifunc
++- __floor_ifunc
++- __fma_ifunc
++- __nearbyint_ifunc
++- __rint_ifunc
++- __roundeven_ifunc
++- __tan_ifunc
++- __trunc_ifunc
++- __ceilf_ifunc
++- __floorf_ifunc
++- __rintf_ifunc
++- __truncf_ifunc
++- __cpu_indicator_init
++- btree_destroy
++- release_registered_frames
++- call_fini
++- handle_amd
++- __libc_start_call_main
++- get_extended_indices.constprop.0
++- get_common_indices.constprop.0
++- update_active.constprop.0
++- init_cpu_features.constprop.0
++- __libc_start_main_impl
++- __libc_init_first
++- __libc_setup_tls
++- __errno_location
++- __sigsetjmp
++- __sigjmp_save
++- _setjmp
++- __run_exit_handlers
++- exit
++- getenv
++- __getrandom_early_init
++- strtouq
++- __isoc23_strtoumax
++- ____strtoul_l_internal
++- _itoa_word
++- snprintf
++- _IO_sprintf
++- __printf_buffer
++- __printf_buffer_write
++- __printf_buffer_done
++- _IO_fflush
++- __fopen_internal
++- __vsprintf_internal
++- __vsnprintf_internal
++- __vsnprintf
++- _IO_new_file_init_internal
++- _IO_file_open
++- _IO_new_file_fopen
++- _IO_link_in
++- _IO_flush_all
++- _IO_cleanup
++- _IO_stdfiles_init
++- __libc_cleanup_push_defer
++- __libc_cleanup_pop_restore
++- __pthread_tunables_init
++- ___pthread_mutex_lock
++- __pthread_mutex_unlock_usercnt
++- ___pthread_mutex_unlock
++- pthread_self
++- _int_free_create_chunk
++- systrim.constprop.0
++- _int_free_maybe_trim.part.0
++- _int_free_merge_chunk
++- _int_free_chunk
++- sysmalloc
++- _int_malloc
++- __libc_malloc2
++- tcache_init.part.0
++- __libc_calloc2
++- __ptmalloc_init
++- malloc
++- free
++- tcache_free_init
++- __libc_calloc
++- __popcountdi2
++- __mempcpy_ifunc
++- __stpcpy_ifunc
++- __strcasecmp_l_ifunc
++- __strchrnul_ifunc
++- __strncasecmp_l_ifunc
++- __strnlen_ifunc
++- __memchr_evex512
++- __memcmp_evex_movbe
++- __mempcpy_avx512_unaligned_erms
++- __memmove_avx512_unaligned_erms
++- __mempcpy_sse2_unaligned
++- __memmove_sse2_unaligned
++- __memmove_sse2_unaligned_erms
++- __memset_avx512_unaligned
++- __memset_avx512_unaligned_erms
++- __memset_sse2_unaligned
++- __memset_sse2_unaligned_erms
++- __strchr_evex512
++- __strchrnul_evex512
++- __strcmp_evex
++- __strlen_evex512
++- __strlen_sse2
++- __strncmp_evex
++- __strrchr_evex512
++- __wcslen_ifunc
++- __wcsnlen_ifunc
++- __wmemset_ifunc
++- __wmemchr_ifunc
++- time
++- __wcschr_ifunc
++- closedir
++- opendir_tail
++- opendir
++- __readdir
++- getdents64
++- _Exit
++- getpid
++- pread64
++- uname
++- __libc_close
++- fstat64
++- fstatat64
++- open64
++- __libc_read
++- stat64
++- __close_nocancel
++- __close_nocancel_nostatus
++- __open64_nocancel
++- __GI_getrlimit
++- getrusage
++- read_sysfs_file
++- madvise
++- mmap64
++- mprotect
++- munmap
++- sbrk
++- syscall
++- __prctl_time64
++- __strncasecmp_ifunc
++- __strcasecmp_ifunc
++- _dl_debug_initialize
++- _dl_find_object_from_map
++- _dlfo_sort_mappings.part.0
++- _dlfo_process_initial
++- _dl_find_object_init
++- _dl_init_paths
++- _dl_add_to_namespace_list
++- _dl_new_object
++- _dl_get_origin
++- _dl_protect_relro
++- check_match
++- do_lookup_x
++- _dl_lookup_symbol_x
++- _dl_setup_hash
++- _dl_allocate_tls_init.part.0
++- _dl_tls_static_surplus_init
++- _dl_determine_tlsoffset
++- _dl_allocate_tls_init
++- __tls_pre_init_tp
++- __tls_init_tp
++- do_tunable_update_val.part.0
++- __tunable_is_initialized
++- __tunable_set_val
++- __tunables_init
++- __tunable_get_val
++- _dl_cet_setup_features
++- _dl_aux_init
++- _dl_non_dynamic_init
++- _dl_get_dl_main_map
++- __libc_early_init
+diff --git a/docs/arena-memory.md b/docs/arena-memory.md
+index 8135c0ca..871065f2 100644
+--- a/docs/arena-memory.md
++++ b/docs/arena-memory.md
+@@ -113,13 +113,15 @@ empty file's or sqlite3.c's, writes 11 pages in three 2 MB stretches; with
+ transparent huge pages `always`, as on the 9700X, two of them took a huge page
+ each, 4 MB cleared for 44 KB of statics. Tests and benchmarks keep their
+ `.bss` as the kernel gives it. The advice comes before the process reads or
+-writes any of `.bss` (`main_driver`, for a command that starts with an option,
+-as a compile's do), because it doesn't undo a touch before it: a
+-read maps the huge zero page over its 2 MB, and a write there, even after the
+-advice, then takes a huge page of its own. Until #1444, `arena_page_policy`'s
++writes any of `.bss` (`main_driver`), because it doesn't undo a touch before
++it: a read maps the huge zero page over its 2 MB, and a write there, even after
++the advice, then takes a huge page of its own. Until #1444, `arena_page_policy`'s
+ statics were written first, and that page took one of an empty file's two huge
+-pages. The `check` and `parse` commands, and a source command whose first
+-argument is a file, still advise after `arena_page_policy` and take that page.
++pages. `main_driver` advises for a first argument that is an option, as a
++compile's usually is, or that holds a byte no command's name has, such as a file
++first (`hello.c -o hello`, `main_source_first`), and for `check`, `parse` and
++`measure-attested`. A first argument of a name's bytes alone (a file named `a`)
++is a source command's only once no command has taken it, and is advised then.
+ 
+ ## Finite address spaces
+ 
+diff --git a/docs/commands/README.md b/docs/commands/README.md
+index a39a62a0..cd457ac5 100644
+--- a/docs/commands/README.md
++++ b/docs/commands/README.md
+@@ -79,7 +79,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
+ | `test-parser, benchmark-parser` | `c_parser.c` | [parser](parser.md) |
+ | `test-preprocessor, benchmark-preprocessor` | `c_preprocessor.c` | [preprocessor](preprocessor.md) |
+ | `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` | `preprocessor_fuzz.c` | [preprocessor-fuzz](preprocessor-fuzz.md) |
+-| `ab, time-runs, test-profile` | `profile.c` | [profiling](profiling.md) |
++| `ab, time-runs, start-order, test-profile` | `profile.c` | [profiling](profiling.md) |
+ | `test-refinement, benchmark-refinement` | `c_intern.c` | [refinement](refinement.md) |
+ | `test-snapshot, benchmark-snapshot` | `snapshot.c` | [snapshot](snapshot.md) |
+ | `test-ssa, test-ssa-ir, test-ssa-source` | `ssa.c` | [ssa](ssa.md) |
+diff --git a/docs/commands/build.md b/docs/commands/build.md
+index 0380f6a4..656a15ea 100644
+--- a/docs/commands/build.md
++++ b/docs/commands/build.md
+@@ -947,6 +947,59 @@ checks make each refusal before any tree is configured, and
+ `.github/workflows/build-pgo.yml` runs them on GitHub's runner with a `clang`
+ that fails at any compile.
+ 
++## The start's code order
++
++A small compile's code is spread over the executable: on the 9700X, an empty
++file's `-fsyntax-only` ran 185 functions in 52 of `.text`'s 64 KB windows, the
++stretch the kernel maps at a fault on a file's pages (fault-around), and
++`hello.c`'s `-c` 532 in 106 (#1444). Each window it touches is a fault. So
++where lld links the static executable, the functions that small compiles run
++go first, together, in a section of their own before `.text`
++(`.text.buster_start`), and the C library's ones right after it, first in
++`.text`. The checker's own code stays in its section, `.text.buster_checker`
++(one section of each unit, `main.c`'s pragmas, #502), which holds 18 of the
++empty file's windows and 60 of `hello.c`'s.
++
++- **The list:** `cmake/BusterStartOrder.txt`, the functions in the order the
++  profiled build had them, `UNIT NAME` for a local function of one of
++  `main.c`'s units and `- NAME` for any other: a global one, whose name is the
++  link's alone, or the C library's.
++- **Each unit's copy apart:** every unit compiles a copy of the static helpers
++  it uses, and a symbol ordering file, which names symbols, moves every copy:
++  one built so faulted more (75 times against 69 in `.text`, #1444's opening
++  report). So the units are compiled with `-ffunction-sections`, and the link
++  script (`cmake/BusterStartOrder.cmake` writes `start-order.ld` into the
++  tree at configuration) names each function by its unit's object, the unit's
++  own (`*/UNIT.c.o`) or its parallel parts' join (`*/UNIT/native.o`), and its
++  section (`.text.NAME`, `.text.unlikely.NAME`, `.text.hot.NAME`). The
++  others go by name in a symbol ordering file (`start-order.symbols`), which
++  puts their sections first in `.text`, right after; `start-order` leaves out
++  any whose name a unit's static shares, which the name would move too.
++- **Shifts:** a shifted link's padding (`.text.buster_shift_padding`, above)
++  goes in `.text.buster_start` right before the shift source's first
++  function, so that the shift moves that unit's code there too.
++- **Where:** a static link by lld (`start order: TRUE` in the configure
++  step's status line). The sanitizers', fuzzing and `BUSTER_HOST_RUNTIME`'s
++  dynamic links, and the other linkers, keep their layout and compile without
++  `-ffunction-sections`. `-ffunction-sections` alone made `.text` 6 KB longer
++  (0.02%): a jump to another function's section can't take the assembler's
++  short form.
++- **A stale list:** a function that is gone, renamed or no longer an object's
++  matches nothing and stays out; a link whose list matches nothing at all
++  fails (the script's `ASSERT`), which a changed object path would make.
++
++Refresh the list when small compiles' code has moved, from a Release build of
++the tree as the benchmark builds are, on the 9700X under its lock: sample each
++control (`perf record -b -e instructions:u -c 4999`, a few hundred processes
++of each of an empty file's `-fsyntax-only` and `-E -P`, `tiny.c`'s `-c` and
++`hello.c`'s `-c`, `perf script -F ip,brstack` of each), take the executable's
++symbols (`readelf -sW`), then write the list with `start-order` below the
++header, which names the revision, the host and the commands:
++
++```sh
++./build/compiler start-order symbols.txt syntax.txt preprocess.txt tiny.txt hello.txt > body.txt
++```
++
+ ## Experiments
+ 
+ `./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with other
+diff --git a/docs/commands/profiling.md b/docs/commands/profiling.md
+index f26d6dd0..614d891c 100644
+--- a/docs/commands/profiling.md
++++ b/docs/commands/profiling.md
+@@ -107,6 +107,11 @@ must be exactly the expected one:
+ - `branch-misses`: records mispredicted, predicted and neither, fields that
+   aren't records, the load bias and the disassembly's instructions, and
+   10,000 branches, which grow its table;
++- `start-order`: functions of main.c's units by their `FILE` symbols (one
++  unit in two parts), a global past its unit's locals, a parallel split's
++  alias, a benchmark's and the C library's functions, a name a unit's static
++  shares (left out), two sample files that repeat functions, and symbols
++  without functions (an error);
+ - `ab`: the order of a Williams design (#1311) for 1 to 17 trees, each
+   tree at every place and after every other equally often over the period,
+   and runs that succeed, fail and can't start, with
+@@ -131,8 +136,12 @@ copies with `--copies`, in a Williams design's order, with their wall time, rusa
+ resident set, page faults and user cycles and instructions, and the builds
+ compared over their placements and copies; under `ab`), `hot-loops FUNCTION DISASSEMBLY SAMPLES
+ [--loops N]`, `label-spills FUNCTION TAG INPUT.s OUTPUT.s`, `spill-report
+-FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]` and `branch-misses BRSTACK [--bias
+-ADDRESS] [--disassembly FILE] [--branches N]`; `docs/profiling.md` has the
++FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]`, `branch-misses BRSTACK [--bias
++ADDRESS] [--disassembly FILE] [--branches N]` and `start-order SYMBOLS
++SAMPLES...` (the functions that `perf script -F ip,brstack` samples ran, by
++their copies in `readelf -sW` of the executable, for
++`cmake/BusterStartOrder.txt`: the build guide's "The start's code order");
++`docs/profiling.md` has the
+ perf and objdump commands that make their inputs. Run `ab` itself outside the
+ 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
+ for each run. The 9700X job's test step runs the tests.
+diff --git a/docs/compile-time.md b/docs/compile-time.md
+index 23e9cbad..d3acacfb 100644
+--- a/docs/compile-time.md
++++ b/docs/compile-time.md
+@@ -1127,6 +1127,16 @@ alone at 287.2 MB against main's 293.7 MB, with 396 more faults. Its observed
+ medians were 138.7 against 139.9 ms, from three unpaired runs each, which
+ establish no difference in time.
+ 
++The file cache's token columns took a huge page each for far less (#1444): the
++four-byte ones, the starts' and the values', of a unit that includes
++`stdio.h` (18,000 tokens) filled 72 KB, 8 KB past their 64 KB of base pages, so
++each cleared 2 MB for two pages, two of the six huge pages of a hello world's
++`-c` on the 9700X. They now start with 256 KB of base pages
++(`BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES`, 64K tokens, about 64 faults, less
++than a huge page costs to clear), and `sqlite3.c`'s 1.3 million tokens take
++48 more faults a column; a group of more than four lanes keeps
++`BUSTER_FILES_COLUMN_SMALL_BYTES` past lane 0.
++
+ ### Partly used huge pages, and three changes not taken (#628)
+ 
+ A map of each push's resident pages at the three peaks of `-c sqlite3.c`, with
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index cf1c4339..60dc7010 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -3836,6 +3836,12 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location,
+ // The base pages that a lane's records arena and its bytes arena start with (file_cache_arenas): a unit fills a few
+ // hundred kilobytes of each (sqlite3.c's 268 and 376 KB), where each one's first huge page took 2 MB (#672).
+ #define BUSTER_FILE_CACHE_SMALL_BYTES (2ull << 20)
++// The base pages that a lane's token columns start with, but where FileCache.lane_small_bytes gives more: a unit of a
++// few headers fills a few pages past BUSTER_ARENA_SMALL_BYTES of the 4-byte ones, the starts' and the values', and each
++// such page took a huge page of its own, cleared whole: stdio.h's 18,000 tokens took 72 KB of each, two of a hello
++// world's six huge pages (#1444). 256 KB holds 64K tokens, about 64 pages of base pages, less than a huge page costs to
++// clear on the 9700X; sqlite3.c's 1.3 million take 48 more faults a column.
++#define BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES (256ull << 10)
+ // The largest file a translation unit's lookup reads into its lane's bytes arena rather than maps
+ // (file_cache_lookup_path), as c_files.c's lanes read theirs (BUSTER_FILES_READ_LIMIT): a read saves the file's mmap
+ // and, when the cache is released, its munmap. On the 9700X, reading the files of up to 16 KB took 1.9% to 2.3% off the
+@@ -3984,10 +3990,11 @@ static FileCacheArenas* file_cache_arenas(FileCache* cache, uint32_t lane)
+         bool reserved = true;
+         for (uint32_t i = 0; reserved && i < BUSTER_ARRAY_LENGTH(arenas); i += 1)
+         {
+-            // The token columns are the first three. The records' arena and the bytes arena, the last two, start with
++            // The token columns are the first three, with BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES of base pages, or the
++            // cache's lane_small_bytes past lane 0. The records' arena and the bytes arena, the last two, start with
+             // BUSTER_FILE_CACHE_SMALL_BYTES of base pages.
+             const bool small = lane != 0 && cache->lane_small_bytes != 0 && i < 3;
+-            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_ARENA_SMALL_BYTES;
++            const uint64_t base_pages = i >= 3 ? BUSTER_FILE_CACHE_SMALL_BYTES : small ? cache->lane_small_bytes : BUSTER_FILE_CACHE_COLUMN_SMALL_BYTES;
+             *arenas[i] = arena_reserve_small(BUSTER_FILE_CACHE_ARENA_BYTES, base_pages);
+             reserved = arenas[i]->base != 0;
+         }
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index ae40fdaf..caffeae7 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -1810,7 +1810,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
+     }
+     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "check") == 0)
+     {
+-        arena_static_base_pages();
++        // main_driver advised .bss already.
+         arena_limits_fix();
+         result = run_check_command_mode(argc - 2, argv + 2, false, false);
+     }
+@@ -1818,7 +1818,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND)
+     else if (BUSTER_IN_UNIT(BUSTER_UNIT_FRONTEND) && argc >= 2 && strcmp(argv[1], "parse") == 0)
+     {
+-        arena_static_base_pages();
++        // main_driver advised .bss already.
+         arena_limits_fix();
+         result = run_parse_command(argc - 2, argv + 2);
+     }
+@@ -2030,7 +2030,7 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
+     }
+     else if (BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER) && argc >= 2 && strcmp(argv[1], "measure-attested") == 0)
+     {
+-        arena_static_base_pages();
++        // main_driver advised .bss already.
+         arena_limits_fix();
+         result = run_attested_census(argc - 2, argv + 2);
+     }
+@@ -2419,7 +2419,8 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
+ #endif
+     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 &&
+              (strcmp(argv[1], "ab") == 0 || strcmp(argv[1], "hot-loops") == 0 || strcmp(argv[1], "label-spills") == 0 ||
+-              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0))
++              strcmp(argv[1], "spill-report") == 0 || strcmp(argv[1], "branch-misses") == 0 || strcmp(argv[1], "time-runs") == 0 ||
++              strcmp(argv[1], "start-order") == 0))
+     {
+         result = run_profile_command(argc - 1, argv + 1);
+     }
+@@ -2556,14 +2557,32 @@ extern int LLVMFuzzerRunDriver(int* argc, char*** argv, int (*callback)(const ui
+ // Weak: present whenever LeakSanitizer is linked (the fuzz builds' combined `address` mode), null otherwise.
+ extern int __lsan_do_recoverable_leak_check(void) __attribute__((weak));
+ #endif
++// Whether a command line's first argument is a source command's (#652, #1444): an option (-E, -fsyntax-only, -c, ...),
++// or a byte no command's name has, since every name is lowercase letters, digits and '-': a file first (hello.c, ./a.out,
++// src/x.c) or a response file (@FILE). A first argument made of those bytes alone (a file named `a`) is a source
++// command's only once no unit's command has taken it.
++static bool main_source_first(const char* argument)
++{
++    bool name = argument[0] != '-';
++    for (size_t i = 0; name && argument[i] != 0; i += 1)
++    {
++        const char c = argument[i];
++        name = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
++    }
++    return !name;
++}
++
+ static int main_driver(int argc, char** argv)
+ {
+     // A source command's .bss in base pages (arena_static_base_pages) before the process touches any of it (#1444): with
+     // transparent huge pages `always`, a read of a 2 MB stretch of .bss maps the huge zero page, and a write to it, even
+     // after the advice, then takes a huge page of its own. arena_page_policy's statics shared such a stretch with 220 MB
+-    // of others, and took one of an empty file's two huge pages. A test or benchmark keeps its .bss as the kernel gives it.
+-    const bool source = argc >= 2 && argv[1][0] == '-';
+-    if (source)
++    // of others, and took one of an empty file's two huge pages. `check`, `parse` and `measure-attested` compile a source
++    // as well, through their units' chains, so they are advised here too, and don't advise again. A test or benchmark
++    // keeps its .bss as the kernel gives it.
++    const bool source = argc >= 2 && main_source_first(argv[1]);
++    const bool compiles = argc >= 2 && (strcmp(argv[1], "check") == 0 || strcmp(argv[1], "parse") == 0 || strcmp(argv[1], "measure-attested") == 0);
++    if (source || compiles)
+     {
+         arena_static_base_pages();
+     }
+@@ -2585,11 +2604,11 @@ static int main_driver(int argc, char** argv)
+     // dispatch, including -E and parse commands that need no worker lease themselves.
+     bool found = guardian >= 0 || worker_budget_dry_run(getenv("MAKEFLAGS"));
+     int result = guardian >= 0 ? guardian : 0;
+-    // An option first (-E, -fsyntax-only, -c, ...) is a source command's (#652), but for the assembler unit's -c of a .s
+-    // or .S file (main_assembly_source): no unit's command name starts with '-' (the two that do, --fuzz and the
+-    // guardian's, are main's and the guardian's above), so it skips the units' chains of strcmp against every command's
+-    // name, which were most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a
+-    // compile needs nothing else of.
++    // An option first (-E, -fsyntax-only, -c, ...) or a file first is a source command's (#652, main_source_first): no
++    // unit's command name starts with '-' (the two that do, --fuzz and the guardian's, are main's and the guardian's
++    // above) or holds any other byte, so it skips the units' chains of strcmp against every command's name, which were
++    // most of an empty file's 930 strcmp calls and touched pages of the string pool and .text that a compile needs
++    // nothing else of.
+     if (!found && source)
+     {
+         result = main_source_command(argc, argv, true);
+diff --git a/src/buster/compiler/profile.c b/src/buster/compiler/profile.c
+index 6202e1c9..87556a5e 100644
+--- a/src/buster/compiler/profile.c
++++ b/src/buster/compiler/profile.c
+@@ -11,6 +11,7 @@
+ //   build/compiler label-spills FUNCTION TAG INPUT.s OUTPUT.s
+ //   build/compiler spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]
+ //   build/compiler branch-misses BRSTACK [--bias ADDRESS] [--disassembly FILE] [--branches N]
++//   build/compiler start-order SYMBOLS SAMPLES...
+ //   build/compiler time-runs [--runs N] [--warmups N] [--after-scalar MS] [--copies N] [--directory PATH]
+ //                            [--executable PATH | --build NAME PATH]... --list ARGUMENT... [--list ARGUMENT...]...
+ //
+@@ -35,6 +36,10 @@
+ // - branch-misses reads `perf script -F brstack` of last-branch records (`perf record -j any,u`) and ranks the branches
+ //   by their mispredictions, at addresses less the load bias (where a PIE was mapped, from --show-mmap-events), so
+ //   that `addr2line` and objdump of the file take them; with the file's disassembly, each with its instruction.
++// - start-order reads `readelf -sW` of the executable and `perf script -F ip,brstack` of its samples (one file per command
++//   profiled) and writes the functions they ran in address order: a local function of one of main.c's units as its unit
++//   and name, and any other (a global one, the C library's) as `-` and its name: cmake/BusterStartOrder.txt, which the
++//   link places before .text (build.md, "The start's code order", #1444).
+ // - time-runs times whole processes of this executable (or of each --executable, and of each --build's placements),
+ //   one per argument list, executable and copy in each run, in each run's order of a Williams design (profile_ab_tree:
+ //   each slot follows each other equally often), after warm-up runs in slot order: each one's wall time from its exec's release to wait4's return, its user and system time, peak
+@@ -50,12 +55,13 @@
+ //   with each one's spread over its placements and copies and each difference's range over them (profile_time_compare).
+ //
+ // Each tool's work is a function of its input texts that writes its report into a ProfileReport (profile_hot_loops,
+-// profile_label_spills, profile_spill_report, profile_branch_misses, and time-runs' profile_time_compare), which
++// profile_label_spills, profile_spill_report, profile_branch_misses, profile_start_order, and time-runs'
++// profile_time_compare), which
+ // profile_test.c checks, and ab's order is profile_ab_tree. main.c includes this file after lane.c, for its arenas, and profile_test.c after it.
+ //
+ // Layout, in this order: the report (ProfileReport, profile_print), reading text (profile_line and the others), the
+ // disassembly (ProfileDisassembly, profile_disassembly_read, profile_jump_target), hot-loops, label-spills,
+-// spill-report, branch-misses, ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
++// spill-report, branch-misses, start-order (profile_start_order), ab (profile_ab_tree, profile_ab_run), time-runs (profile_time_slot, profile_time_one,
+ // profile_time_compare, profile_time_make_copies, profile_time_runs), and the commands (run_profile_command).
+ 
+ #include "buster/compiler/test_paths.h"
+@@ -1522,8 +1528,250 @@ static bool profile_branch_misses(Arena* arena, ProfileReport* report, String8 b
+ }
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
+-// ab
++// start-order
+ 
++// A function's copy in the executable, from readelf -sW's FUNC symbols: its address, size and name, and for a local one
++// of main.c's units the FILE symbol before it, its unit's source.
++typedef struct ProfileFunction ProfileFunction;
++struct ProfileFunction
++{
++    uint64_t address;
++    uint64_t size;
++    String8 name;
++    String8 unit;
++    bool hit;
++};
++
++// start-order's sample files, one per command profiled.
++#define BUSTER_PROFILE_START_SAMPLES 64
++
++static int profile_function_compare(const void* a, const void* b)
++{
++    const ProfileFunction* x = a;
++    const ProfileFunction* y = b;
++    return (x->address > y->address) - (x->address < y->address);
++}
++
++// Whether `file` is one of main.c's units, whose objects the link names by their source (build.md, "The start's code
++// order"): main.c and main_unit_*.c.
++static bool profile_start_unit(String8 file)
++{
++    const String8 suffix = profile_string(".c");
++    const bool source = file.length > suffix.length && memcmp(file.pointer + file.length - suffix.length, suffix.pointer, suffix.length) == 0;
++    return source && (profile_equal(file, profile_string("main.c")) || profile_starts_with(file, profile_string("main_unit_")));
++}
++
++// The field of `line` at *position, the blanks before it skipped, and *position past it.
++static String8 profile_field(String8 line, uint64_t* position)
++{
++    uint64_t start = *position;
++    while (start < line.length && profile_is_blank(line.pointer[start]))
++    {
++        start += 1;
++    }
++    uint64_t end = start;
++    while (end < line.length && !profile_is_blank(line.pointer[end]))
++    {
++        end += 1;
++    }
++    *position = end;
++    return profile_slice(line, start, end);
++}
++
++// readelf's Size column: decimal, or hexadecimal with 0x for a large one.
++static bool profile_symbol_size(String8 text, uint64_t* size)
++{
++    uint64_t position = 0;
++    const bool hexadecimal = profile_starts_with(text, profile_string("0x"));
++    return hexadecimal ? profile_hex(text, &position, size) && position == text.length : profile_decimal(text, size);
++}
++
++// The functions of `symbols` (readelf -sW of the executable), sorted by address, each local one of main.c's units with
++// its unit: an alias the parallel parts' split names (NAME.buster_split) is left out, as its function is there under its
++// own name. Null if the arena is full.
++static ProfileFunction* profile_functions_read(Arena* arena, String8 symbols, uint64_t* count)
++{
++    uint64_t lines = 1;
++    for (uint64_t i = 0; i < symbols.length; i += 1)
++    {
++        lines += symbols.pointer[i] == '\n';
++    }
++    ProfileFunction* functions = BUSTER_ARENA_PUSH_ARRAY(arena, ProfileFunction, lines);
++    uint64_t found = 0;
++    String8 file = { 0 };
++    uint64_t position = 0;
++    const String8 alias = profile_string(".buster_split");
++    while (functions != 0 && position < symbols.length)
++    {
++        const String8 line = profile_line(symbols, &position);
++        uint64_t at = 0;
++        const String8 number = profile_field(line, &at);
++        const String8 value = profile_field(line, &at);
++        const String8 size_text = profile_field(line, &at);
++        const String8 type = profile_field(line, &at);
++        const String8 bind = profile_field(line, &at);
++        profile_field(line, &at);
++        const String8 index = profile_field(line, &at);
++        const String8 name = profile_field(line, &at);
++        uint64_t address = 0;
++        uint64_t size = 0;
++        uint64_t value_at = 0;
++        const bool symbol = number.length > 1 && number.pointer[number.length - 1] == ':' && name.length != 0 && profile_hex(value, &value_at, &address) &&
++                            value_at == value.length && profile_symbol_size(size_text, &size);
++        const bool aliased = name.length > alias.length && memcmp(name.pointer + name.length - alias.length, alias.pointer, alias.length) == 0;
++        if (symbol && profile_equal(type, profile_string("FILE")))
++        {
++            file = name;
++        }
++        else if (symbol && profile_equal(type, profile_string("FUNC")) && !profile_equal(index, profile_string("UND")) && size != 0 && !aliased)
++        {
++            const bool unit = profile_equal(bind, profile_string("LOCAL")) && profile_start_unit(file);
++            functions[found] = (ProfileFunction){
++                .address = address,
++                .size = size,
++                .name = name,
++                .unit = unit ? file : (String8){ 0 },
++            };
++            found += 1;
++        }
++    }
++    if (functions != 0)
++    {
++        qsort(functions, found, sizeof(ProfileFunction), profile_function_compare);
++    }
++    *count = found;
++    return functions;
++}
++
++// The function whose copy holds `address`, or count.
++static uint64_t profile_function_at(const ProfileFunction* functions, uint64_t count, uint64_t address)
++{
++    uint64_t low = 0;
++    uint64_t high = count;
++    while (low < high)
++    {
++        const uint64_t middle = low + (high - low) / 2;
++        if (functions[middle].address <= address)
++        {
++            low = middle + 1;
++        }
++        else
++        {
++            high = middle;
++        }
++    }
++    const bool inside = low != 0 && address - functions[low - 1].address < functions[low - 1].size;
++    return inside ? low - 1 : count;
++}
++
++// Marks the function that holds `address` as run; counts it, and in *outside if none holds it.
++static void profile_start_hit(ProfileFunction* functions, uint64_t count, uint64_t address, uint64_t* addresses, uint64_t* outside)
++{
++    const uint64_t index = profile_function_at(functions, count, address);
++    *addresses += 1;
++    *outside += index == count;
++    if (index != count)
++    {
++        functions[index].hit = true;
++    }
++}
++
++// Marks the function that holds each address of `samples` (perf script -F ip,brstack: each line's ip, then its records,
++// 0xFROM/0xTO/...) as run. Returns the addresses read, and in *outside those no function holds.
++static uint64_t profile_start_hits(ProfileFunction* functions, uint64_t count, String8 samples, uint64_t* outside)
++{
++    uint64_t addresses = 0;
++    uint64_t position = 0;
++    while (position < samples.length)
++    {
++        const String8 line = profile_line(samples, &position);
++        uint64_t at = 0;
++        while (at < line.length)
++        {
++            const String8 field = profile_field(line, &at);
++            uint64_t i = 0;
++            uint64_t address = 0;
++            if (field.length != 0 && profile_hex(field, &i, &address))
++            {
++                profile_start_hit(functions, count, address, &addresses, outside);
++                // A record's branch target, after the '/' that ends its source.
++                i += i < field.length && field.pointer[i] == '/';
++                if (i < field.length && field.pointer[i - 1] == '/' && profile_hex(field, &i, &address))
++                {
++                    profile_start_hit(functions, count, address, &addresses, outside);
++                }
++            }
++        }
++    }
++    return addresses;
++}
++
++// start-order: the functions that `samples` ran (perf script -F ip,brstack of user instructions, one text per command
++// profiled), by their copies in `symbols` (readelf -sW of the same executable), in address order, one a line: `UNIT
++// NAME` for a local function of one of main.c's units, which the link script places by its unit's object and its
++// section (-ffunction-sections' .text.NAME), so that one unit's copy of a static helper moves and the others' don't;
++// and `- NAME` for any other, a global function (whose name is the link's alone) or the C library's, which the symbol
++// ordering file places by name. One whose name a unit's local function has too, which the name would move as well, is
++// left out.
++static bool profile_start_order(Arena* arena, ProfileReport* report, String8 symbols, const String8* samples, uint32_t sample_count)
++{
++    uint64_t count = 0;
++    ProfileFunction* functions = profile_functions_read(arena, symbols, &count);
++    const bool valid = functions != 0 && count != 0;
++    uint64_t addresses = 0;
++    uint64_t outside = 0;
++    for (uint32_t s = 0; valid && s < sample_count; s += 1)
++    {
++        addresses += profile_start_hits(functions, count, samples[s], &outside);
++    }
++    // A function placed by name whose name a unit's local function has too is left out, as its name would move both:
++    // each run one is looked for among all the functions, which a refresh does once.
++    uint64_t unit_functions = 0;
++    uint64_t other_functions = 0;
++    uint64_t unit_bytes = 0;
++    uint64_t other_bytes = 0;
++    uint64_t shared = 0;
++    for (uint64_t f = 0; valid && f < count; f += 1)
++    {
++        const ProfileFunction* function = &functions[f];
++        bool named = false;
++        for (uint64_t g = 0; function->hit && function->unit.length == 0 && !named && g < count; g += 1)
++        {
++            named = functions[g].unit.length != 0 && profile_equal(functions[g].name, function->name);
++        }
++        unit_functions += function->hit && function->unit.length != 0;
++        unit_bytes += function->hit && function->unit.length != 0 ? function->size : 0;
++        other_functions += function->hit && function->unit.length == 0 && !named;
++        other_bytes += function->hit && function->unit.length == 0 && !named ? function->size : 0;
++        shared += function->hit && named;
++        functions[f].hit = function->hit && !named;
++    }
++    if (valid)
++    {
++        profile_print(report, "# start-order: %llu addresses, %llu of them in no function; %llu local functions of main.c's units (%llu KB) and %llu by name (%llu KB)",
++                      (unsigned long long)addresses, (unsigned long long)outside, (unsigned long long)unit_functions, (unsigned long long)(unit_bytes >> 10),
++                      (unsigned long long)other_functions, (unsigned long long)(other_bytes >> 10));
++        if (shared != 0)
++        {
++            profile_print(report, ", %llu left out that share a unit's function's name", (unsigned long long)shared);
++        }
++        profile_print(report, "\n");
++        for (uint64_t f = 0; f < count; f += 1)
++        {
++            const ProfileFunction* function = &functions[f];
++            if (function->hit)
++            {
++                const String8 unit = function->unit.length != 0 ? function->unit : profile_string("-");
++                profile_print(report, "%.*s %.*s\n", (int)unit.length, unit.pointer, (int)function->name.length, function->name.pointer);
++            }
++        }
++    }
++    else
++    {
++        profile_print(report, "start-order: %s\n", functions == 0 ? "out of memory" : "no functions in the symbols");
++    }
++    return valid && !report->full;
++}
+ // The tree that run `position` of a round runs (#1311): round r takes row r of a Williams design, a Latin square
+ // whose rows each run every tree once, and over its period every tree runs at every place and directly after every
+ // other tree equally often. A rotation ran the trees in one cyclic order from different starts, so each tree followed
+@@ -2577,7 +2825,7 @@ static bool profile_option(int argc, char** argv, int* i, const char* name, uint
+     return result;
+ }
+ 
+-// The commands but ab, which reads no text: hot-loops, label-spills, spill-report and branch-misses.
++// The commands but ab, which reads no text: hot-loops, label-spills, spill-report, start-order and branch-misses.
+ static int run_profile_text_command(Arena* arena, ProfileReport* report, int argc, char** argv)
+ {
+     bool valid = true;
+@@ -2647,6 +2895,26 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
+             fprintf(stderr, "usage: spill-report FUNCTION LABELED.s DISASSEMBLY SAMPLES [--slots N]\n");
+         }
+     }
++    else if (strcmp(argv[0], "start-order") == 0)
++    {
++        valid = argc >= 3 && argc - 2 <= BUSTER_PROFILE_START_SAMPLES;
++        String8 samples[BUSTER_PROFILE_START_SAMPLES];
++        const String8 symbols = valid ? profile_read_file(arena, argv[1]) : (String8){ 0 };
++        bool read = symbols.pointer != 0;
++        for (int i = 2; read && i < argc; i += 1)
++        {
++            samples[i - 2] = profile_read_file(arena, argv[i]);
++            read = samples[i - 2].pointer != 0;
++        }
++        if (read)
++        {
++            succeeded = profile_start_order(arena, report, symbols, samples, (uint32_t)(argc - 2));
++        }
++        if (!valid)
++        {
++            fprintf(stderr, "usage: start-order SYMBOLS SAMPLES... (at most %u sample files)\n", BUSTER_PROFILE_START_SAMPLES);
++        }
++    }
+     else
+     {
+         count = BUSTER_PROFILE_DEFAULT_BRANCHES;
+@@ -2697,7 +2965,7 @@ static int run_profile_text_command(Arena* arena, ProfileReport* report, int arg
+     return succeeded ? 0 : 1;
+ }
+ 
+-// argv[0] is the command's name: ab, hot-loops, label-spills, spill-report or branch-misses.
++// argv[0] is the command's name: ab, hot-loops, label-spills, spill-report, start-order or branch-misses.
+ static int run_profile_command(int argc, char** argv)
+ {
+     int result = 1;
+diff --git a/src/buster/compiler/profile_test.c b/src/buster/compiler/profile_test.c
+index c144a01e..c14a766f 100644
+--- a/src/buster/compiler/profile_test.c
++++ b/src/buster/compiler/profile_test.c
+@@ -19,6 +19,9 @@
+ //   - spill-report: label-spills' output with samples at labels, after them, at a label it doesn't have, in another
+ //     function and in other copies of the static function, before its labels too (#236's review): the slots, their widths and the source locations of their hottest spills and reloads; labels that aren't
+ //     numbered in order;
++//   - start-order: local functions of main.c's units by their FILE symbols (two parts of one), a unit's global and the C
++//     library's functions by name, a split's alias, a benchmark's function whose name a unit's static shares (left out),
++//     two sample files that repeat functions, and symbols without functions;
+ //   - branch-misses: records with M, P and neither, a field that isn't one and one of a branch at 0, with the load bias
+ //     and the disassembly's instructions, and an address the disassembly doesn't have; then 10,000 branches, which grow
+ //     the table, without a disassembly;
+@@ -252,6 +255,45 @@ static const char profile_test_branch_misses[] = "branch-misses: 5 records of 3
+                                                  "        100a             1         1  33.33%  f+0xa: jmp    1020 <g>\n"
+                                                  "        1011             0         1   0.00%  (not an instruction of the disassembly)\n";
+ 
++// readelf -sW of an executable of main.c's unit, main_unit_checker.c in two parts (with a split's alias), a benchmark's
++// object and the C library after it, whose locals have no FILE symbol of their own: two copies of the static `helper`
++// in units and one in the benchmark, a global of the checker's unit, a large size in hexadecimal, and an undefined
++// function.
++static const char profile_test_start_symbols[] = "\n"
++                                                 "Symbol table '.symtab' contains 17 entries:\n"
++                                                 "   Num:    Value          Size Type    Bind   Vis      Ndx Name\n"
++                                                 "     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND \n"
++                                                 "     1: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main.c\n"
++                                                 "     2: 0000000000401020    16 FUNC    LOCAL  DEFAULT   11 main_driver\n"
++                                                 "     3: 0000000000401000    32 FUNC    LOCAL  DEFAULT   11 helper\n"
++                                                 "     4: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main_unit_checker.c\n"
++                                                 "     5: 0000000000402000    64 FUNC    LOCAL  DEFAULT   11 helper\n"
++                                                 "     6: 0000000000402040    32 FUNC    LOCAL  DEFAULT   11 check_one\n"
++                                                 "     7: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS main_unit_checker.c\n"
++                                                 "     8: 0000000000402060    16 FUNC    LOCAL  DEFAULT   11 check_two\n"
++                                                 "     9: 0000000000402060    16 FUNC    LOCAL  DEFAULT   11 check_two.buster_split\n"
++                                                 "    10: 0000000000000000     0 FILE    LOCAL  DEFAULT  ABS c_lexer_benchmark.c\n"
++                                                 "    11: 0000000000403000    16 FUNC    LOCAL  DEFAULT   11 helper\n"
++                                                 "    12: 0000000000404000    48 FUNC    LOCAL  DEFAULT   11 _int_malloc\n"
++                                                 "    13: 0000000000402080 0x100 FUNC    GLOBAL DEFAULT   11 check_entry\n"
++                                                 "    14: 0000000000405000    32 FUNC    GLOBAL DEFAULT   11 memset\n"
++                                                 "    15: 0000000000400100    16 FUNC    GLOBAL DEFAULT   11 _start\n"
++                                                 "    16: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND absent\n";
++
++// perf script -F ip,brstack of them: ips and records, a record whose source is in no function, and repeats.
++static const char profile_test_start_samples[] = "          401004 0x402044/0x401000/P/-/-/0//NON_SPEC_CORRECT_PATH  0x403004/0x404010/M/-/-/1//NON_SPEC_CORRECT_PATH\n"
++                                                 "          405010\n"
++                                                 "          402170 0x500000/0x402064/P/-/-/0//NON_SPEC_CORRECT_PATH\n";
++
++static const char profile_test_start_order[] = "# start-order: 9 addresses, 1 of them in no function; 3 local functions of main.c's units (0 KB) and 3 by name (0 KB), "
++                                               "1 left out that share a unit's function's name\n"
++                                               "main.c helper\n"
++                                               "main_unit_checker.c check_one\n"
++                                               "main_unit_checker.c check_two\n"
++                                               "- check_entry\n"
++                                               "- _int_malloc\n"
++                                               "- memset\n";
++
+ typedef struct ProfileTest ProfileTest;
+ struct ProfileTest
+ {
+@@ -486,6 +528,24 @@ static void profile_test_text_tools(ProfileTest* test)
+ 
+     ok = profile_branch_misses(&test->arena, &test->report, profile_test_string(profile_test_brstack), 0x400000, profile_test_string(profile_test_branch_disassembly), 30);
+     profile_test_check(test, "branch-misses", ok, true, profile_report_text(&test->report), profile_test_branch_misses);
++
++    // Two sample files, the second one repeating the first's _start and memset: each function once.
++    const String8 start_samples[] = { profile_test_string(profile_test_start_samples), profile_test_string("400104 0x405008/0x400100/P/-/-/0//\n") };
++    ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_samples, 2);
++    profile_test_check(test, "start-order", ok, true, profile_report_text(&test->report),
++                       "# start-order: 12 addresses, 1 of them in no function; 3 local functions of main.c's units (0 KB) and 4 by name (0 KB), "
++                       "1 left out that share a unit's function's name\n"
++                       "- _start\n"
++                       "main.c helper\n"
++                       "main_unit_checker.c check_one\n"
++                       "main_unit_checker.c check_two\n"
++                       "- check_entry\n"
++                       "- _int_malloc\n"
++                       "- memset\n");
++    ok = profile_start_order(&test->arena, &test->report, profile_test_string(profile_test_start_symbols), start_samples, 1);
++    profile_test_check(test, "start-order of one file", ok, true, profile_report_text(&test->report), profile_test_start_order);
++    ok = profile_start_order(&test->arena, &test->report, profile_test_string("Symbol table '.symtab' contains 0 entries:\n"), start_samples, 1);
++    profile_test_check(test, "start-order without functions", ok, false, profile_report_text(&test->report), "start-order: no functions in the symbols\n");
+ }
+ 
+ // 10,000 branches, branch b recorded b % 3 + 1 times and mispredicted b % 3 times: the table grows past its first
