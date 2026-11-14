@@ -14,19 +14,28 @@ runs used (`scripts` there).
 ## Inlined subroutines under `-g`
 
 The gate, gdb's backtrace showing an expanded callee, is checked by `test-check-debug`'s inline-instance fixture
-(`check_debug_tier1_inline_test`): two static callees, one expanded into the other and both into `main`, by both paths
-and one lane and eight; gdb stopped at the innermost callee's line in `main`'s code shows
+(`check_debug_tier1_inline_test`, `9700x/gdb-inline/dbg_tier1_inline.c`): two static callees, one expanded into the
+other and both into `main`, the inner one calling a noinline `t1i_mark`, by both paths and one lane and eight; gdb
+stopped in `t1i_mark` shows
 
 ```
-#0  t1i_square (x=<optimized out>) at dbg_tier1_inline.c:6
-#1  t1i_twice (x=<optimized out>) at dbg_tier1_inline.c:11
-#2  main () at dbg_tier1_inline.c:18
+#0  t1i_mark (y=0) at dbg_tier1_inline.c:5
+#1  0x000055555555582f in t1i_square (x=<optimized out>) at dbg_tier1_inline.c:10
+#2  t1i_twice (x=<optimized out>) at dbg_tier1_inline.c:15
+#3  main () at dbg_tier1_inline.c:22
 ```
 
-(the shape of the fixture's checks; without the instances' DIEs the check fails on both paths). On the session's
-container: sqlite3.c by `--tier1 -g -O2 -c` passes `llvm-dwarfdump --verify` with 16,708 instances; speedtest1's
-executable by `--tier1 -O2` is the same `.text` bytes with `-g` and without; `--tier1 --tier1-no-inline -g` and without
-`-g` write the same `.text` of sqlite3.c too. No timing: `-g` changes no code.
+(the shape of the fixture's checks; without the instances' DIEs the check fails on both paths), as clang -O2 -g's
+binary of the same source does (`9700x/gdb-inline/gdb18-clang.txt`). The PR's first head (0ea87ee0) gave each
+`DW_TAG_inlined_subroutine` the callee's out-of-line `DW_TAG_subprogram` as its abstract origin. gdb 15.1 (the session's
+container) showed the frames; gdb 18.1 on the 9700X, and CI's gdb, didn't: a reader takes an attribute an entry lacks
+from its origin, and gdb 18 takes the inherited `DW_AT_low_pc` over the instance's `DW_AT_ranges` ("DW_AT_ranges ignored
+due to DW_AT_low_pc", `9700x/gdb-inline/gdb18-0ea87ee0.txt`, by `diag.gdb`). At a211fede each callee some instance
+expands has an abstract instance (a `DW_TAG_subprogram` with `DW_AT_inline`, its parameters and no code), as clang's,
+and gdb 18.1 shows the frames (`gdb18-a211fede.txt`). On the session's container: sqlite3.c by `--tier1 -g -O2 -c`
+passes `llvm-dwarfdump --verify` with 17,095 instances of 1,349 callees; speedtest1's executable by `--tier1 -O2` is
+the same `.text` bytes with `-g` and without; `--tier1 --tier1-no-inline -g` and without `-g` write the same `.text`
+of sqlite3.c too. No timing: `-g` changes no code.
 
 ## Cyclic callees: measured, not adopted
 
