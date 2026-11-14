@@ -41,10 +41,16 @@ The probes give clang's hashes at every level, through Tier 0 and through Tier 1
 | `rndscaless`/`rndscalesd_round_mask` | x86-64 | "Cannot select" `X86ISD::VRNDSCALES` |
 | `gather{d,q}_*256` | below AVX2 | "Do not know how to split the result of this operator" |
 
-Two of clang's own results are worth knowing:
+Some of clang's own results are worth knowing:
 
 - Its legalized `rndscalesd` at -v2 is `roundsd $imm`, with the whole immediate, so the scale bits are ignored.
 - Its default copy at x86-64 emits AVX2's `vpgatherdq` for a gather.
+- Its default copy keeps the ternary logic as AVX-512VL's EVEX `vpternlogd` and `vpternlogq`: on xmm at x86-64, on ymm
+  at -v3.
+
+So clang's oracle executables for those families run only on a host with those instructions. CI's x86-64 runner has
+no AVX-512, and the first push's lanes and wide fixtures failed there for that reason. The PR's fixtures now run the
+ternary logic's and the gathers' natively only on such a host.
 
 ### Compile time (`-c main.c`, final head)
 
