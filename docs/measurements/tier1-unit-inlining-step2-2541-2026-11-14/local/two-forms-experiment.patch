@@ -1,0 +1,153 @@
+diff --git a/src/buster/compiler/c_check_tier1_inline.c b/src/buster/compiler/c_check_tier1_inline.c
+index da62eb2..a4c6b4f 100644
+--- a/src/buster/compiler/c_check_tier1_inline.c
++++ b/src/buster/compiler/c_check_tier1_inline.c
+@@ -67,6 +67,14 @@ struct CheckTier1Summary
+     CheckTier1Passes passes;
+     Arena frozen;
+     uint32_t inlined;
++    // Its inliner cost (ir_inline_shape's, UINT32_MAX where the inliner takes no such body), and its plain form (#2541
++    // step 2's two forms): for a small candidate whose summary expanded calls of its own and so grew past its class's
++    // bounds, its lowering through Tier 1's passes without those expansions, which a caller copies instead, the deeper
++    // calls staying calls; with its cost. `plain_ready` is whether it has one.
++    uint32_t cost;
++    bool plain_ready;
++    IrFunction plain;
++    uint32_t plain_cost;
+ };
+ 
+ // The emission's generations of its inlining tables.
+@@ -517,17 +525,23 @@ static bool check_tier1_inline_single(const CheckTier1Inline* inlining, uint32_t
+     return inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL && inlining->rooted[b] == 0 && inlining->sites[b] == 1;
+ }
+ 
+-// Whether candidate body `b`'s ready summary may be copied into a caller at `target`: its target's features are the
+-// caller's, and a small one is within its class's size.
+-static bool check_tier1_inline_offered(const CheckTier1Inline* inlining, uint32_t b, const X86Target* target)
++// The form of candidate body `b`'s ready summary a caller at `target` copies, or null for none (#2541): an always_inline
++// one's whatever its size and cost; for another, its summary where it is within its class's bounds (a single-site one's or
++// a small one's: its size, and its inliner cost, before a call's copies of its aggregates), and else its plain form where
++// that one is (step 2's two forms). Not where its target has a feature the caller's lacks.
++static const IrFunction* check_tier1_inline_copied(const CheckTier1Inline* inlining, uint32_t b, const X86Target* target)
+ {
+     const X86Target* own = check_tier1_inline_target(inlining->program, b);
+     const bool features = (own->features & ~target->features) == 0 && (own->extensions & ~target->extensions) == 0;
+-    const bool always = inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS;
+     const bool ready = __atomic_load_n(&inlining->states[b], __ATOMIC_ACQUIRE) == BUSTER_CHECK_TIER1_INLINE_READY;
+-    const uint32_t size = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE :
+-                                                                   BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
+-    return features && ready && (always || check_tier1_inline_function(inlining, b)->instruction_count <= size);
++    const CheckTier1Summary* summary = &inlining->summaries[b];
++    const bool always = inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS;
++    const bool single = check_tier1_inline_single(inlining, b);
++    const uint32_t size = single ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE : BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
++    const uint32_t limit = single ? BUSTER_CHECK_TIER1_INLINE_SINGLE_COST : BUSTER_CHECK_TIER1_INLINE_SMALL_COST;
++    const bool expanded = ready && (always || (summary->passes.optimized.function.instruction_count <= size && summary->cost <= limit));
++    const bool plain = ready && !expanded && summary->plain_ready && summary->plain.instruction_count <= size && summary->plain_cost <= limit;
++    return !features ? NULL : expanded ? &summary->passes.optimized.function : plain ? &summary->plain : NULL;
+ }
+ 
+ // Whether the call at `node` of `function` passes an aggregate by value or gives one back: its expansion copies the
+@@ -584,8 +598,8 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
+         if (candidate != 0 && b != caller && taken[b] != 2)
+         {
+             const bool first = taken[b] == 0;
+-            const bool offered = !first || (inlining->cyclic[b] == 0 && check_tier1_inline_offered(inlining, b, target));
+-            const bool matches = offered && ir_inline_signature(lowered, node, check_tier1_inline_function(inlining, b), check_tier1_inline_flags(inlining, b));
++            const IrFunction* copied = inlining->cyclic[b] == 0 ? check_tier1_inline_copied(inlining, b, target) : NULL;
++            const bool matches = copied != NULL && ir_inline_signature(lowered, node, copied, check_tier1_inline_flags(inlining, b));
+             keys[taken_count] = (uint64_t)program->object_symbols[program->bodies[b].object] << 32 | b;
+             taken_count += first && matches ? 1 : 0;
+             taken[b] = matches ? 1 : 2;
+@@ -620,7 +634,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
+         {
+             const uint32_t b = (uint32_t)sorted[k];
+             const bool self = b == UINT32_MAX;
+-            functions[k] = self ? *lowered : *check_tier1_inline_function(inlining, b);
++            functions[k] = self ? *lowered : *check_tier1_inline_copied(inlining, b, target);
+             symbols[k] = (uint32_t)(sorted[k] >> 32);
+             flags[k] = self ? 0 : check_tier1_inline_flags(inlining, b);
+             limits[k] = self ? 0 :
+@@ -702,6 +716,17 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
+     return changed;
+ }
+ 
++// The inliner cost of `function` as a callee (ir_inline_shape's: its cloned instructions and copied rows), or UINT32_MAX
++// where the inliner takes no such body; its temporaries in `scratch`.
++static uint32_t check_tier1_inline_cost(const IrFunction* function, Arena* scratch)
++{
++    const uint64_t mark = scratch->length;
++    IrInlineBody shape = { 0 };
++    const bool shaped = ir_inline_shape(function, true, scratch, &shape) && shape.supported;
++    arena_pop_to(scratch, mark);
++    return shaped ? shape.cost : UINT32_MAX;
++}
++
+ // Candidate body `b`'s summary, built by this lane: its stream lowered at its own target in steps[1], its calls expanded
+ // from its callees' summaries (check_tier1_inline_expand) in steps[4] and [5], and Tier 1's passes (check_tier1_passes,
+ // with promotion in steps[2]), whose function and analysis go to this lane's two arenas of the run
+@@ -748,6 +773,34 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
+         summary.inlined = summary.passes.unexpanded ? 0 : inlined;
+         arena_pop_to(output, built ? output->length : output_mark);
+         arena_pop_to(analyses, built ? analyses->length : analyses_mark);
++        summary.cost = built ? check_tier1_inline_cost(&summary.passes.optimized.function, scratch) : UINT32_MAX;
++    }
++    // The plain form (#2541 step 2's two forms): a small candidate's lowering through the passes without its expansions,
++    // where its summary expanded calls of its own and so grew past its class's bounds (a wrapper of a larger callee, which
++    // its callers then copy around the call). Its analysis is no caller's: only the function stays.
++    const bool single = check_tier1_inline_single(inlining, b);
++    const uint32_t size = single ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE : BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
++    const uint32_t limit = single ? BUSTER_CHECK_TIER1_INLINE_SINGLE_COST : BUSTER_CHECK_TIER1_INLINE_SMALL_COST;
++    const bool past = built && (summary.passes.optimized.function.instruction_count > size || summary.cost > limit);
++    if (past && summary.inlined != 0 && inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL)
++    {
++        arena_pop_to(&lane->steps[2], 0);
++        arena_pop_to(&lane->steps[6], 0);
++        const uint64_t output_mark = output->length;
++        const uint64_t analyses_mark = analyses->length;
++        const CheckTier1PassesInput input = {
++            .function = &lowered,
++            .verified = true,
++        };
++        IrVerifiedRevision revision = { 0 };
++        CheckTier1Passes plain = { 0 };
++        const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &plain);
++        const uint32_t cost = outcome.stage == CHECK_TIER1_COMPILED ? check_tier1_inline_cost(&plain.optimized.function, scratch) : UINT32_MAX;
++        summary.plain_ready = outcome.stage == CHECK_TIER1_COMPILED && plain.optimized.function.instruction_count <= size && cost <= limit;
++        summary.plain = plain.optimized.function;
++        summary.plain_cost = cost;
++        arena_pop_to(output, summary.plain_ready ? output->length : output_mark);
++        arena_pop_to(analyses, analyses_mark);
+     }
+     inlining->summaries[b] = built ? summary : (CheckTier1Summary){ 0 };
+     if (built)
+@@ -958,24 +1011,14 @@ static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const Emitte
+ }
+ 
+ // Whether candidate body `b`'s own code waits for the emission's last pass (#2541 step 2), its summary ready: with holding,
+-// one the unit stage held (CheckTier1Inline.held) and the last pass hasn't let go on (CheckTier1Inline.released), whose
+-// summary its callers should expand at each call: offered at its own target (check_tier1_inline_offered), and but for an
+-// always_inline one, at an inliner cost (ir_inline_shape's, before the copies of a call's aggregates) within its class's
+-// limit. A summary past it is a call that stays, and its code is made now rather than alone in the last pass.
++// one the unit stage held (CheckTier1Inline.held) and the last pass hasn't let go on (CheckTier1Inline.released), of which
++// its callers should copy a form at each call (check_tier1_inline_copied at its own target). One they don't copy is a call
++// that stays, and its code is made now rather than alone in the last pass.
+ static bool check_tier1_inline_held(CheckTier1Lane* lane, uint32_t b, const X86Target* target)
+ {
+     const CheckTier1Inline* inlining = lane->inlining;
+-    bool held = inlining->holding && b < inlining->body_count && inlining->held[b] == BUSTER_CHECK_TIER1_INLINE_HELD && inlining->released[b] == 0 &&
+-                check_tier1_inline_offered(inlining, b, target);
+-    if (held && inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS)
+-    {
+-        const uint64_t mark = lane->scratch.length;
+-        IrInlineBody shape = { 0 };
+-        const uint32_t limit = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_COST :
+-                                                                         BUSTER_CHECK_TIER1_INLINE_SMALL_COST;
+-        held = ir_inline_shape(check_tier1_inline_function(inlining, b), true, &lane->scratch, &shape) && shape.supported && shape.cost <= limit;
+-        arena_pop_to(&lane->scratch, mark);
+-    }
++    const bool held = inlining->holding && b < inlining->body_count && inlining->held[b] == BUSTER_CHECK_TIER1_INLINE_HELD && inlining->released[b] == 0 &&
++                      check_tier1_inline_copied(inlining, b, target) != NULL;
+     // It waits (BUSTER_CHECK_TIER1_INLINE_WAITING), which the last pass reads once the lanes are done: this lane alone
+     // writes body `b`'s byte.
+     if (held)
