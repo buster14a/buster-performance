@@ -129,8 +129,27 @@ Main's #2734 (`45cd9ae`: `tier1_cfg_carried_unread`, `alternate_intervals`) prov
 - **No hoist to hoist** (`st-nohoist-to-hoist.txt`, `lua-nohoist-to-hoist.txt`, 65 to 64): speedtest1 −8.2 M, Lua −43.6 M, every Lua function the same or fewer, `jsonLookupStep` (−2.6 K) and `speedtest1_run` (−70 K) too. speedtest1's that run more: `jsonParseFree` +126 K (the inlining shift; +2.4 K with its callers), `sqlite3GetInt32` +5.4 K and `sqlite3HashClear` +2.1 K (addresses defined before a loop that mostly runs no iteration), `sqlite3_randomness` +3.7 K, `sqlite3PcacheTruncate` +2.8 K, `jsonInsertIntoBlob` +1.3 K, and every other function under 1 K.
 - **The joins' rule** (`st-without-to-with-joins.txt`, `lua-without-to-with-joins.txt`, 64 to 0) gains speedtest1 0.58 M and costs Lua 0.2 M on this main, against 12.9 M and 14.4 M on `56b5864`; it needs #2574's hot test over every recipe with an unused range entering a join and a byte per range, and it costs `sqlite3Parser` its 1.2 M. The head leaves it out.
 
-The 9700X's run of main `45cd9ae` against the head (`scripts/run2618h.sh`, `run2618g.sh` with its paths renamed) follows in `9700x-531c6b1/`.
+On the 9700X, `scripts/run2618h.sh` (`run2618g.sh` with its paths renamed) ran main `45cd9ae` against the head `531c6b1` (`9700x-531c6b1/`, seventeen holds of the lock from 20:15 to 20:41 UTC, 74 checks the same, every round's compile outputs round 0's):
+
+| Program | Metric | head / main | 95% interval |
+| --- | --- | ---: | ---: |
+| Lua's five scripts, six link orders | time | 1.0002 | 0.9926 to 1.0079 |
+| | user cycles | 1.0003 | 0.9922 to 1.0084 |
+| | user instructions | 0.9990 | 0.9987 to 0.9993 |
+| speedtest1, six layouts | time | 0.9974 | 0.9941 to 1.0008 |
+| | user cycles | 0.9954 | 0.9922 to 0.9986 |
+| | user instructions | 0.9996 | 0.9996 to 0.9996 |
+
+| Compile | Metric | head / main | paired rounds, median (range) |
+| --- | --- | ---: | ---: |
+| `sqlite3.c`, `--tier1 -c` | time | 0.9966 | 0.9965 (0.9949 to 0.9991) |
+| | user cycles | 0.9962 | 0.9969 (0.9952 to 0.9997) |
+| | user instructions | 1.0005 | 1.0005 |
+| Lua's 33 sources, `--tier1` | time | 1.0047 | 1.0064 (0.9884 to 1.0092) |
+| | user instructions | 1.0026 | 1.0026 (0.9986 to 1.0026) |
+
+**Reading.** Lua's 0.10% fewer instructions don't resolve in its time: by link order its scripts' cycles move with the layout for the same instructions (`closures` 0.981 to 1.035, `arithmetic` 0.973 to 1.012), the aliasing #2714's record found for `arithmetic`. speedtest1 takes 0.46% fewer cycles for 0.04% fewer instructions, fewer at five of its six layouts. Without the joins' analyses, `sqlite3.c`'s compile runs 0.05% more instructions, against the third head's 0.35%.
 
 ## Tests
 
-The head's Release and AddressSanitizer builds pass the 23 commands (`tests-release.txt`, of the second head; `tests-asan.txt`, of the head) and `test-checker-driver`'s part 1 of 8 (`driver-part1-head.txt`, `driver-part1-head-asan.txt`); the first head's compiler fails that part's two checks (`driver-part1-first-head.txt`). The head `531c6b1`'s Release build passes the 23 commands (`tests-release-531c6b1.txt`) and the driver's part 1 of 8, 34,931 checks (`driver-part1-531c6b1.txt`).
+The head's Release and AddressSanitizer builds pass the 23 commands (`tests-release.txt`, of the second head; `tests-asan.txt`, of the head) and `test-checker-driver`'s part 1 of 8 (`driver-part1-head.txt`, `driver-part1-head-asan.txt`); the first head's compiler fails that part's two checks (`driver-part1-first-head.txt`). The head `531c6b1`'s Release and AddressSanitizer builds pass the 23 commands (`tests-release-531c6b1.txt`, `tests-asan-531c6b1.txt`, whose extra line is a usage probe that exits 1 by design) and the driver's part 1 of 8, 34,931 checks (`driver-part1-531c6b1.txt`, `driver-part1-531c6b1-asan.txt`), with no sanitizer report.
