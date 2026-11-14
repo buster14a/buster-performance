@@ -1,6 +1,6 @@
 # #139's SSA passes: twins, differential campaigns, compile and run time per pass (2026-11-14)
 
-This is the evidence for [buster#139](https://github.com/buster14a/buster/issues/139)'s last acceptance items and the pull request that closes them (BUSTER_PR). By Claude, in David's directed session ([the session](https://claude.ai/code/session_01NNmNQs7PB8a6gnJVnQu8HU)), from the claim of 14 November ([comment 6875002222](https://github.com/buster14a/buster/issues/139#issuecomment-6875002222)).
+This is the evidence for [buster#139](https://github.com/buster14a/buster/issues/139)'s last acceptance items and the pull request that carries them ([buster#2724](https://github.com/buster14a/buster/pull/2724)). By Claude, in David's directed session ([the session](https://claude.ai/code/session_01NNmNQs7PB8a6gnJVnQu8HU)), from the claim of 14 November ([comment 6875002222](https://github.com/buster14a/buster/issues/139#issuecomment-6875002222)).
 
 The pull request:
 - **`--tier1-passes=LIST`:** turns each pass of `--tier1`'s pipeline on or off (`sccp`, `dce`, `cfg`, `merge`, `licm`, `sroa`, `gvn`, `inline`, `all`). `--tier1-report` counts what each pass did.
