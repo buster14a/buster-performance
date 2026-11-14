@@ -55,6 +55,28 @@ Wall time in this virtual machine, `benchmark-lexer`'s medians on a 46,679-byte 
 timing, and no counters here): `c_tokenize` 0.883 ms by Tier 1, 0.015 ms by clang -O2 (59×); Tier 1's vector lexer is
 2.1× slower than Tier 1's scalar lexer (0.424 ms).
 
+## With buster#2742
+
+The same file and call, by the compiler of [buster14a/buster#2742](https://github.com/buster14a/buster/pull/2742): SROA
+makes a vector load the constant or the splat its block's stores wrote (`sroa`), and a constant whose quadwords are one
+value is `mov r11, imm; vpbroadcastq` (`splat64`). The same pull request stops the crash, so the Tier 1 lexer now agrees
+with the scalar one on `c_lexer.c`, `c_parser.c` and `lane.c`.
+
+| Build | instructions | per byte | immediate stores | vectors built on the stack |
+| --- | ---: | ---: | ---: | ---: |
+| clang -O2 | 27,785 | 3.06 | 50 | |
+| `--tier1`, main `ca2bd994` | 274,120 | 30.20 | 170,752 | 6,815 |
+| `--tier1`, `sroa` | 132,681 | 14.62 | 35,313 | 3,157 |
+| `--tier1`, `sroa` and `splat64` | 122,190 | 13.46 | 23,489 | 1,824 |
+
+`benchmark-lexer`'s `c_tokenize` median in this virtual machine on the 46,679-byte file (wall time, no counters, not a
+9700X timing): 0.883 ms on main, 0.620 ms with `sroa`, 0.392 ms with both; clang -O2 0.015 to 0.020 ms. The second
+step removes 8% of the instructions and 37% of the time: what a vector built on the stack costs is its load, which
+no store forwards to, more than its stores.
+
+What is left of the constants (`results/mid200-tier1-sroa-splat64.runs.txt`): 1,026 written as quadwords and 725 as
+doublewords, 12.8 per 64-byte chunk, which are buster#2744's literal pool's. `v2.c` holds the quadword splats' cases.
+
 ## Method
 
 No performance counters exist in the session's virtual machine, and valgrind has no AVX-512. `stephist.c` counts
@@ -84,10 +106,11 @@ python3 runs.py mid200-tier1.dump
 
 - `host.txt`: the machine, the kernel, clang and the buster revision.
 - `stephist.c`, `annotate.py`, `runs.py`: the counter and the two readers.
-- `small.c`, `mid200.c`, `v1.c`: the inputs.
+- `small.c`, `mid200.c`, `v1.c`, `v2.c`: the inputs.
 - `results/*.hist`: `OFFSET COUNT` per executed address; `results/*.summary.txt`: by function and class;
   `results/mid200-*.dump.gz`: every executed instruction with its count and class; `results/mid200-tier1.runs.txt`: the
-  immediate-store runs by shape; `results/binaries.sha256`: the three lexer programs.
+  immediate-store runs by shape; `results/binaries.sha256`: the lexer programs. The `-sroa` and `-sroa-splat64` files
+  are buster#2742's two steps.
 
 ## Limits
 
