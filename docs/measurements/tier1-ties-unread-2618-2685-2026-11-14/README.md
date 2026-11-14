@@ -191,6 +191,22 @@ The head against main: speedtest1 −12.76 M (−0.44%), Lua −21.87 M (−0.43
 - Lua's `arithmetic` script depends on the link order: its cycles move by 0.973 to 1.079 over the six orders, for 0.14% fewer instructions (the other scripts 0.97 to 1.05). Before #2592 the same script was 0.945 to 0.981 at every order.
 - The compile costs 0.69% more `sqlite3.c` cycles, for 0.42% more instructions: less than the first head's 1.24% against main.
 
+**Lua's `arithmetic` script, by alignment** (`9700x-after-2592/arithmetic/`; `scripts/luaprof.sh`, `luamisp.sh`, `luapad.sh`, each one hold). At orders 1 and 4 (head 1.079 and 1.071), five runs of each build with the predictor's and the front end's counters give the head 13 M more cycles (183 M against 170 M) and 330 K more retired mispredictions (about 500 K against 167 K) in every run, for 1.44 M fewer instructions. At order 5 (0.973), the head mispredicts as often as main (167 K) and runs 5 M fewer cycles. Sampled every 211 mispredictions, the head's extra ones at order 1 fall in `luaV_mod` (31% of them, 7% at main), whose code is the same in both builds, and in `luaV_execute`'s dispatch near +6600.
+
+Order 1 linked again after a pad of 64 to 960 bytes, every byte of code moved by a multiple of 64 (`arithmetic/pad/`, three runs each, the same output):
+
+| Pad, bytes | `luaV_mod` mod 128, head | head: cycles, M | mispredictions, K | main: cycles, M | mispredictions, K |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0 | 0x60 | 184.4 | 498 | 170.0 | 170 |
+| 64 | 0x20 | 171.3 | 204 | 170.1 | 170 |
+| 128 | 0x60 | 184.7 | 500 | 169.6 | 167 |
+| 256 | 0x60 | 183.5 | 499 | 170.0 | 167 |
+| 512 | 0x60 | 185.1 | 499 | 169.9 | 167 |
+| 576 | 0x20 | 171.3 | 204 | 170.5 | 167 |
+| 960 | 0x20 | 171.7 | 213 | 170.7 | 177 |
+
+The cycles are each cell's median. A shift by whole 64-byte lines leaves every line's instructions as they were, so the extra mispredictions are the predictor's tables aliasing at the head's branch addresses: the head's script is 7.9% to 9.0% slower at one phase of address bit 6 and 0.5% to 0.7% slower at the other, where main's is the same at both. That is the placement's noise that the six orders average over, not instructions the change adds.
+
 ## Tests
 
 `scripts/tests.sh` ran the Tier 1 and IR tests of `tools/ci/correctness.tests` that the change reaches on the head's compiler (`tests.txt`). A mutation build, each rule turned off at once (the CFG's and the straight line's ties, `ir_typed_folds`, the walks, the eviction before a read, the resting rule), failed `test-tier1-allocation`'s two traces of the eviction (on all three entry points), `test-tier1-emit`'s four tie checks, and `test-ir-lowering`'s two new checks.
