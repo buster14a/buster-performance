@@ -33,6 +33,9 @@ by pointer jumping on the vector path.
 | head-b's | `df7bc06c3ae6a97eb2b8515a25aeab2a0b5b721775f601f3771a2117a23ba18f` |
 | `sqlite3.c` (the frozen corpus's) | `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d` |
 
+The probes' executables are in `identities.txt` too, and the second probe's (`compiler-probe2-main`,
+`compiler-probe2-b`, hashed after their runs) in `9700x/identities-probe2.txt`.
+
 `scripts/sq.sh COMPILER OUT [OPTIONS]` is the compile every whole-compile number here is of: `-c --tier1` of the frozen
 corpus's `sqlite3.c` with the corpus's pinned predefines and headers, `-march=znver5 -std=gnu17`.
 
@@ -63,8 +66,8 @@ corpus's `sqlite3.c` with the corpus's pinned predefines and headers, `-march=zn
 A temporary `rdtsc` pair around `tier1_frame_plan_path` (`scripts/probe.py`, then `scripts/probe2.py`) sums the
 planner's ticks over the compile, on CPU 2 with `--lanes 1`. The TSC counts at 3.8 GHz there.
 
-The first probe (`probe.py`: `9700x/probe-sqlite.log` for main, `probe-sqlite-a.log` for head-a) prints a line after
-every plan, 1,368 a compile; the table takes each compile's last line:
+The first probe (`probe.py`: `9700x/probe-sqlite.log` for main, `probe-sqlite-a.log` and `probe-sqlite-b.log` for the
+heads) prints a line after every plan, 1,368 a compile; the table takes each compile's last line:
 
 | build | path | ticks, median (range) | at 3.8 GHz | of the compile's 621 ms |
 | --- | --- | ---: | ---: | ---: |
@@ -72,13 +75,30 @@ every plan, 1,368 a compile; the table takes each compile's last line:
 | main | `--scalar` | 8,853,886 (8,847,654 to 8,902,602), 3 runs | 2.33 ms | 0.38% |
 | head-a | vector | 2,329,286 (2,284,522 to 2,367,476), 7 runs | 0.61 ms | 0.10% |
 | head-a | `--scalar` | 3,460,660 (3,451,008 to 3,494,974), 3 runs | 0.91 ms | 0.15% |
+| head-b | vector | 2,051,278 (2,041,892 to 2,078,980), 7 runs | 0.54 ms | 0.09% |
+| head-b | `--scalar` | 3,232,812 (3,211,114 to 3,254,016), 3 runs | 0.85 ms | 0.14% |
 
 - Main's planner is 0.42% of the compile on the default path: 1.9 µs a plan over all 1,368, 2.5 µs over the 1,034
   with objects.
-- The write between each plan and the next costs the next plan its warm caches, so these are upper bounds, and more so
-  for the heads, whose plans are short: head-a's 448 ns a plan is several times the benchmark's hot 80 to 340 ns
-  below. `probe2.py` prints one line, at the compile's last plan; its runs for main and head-b are in
-  `9700x/probe2-b.log` once they have run (the host's queue was long that afternoon).
+- head-b's selects against head-a's branches, on these real frames: 2.05 M ticks against 2.33 M on the default path,
+  and 3.23 M against 3.46 M with `--scalar`.
+
+The second probe (`probe2.py`, run by `scripts/q4.sh b`: `9700x/probe2-b.log`) prints one line, at the compile's
+1,368th and last plan, so no write comes between one plan and the next. Main and head-b alternate in one hold, 9 runs
+each on the default path and 5 with `--scalar`:
+
+| build | path | ticks, median (range) | at 3.8 GHz | a plan | of the compile's 621 ms | against the first probe |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| main | vector, the default | 9,704,174 (9,630,530 to 9,793,056) | 2.55 ms | 1.87 µs | 0.41% | −1.3% |
+| main | `--scalar` | 8,787,994 (8,692,842 to 8,823,866) | 2.31 ms | 1.69 µs | 0.37% | −0.7% |
+| head-b | vector | 2,079,246 (2,045,920 to 2,131,534) | 0.55 ms | 400 ns | 0.09% | +1.4% |
+| head-b | `--scalar` | 3,267,962 (3,215,142 to 3,292,396) | 0.86 ms | 629 ns | 0.14% | +1.1% |
+
+- Printing after every plan wasn't what made the plans slow: the two probes agree within 1.5% for both builds, in
+  both directions, about what two builds of one source differ by. So the first probe's numbers aren't upper bounds,
+  and head-b's 400 ns a plan in the compile, against the benchmark's hot 80 to 340 ns below, is the cost of a cold call
+  between the rest of a function's work, not of the probe.
+- The planner on the default path: main 4.67 times head-b's ticks, 9.70 M against 2.08 M; with `--scalar`, 2.69 times.
 - The whole compile's cycles below agree in size: main less head-a is 12.9 M cycles, which is 8.9 M of these ticks.
 
 ## The whole compile
