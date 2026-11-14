@@ -78,3 +78,25 @@ sanitizer build's units before the optimizer would build.
 The split adds 4% of work (the parts' imported bodies), and one part, `main_unit_x86`'s part 6, took 277.6 s alone
 (the whole unit compiles in 56 s in Release): slower on a hosted runner's 4 CPUs, and on a machine with more cores
 that part would be the build's new longest step. Not built.
+
+## Plain Release with `-g` (local timing builds)
+
+`traced-release-g/`: the same tracing of a clean native Release build at `5f3c7d48f` (main after #2749, #2753 and
+#2757), with `-g` (`BUSTER_DEBUG_INFO` 1, the local default; CI's hosted rows and the 9700X jobs build with 0): 298.8 s
+on 4 CPUs, 1,089 s of compiles (front end 119, optimizer 461, code generation 491), 62 idle CPU-seconds.
+
+| Pass | Seconds |
+| --- | ---: |
+| ModuleInlinerWrapperPass (the CGSCC pipeline) | 310.8 |
+| X86 DAG->DAG Instruction Selection | 88.7 |
+| Live DEBUG_VALUE analysis | 86.6 |
+| InstCombinePass | 71.7 |
+| Greedy Register Allocator | 52.2 |
+| X86 Assembly Printer | 43.6 |
+| Assignment Tracking Analysis | 32.1 |
+
+With `-g` there are variables to locate, so the instruction-referencing LiveDebugValues and the assignment tracking
+do work a debugger uses: about 119 s of the 1,089 s. The older pass (`-experimental-debug-variable-locations=false`)
+and `-Xclang -fexperimental-assignment-tracking=disabled` would leave the code as it is and change where the debug
+information says variables live, so they are the owner's decision, not a fix; `BUSTER_DEBUG_INFO=0` already skips
+all of it.
