@@ -97,7 +97,9 @@ Each round runs the same build without the memo and with it warm (a process each
   pages; its load is 2.6% of the faults. `sqlite3.c`'s view took about 4,000 of its 12,113 faults with the memo
   (`memmove` 21.9%, `check_attested_view` 11.0%): it copied the 94% of the unit it reads to skip 6% of it. `s4d` makes a
   one-file command's view only where it skips a third of the unit's tokens or more; 1,158 of musl's 1,331 units with
-  tokens still are (a debug count in the cloud VM).
+  tokens still are (a debug count in the cloud VM). At `s4d`, `sqlite3.c` (710,061 tokens, 40,639 skipped) takes 8,164
+  faults with the memo against 6,905 without it; the largest share of the difference is the chain's arrays
+  (`check_attested_chain`, 5.4% of the faults), and the passes are about 2% of its user cycles (`results/sq-*-s4d*`).
 - **A bug in #2710's step 4, found here:** a one-file command's stream was never the preprocessor's diagnostics, so a
   unit that skipped and failed printed its errors twice. #2726 fixes it, with a test that fails without the fix. No
   run above has a failing unit.
