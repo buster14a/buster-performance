@@ -1,0 +1,150 @@
+From a5af82116bb2a9e89a366b0ff80f6f93cc8e32d8 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 11:59:26 +0000
+Subject: [PATCH 3/3] Tier 1: the ties from the problem's first pass, and hints
+ only where a tie is
+
+On the 9700X, #2685's ties cost sqlite3.c's --tier1 -c 1.2% more cycles
+for 0.22% more instructions: tier1_emit_cfg_problem read every node's
+selection pattern twice more, for the ties and for the returned values,
+after its first pass had read it. That pass now records each value's tied
+operands and the node a return reads (tier1_select_ties is inlined), and
+the values' pass maps them to values of the value's class. The
+straight-line consumer gives the allocator its hints only where some
+result has a tie; otherwise the copy without hints runs. Every object of
+sqlite3.c and of Lua 5.4.8 is byte-identical to the previous commit's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQsNkec1N4WJ65hh6VB
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/tier1_emit.c     |  5 +++-
+ src/buster/compiler/tier1_emit_cfg.c | 38 ++++++++++++++++++----------
+ src/buster/compiler/tier1_select.c   |  2 +-
+ 3 files changed, 30 insertions(+), 15 deletions(-)
+
+diff --git a/src/buster/compiler/tier1_emit.c b/src/buster/compiler/tier1_emit.c
+index 8d2ca8d..daae706 100644
+--- a/src/buster/compiler/tier1_emit.c
++++ b/src/buster/compiler/tier1_emit.c
+@@ -505,6 +505,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+         // (#2685, tier1_select_ties), which leaves out the copy into the destination: the hinted allocator's value hints.
+         // A returned value takes none (tier1_select_returned).
+         tier1_select_returned(plan, returned);
++        bool tied = false;
+         for (uint32_t interval = 0; interval < source->count; interval += 1)
+         {
+             const uint32_t value = source->values[interval];
+@@ -520,6 +521,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+                 const bool ends = tied != BUSTER_IR_NONE && source->ends[tied] == source->starts[interval];
+                 hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
+             }
++            tied |= hints[interval] != BUSTER_IR_NONE;
+         }
+         // The prospective spill set contains every selected definition. Its alignment determines frame-base
+         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
+@@ -556,7 +558,8 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+             prepared.allocation.use_required = required;
+             prepared.allocation.use_count = use;
+             prepared.allocation.rematerializable = interval_remat;
+-            prepared.allocation.hint_values = hints;
++            // Without a tie, no hints: the allocator's copy without them is the cheaper.
++            prepared.allocation.hint_values = tied ? hints : 0;
+         }
+     }
+     if (error == TIER1_EMIT_OK)
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 4ce7526..31ba9f4 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -512,6 +512,14 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+     bool ok = error == TIER1_EMIT_OK;
+     uint32_t* node_values = ok ? ir_allocate(output, count, 4, &ok) : 0;
+     uint32_t* value_nodes = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
++    // Two per value: the operands whose registers its definition may take (#2685, Tier1CfgInput.ties), first as nodes;
++    // and each node a return reads.
++    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)count + 2, 4, &ok) : 0;
++    uint8_t* returned = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
++    if (ok)
++    {
++        memset(returned, 0, (uint64_t)count + 1);
++    }
+     uint32_t value_count = 0;
+     uint32_t phi_count = 0;
+     uint32_t operand_count = 0;
+@@ -548,6 +556,18 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+         floats += floating && value;
+         node_values[node] = value ? value_count : BUSTER_TIER1_CFG_NONE;
+         value_nodes[value_count] = node;
++        // The operands whose registers a two-address result may take (#2685, tier1_select_ties), as nodes, and the node a
++        // return reads (tier1_select_returned's rule), from the pattern this pass reads anyway: the values' pass maps them.
++        uint32_t first = BUSTER_IR_NONE;
++        uint32_t second = BUSTER_IR_NONE;
++        if (value)
++        {
++            tier1_select_ties(plan, node, &first, &second);
++        }
++        ties[2 * (uint64_t)value_count] = first;
++        ties[2 * (uint64_t)value_count + 1] = second;
++        const uint32_t read = plan->covered[node] == 0 && plan->patterns[node].rule == TIER1_RULE_RETURN ? plan->patterns[node].values[0] : BUSTER_IR_NONE;
++        returned[read < count ? read : count] = read < count;
+         value_count += value;
+         phi_count += function->op[node] == IR_PHI && !x87;
+         operand_count += function->op[node] == IR_PHI && !x87 ? function->b[node] : 0;
+@@ -759,8 +779,6 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+     uint32_t* phi_values = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
+     uint32_t* phi_operand_offsets = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
+     uint32_t* phi_operands = ok ? ir_allocate(output, (uint64_t)operand_count + 1, 4, &ok) : 0;
+-    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)value_count + 2, 4, &ok) : 0;
+-    uint8_t* returned = ok ? ir_allocate(scratch, (uint64_t)count + 1, 1, &ok) : 0;
+     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
+     if (error == TIER1_EMIT_OK)
+     {
+@@ -803,7 +821,6 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+             }
+         }
+         predecessor_offsets[blocks] = edge;
+-        tier1_select_returned(plan, returned);
+         // Values: a parameter in its incoming register from position 0 (its definition's interval alone: elsewhere it may
+         // be in any register), a phi at its block's start, any other at its node's definition phase.
+         use_offsets[0] = 0;
+@@ -826,18 +843,13 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+             // reads this column).
+             rematerializable[v] = classes[v] != BUSTER_TIER1_ALLOCATE_GPR ? 0 : marks[node];
+             use_offsets[v + 1] = op != IR_PHI;
+-            // The operands whose registers a two-address result may take (#2685, tier1_select_ties): values of its class.
+-            // A returned value takes none (tier1_select_returned).
+-            uint32_t first = BUSTER_IR_NONE;
+-            uint32_t second = BUSTER_IR_NONE;
+-            if (op != IR_PHI && !parameter && returned[node] == 0)
++            // The ties as values of v's class; a returned value takes none (tier1_select_returned).
++            for (uint32_t k = 0; k < 2; k += 1)
+             {
+-                tier1_select_ties(plan, node, &first, &second);
++                const uint32_t tied = ties[2 * (uint64_t)v + k];
++                const uint32_t tied_value = tied < count && returned[node] == 0 ? node_values[tied] : BUSTER_TIER1_CFG_NONE;
++                ties[2 * (uint64_t)v + k] = tied_value != BUSTER_TIER1_CFG_NONE && node_classes[tied] == classes[v] ? tied_value : BUSTER_TIER1_CFG_NONE;
+             }
+-            const uint32_t first_value = first < count ? node_values[first] : BUSTER_TIER1_CFG_NONE;
+-            const uint32_t second_value = second < count ? node_values[second] : BUSTER_TIER1_CFG_NONE;
+-            ties[2 * (uint64_t)v] = first_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[first_value]] == classes[v] ? first_value : BUSTER_TIER1_CFG_NONE;
+-            ties[2 * (uint64_t)v + 1] = second_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[second_value]] == classes[v] ? second_value : BUSTER_TIER1_CFG_NONE;
+         }
+         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
+         // definition's own use. A parameter's, at position 0, precedes every other use of it.
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index 3fd8958..8211b3e 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -7451,7 +7451,7 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
+ // first place; a select's value where its condition holds not, which its cmov keeps, and the other one, which it inverts
+ // to keep. BUSTER_IR_NONE where it has none. The allocator takes such a register only where the operand's interval ends
+ // there: an operand live past the node holds it.
+-static void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
++static inline __attribute__((always_inline)) void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
+ {
+     const Tier1SelectPattern* pattern = &plan->patterns[node];
+     const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : pattern->rule;
+-- 
+2.43.0
+

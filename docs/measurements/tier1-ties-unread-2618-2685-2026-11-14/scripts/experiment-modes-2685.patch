@@ -1,0 +1,456 @@
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index e5ba32c..3de548a 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -1293,11 +1293,38 @@ static __attribute__((always_inline)) inline void ir_typed_spill(IrTypedSink* si
+ // A GLOBAL_ADDRESS entry whose address the function may compute once (#2574): a U64 of a symbol accessed directly, as
+ // a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for. The tables' own entries
+ // stay theirs.
++#include <stdlib.h>
++#include <stdio.h>
++// EXPERIMENT #2685: BUSTER_X2685's bits select variants.
++static uint32_t ir_x2685(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2685");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
++// Experiment (bit 4): a take that a load reads at a constant offset, or a store of a one-entry value writes.
++static bool ir_typed_folds(const Tier0Function* input, uint32_t entry)
++{
++    uint32_t next = entry + 1;
++    const bool offset = next + 1 < input->count && input->kinds[next] == BUSTER_TYPED_CONST && input->kinds[next + 1] == BUSTER_TYPED_PTR_ADD;
++    next += offset ? 2 : 0;
++    const bool load = next < input->count && input->kinds[next] == BUSTER_TYPED_LOAD && input->classes[next] < BUSTER_TYPED_CLASS_LIMIT;
++    const uint8_t value = next < input->count ? input->kinds[next] : 0;
++    const uint8_t after = next + 1 < input->count ? input->kinds[next + 1] : 0;
++    const bool store = (value == BUSTER_TYPED_CONST || value == BUSTER_TYPED_LOCAL) && (after == BUSTER_TYPED_STORE || after == BUSTER_TYPED_SET) && input->classes[next + 1] < BUSTER_TYPED_CLASS_LIMIT;
++    return (ir_x2685() & 20) != 0 && (load || store);
++}
++
+ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
+ {
+     const uint64_t symbol = input->values[entry];
+     return input->kinds[entry] == BUSTER_TYPED_GLOBAL_ADDRESS && input->classes[entry] == BUSTER_TYPED_CLASS_U64 && symbol != 0 && symbol <= UINT32_MAX &&
+-           (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT));
++           (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT)) && ((ir_x2685() & 4) == 0 || !ir_typed_folds(input, entry)) && (ir_x2685() & 8) == 0;
+ }
+ 
+ // The symbols whose addresses the function computes once (IrTypedPlan.hoisted_symbols, #2574): each one the function
+@@ -1372,7 +1399,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+                     counts[slot] = 0;
+                     numbers[slot] = UINT32_MAX;
+                 }
+-                counts[slot] += pass == 0;
++                counts[slot] += pass == 0 && ((ir_x2685() & 16) == 0 || !ir_typed_folds(input, i));
+                 if (pass == 1 && counts[slot] >= 2 && numbers[slot] == UINT32_MAX)
+                 {
+                     numbers[slot] = plan->hoisted_count;
+@@ -1782,6 +1809,58 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+             }
+         }
+     }
++    // Experiment (bit 32): the walks' successors, where a block of one constant goes into a block that branches on it
++    // first (the alternative of a && or ||, into its truth value's join), go to the branch's choice for it.
++    uint32_t* walks = successors;
++    if (predecessors != 0 && (ir_x2685() & 32) != 0)
++    {
++        walks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)edges + 1);
++        ok = ok && walks != 0;
++        for (uint32_t n = 0; walks != 0 && n < nodes; n += 1)
++        {
++            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
++            {
++                walks[e] = successors[e];
++            }
++            const bool source = n != 0 && n <= plan->block_count;
++            const uint32_t first = source ? plan->block_firsts[n - 1] : 0;
++            const uint32_t end = source ? plan->block_firsts[n] : 0;
++            const bool constant = source && end > first && input->kinds[first] == BUSTER_TYPED_CONST &&
++                                  (end - first == 1 || (end - first == 2 && input->kinds[first + 1] == BUSTER_TYPED_JUMP_VALUE)) && offsets[n + 1] - offsets[n] == 1;
++            const uint32_t join = constant ? successors[offsets[n]] : 0;
++            const bool joined = join != 0 && join <= plan->block_count && plan->block_firsts[join - 1] < plan->block_firsts[join];
++            // The join's truth test: its branch, or a comparison with zero first (NE keeps the value's truth, EQ inverts it).
++            const uint32_t at = joined ? plan->block_firsts[join - 1] : 0;
++            const bool compared = joined && plan->block_firsts[join] - at >= 3 && input->kinds[at] == BUSTER_TYPED_CONST && input->values[at] == 0 &&
++                                  (input->kinds[at + 1] == BUSTER_TYPED_NE || input->kinds[at + 1] == BUSTER_TYPED_EQ);
++            const uint32_t branch = compared ? at + 2 : at;
++            const uint8_t kind = joined ? input->kinds[branch] : 0;
++            const bool truth = compared && input->kinds[at + 1] == BUSTER_TYPED_EQ ? input->values[first] == 0 : input->values[first] != 0;
++            if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE)
++            {
++                const bool taken = (kind == BUSTER_TYPED_BRANCH_FALSE) == !truth;
++                walks[offsets[n]] = taken ? plan->entry_blocks[(uint32_t)input->values[branch]] + 1 : join + 1;
++            }
++        }
++    }
++    if (predecessors != 0 && (ir_x2685() & 4096) != 0)
++    {
++        for (uint32_t n = 0; n < nodes; n += 1)
++        {
++            fprintf(stderr, "X2685 node %u:", n);
++            const bool source = n != 0 && n <= plan->block_count;
++            for (uint32_t i = source ? plan->block_firsts[n - 1] : 0; source && i < plan->block_firsts[n]; i += 1)
++            {
++                fprintf(stderr, " %u/%llu", input->kinds[i], (unsigned long long)input->values[i]);
++            }
++            fprintf(stderr, " ->");
++            for (uint32_t e = offsets[n]; e < offsets[n + 1]; e += 1)
++            {
++                fprintf(stderr, " %u(%u)", successors[e], walks[e]);
++            }
++            fprintf(stderr, " depth %u\n", source ? plan->stack_depths[n - 1] : 0);
++        }
++    }
+     const uint64_t mark = output->length;
+     Dominators dominators = { 0 };
+     DominatorStatus analyzed = DOMINATOR_INVALID;
+@@ -1854,13 +1933,13 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+         bool kept = !placed;
+         if (placed)
+         {
+-            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, successors, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
++            const IrTypedPlace whole = ir_typed_place(plan, &dominators, offsets, walks, calls, order, firsts[k], firsts[k + 1], 2, reads, seen, stack, marks, k + 1, &walk, &budget, &loop_budget);
+             const uint32_t top = whole.ancestor;
+             kept = whole.kept;
+             place = whole.place;
+             // Kept at P outside loops for a take in a loop where some path from P takes it nowhere: its takes' groups, by
+             // the child of P that dominates each, are placed each as a symbol is.
+-            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, successors, reads, seen, stack, top, k + 1, &budget))
++            if (kept && whole.loop == BUSTER_DOMINATOR_NONE && whole.looped && !ir_typed_anticipated(offsets, walks, reads, seen, stack, top, k + 1, &budget))
+             {
+                 for (uint32_t x = firsts[k]; x < firsts[k + 1]; x += 1)
+                 {
+@@ -1916,7 +1995,7 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+                         next += 1;
+                     }
+                     walk += 1;
+-                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, successors, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
++                    const IrTypedPlace part = children[group] != BUSTER_DOMINATOR_NONE ? ir_typed_place(plan, &dominators, offsets, walks, calls, order, group, next, 2, reads, seen, stack, marks, walk, &walk, &budget, &loop_budget) :
+                                                                                           (IrTypedPlace){ .ancestor = BUSTER_DOMINATOR_NONE, .loop = BUSTER_DOMINATOR_NONE };
+                     below = !part.kept || (part.place != top && ir_typed_dominated(&dominators, top, part.place));
+                     if (below && part.kept)
+@@ -1962,7 +2041,8 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan,
+     {
+         const uint32_t k = numbers[take_definitions[t]];
+         // A take in an unreachable block stays its own.
+-        const bool own = k == BUSTER_DOMINATOR_NONE || (placed && dominators.rpo_index[plan->entry_blocks[plan->hoisted_entries[t]] + 1] == BUSTER_DOMINATOR_NONE);
++        const bool own = k == BUSTER_DOMINATOR_NONE || (placed && dominators.rpo_index[plan->entry_blocks[plan->hoisted_entries[t]] + 1] == BUSTER_DOMINATOR_NONE) ||
++                         ((ir_x2685() & 16) != 0 && ir_typed_folds(input, plan->hoisted_entries[t]));
+         plan->hoisted_entries[takes] = plan->hoisted_entries[t];
+         plan->hoisted_numbers[takes] = k;
+         takes += !own;
+diff --git a/src/buster/compiler/tier1_allocate.c b/src/buster/compiler/tier1_allocate.c
+index 51d8bb6..5abb31d 100644
+--- a/src/buster/compiler/tier1_allocate.c
++++ b/src/buster/compiler/tier1_allocate.c
+@@ -19,6 +19,8 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
+ #include "host_isa.h"
+ 
+ #define BUSTER_TIER1_ALLOCATE_MAX_INTERVALS (1u << 20)
+@@ -446,6 +448,41 @@ static void tier1_allocation_finish_piece(Tier1AllocationPieces* pieces, uint32_
+     }
+ }
+ 
++// EXPERIMENT #2685: BUSTER_X2685's bits select variants.
++static uint32_t tier1_allocate_x2685(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2685");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
++// An eviction of `victim` at `position`, to `kind`: its register fragment up to there, and from there `kind`. Experiment
++// (bit 128): a recomputable value that has held its register since its interval's start, which no use read there, is
++// recomputed from its start instead, so that its block's entry, and the edges into it, keep no register for it.
++static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t chosen);
++
++static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1AllocationPieces* pieces, uint32_t victim, uint32_t position, uint32_t* begins, uint8_t* kinds, uint8_t* regs, uint8_t kind, uint32_t site, uint8_t* last)
++{
++    const uint32_t first = columns->use_offsets[victim] < columns->use_offsets[victim + 1] ? columns->use_positions[columns->use_offsets[victim]] : UINT32_MAX;
++    const bool unread = (tier1_allocate_x2685() & site) != 0 && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && kinds[victim] == BUSTER_TIER1_ALLOCATE_REGISTER &&
++                        begins[victim] == columns->starts[victim] && first >= position;
++    if (!unread)
++    {
++        tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
++        begins[victim] = position;
++    }
++    else if ((tier1_allocate_x2685() & 2048) != 0)
++    {
++        tier1_allocation_note_opening(columns, last, victim, UINT32_MAX);
++    }
++    kinds[victim] = kind;
++    regs[victim] = UINT8_MAX;
++}
++
+ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint32_t interval, uint32_t position)
+ {
+     bool required = input->flags != 0 && (input->flags[interval] & BUSTER_TIER1_ALLOCATE_REQUIRED) != 0;
+@@ -530,10 +567,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 const uint32_t victim = active[r];
+                 if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
+                 {
+-                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
+-                    begins[victim] = position;
+-                    kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+-                    regs[victim] = UINT8_MAX;
++                    tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, 512, last);
+                     active[r] = UINT32_MAX;
+                     occupied &= ~(1u << r);
+                 }
+@@ -587,10 +621,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 tier1_allocation_yields(&columns, active, occupied, follow, position))
+             {
+                 const uint32_t victim = active[follow];
+-                tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
+-                begins[victim] = position;
+-                kinds[victim] = BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+-                regs[victim] = UINT8_MAX;
++                tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, 256, last);
+                 active[follow] = UINT32_MAX;
+                 occupied &= ~(1u << follow);
+             }
+@@ -599,7 +630,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+             const uint32_t open = free & ~(starting ? claimed & ~mine : 0);
+             claimed &= ~mine;
+             uint32_t chosen = UINT32_MAX;
+-            if (idle && (!recomputed || open == 0))
++            if (idle && (!recomputed || open == 0 || ((tier1_allocate_x2685() & 8192) != 0 && follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT)))
+             {
+             }
+             else if (open != 0 || (free != 0 && required))
+@@ -643,10 +674,7 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 if (chosen != UINT32_MAX)
+                 {
+                     const uint32_t victim = active[chosen];
+-                    tier1_allocation_finish_piece(pieces, victim, begins[victim], position, kinds[victim], regs[victim]);
+-                    begins[victim] = position;
+-                    kinds[victim] = tier1_allocation_spill_kind(&columns, victim);
+-                    regs[victim] = UINT8_MAX;
++                    tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, tier1_allocation_spill_kind(&columns, victim), 128, last);
+                     if (last != 0 && kinds[victim] == BUSTER_TIER1_ALLOCATE_SPILL)
+                     {
+                         last[columns.values[victim]] = BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+@@ -657,6 +685,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                     valid = false;
+                 }
+             }
++            if ((tier1_allocate_x2685() & 4096) != 0)
++            {
++                fprintf(stderr, "X2685 scan: interval %u value %u %s at %u [%u,%u) required %d recipe %d idle %d follow %d free %x claimed %x chosen %d\n", interval, columns.values[interval], use_event ? "use" : "start", position, columns.starts[interval], columns.ends[interval], (int)required, (int)recomputed, (int)idle, (int)follow, free, claimed, (int)chosen);
++            }
+             if (!use_event)
+             {
+                 tier1_allocation_note_opening(&columns, last, interval, chosen);
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 786839f..e73a5af 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -142,6 +142,10 @@ struct Tier1CfgInput
+     const uint32_t* clobbers;
+     uint32_t clobber_count;
+     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
++    // Optional (#2685), two per value: the values whose registers its definition may take, in preference order, or
++    // BUSTER_TIER1_CFG_NONE: a two-address instruction's first operand, which its destination is otherwise a copy of. The
++    // definition's interval takes one where that operand's interval ends at the definition, and nothing else hints it.
++    const uint32_t* ties;
+     uint32_t block_count;
+     uint32_t edge_count;
+     uint32_t value_count;
+@@ -1030,6 +1034,40 @@ static void tier1_cfg_operand_targets(const Tier1CfgInput* input, const uint32_t
+     }
+ }
+ 
++// A definition that nothing else hints, of a value tied to an operand whose interval ends there (#2685), takes that
++// interval's closing register: a two-address instruction's result in its dying first operand's register, which leaves
++// out the copy into the destination. An operand live past the definition holds its register, so no hint names it.
++static uint32_t tier1_cfg_x2685(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2685");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
++static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
++{
++    for (uint32_t v = 0; (tier1_cfg_x2685() & 1) == 0 && input->ties != 0 && v < input->value_count; v += 1)
++    {
++        const uint32_t definition = input->definitions[v];
++        const uint32_t own = input->ties[2 * (uint64_t)v] != BUSTER_TIER1_CFG_NONE && definition != 0 ? tier1_cfg_piece_at(pieces, offsets[v], offsets[v + 1], definition) : BUSTER_TIER1_CFG_NONE;
++        const bool open = own != BUSTER_TIER1_CFG_NONE && pieces->starts[own] == definition && pieces->hints[own] == BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
++        for (uint32_t k = 0; open && k < 2; k += 1)
++        {
++            const uint32_t tied = input->ties[2 * (uint64_t)v + k];
++            const uint32_t taken = tied != BUSTER_TIER1_CFG_NONE && tied != v ? tier1_cfg_piece_at(pieces, offsets[tied], offsets[tied + 1], definition - 1) : BUSTER_TIER1_CFG_NONE;
++            if (taken != BUSTER_TIER1_CFG_NONE && pieces->ends[taken] == definition && pieces->classes[taken] == pieces->classes[own] && pieces->hints[own] == BUSTER_TIER1_CFG_NONE)
++            {
++                pieces->hints[own] = tied;
++                pieces->hint_intervals[own] = taken | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
++            }
++        }
++    }
++}
++
+ // Wider values first, so a partial block column keeps the ones whose binary search is deepest (#1399). Descending:
+ // narrow values' zero keys sort last, where the install loop's `keys[i] != 0` stops.
+ static int tier1_cfg_lookup_order(const void* left, const void* right)
+@@ -1924,6 +1962,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                 use_offsets[count] = input->use_count;
+                 tier1_cfg_phi_exits(input, chosen, candidate.value_interval_offsets, &pieces);
+                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
++                tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
+                 candidate.block_starts = input->block_starts;
+                 candidate.block_count = input->block_count;
+                 candidate.intervals = (Tier1AllocationInput){
+diff --git a/src/buster/compiler/tier1_emit.c b/src/buster/compiler/tier1_emit.c
+index 22622bf..3c45ace 100644
+--- a/src/buster/compiler/tier1_emit.c
++++ b/src/buster/compiler/tier1_emit.c
+@@ -409,6 +409,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+     uint32_t* positions = 0;
+     uint8_t* required = 0;
+     uint8_t* interval_remat = 0;
++    uint32_t* hints = 0;
+     uint8_t* operations = 0;
+     uint8_t* widths = 0;
+     uint8_t* flags = 0;
+@@ -429,6 +430,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+         positions = ir_allocate(output, uses, 4, &ok);
+         required = ir_allocate(output, uses, 1, &ok);
+         interval_remat = ir_allocate(output, source->count, 1, &ok);
++        hints = ir_allocate(output, (uint64_t)source->count + 1, 4, &ok);
+         operations = ir_allocate(output, count, 1, &ok);
+         widths = ir_allocate(output, count, 1, &ok);
+         flags = ir_allocate(output, count, 1, &ok);
+@@ -497,6 +499,24 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+             }
+         }
+         offsets[source->count] = use;
++        // A two-address result takes its first operand's register where that operand's interval ends at its definition
++        // (#2685, tier1_select_ties), which leaves out the copy into the destination: the hinted allocator's value hints.
++        for (uint32_t interval = 0; interval < source->count; interval += 1)
++        {
++            const uint32_t value = source->values[interval];
++            uint32_t ties[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
++            if ((tier1_cfg_x2685() & 64) == 0 || !tier1_select_returned(plan, value))
++            {
++                tier1_select_ties(plan, value, &ties[0], &ties[1]);
++            }
++            hints[interval] = BUSTER_IR_NONE;
++            for (uint32_t k = 0; k < 2; k += 1)
++            {
++                const uint32_t tied = ties[k] < count ? prepared.value_intervals[ties[k]] : BUSTER_IR_NONE;
++                const bool ends = tied != BUSTER_IR_NONE && source->ends[tied] == source->starts[interval];
++                hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
++            }
++        }
+         // The prospective spill set contains every selected definition. Its alignment determines frame-base
+         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
+         const Tier1FrameRequest prospective = {
+@@ -532,6 +552,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
+             prepared.allocation.use_required = required;
+             prepared.allocation.use_count = use;
+             prepared.allocation.rematerializable = interval_remat;
++            prepared.allocation.hint_values = (tier1_cfg_x2685() & 2) == 0 ? hints : 0;
+         }
+     }
+     if (error == TIER1_EMIT_OK)
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 37dd49e..e937bfd 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -759,6 +759,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+     uint32_t* phi_values = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
+     uint32_t* phi_operand_offsets = ok ? ir_allocate(output, (uint64_t)phi_count + 1, 4, &ok) : 0;
+     uint32_t* phi_operands = ok ? ir_allocate(output, (uint64_t)operand_count + 1, 4, &ok) : 0;
++    uint32_t* ties = ok ? ir_allocate(output, 2 * (uint64_t)value_count + 2, 4, &ok) : 0;
+     error = ok || error != TIER1_EMIT_OK ? error : TIER1_EMIT_MEMORY;
+     if (error == TIER1_EMIT_OK)
+     {
+@@ -823,6 +824,17 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+             // reads this column).
+             rematerializable[v] = classes[v] != BUSTER_TIER1_ALLOCATE_GPR ? 0 : marks[node];
+             use_offsets[v + 1] = op != IR_PHI;
++            // The operands whose registers a two-address result may take (#2685, tier1_select_ties): values of its class.
++            uint32_t first = BUSTER_IR_NONE;
++            uint32_t second = BUSTER_IR_NONE;
++            if (op != IR_PHI && !parameter && ((tier1_cfg_x2685() & 64) == 0 || !tier1_select_returned(plan, node)))
++            {
++                tier1_select_ties(plan, node, &first, &second);
++            }
++            const uint32_t first_value = first < count ? node_values[first] : BUSTER_TIER1_CFG_NONE;
++            const uint32_t second_value = second < count ? node_values[second] : BUSTER_TIER1_CFG_NONE;
++            ties[2 * (uint64_t)v] = first_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[first_value]] == classes[v] ? first_value : BUSTER_TIER1_CFG_NONE;
++            ties[2 * (uint64_t)v + 1] = second_value != BUSTER_TIER1_CFG_NONE && node_classes[value_nodes[second_value]] == classes[v] ? second_value : BUSTER_TIER1_CFG_NONE;
+         }
+         // Uses by value, counted then filled in node order, which is position order: a node's effective uses, then its
+         // definition's own use. A parameter's, at position 0, precedes every other use of it.
+@@ -975,6 +987,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const
+             .phi_values = phi_values,
+             .phi_operand_offsets = phi_operand_offsets,
+             .phi_operands = phi_operands,
++            .ties = ties,
+             .block_count = blocks,
+             .edge_count = edges,
+             .value_count = value_count,
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index f619e2e..cde4d6c 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -7234,6 +7234,38 @@ static X86Instruction tier1_select_memory_holes(const Tier1SelectPattern* patter
+     return result;
+ }
+ 
++// The operands whose register a node's result may take to save the copy its records make into the destination otherwise
++// (#2685): a two-address instruction's first operand, and a commutative one's second, which its records swap into the
++// first place; a select's value where its condition holds not, which its cmov keeps, and the other one, which it inverts
++// to keep. BUSTER_IR_NONE where it has none. The allocator takes such a register only where the operand's interval ends
++// there: an operand live past the node holds it.
++static void tier1_select_ties(const Tier1SelectPlan* plan, uint32_t node, uint32_t* first, uint32_t* second)
++{
++    const Tier1SelectPattern* pattern = &plan->patterns[node];
++    const uint8_t rule = plan->covered[node] ? TIER1_RULE_NONE : pattern->rule;
++    const bool multiply = pattern->operation == X86_OPERATION_IMUL && rule == TIER1_RULE_IMMEDIATE;
++    const bool swapped = (rule == TIER1_RULE_REGISTER && tier1_select_commutative((X86Operation)pattern->operation)) ||
++                         (rule == TIER1_RULE_FLOAT_BINARY && (((uint32_t)pattern->operation & 3) == IR_FADD - IR_FADD || ((uint32_t)pattern->operation & 3) == IR_FMUL - IR_FADD));
++    const bool left = rule == TIER1_RULE_COPY || (rule == TIER1_RULE_TRUNCATE && pattern->width == 4) || rule == TIER1_RULE_UNARY || rule == TIER1_RULE_REGISTER ||
++                      (rule == TIER1_RULE_IMMEDIATE && !multiply) || rule == TIER1_RULE_MULTIPLY_SHIFT || rule == TIER1_RULE_LOAD_OPERAND ||
++                      (rule == TIER1_RULE_INTRINSIC && pattern->immediate == BUSTER_IR_INTRINSIC_BSWAP) || rule == TIER1_RULE_FLOAT_COPY || rule == TIER1_RULE_FLOAT_BINARY ||
++                      rule == TIER1_RULE_FLOAT_LOAD_OPERAND || rule == TIER1_RULE_FLOAT_NEGATE;
++    const bool select = rule == TIER1_RULE_SELECT;
++    *first = left ? pattern->values[0] : select ? pattern->values[2] : BUSTER_IR_NONE;
++    *second = swapped ? pattern->values[1] : select ? pattern->values[1] : BUSTER_IR_NONE;
++}
++
++// Experiment: whether a return reads node's value (a scan of the function's returns).
++static bool tier1_select_returned(const Tier1SelectPlan* plan, uint32_t node)
++{
++    bool returned = false;
++    for (uint32_t n = node + 1; !returned && n < plan->function->instruction_count; n += 1)
++    {
++        returned = plan->covered[n] == 0 && plan->patterns[n].rule == TIER1_RULE_RETURN && plan->patterns[n].values[0] == node;
++    }
++    return returned;
++}
++
+ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const uint8_t* registers, uint32_t node)
+ {
+     const Tier1SelectPattern* pattern = &plan->patterns[node];
