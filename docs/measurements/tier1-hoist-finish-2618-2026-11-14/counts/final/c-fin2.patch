@@ -1,0 +1,621 @@
+diff --git a/src/buster/compiler/ir_lower.c b/src/buster/compiler/ir_lower.c
+index c80201b..bf3459e 100644
+--- a/src/buster/compiler/ir_lower.c
++++ b/src/buster/compiler/ir_lower.c
+@@ -1431,10 +1431,21 @@ static bool ir_typed_folds(const Tier0Function* input, uint32_t entry)
+ // A GLOBAL_ADDRESS entry whose address the function may compute once (#2574): a U64 of a symbol accessed directly, as
+ // a jump table's base is (tier0_jump_tables_valid), which no load or TLS access is moved for, and whose access Tier 1
+ // doesn't fold (ir_typed_folds). The tables' own entries stay theirs.
++static uint32_t ir_x2618(void)
++{
++    static int mode = -1;
++    if (mode < 0)
++    {
++        const char* text = getenv("BUSTER_X2618");
++        mode = text != 0 ? atoi(text) : 0;
++    }
++    return (uint32_t)mode;
++}
++
+ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
+ {
+     const uint64_t symbol = input->values[entry];
+-    return input->kinds[entry] == BUSTER_TYPED_GLOBAL_ADDRESS && input->classes[entry] == BUSTER_TYPED_CLASS_U64 && symbol != 0 && symbol <= UINT32_MAX &&
++    return (ir_x2618() & 1) == 0 && input->kinds[entry] == BUSTER_TYPED_GLOBAL_ADDRESS && input->classes[entry] == BUSTER_TYPED_CLASS_U64 && symbol != 0 && symbol <= UINT32_MAX &&
+            (input->symbol_access == 0 || (symbol < input->symbol_count && input->symbol_access[symbol] == BUSTER_TIER0_ACCESS_DIRECT)) && !ir_typed_folds(input, entry);
+ }
+ 
+@@ -1447,6 +1458,58 @@ static bool ir_typed_hoistable(const Tier0Function* input, uint32_t entry)
+ // are listed once, counted by an open-addressed table of the symbols, sized to twice the takes, and numbered in entry
+ // order, which the emission reads with a cursor as it does the tables'. Scalar past the compare: it visits the takes
+ // alone, a few in a hundred of a function's entries. False where the arena is short.
++// Whether a take's address is only a call's argument (#2618): the first entry that pops it, within its block, is a call
++// taking it as an argument, not as an indirect call's target. The take's own lea puts the address in the argument's
++// register; a hoisted address would be a move there, no fewer instructions, for a register held from its definition on
++// (sqlite3Select's sqlite3ExprListDeleteGeneric, passed to sqlite3ParserAddCleanup on rare paths, was computed on each
++// call). The walk follows the stack's depth over the entries that push and pop without leaving the block, and stops at
++// anything else; a long argument list past a few dozen entries keeps the take hoistable. Scalar: a few entries per take.
++static bool ir_typed_argument(const Tier0Function* input, const IrTypedPlan* plan, uint32_t entry)
++{
++    uint32_t depth = 1;
++    bool argument = false;
++    bool walking = true;
++    for (uint32_t j = entry + 1; walking && j < input->count && j < entry + 48; j += 1)
++    {
++        const uint8_t kind = input->kinds[j];
++        const bool leader = plan->block_firsts[plan->entry_blocks[j]] == j;
++        const bool push = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_GLOBAL ||
++                          kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_FRAME_ADDRESS;
++        const bool unary = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT || kind == BUSTER_TYPED_CONVERT ||
++                           kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL;
++        const bool popping = kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_SET_GLOBAL || kind == BUSTER_TYPED_DISCARD;
++        const bool binary = kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_GE);
++        if (leader)
++        {
++            walking = false;
++        }
++        else if (push)
++        {
++            depth += 1;
++        }
++        else if (unary)
++        {
++            walking = depth > 1;
++        }
++        else if (popping)
++        {
++            walking = depth > 1;
++            depth -= 1;
++        }
++        else if (binary)
++        {
++            walking = depth > 2;
++            depth -= kind == BUSTER_TYPED_SET ? 2 : 1;
++        }
++        else
++        {
++            argument = kind == BUSTER_TYPED_CALL && depth <= input->call_argument_counts[input->values[j]];
++            walking = false;
++        }
++    }
++    return argument;
++}
++
+ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
+ {
+     const uint32_t* tables = input->table_addresses;
+@@ -1468,7 +1531,7 @@ static bool ir_typed_plan_hoisted(const Tier0Function* input, IrTypedPlan* plan,
+         {
+             table += 1;
+         }
+-        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i))
++        if (input->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS && ir_typed_hoistable(input, i) && !(table < table_count && tables[table] == i) && !ir_typed_argument(input, plan, i))
+         {
+             taken[addresses] = i;
+             addresses += 1;
+diff --git a/src/buster/compiler/ir_lower_test.c b/src/buster/compiler/ir_lower_test.c
+index 87a58ca..9c778aa 100644
+--- a/src/buster/compiler/ir_lower_test.c
++++ b/src/buster/compiler/ir_lower_test.c
+@@ -4240,6 +4240,67 @@ static void ir_lower_test_hoisted_folds(IrLowerTestTally* tally)
+     arena_release(&execution);
+ }
+ 
++// #2618: a take whose address is only a call's argument stays its own (ir_typed_argument). Five streams of one block, each
++// a take at entry 0: (a) the second argument of a call of two; (b) an address an addition consumes, then loaded; (c) an
++// indirect call's target, under its arguments; (d) a value a call of one doesn't reach, two entries above its argument;
++// (e) a take its block ends at. Only (a) is an argument.
++static void ir_lower_test_arguments(IrLowerTestTally* tally)
++{
++    static const uint8_t kinds[][4] = {
++        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN },
++        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CONST, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_LOAD },
++        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN, BUSTER_TYPED_NONE },
++        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL },
++        { BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN },
++    };
++    static const uint64_t values[][4] = {
++        { 1, 0, 0, 0 },
++        { 1, 8, 1, 0 },
++        { 1, 1, 0, 0 },
++        { 1, 0, 0, 0 },
++        { 1, 0, 0, 0 },
++    };
++    // Calls 0 and 1: two arguments, then none (the indirect call's, whose target is under them).
++    static const uint32_t argument_counts[] = { 2, 0 };
++    static const uint32_t one[] = { 1 };
++    static const uint32_t block_firsts[][3] = {
++        { 0, 4, 4 },
++        { 0, 4, 4 },
++        { 0, 4, 4 },
++        { 0, 4, 4 },
++        { 0, 1, 4 },
++    };
++    static const uint32_t entry_blocks[][5] = {
++        { 0, 0, 0, 0, 1 },
++        { 0, 0, 0, 0, 1 },
++        { 0, 0, 0, 0, 1 },
++        { 0, 0, 0, 0, 1 },
++        { 0, 1, 1, 1, 2 },
++    };
++    static const bool expected[] = { true, false, false, false, false };
++    const char* names[] = {
++        "a take a call passes as an argument is an argument",
++        "a take an addition consumes is no argument",
++        "an indirect call's target is no argument",
++        "a take below a call's arguments is no argument",
++        "a take its block ends at is no argument",
++    };
++    for (uint32_t which = 0; which < BUSTER_ARRAY_LENGTH(names); which += 1)
++    {
++        const Tier0Function input = {
++            .kinds = kinds[which],
++            .values = values[which],
++            .count = 4,
++            .call_argument_counts = which == 3 ? one : argument_counts,
++        };
++        IrTypedPlan plan = { 0 };
++        plan.block_firsts = (uint32_t*)block_firsts[which];
++        plan.entry_blocks = (uint32_t*)entry_blocks[which];
++        plan.block_count = which == 4 ? 2 : 1;
++        ir_lower_test_expect(tally, ir_typed_argument(&input, &plan, 0) == expected[which], names[which], 0, which);
++    }
++}
++
+ // #2618: a symbol defined at P for its takes in a loop, where some path from P takes it nowhere, splits into groups by the
+ // child of P (in the dominator tree) that dominates each take, where no path takes two groups' or P is a value join. Three
+ // functions of p (local 0), with r (local 1) and j (local 2), each taking one symbol twice in each of its groups:
+@@ -5325,6 +5386,7 @@ static int run_ir_lower_tests(int argc, char** argv)
+         ir_lower_test_hoisted_loops(&tally);
+         ir_lower_test_hoisted_split(&tally);
+         ir_lower_test_hoisted_folds(&tally);
++        ir_lower_test_arguments(&tally);
+         ir_lower_test_depth_types(&tally);
+         ir_lower_test_guarded(&tally);
+         const Tier0ProgramOptions values =
+diff --git a/src/buster/compiler/tier1_allocate.c b/src/buster/compiler/tier1_allocate.c
+index b6329e1..7e56896 100644
+--- a/src/buster/compiler/tier1_allocate.c
++++ b/src/buster/compiler/tier1_allocate.c
+@@ -46,6 +46,14 @@
+ #define BUSTER_TIER1_ALLOCATE_MEMORY_HINT 0xfeu
+ // In a hint_intervals entry: the named interval's register at its end, rather than at its start (#2553).
+ #define BUSTER_TIER1_ALLOCATE_HINT_EXIT 0x80000000u
++// A closing's byte in `last` while its interval, evicted by a clobber, is out of its register (#2735): noted as no hint at
++// its end, not as BUSTER_TIER1_ALLOCATE_MEMORY_HINT. Never a register or a hint a reader takes.
++#define BUSTER_TIER1_ALLOCATE_CLOBBERED 0xfdu
++// A join_starts byte (#2618): the block's predecessors, saturating, and whether one is laid out at or after the block.
++#define BUSTER_TIER1_ALLOCATE_JOIN_COUNT 0x7fu
++#define BUSTER_TIER1_ALLOCATE_JOIN_LATER 0x80u
++// The predecessors from which an unused recipe rests at a block's entry (#2618).
++#define BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM 3
+ 
+ typedef struct Tier1FixedIntervals Tier1FixedIntervals;
+ struct Tier1FixedIntervals
+@@ -80,6 +88,16 @@ struct Tier1AllocationInput
+     // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
+     // its operand's at a predecessor's.
+     const uint32_t* hint_intervals;
++    // Optional, with hint_intervals (#2618): per interval, a join_starts byte where it enters its block from another one,
++    // the block's predecessor count and BUSTER_TIER1_ALLOCATE_JOIN_LATER; 0 for any other interval. A recipe the
++    // interval doesn't use rests at a join of BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM or more predecessors where its hint is
++    // no predecessor's closing or a predecessor comes later, rather than make each edge recompute it: sqlite3VdbeExec's
++    // dispatch join, laid out after its first successor.
++    const uint8_t* join_starts;
++    // Optional, per value (#2618): nonzero for a recipe that keeps its register at a join all the same, one read on every
++    // iteration of its loops (Lua's disptab, a switch's table in a loop), which every predecessor already holds. Recipes
++    // rest at joins only with this column: without it, which recipes those are isn't known.
++    const uint8_t* resident_values;
+     const uint8_t* rematerializable;
+     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
+     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
+@@ -280,7 +298,8 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns,
+     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
+     // after its body takes the register the body gave its phi, not its operand's.
+     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
+-    return opening != UINT8_MAX ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
++    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
++    return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+ }
+ 
+ static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t chosen)
+@@ -292,11 +311,14 @@ static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, u
+ }
+ 
+ // An interval's register as it ends, or none (#2553): read by the intervals that name it with BUSTER_TIER1_ALLOCATE_HINT_EXIT.
++// An interval a clobber last evicted ends with no hint (#2735): the range after it shouldn't wait in memory because a call
++// took the register, as luaV_execute's dispatch join would for disptab, which a handler's call evicts.
+ static void tier1_allocation_note_closing(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t held)
+ {
+     if (last != 0 && columns->hint_intervals != 0)
+     {
+-        last[(uint64_t)columns->value_count + 1 + columns->count + interval] = held < 32 ? (uint8_t)held : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
++        uint8_t* closing = &last[(uint64_t)columns->value_count + 1 + columns->count + interval];
++        *closing = held < 32 ? (uint8_t)held : *closing == BUSTER_TIER1_ALLOCATE_CLOBBERED ? UINT8_MAX : BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
+     }
+ }
+ 
+@@ -468,6 +490,12 @@ static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1All
+     }
+     kinds[victim] = kind;
+     regs[victim] = UINT8_MAX;
++    // A later eviction is no clobber's: the closing is noted as usual unless the clobber site marks it again.
++    uint8_t* closing = last != 0 && columns->hint_intervals != 0 ? &last[(uint64_t)columns->value_count + 1 + columns->count + victim] : 0;
++    if (closing != 0 && *closing == BUSTER_TIER1_ALLOCATE_CLOBBERED)
++    {
++        *closing = UINT8_MAX;
++    }
+ }
+ 
+ static bool tier1_allocation_required_at(const Tier1AllocationInput* input, uint32_t interval, uint32_t position)
+@@ -555,6 +583,10 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+                 if (tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(&columns, victim, position))
+                 {
+                     tier1_allocation_evict(&columns, pieces, victim, position, begins, kinds, regs, last, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, false);
++                    if (last != 0 && columns.hint_intervals != 0)
++                    {
++                        last[(uint64_t)columns.value_count + 1 + columns.count + victim] = BUSTER_TIER1_ALLOCATE_CLOBBERED;
++                    }
+                     active[r] = UINT32_MAX;
+                     occupied &= ~(1u << r);
+                 }
+@@ -619,12 +651,22 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+             claimed &= ~mine;
+             uint32_t chosen = UINT32_MAX;
+             // An unused recipe rests where its hint is another range's opening that took no register: the convention of the
+-            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body). A range's
+-            // closing after a call took the register isn't one: luaV_execute's dispatch join then took no register for
+-            // disptab, which every dispatch recomputed.
++            // block it takes, whose edges then recompute nothing for it (hexFunc's header, after its body).
+             const uint32_t named = last != 0 && columns.hint_intervals != 0 ? columns.hint_intervals[interval] : UINT32_MAX;
+-            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
+-            if (idle && (!recomputed || open == 0 || rests))
++            const bool opening = named == UINT32_MAX || (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) == 0;
++            const bool rests = follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT && named != UINT32_MAX && opening;
++            // A recipe whose hint is memory, which its last range ended in, takes no register at its start either: it
++            // waits for its first read, where a required use gives it one. jsonLookupStep's sqlite3CtypeMap, read past a
++            // loop, otherwise took the register the loop's frame address followed and made each iteration swap them
++            // (#2618). A closing a call emptied gives no such hint (tier1_allocation_note_closing).
++            const bool waits = recomputed && !use_event && !required && follow == BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
++            // An unused recipe entering a join rests there too, unless it is resident or its hint is a closing of the
++            // predecessors before it, which already hold it (lua_getmetatable's zero): each edge would recompute it, where
++            // its reads after the join, on fewer paths, do (sqlite3VdbeExec's frame address at its dispatch join).
++            const uint8_t join = columns.join_starts != 0 ? columns.join_starts[interval] : 0;
++            const bool resident = columns.resident_values == 0 || columns.resident_values[columns.values[interval]] != 0;
++            const bool joins = (join & BUSTER_TIER1_ALLOCATE_JOIN_COUNT) >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && !resident && (opening || (join & BUSTER_TIER1_ALLOCATE_JOIN_LATER) != 0);
++            if ((idle && (!recomputed || open == 0 || rests || joins)) || waits)
+             {
+             }
+             else if (open != 0 || (free != 0 && required))
+diff --git a/src/buster/compiler/tier1_allocate_hints_test.c b/src/buster/compiler/tier1_allocate_hints_test.c
+index 993d2d7..53a301e 100644
+--- a/src/buster/compiler/tier1_allocate_hints_test.c
++++ b/src/buster/compiler/tier1_allocate_hints_test.c
+@@ -383,11 +383,167 @@ static void tier1_allocation_test_unread(Tier1AllocationTestTally* tally, Arena*
+     }
+ }
+ 
++// The allocation's outputs against one fixture's expected fragments, on the three paths alike.
++static void tier1_allocation_test_fragments(Tier1AllocationTestTally* tally, Arena* arena, const Tier1AllocationInput* input, uint32_t fragments, const uint8_t* kinds, const uint8_t* registers, const uint32_t* starts, const char* name)
++{
++    Tier1Allocation outputs[3] = { { 0 } };
++    bool produced = true;
++    const uint64_t saved = arena->length;
++    for (uint32_t path = 0; path < 3; path += 1)
++    {
++        const Tier1AllocationError error = path == 0 ? tier1_allocate(input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(input, arena, &outputs[path]) : tier1_allocate_scan_reference(input, arena, &outputs[path]);
++        const Tier1Allocation* output = &outputs[path];
++        bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments && output->spill_count == 0 && tier1_allocation_verify(input, output) && tier1_allocation_test_occupancy(input, output);
++        valid = valid && memcmp(output->kinds, kinds, fragments) == 0 && memcmp(output->registers, registers, fragments) == 0 && memcmp(output->starts, starts, fragments * sizeof(uint32_t)) == 0;
++        produced &= error == TIER1_ALLOCATION_OK;
++        tier1_allocation_test_expect(tally, valid, name);
++        if (!valid && error == TIER1_ALLOCATION_OK)
++        {
++            fprintf(stderr, "  path %u: %u fragments:", path, output->fragment_count);
++            for (uint32_t f = 0; f < output->fragment_count; f += 1)
++            {
++                fprintf(stderr, " %u@%u/r%u", output->kinds[f], output->starts[f], output->registers[f]);
++            }
++            fprintf(stderr, "\n");
++        }
++    }
++    tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(input, &outputs[0], &outputs[1]), "both production paths place a recipe's later range alike");
++    arena_pop_to(arena, saved);
++}
++
++// A recipe's range after a closing that held no register (#2618, #2735), with one register: recipe value 0 takes r0 at 0,
++// read at 1, and leaves it at 4; its range at 10, named by the first one's closing, is read at 15. Where a required value
++// 1 took r0 at 4, the closing is memory, and the range at 10 waits for its read at 15 (tier1_allocation's `waits`, where
++// it took r0 at once before). Where a call's clobber at 4 took it, and value 1 then r0, the closing gives no hint
++// (tier1_allocation_note_closing), and the range at 10 takes r0, value 0's last register, at its start.
++static void tier1_allocation_test_waits(Tier1AllocationTestTally* tally, Arena* arena)
++{
++    const uint32_t starts[3] = { 0, 4, 10 };
++    const uint32_t ends[3] = { 10, 8, 20 };
++    const uint32_t values[3] = { 0, 1, 0 };
++    const uint32_t allowed[3] = { 1, 1, 1 };
++    const uint8_t classes[3] = { 0 };
++    const uint8_t rematerializable[3] = { 1, 0, 1 };
++    const uint32_t hint_intervals[3] = { UINT32_MAX, UINT32_MAX, 0 | BUSTER_TIER1_ALLOCATE_HINT_EXIT };
++    const uint32_t use_offsets[4] = { 0, 1, 2, 3 };
++    const uint32_t use_positions[3] = { 1, 4, 15 };
++    const uint32_t clobbers[1] = { 4 };
++    const uint8_t required[3] = { 1, 1, 1 };
++    const uint8_t kinds[][5] = {
++        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER },
++        { BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REMATERIALIZE, BUSTER_TIER1_ALLOCATE_REGISTER, BUSTER_TIER1_ALLOCATE_REGISTER },
++    };
++    const uint8_t registers[][5] = {
++        { 0, UINT8_MAX, 0, UINT8_MAX, 0 },
++        { 0, UINT8_MAX, 0, 0 },
++    };
++    const uint32_t fragment_starts[][5] = {
++        { 0, 4, 4, 10, 15 },
++        { 0, 4, 4, 10 },
++    };
++    const uint32_t fragments[2] = { 5, 4 };
++    const char* names[2] = {
++        "a recipe's range after a closing in memory waits for its read",
++        "a recipe's range after a closing a call emptied takes its register at its start",
++    };
++    for (uint32_t fixture = 0; fixture < 2; fixture += 1)
++    {
++        const Tier1AllocationInput input = {
++            .starts = starts,
++            .ends = ends,
++            .values = values,
++            .allowed_registers = allowed,
++            .classes = classes,
++            .hint_values = values,
++            .hint_intervals = hint_intervals,
++            .rematerializable = rematerializable,
++            .use_offsets = use_offsets,
++            .use_positions = use_positions,
++            .use_required = required,
++            .use_count = 3,
++            .clobbers = fixture == 1 ? clobbers : 0,
++            .clobber_count = fixture == 1 ? 1 : 0,
++            .clobber_registers = { fixture == 1 ? 1u : 0u },
++            .count = 3,
++            .value_count = 2,
++            .position_count = 20,
++            .registers = { 1 },
++        };
++        tier1_allocation_test_fragments(tally, arena, &input, fragments[fixture], kinds[fixture], registers[fixture], fragment_starts[fixture], names[fixture]);
++    }
++}
++
++// An unused recipe entering a join (#2618, Tier1AllocationInput.join_starts), with two registers of which the ranges may
++// take r0: recipe value 0 takes r0 at 0, read at 1, and holds it to its end at 10; its range at 10 isn't read. Named by the
++// first range's closing, it takes r0 there unless it enters a join of three that a predecessor reaches from later, where it
++// rests; resident, it takes r0 all the same, and without the resident column, which recipes keep theirs isn't known: it
++// takes r0 too. Named by the first range's opening, it rests at a join of three alone.
++static void tier1_allocation_test_joins(Tier1AllocationTestTally* tally, Arena* arena)
++{
++    const uint32_t starts[2] = { 0, 10 };
++    const uint32_t ends[2] = { 10, 20 };
++    const uint32_t values[2] = { 0, 0 };
++    const uint32_t allowed[2] = { 1, 1 };
++    const uint8_t classes[2] = { 0 };
++    const uint8_t rematerializable[2] = { 1, 1 };
++    const uint32_t closing[2] = { UINT32_MAX, 0 | BUSTER_TIER1_ALLOCATE_HINT_EXIT };
++    const uint32_t opening[2] = { UINT32_MAX, 0 };
++    const uint32_t use_offsets[3] = { 0, 1, 1 };
++    const uint32_t use_positions[1] = { 1 };
++    const uint8_t required[1] = { 1 };
++    const uint8_t no_join[2] = { 0, 0 };
++    const uint8_t earlier[2] = { 0, 3 };
++    const uint8_t later[2] = { 0, 3 | BUSTER_TIER1_ALLOCATE_JOIN_LATER };
++    const uint8_t resident[1] = { 1 };
++    const uint8_t transient[1] = { 0 };
++    const uint8_t* joins[] = { no_join, earlier, later, later, earlier, later };
++    const uint32_t* named[] = { closing, closing, closing, closing, opening, closing };
++    const uint8_t* residents[] = { transient, transient, transient, resident, transient, 0 };
++    const bool rests[] = { false, false, true, false, true, false };
++    const char* names[] = {
++        "an unused recipe outside a join takes its closing's register",
++        "an unused recipe entering a join its predecessors precede takes its closing's register",
++        "an unused recipe entering a join a later predecessor reaches rests",
++        "a resident recipe entering a join takes its closing's register",
++        "an unused recipe entering a join named by an opening rests",
++        "without the resident column, a recipe entering a join takes its closing's register",
++    };
++    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(names); fixture += 1)
++    {
++        const Tier1AllocationInput input = {
++            .starts = starts,
++            .ends = ends,
++            .values = values,
++            .allowed_registers = allowed,
++            .classes = classes,
++            .hint_values = values,
++            .hint_intervals = named[fixture],
++            .join_starts = joins[fixture],
++            .resident_values = residents[fixture],
++            .rematerializable = rematerializable,
++            .use_offsets = use_offsets,
++            .use_positions = use_positions,
++            .use_required = required,
++            .use_count = 1,
++            .count = 2,
++            .value_count = 1,
++            .position_count = 20,
++            .registers = { 3 },
++        };
++        const uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REGISTER, rests[fixture] ? BUSTER_TIER1_ALLOCATE_REMATERIALIZE : BUSTER_TIER1_ALLOCATE_REGISTER };
++        const uint8_t registers[2] = { 0, rests[fixture] ? UINT8_MAX : 0 };
++        const uint32_t fragment_starts[2] = { 0, 10 };
++        tier1_allocation_test_fragments(tally, arena, &input, 2, kinds, registers, fragment_starts, names[fixture]);
++    }
++}
++
+ static void tier1_allocation_test_hints(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
+ {
+     tier1_allocation_test_idle(tally, arena);
+     tier1_allocation_test_yields(tally, arena);
+     tier1_allocation_test_unread(tally, arena);
++    tier1_allocation_test_waits(tally, arena);
++    tier1_allocation_test_joins(tally, arena);
+     // Two values, each with two adjacent ranges: a [0, 10) [10, 20), b [2, 10) [10, 20). Ends come first in input
+     // order, a's then b's, so the level rule gives a's second range b's register and b's a's.
+     {
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 9637cd5..e1ad133 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -144,6 +144,9 @@ struct Tier1CfgInput
+     const uint32_t* clobbers;
+     uint32_t clobber_count;
+     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
++    // Optional (#2618), per value: nonzero for a recipe that keeps its register at a join (Tier1AllocationInput's
++    // resident_values), the preferred problem's #2574 hot recipes.
++    const uint8_t* resident;
+     // Optional (#2685), two per value: the values whose registers its definition may take, in preference order, or
+     // BUSTER_TIER1_CFG_NONE: a two-address instruction's first operand, which its destination is otherwise a copy of. The
+     // definition's interval takes one where that operand's interval ends at the definition, and nothing else hints it.
+@@ -960,6 +963,7 @@ struct Tier1CfgPieces
+     uint8_t* remat;
+     uint32_t* hints;
+     uint32_t* hint_intervals;
++    uint8_t* joins;
+     uint32_t* split_positions;
+     uint32_t* split_values;
+     uint64_t count;
+@@ -983,6 +987,7 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input,
+         pieces->remat[i] = input->rematerializable != 0 ? input->rematerializable[v] : 0;
+         pieces->hints[i] = hint;
+         pieces->hint_intervals[i] = earlier;
++        pieces->joins[i] = 0;
+         if (split)
+         {
+             pieces->split_positions[pieces->splits] = start;
+@@ -1958,10 +1963,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                 pieces.remat = ready ? arena_push(output, interval_count + 1, 1) : 0;
+                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.hint_intervals = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
++                pieces.joins = ready ? arena_push(output, interval_count + 1, 1) : 0;
+                 use_offsets = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+-                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
++                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.joins != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                 pieces.fill = ready;
+             }
+             if (ready)
+@@ -2045,6 +2051,19 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                                     const bool anchored = !modeled && anchor != BUSTER_TIER1_CFG_NONE && exit_stamps[anchor] == v + 1;
+                                     const uint32_t earlier = modeled ? entry_pieces[model] : anchored ? exit_pieces[anchor] | BUSTER_TIER1_ALLOCATE_HINT_EXIT : BUSTER_TIER1_CFG_NONE;
+                                     tier1_cfg_piece(&pieces, input, v, from, to, piece == 0 && defined_here ? phi_hints[v] : v, earlier, piece != 0);
++                                    // A range entering a join (#2618): its predecessor count, and whether one is laid
++                                    // out at or after it, for an unused recipe to rest there (Tier1AllocationInput.join_starts).
++                                    const uint32_t incoming = entry && !defined_here ? input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] : 0;
++                                    uint32_t later = 0;
++                                    for (uint32_t q = input->predecessor_offsets[b]; pieces.fill && incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM && q < input->predecessor_offsets[b + 1]; q += 1)
++                                    {
++                                        later += input->predecessors[q] >= b;
++                                    }
++                                    if (pieces.fill && incoming >= BUSTER_TIER1_ALLOCATE_JOIN_MINIMUM)
++                                    {
++                                        const uint32_t count = incoming < BUSTER_TIER1_ALLOCATE_JOIN_COUNT ? incoming : BUSTER_TIER1_ALLOCATE_JOIN_COUNT;
++                                        pieces.joins[pieces.count - 1] = (uint8_t)(count | (later != 0 ? BUSTER_TIER1_ALLOCATE_JOIN_LATER : 0));
++                                    }
+                                 }
+                                 if (entry)
+                                 {
+@@ -2100,6 +2119,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                     .classes = pieces.classes,
+                     .hint_values = pieces.hints,
+                     .hint_intervals = pieces.hint_intervals,
++                    .join_starts = pieces.joins,
+                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
+                     .use_offsets = use_offsets,
+                     .use_positions = input->use_positions,
+@@ -2170,6 +2190,7 @@ static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1Allocat
+     }
+     intervals->clobbers = input->clobbers;
+     intervals->clobber_count = input->clobber_count;
++    intervals->resident_values = input->resident;
+ }
+ 
+ // One assignment (3. above) over the prepared intervals, for `input`'s registers and `column`, the registers each
+@@ -2592,6 +2613,8 @@ struct Tier1CfgPreference
+     const uint32_t* clobbers;
+     uint32_t clobber_count;
+     uint32_t clobber_registers[BUSTER_TIER1_ALLOCATE_CLASSES];
++    // The preferred problem's resident recipes (Tier1CfgInput.resident, #2618), or none.
++    const uint8_t* resident;
+     bool verdict;
+ };
+ 
+@@ -2608,6 +2631,7 @@ static __attribute__((unused)) bool tier1_cfg_preferred(const Tier1CfgInput* inp
+     preferred->allowed_registers = allowed;
+     preferred->clobbers = preference->clobbers;
+     preferred->clobber_count = preference->clobber_count;
++    preferred->resident = preference->resident;
+     for (uint32_t c = 0; c < BUSTER_TIER1_ALLOCATE_CLASSES; c += 1)
+     {
+         preferred->registers[c] = preference->registers[c];
+@@ -2769,7 +2793,8 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
+            tier1_cfg_same_column(a->allowed_registers, b->allowed_registers, count * 4) && tier1_cfg_same_column(a->classes, b->classes, count);
+     differs = same || differs != 0 ? differs : 2;
+     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
+-           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
++           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count) &&
++           tier1_cfg_same_column(a->join_starts, b->join_starts, count) && tier1_cfg_same_column(a->resident_values, b->resident_values, input->value_count);
+     differs = same || differs != 0 ? differs : 3;
+     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
+     differs = same || differs != 0 ? differs : 4;
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index aa6bd3d..d7b029a 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -4626,6 +4626,25 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
+             hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
+         }
+     }
++    // The recipes read on every iteration of the loops they are live across, whether they cross a call or not, keep their
++    // registers at joins in the preferred problem (#2618, Tier1AllocationInput.resident_values): every handler's tail
++    // holds Lua's disptab already, and every case's a switch's table in a loop (tier1_table_loop's), where an unused recipe
++    // read in a few of a loop's blocks rests. The problem rests recipes at joins only with this column, which the plain
++    // problem hasn't. A pass of its own: tier1_emit_cfg_hot_recipes's budget is shared by its candidates.
++    uint8_t* resident = ok ? ir_allocate(output, (uint64_t)input->value_count + 1, 1, &ok) : 0;
++    uint32_t recipes = 0;
++    for (uint32_t v = 0; resident != 0 && v < input->value_count; v += 1)
++    {
++        uint32_t root = v;
++        while (parents[root] != root)
++        {
++            root = parents[root];
++        }
++        const bool recipe = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && root == v && input->rematerializable != 0 && input->rematerializable[v] != 0;
++        resident[v] = recipe ? 2 : 0;
++        recipes += recipe;
++    }
++    ok = ok && (recipes == 0 || tier1_emit_cfg_hot_recipes(input, intervals, recipes, output, scratch, resident));
+     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
+     // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
+     uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
+@@ -4641,6 +4660,7 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
+             0,
+             0,
+         },
++        .resident = resident,
+     };
+     *preferred = allowed;
+     *crossing = count;
+@@ -4711,6 +4731,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
+             clobbering.clobber_registers[1],
+             clobbering.clobber_registers[2],
+         },
++        .resident = clobbering.resident,
+     };
+     error = error == TIER1_EMIT_OK && moved != 0 && !tier1_cfg_preferred(input, &preference, output, &problem) ? TIER1_EMIT_MEMORY : error;
+     if (error == TIER1_EMIT_OK && moved != 0)
+@@ -4771,6 +4792,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
+                 clobbering.clobber_registers[1],
+                 clobbering.clobber_registers[2],
+             },
++            .resident = clobbering.resident,
+             .verdict = true,
+         };
+         const uint32_t* preferred = 0;
