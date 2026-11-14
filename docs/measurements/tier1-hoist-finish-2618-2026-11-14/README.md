@@ -9,7 +9,7 @@ On main `56b5864`, the hoisted symbol addresses against the same compiler with n
 - **An unused recipe entering a join rests there** (three or more predecessors; a hint that is no predecessor's closing, or a predecessor laid out later), unless it is read on every iteration of its loops (`resident_values`), in the preferred problem alone.
 - **A take whose address is only a call's argument stays its own** (`ir_typed_argument`).
 
-Buster's `docs/tier1-allocation.md` ("Recipes that wait, and recipes at joins") and `docs/ir.md` describe them.
+After main took #2734 (`45cd9ae`), the pull request merged it and left the joins' rule out (section 5): the head keeps the other three. Buster's `docs/tier1-allocation.md` ("Recipes that wait") and `docs/ir.md` describe them.
 
 ## Revisions
 
@@ -18,7 +18,12 @@ Buster's `docs/tier1-allocation.md` ("Recipes that wait, and recipes at joins") 
 | main | `56b5864ba3c641ee6c22efea18f8e77a32f7bab2` | the base of the pull request and of the counts |
 | first head | `5fb02a53f1df7fe4a94710fd700f37d7e39f61c4` | the four rules, the joins' in every problem |
 | second head | `2b0c01c0bd1d13f2aa4ab4ca8ef20c9301831bdb` | the joins' rule where the resident recipes are known alone |
-| head | `fe9bcd7400b55f33cf8dc5f3e301811a22fc620e` | the joins' analyses once per block and per function, the same code out |
+| third head | `fe9bcd7400b55f33cf8dc5f3e301811a22fc620e` | the joins' analyses once per block and per function, the same code out |
+| main after #2734 | `45cd9aec77c4885f55da8f2ee9cace69fa394a85` | the base of section 5 |
+| merge | `d7fc674` | main `45cd9ae` merged, both sides kept; section 5's experiment tree |
+| head | `531c6b13408f4423e473fcab176d944a7c35b8bb` | the joins' rule left out: `tier1_cfg.c`, `tier1_emit_cfg.c` and `tier1_hot_recipes_test.c` main's again |
+
+In sections 1 to 4, main is `56b5864` and "the head" is the third head, `fe9bcd7`; section 5 measures the head, `531c6b1`, against main `45cd9ae`.
 | experiment base | `5f3c7d4` (`experiment/base.txt`) | the experiment's tree; the files the change touches are the same at `56b5864` |
 
 ## Inputs and tools
@@ -105,6 +110,27 @@ The first head failed CI's `test-checker-driver` part 1 of 8 (`tier1_table_loop`
 
 **Reading.** Lua is faster at every link order (0.980 to 0.994), its scripts `calls` 0.978, `closures` 0.987, `strings` 0.989, `arithmetic` 0.990, `tables` 1.001; speedtest1's 0.63% fewer instructions don't resolve in its time over the layouts. `9700x-2b0c01c/` is the same run for the second head, whose code is the head's: Lua 0.9921 (0.9836 to 1.0007), speedtest1 0.9955 (0.9909 to 1.0002), and its compile 1.16% more time for 1.65% more instructions, which the head's cheaper analyses bring to 0.48% and 0.35%.
 
+## 5. After #2734: the joins' rule left out
+
+Main's #2734 (`45cd9ae`: `tier1_cfg_carried_unread`, `alternate_intervals`) proves after the allocation that no block reads an unused recipe's register, and enters the value as its recipe, which takes most of the dispatch joins' recomputations the joins' rule took. The merge (`d7fc674`) kept both; `counts/merge/` measures it with `experiment-modes-merge.patch`'s switches (`c-m`; `BUSTER_X2618`: 1 no hoist, 8 no clobber mark, 32 no waiting, 512 waiting for used ranges alone, 64 no joins' rule, 256 no argument takes; 128 with `BUSTER_X2618_N` traces one function's scan, `c-mt`), main's compiler (`c-main3`) and the head's (`c-final`, which `531c6b1`'s Release build gives byte for byte, and whose objects `c-m` gives with 64). `totals.tsv` has every run; the variable's bytes in the environment move a few thousand instructions between `c-final` and `c-m` with 64. All runs verify speedtest1's hash and Lua's five outputs.
+
+| Build | speedtest1 | Lua's scripts |
+| --- | ---: | ---: |
+| main `45cd9ae` | 2,626,659,235 | 4,773.9 M |
+| head | 2,625,623,908 (−0.04%) | 4,768.9 M (−0.10%) |
+| head, no hoist (65) | 2,633,837,253 | 4,812.5 M |
+| head and the joins' rule (0) | 2,625,035,708 | 4,769.1 M |
+| head without the clobber's closing (72) | 2,625,338,106 | 4,821.2 M |
+| head without waiting (96) | 2,626,645,724 | 4,771.4 M |
+| head, used ranges alone waiting (576) | 2,625,920,346 | 4,769.3 M |
+| head without the argument takes (320) | 2,625,632,902 | 4,768.9 M |
+
+- **Main to head** (`st-main-to-head.txt`, `lua-main-to-head.txt`, functions changing by 1,000 or more): `sqlite3BtreeInsert` −1.10 M, `sqlite3_str_vappendf` −0.57 M, `instrFunc` −0.35 M, `jsonLookupStep` −0.29 M; `str_gsub` −3.45 M, `str_format` −0.72 M, `match` −0.72 M, `luaV_execute` −0.12 M, and no Lua function more. Losses: `sqlite3VdbeExec` +2.44 M, `checkTreePage` +0.12 M, `sqlite3Select` +64 K, `whereLoopAddBtreeIndex` +51 K. Unused recipes waiting costs `sqlite3VdbeExec` its 2.44 M (`st-used-waits-to-all-waits.txt`): the registers they left take other values, and a handler's block swaps two loaded values through `r11` on its way to the join. With used ranges alone waiting, `sqlite3VdbeExec` runs as on main, but `speedtest1_run` keeps 70 K against no hoist and speedtest1 runs 0.30 M more in all.
+- **No hoist to hoist** (`st-nohoist-to-hoist.txt`, `lua-nohoist-to-hoist.txt`, 65 to 64): speedtest1 −8.2 M, Lua −43.6 M, every Lua function the same or fewer, `jsonLookupStep` (−2.6 K) and `speedtest1_run` (−70 K) too. speedtest1's that run more: `jsonParseFree` +126 K (the inlining shift; +2.4 K with its callers), `sqlite3GetInt32` +5.4 K and `sqlite3HashClear` +2.1 K (addresses defined before a loop that mostly runs no iteration), `sqlite3_randomness` +3.7 K, `sqlite3PcacheTruncate` +2.8 K, `jsonInsertIntoBlob` +1.3 K, and every other function under 1 K.
+- **The joins' rule** (`st-without-to-with-joins.txt`, `lua-without-to-with-joins.txt`, 64 to 0) gains speedtest1 0.58 M and costs Lua 0.2 M on this main, against 12.9 M and 14.4 M on `56b5864`; it needs #2574's hot test over every recipe with an unused range entering a join and a byte per range, and it costs `sqlite3Parser` its 1.2 M. The head leaves it out.
+
+The 9700X's run of main `45cd9ae` against the head (`scripts/run2618h.sh`, `run2618g.sh` with its paths renamed) follows in `9700x-531c6b1/`.
+
 ## Tests
 
-The head's Release and AddressSanitizer builds pass the 23 commands (`tests-release.txt`, of the second head; `tests-asan.txt`, of the head) and `test-checker-driver`'s part 1 of 8 (`driver-part1-head.txt`, `driver-part1-head-asan.txt`); the first head's compiler fails that part's two checks (`driver-part1-first-head.txt`).
+The head's Release and AddressSanitizer builds pass the 23 commands (`tests-release.txt`, of the second head; `tests-asan.txt`, of the head) and `test-checker-driver`'s part 1 of 8 (`driver-part1-head.txt`, `driver-part1-head-asan.txt`); the first head's compiler fails that part's two checks (`driver-part1-first-head.txt`). The head `531c6b1`'s Release build passes the 23 commands (`tests-release-531c6b1.txt`) and the driver's part 1 of 8, 34,931 checks (`driver-part1-531c6b1.txt`).
