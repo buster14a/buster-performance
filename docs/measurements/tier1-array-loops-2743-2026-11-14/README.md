@@ -2,7 +2,7 @@
 
 This is the evidence for [buster#2743](https://github.com/buster14a/buster/issues/2743): what `--tier1` makes of loops over arrays, beside clang and gcc, and what its back end makes of the same loops once they are written with vector operations. By Droid in David's directed session (Factory Droid session `5d5f629c-b881-4d75-9267-35567e982c31`, model Fable 5.2 as Droid reports it), from the claim in [comment 6878234250](https://github.com/buster14a/buster/issues/2743#issuecomment-6878234250).
 
-**Status of this record:** the sources, the scripts and the local runs are here, and so are the 9700X's runs of the two intrinsic loops that [buster#2750](https://github.com/buster14a/buster/issues/2750) came from ("By-value vectors' copies below AVX-512" below). The 9700X's completed x86-64 matrix for the 25 kernels is under `9700x/x86-64/`; the shorter znver5 run is added under `9700x/znver5/` when it ends. Until then, the explicit-vector and znver4 kernel numbers are from the session's desktop and are preliminary.
+**Status of this record:** the sources, the scripts and the local runs are here, and so are the 9700X's runs of the two intrinsic loops that [buster#2750](https://github.com/buster14a/buster/issues/2750) came from ("By-value vectors' copies below AVX-512" below). The 9700X's completed x86-64 matrix for the 25 kernels is under `9700x/x86-64/`; the shorter znver5 run is in progress under `9700x/znver5/` (currently the completed Tier 1 and clang -O2 builds). Until its explicit-vector rows arrive, those and the znver4 kernel numbers are from the session's desktop and are preliminary.
 
 ## Revisions and toolchains
 
@@ -80,8 +80,10 @@ case; no alignment rule is inferred from them.
 The original long script was stopped after this x86-64 matrix because the
 shared lock was heavily contended. `scripts/9700x/measure-short.sh` runs the
 smaller znver5 set as linked (placement 0): Tier 1 and clang -O2 on the C and
-explicit-vector units, plus clang's two scalar configurations. Its output is
-added under `9700x/znver5/` when complete. The other builds in
+explicit-vector units, plus clang's two scalar configurations. Its partial output is
+under `9700x/znver5/`: the first two builds give `--tier1` / clang -O2 a
+geometric mean of 17.50 on the 19 vectorized loops and 1.09 on the controls,
+with matching digests. The other builds in
 `scripts/9700x/measure.sh` were not run on the 9700X.
 ## Local results (Zen 4, preliminary)
 
