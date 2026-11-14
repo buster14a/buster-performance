@@ -2,7 +2,7 @@
 
 This is the evidence for [buster#2743](https://github.com/buster14a/buster/issues/2743): what `--tier1` makes of loops over arrays, beside clang and gcc, and what its back end makes of the same loops once they are written with vector operations. By Droid in David's directed session (Factory Droid session `5d5f629c-b881-4d75-9267-35567e982c31`, model Fable 5.2 as Droid reports it), from the claim in [comment 6878234250](https://github.com/buster14a/buster/issues/2743#issuecomment-6878234250).
 
-**Status of this record:** the sources, the scripts and the local runs are here, and so are the 9700X's runs of the two intrinsic loops that [buster#2750](https://github.com/buster14a/buster/issues/2750) came from ("By-value vectors' copies below AVX-512" below). The 9700X's completed x86-64 matrix for the 25 kernels is under `9700x/x86-64/`; the shorter znver5 run is in progress under `9700x/znver5/` (currently the completed Tier 1 and clang -O2 builds). Until its explicit-vector rows arrive, those and the znver4 kernel numbers are from the session's desktop and are preliminary.
+**Status of this record:** the sources, the scripts and the local runs are here, and so are the 9700X's runs of the two intrinsic loops that [buster#2750](https://github.com/buster14a/buster/issues/2750) came from ("By-value vectors' copies below AVX-512" below). The 9700X's completed x86-64 matrix for the 25 kernels is under `9700x/x86-64/`, and its completed six-build znver5 short run, including both explicit-vector builds, is under `9700x/znver5/`. The desktop znver4 numbers remain preliminary; the other 9700X build configurations were not run.
 
 ## Revisions and toolchains
 
@@ -78,13 +78,41 @@ innermost loop crosses a 64-byte line. The raw placement tables retain every
 case; no alignment rule is inferred from them.
 
 The original long script was stopped after this x86-64 matrix because the
-shared lock was heavily contended. `scripts/9700x/measure-short.sh` runs the
-smaller znver5 set as linked (placement 0): Tier 1 and clang -O2 on the C and
-explicit-vector units, plus clang's two scalar configurations. Its partial output is
-under `9700x/znver5/`: the first two builds give `--tier1` / clang -O2 a
-geometric mean of 17.50 on the 19 vectorized loops and 1.09 on the controls,
-with matching digests. The other builds in
+shared lock was heavily contended. `scripts/9700x/measure-short.sh` then ran
+the smaller znver5 set as linked (placement 0). The other builds in
 `scripts/9700x/measure.sh` were not run on the 9700X.
+
+## 9700X kernel results (znver5)
+
+`9700x/znver5/results.txt` is the completed short run: 150 timing lines and
+150 `perf` lines for six builds, all with status 0 and matching digests.
+`tables.md` has every kernel's times and counters. Tier 1 compiled all 25 C
+kernels and all 85 functions in the explicit-vector unit with no fallback;
+both reports and all object hashes are kept beside the results.
+
+| Ratio | 19 vectorized loops | 6 scalar controls |
+| --- | ---: | ---: |
+| `--tier1` / clang -O2 | 17.50 | 1.09 |
+| `--tier1` / clang -O2, no vectorizer or unroller | 1.14 | 1.03 |
+| clang without vectorizer or unroller / clang without vectorizer | 1.64 | 1.05 |
+| clang without vectorizer / clang -O2 | 9.36 | 1.01 |
+
+The explicit-vector probe confirms both the main opportunity and a remaining
+back-end gap. Geometrically over its 12 kernels:
+
+| Ratio | Geometric mean |
+| --- | ---: |
+| Tier 1 on the C loop / Tier 1 on explicit vector source | 13.53 |
+| Tier 1 on vector source / clang -O2 on the C loop | 1.34 |
+| Tier 1 on vector source / clang -O2 on the same vector source | 1.29 |
+
+So a loop vectorizer addresses the dominant missing piece, but its output is
+not automatically at clang's speed: the existing back end is 1.29 times clang
+on identical vector source in this probe. Clamp (2.51), maximum (1.84) and
+byte sum (1.68) are among the larger same-source residuals; the individual
+rows are in `tables.md`. This run used placement 0 only, so it makes no new
+placement claim.
+
 ## Local results (Zen 4, preliminary)
 
 `local/x86-64/run1.txt` (12 builds), `local/x86-64/pad-*.txt` (two builds at four placements, with `p*-*.loops`), `local/znver4/run1.txt` (four builds); `tables.md` beside each is `tables.py`'s output. The runs weren't pinned and the desktop wasn't idle.
