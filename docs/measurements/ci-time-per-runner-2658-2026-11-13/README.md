@@ -92,6 +92,33 @@ when they share: in a full shard they would cost about half the CPU-seconds they
 failed 10 of its 142 arena checks (its pages' advice and huge pages, `shared-7-shared/stdout.txt`), which pass alone; CI
 gives it every CPU.
 
+## After buster#2660: its merge-queue candidate (`queue-after/`)
+
+[Run 43574311146](https://github.com/buster14a/buster/actions/runs/43574311146), the candidate that merged buster#2660
+as `d2b1b238` on 2026-11-14, read as `queue/` reads 43481767714 (`queue-after/lines/`, `commands.json`, `shards.txt`;
+the same 1,700 commands of the same headings).
+
+| | 43481767714 (before) | 43574311146 (after) |
+|---|---:|---:|
+| Evidence job | 246 s | 10 s |
+| CI glue fixtures | in the evidence job | 244 s, beside the rows, passed |
+| First shard starts | 298 s (224 to 313 s over main's 10 candidates before) | 93 s |
+| Whole run | 33.2 min, 962 runner-minutes | 30.6 min, 923 runner-minutes |
+| Shard commands' CPU used over held | 0.76 | 0.77 |
+
+The test-ssa-source commands kept more of their CPUs busy in every row:
+
+| Command | Before (8 rows) | After |
+|---|---|---|
+| c-testsuite comparison [4 CPUs] | 0.69 to 0.80 | 0.79 to 0.88 |
+| 48 random programs [4 CPUs] | 0.33 to 0.41 | 0.73 to 0.81 |
+| 24 random programs with lifetimes [3 CPUs] | 0.42 to 0.48 | 0.79 to 1.02 |
+
+On the same CPU model: the comparison in x86-64 ASan 225 to 208 s (9V74); the lifetimes 16 to 10 s (x86-64 ASan, 9V74)
+and 55 to 36 s (x86-64 MSan, 7763). The plain rows' logs name no CPU, and each native row's compiler takes the vector
+or scalar path by its runner's CPU, so neither compares across models. Main changed between the two runs (#2680's
+admission by memory among them), so the whole-run figures are not this PR's alone.
+
 ## Limitations
 
 - One candidate's logs for the analysis, one run for each 9700X measurement.
