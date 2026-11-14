@@ -139,6 +139,29 @@ The follow-up (`a5af8212`, in its own pull request after this one) computes the 
 
 The ranges over placements and copies are in `ab.txt`; `lvm.c`'s compile is within main's floor in every round.
 
+## 5. After #2592
+
+The merge queue dropped buster#2714 for a conflict with main, which had taken #2592 (the operand sink, "Increments after their last reader" in buster's allocation guide) since. #2592 removes much of the same traffic in `luaV_execute`. With main `98186d5e` merged into the branch, the follow-up's commits included, by callgrind (`counts/after-2592/`):
+
+| Run | Compiler | speedtest1 | Lua's scripts |
+| --- | --- | ---: | ---: |
+| `main2` | main `98186d5e` | 2,878,383,592 | 5,122,797,624 |
+| `merged` | the merge, resting on openings and closings | 2,858,445,021 | 5,108,903,903 |
+| `m1`, `st1` | the same without resting | 2,867,348,918 | 5,101,266,583 |
+| `m128`, `st128` | resting on openings alone | 2,865,623,403 | 5,100,924,561 |
+
+The ablation compiler (`c-abl`, a switch `BUSTER_X2714` on the merge, not kept) turned each rule off in turn on Lua's scripts. Bits:
+- 2, the eviction before a read: +0.00 M;
+- 4, the CFG's ties: +18.6 M;
+- 8, the definitions no edge reads: +9.6 M;
+- 16, the straight line's ties: +0.06 M;
+- 32, the folded takes: +0.05 M;
+- 64, the walks: +0.05 M.
+
+Resting on closings, not only on openings, cost `luaV_execute` 8.0 M (`lua-norest-to-rest.txt`). By opcode: 52.9 M fewer frame `lea`s, but 14.3 M more `lea`s of `disptab`, 23.7 M more register moves and 21.8 M more other moves. A handler's call takes `disptab`'s register, the ranges hinted to that closing rested, and with them the dispatch join's convention, so every dispatch recomputed it. Resting on openings alone (`c-abl2`, bit 128; the head's code, whose `sqlite3.c` object is the same) keeps `hexFunc`'s header without a register and gains both programs. The closings' case is [buster#2735](https://github.com/buster14a/buster/issues/2735).
+
+The head against main: speedtest1 −12.76 M (−0.44%), Lua −21.87 M (−0.43%; every script −0.14% to −0.88%, `luaV_execute` −7.04 M, no function more; `st-main2-to-final.txt`, `lua-main2-to-final.txt`).
+
 ## Tests
 
 `scripts/tests.sh` ran the Tier 1 and IR tests of `tools/ci/correctness.tests` that the change reaches on the head's compiler (`tests.txt`). A mutation build, each rule turned off at once (the CFG's and the straight line's ties, `ir_typed_folds`, the walks, the eviction before a read, the resting rule), failed `test-tier1-allocation`'s two traces of the eviction (on all three entry points), `test-tier1-emit`'s four tie checks, and `test-ir-lowering`'s two new checks.
