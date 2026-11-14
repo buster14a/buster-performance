@@ -146,3 +146,21 @@ By callgrind in the container (`lvm.c` alone: under valgrind the compiler can't 
 `lvm.c`. That comes from the waiting checks, the first registers and the reloads the scan now places at uses. The
 records, the encoder's validation and the moves' resolution run about as many fewer, since the change leaves 1.5% fewer
 records and 17% fewer edge moves; the whole compile ran 51 K fewer instructions in the container's Develop build.
+
+## 4. With #2766
+
+[buster#2766](https://github.com/buster14a/buster/pull/2766) changes the same scan (its alternates take a settled phi
+place at a range's start), and it merged before this change, at its head `c3c9fb697c76023d2cbebbd87eebaed1e8ae6237`.
+By section 1's method, that head alone (`counts/pr2766/`) against it merged with this change's head
+(`counts/pr2766-and-head/`): the code merged without conflicts, and the merge passed `test-tier1-allocation`, `-cfg`,
+`-select`, `-emit`, `-pipeline --cross-check`, `-schedule` and `-masks`, and `tests/driver/tier1_patterns.c`.
+
+| | #2766 | #2766 and this | change |
+| --- | ---: | ---: | ---: |
+| Lua's five scripts | 4,778.2 M | 4,756.0 M | −0.46% |
+| `luaV_execute` | 2,225.5 M | 2,206.3 M | −0.86% |
+| its moves through `r11` | 5.0 M | 3.6 M | |
+| speedtest1 | 2,626.65 M | 2,603.53 M | −0.88% |
+
+The moves through `r11` left are #2767's divisor in `rax` (3.49 M) and 0.14 M. No Lua function runs more; speedtest1's
+only loss over 0.1 M is `sqlite3WhereEnd` (+0.42 M), as against main.
