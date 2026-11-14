@@ -1,0 +1,468 @@
+diff --git a/docs/tier1.md b/docs/tier1.md
+index bada637..5f049b9 100644
+--- a/docs/tier1.md
++++ b/docs/tier1.md
+@@ -472,19 +472,21 @@ share runs two epochs), so that a body's lane reads any callee's typed stream.
+ 
+ Between the halves the first lane to need it runs the unit stage: the
+ candidates' call graph from their typed streams' direct calls
+-(`Tier0Function.call_targets`), whose cycles' members (Tarjan's components, a
+-self call too) are no candidates. Each other candidate has a summary, built once
+-for the unit by the first lane to need it: its typed stream lowered at its own
+-target, its calls of candidates expanded from their summaries (built first),
+-and Tier 1's passes from promotion to the verified optimizer
+-(`check_tier1_passes`, below), whose function and analysis stay in that lane's
+-arenas of the run until the run ends. A lane claims a summary by a
++(`Tier0Function.call_targets`) and its cycles (Tarjan's components, a self call
++too): a cycle's member is copied only into code outside its own cycle, its calls
++of the cycle staying calls, as LLVM's inliner expands a recursive function into
++a caller outside its cycle (#2541 step 3). Each candidate has a summary, built
++once for the unit by the first lane to need it: its typed stream lowered at its
++own target, its calls of candidates outside its cycle expanded from their
++summaries (built first), and Tier 1's passes from promotion to the verified
++optimizer (`check_tier1_passes`, below), whose function and analysis stay in
++that lane's arenas of the run until the run ends. A lane claims a summary by a
+ compare-and-swap of its state word, and a lane that needs one another lane is
+-building waits for it; summaries depend only on their callees', which form no
+-cycle, so no wait waits on itself. A candidate's own code goes on from its
+-summary at selection: its lowering, passes and optimization are moved, not
+-repeated. A summary is a function of its body and its callees' summaries, so
+-the objects are the same by any lane count.
++building waits for it; a summary depends only on those of callees outside its
++cycle, which form no cycle, so no wait waits on itself. A candidate's own code
++goes on from its summary at selection: its lowering, passes and optimization are
++moved, not repeated. A summary is a function of its body and its callees'
++summaries, so the objects are the same by any lane count.
+ 
+ A caller copies its direct callees' summaries: the unit of the caller and all
+ of those callees, each once, by symbol (step 1 took the first 64, which a
+@@ -562,8 +564,8 @@ units of callees with control flow, and the per-callee limits and caller-only
+ rewrite; `test-checker-driver`'s inlining fixture builds a program of
+ intrinsics, a struct helper, helpers with control flow (two returns, a loop, a
+ switch, a vector by value chosen by a branch, a local array, nested calls), the
+-small class's (two returns, a loop that calls one, a recursive pair, which stays
+-calls) and a noinline function by each path, with and without inlining, against
++small class's (two returns, a loop that calls one, a recursive pair, whose
++calls of each other stay calls) and a noinline function by each path, with and without inlining, against
+ clang -O0's, and compares its objects by one and eight lanes by each path. A
+ fixture that measures a frame across a call (a backtrace's depth, a value kept
+ in a callee-saved register across it) marks its callee noinline.
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 9954521..b4da090 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -554,6 +554,9 @@ struct CheckTier1Inline
+     // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm). And the scalar twins' choice.
+     uint8_t* held;
+     uint8_t* released;
++    // Per body, the component of the candidates' call graph it is in (its root's index, the unit stage's; UINT32_MAX for one
++    // that is no candidate): a callee in a cycle isn't copied into its own cycle's members (#2541 step 3).
++    uint32_t* components;
+     bool holding;
+     bool scalar;
+     uint32_t body_count;
+diff --git a/src/buster/compiler/c_check_tier1_driver_test.c b/src/buster/compiler/c_check_tier1_driver_test.c
+index d4dd2b1..2a1300a 100644
+--- a/src/buster/compiler/c_check_tier1_driver_test.c
++++ b/src/buster/compiler/c_check_tier1_driver_test.c
+@@ -5487,9 +5487,10 @@ static void check_test_driver_tier1_half(CheckTest* test, const char* clang, con
+ // places at their calls: two returns, a loop, a switch, a vector by value chosen by a branch, a local array in a loop,
+ // and one that calls two of them. #2541 step 1's small class, static functions without an inline attribute, from their
+ // summaries: one with two returns, one with a loop that calls it (its summary expands it first), and two that call each
+-// other, which stay calls. By each path, with --verify's certificates, the build inlines (the report's `inlined`), and
+-// runs as clang -O0's build and as --tier1-no-inline's do, where the host has x86-64-v4; and by each path, its object
+-// by one lane is its object by eight.
++// other, whose calls of each other stay calls and which their caller outside the cycle expands (#2541 step 3). By each
++// path, with --verify's certificates, the build inlines (the report's `inlined`), and runs as clang -O0's build and as
++// --tier1-no-inline's do, where the host has x86-64-v4; and by each path, its object by one lane is its object by
++// eight.
+ static const char check_test_tier1_inline_source[] =
+     "#include <immintrin.h>\n"
+     "#include <stdint.h>\n"
+diff --git a/src/buster/compiler/c_check_tier1_inline.c b/src/buster/compiler/c_check_tier1_inline.c
+index 32186d6..958ff61 100644
+--- a/src/buster/compiler/c_check_tier1_inline.c
++++ b/src/buster/compiler/c_check_tier1_inline.c
+@@ -16,13 +16,14 @@
+ // (CheckEmitRun.tier1_inline).
+ //
+ // Between the halves, the unit stage (check_tier1_inline_stage) runs once, on the first lane to need it: the candidates'
+-// call graph from their typed streams' direct calls (Tier0Function.call_targets), whose cycles' members (Tarjan's
+-// components, a self call too) are no candidates. Each other candidate has a summary, built once for the unit by the first
+-// lane to need it (check_tier1_inline_summary): its typed stream lowered at its own target, its calls of candidates
+-// expanded from their summaries (built first), and Tier 1's passes from promotion to the verified optimizer
++// call graph from their typed streams' direct calls (Tier0Function.call_targets) and its cycles (Tarjan's components, a
++// self call too): a cycle's member is copied only into code outside its own cycle, its calls of the cycle staying calls
++// (check_tier1_inline_copyable, #2541 step 3). Each candidate has a summary, built once for the unit by the first lane to
++// need it (check_tier1_inline_summary): its typed stream lowered at its own target, its calls of candidates outside its
++// cycle expanded from their summaries (built first), and Tier 1's passes from promotion to the verified optimizer
+ // (check_tier1_passes), whose function and analysis it keeps. A lane claims a summary by its state word (a
+-// compare-and-swap) and a lane that needs one another lane is building waits for it (lane_wait); summaries depend only on
+-// their callees', which form no cycle, so no wait waits on itself. A summary lives in its builder's lane state's arenas of
++// compare-and-swap) and a lane that needs one another lane is building waits for it (lane_wait); a summary depends only on
++// those of callees outside its cycle, which form no cycle, so no wait waits on itself. A summary lives in its builder's lane state's arenas of
+ // the emission run (CheckTier1Inline.arenas), until the run ends. It is what each caller copies (check_tier1_inline: the
+ // caller's direct callees' summaries and the caller, its calls of them decided by each callee's class and target, through
+ // ir_optimize_inline with the caller alone rewritten), and what the candidate's own code goes on from, at selection
+@@ -158,9 +159,10 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
+     uint32_t* sites = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
+     uint8_t* held = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
+     uint8_t* released = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 1) : 0;
++    uint32_t* components = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
+     // The objects' marks (check_tier1_inline_marks), while the table is built (popped after it).
+     const uint64_t mark = arena->length;
+-    uint8_t* marks = stage && rooted != 0 && dead != 0 && sites != 0 && held != 0 && released != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)input->token_count + 1) : 0;
++    uint8_t* marks = stage && rooted != 0 && dead != 0 && sites != 0 && held != 0 && released != 0 && components != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)input->token_count + 1) : 0;
+     if (marks != 0)
+     {
+         memset(marks, 0, (uint64_t)input->token_count + 1);
+@@ -204,6 +206,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
+             memset(sites, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+             memset(held, 0, (uint64_t)count + 1);
+             memset(released, 0, (uint64_t)count + 1);
++            memset(components, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+             *word = 0;
+         }
+         for (uint32_t b = 0; b < count; b += 1)
+@@ -254,6 +257,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
+             .sites = sites,
+             .held = held,
+             .released = released,
++            .components = components,
+             .scalar = scalar,
+             .body_count = count,
+         };
+@@ -275,6 +279,7 @@ static void check_tier1_inline_renew(CheckTier1Inline* table)
+         memset(table->sites, 0, ((uint64_t)table->body_count + 1) * sizeof(uint32_t));
+         memset(table->held, 0, (uint64_t)table->body_count + 1);
+         memset(table->released, 0, (uint64_t)table->body_count + 1);
++        memset(table->components, 0xff, ((uint64_t)table->body_count + 1) * sizeof(uint32_t));
+         for (uint32_t k = 0; k < 2 * BUSTER_CHECK_EMIT_MAX_LANES; k += 1)
+         {
+             arena_pop_to(&table->arenas[k], 0);
+@@ -307,6 +312,16 @@ static uint32_t check_tier1_inline_callee(const CheckTier1Inline* inlining, cons
+     return candidate != 0 && candidate - 1 != self && inlining->ready[candidate - 1] != 0 ? candidate : 0;
+ }
+ 
++// Whether candidate body `callee`'s summary may be copied into body `caller`'s code (#2541 step 3): not into itself, and a
++// callee in a cycle of the candidates' calls not into a member of its own cycle (CheckTier1Inline.components), whose copy
++// would call back its caller; into any other, its calls of its cycle staying calls. A caller that is no candidate is in
++// no cycle of theirs.
++static bool check_tier1_inline_copyable(const CheckTier1Inline* inlining, uint32_t caller, uint32_t callee)
++{
++    const uint32_t component = caller < inlining->body_count ? inlining->components[caller] : UINT32_MAX;
++    return callee != caller && (inlining->cyclic[callee] == 0 || inlining->components[callee] != component);
++}
++
+ // The candidates whose address a body's code takes (a BUSTER_TYPED_GLOBAL_ADDRESS entry of its typed stream, whose value
+ // is the symbol), marked in `addressed` (cleared, a byte a body): 64 kinds a vector by a compare, then each match's
+ // value; the scalar path, its twin, reads every entry.
+@@ -443,6 +458,7 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
+                             {
+                                 member = active[--active_count];
+                                 stacked[member] = 0;
++                                inlining->components[member] = body;
+                             } while (member != body);
+                             for (uint32_t k = active_count; top - active_count > 1 && k < top; k += 1)
+                             {
+@@ -589,7 +605,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
+         if (candidate != 0 && b != caller && taken[b] != 2)
+         {
+             const bool first = taken[b] == 0;
+-            const bool offered = !first || (inlining->cyclic[b] == 0 && check_tier1_inline_offered(inlining, b, target));
++            const bool offered = !first || (check_tier1_inline_copyable(inlining, caller, b) && check_tier1_inline_offered(inlining, b, target));
+             const bool matches = offered && ir_inline_signature(lowered, node, check_tier1_inline_function(inlining, b), check_tier1_inline_flags(inlining, b));
+             keys[taken_count] = (uint64_t)program->object_symbols[program->bodies[b].object] << 32 | b;
+             taken_count += first && matches ? 1 : 0;
+@@ -775,7 +791,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
+ static bool check_tier1_inline_summary(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t b, bool scalar, bool certify)
+ {
+     const uint32_t count = inlining->body_count;
+-    bool ready = inlining->cyclic[b] == 0 && inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->ready[b] != 0;
++    bool ready = inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->ready[b] != 0;
+     uint32_t state = ready ? __atomic_load_n(&inlining->states[b], __ATOMIC_ACQUIRE) : BUSTER_CHECK_TIER1_INLINE_REFUSED;
+     if (ready && state != BUSTER_CHECK_TIER1_INLINE_READY && state != BUSTER_CHECK_TIER1_INLINE_REFUSED)
+     {
+@@ -819,7 +835,7 @@ static bool check_tier1_inline_summary(CheckTier1Lane* lane, const CheckTier1Inl
+                 for (uint32_t c = 0; pending == BUSTER_IR_NONE && c < function->call_count; c += 1)
+                 {
+                     const uint32_t candidate = check_tier1_inline_callee(inlining, function, c, top);
+-                    const uint32_t callee = candidate != 0 && inlining->cyclic[candidate - 1] == 0 ? candidate - 1 : BUSTER_IR_NONE;
++                    const uint32_t callee = candidate != 0 && check_tier1_inline_copyable(inlining, top, candidate - 1) ? candidate - 1 : BUSTER_IR_NONE;
+                     const uint32_t callee_state = callee != BUSTER_IR_NONE ? __atomic_load_n(&inlining->states[callee], __ATOMIC_ACQUIRE) : BUSTER_CHECK_TIER1_INLINE_READY;
+                     pending = callee_state == BUSTER_CHECK_TIER1_INLINE_READY || callee_state == BUSTER_CHECK_TIER1_INLINE_REFUSED ? BUSTER_IR_NONE : callee;
+                 }
+diff --git a/src/buster/compiler/ir_optimize_inline.c b/src/buster/compiler/ir_optimize_inline.c
+index a26a792..ea74f13 100644
+--- a/src/buster/compiler/ir_optimize_inline.c
++++ b/src/buster/compiler/ir_optimize_inline.c
+@@ -5,7 +5,8 @@
+ // and explicit linkage/variadic/noinline facts in one symbol-sorted table. Original code; the graph reference is
+ // Tarjan, Depth-First Search and Linear Graph Algorithms (1972). The DFS uses explicit bounded stacks, not recursion.
+ //
+-// Tarjan components are processed in callee-before-caller order. Recursive members are never candidates. A candidate
++// Tarjan components are processed in callee-before-caller order. Recursive members are never candidates but where the
++// caller alone is rewritten (IrInlineUnit.only), which copies one outside the caller's own cycle (#2541 step 3). A candidate
+ // is a leaf whose blocks are one straight line (one block, or #1282's chain, each block's br to the next dropped); its
+ // operations, faulting accesses and volatile flags are copied in their original order. Parameters become the already
+ // evaluated actual arguments; the final return becomes COPY or disappears for void. A previously rewritten acyclic
+@@ -56,6 +57,10 @@
+ #define BUSTER_IR_INLINE_MAX_FUNCTIONS (1u << 16)
+ #define BUSTER_IR_INLINE_MAX_ITEMS (1u << 20)
+ #define BUSTER_IR_INLINE_MAX_TOTAL (1u << 22)
++// IrInlineOptions.add_sites's default: on the 9700X the masked adds over every site take fewer cycles than the gathers'
++// flat 5.3 to 7.3 a node at every caller size measured up to 8 sites, and not at 12 (#2541 step 3's record,
++// splice_rule_bench.c's `all` form).
++#define BUSTER_IR_INLINE_ADD_SITES 8u
+ 
+ typedef struct IrInlineUnit IrInlineUnit;
+ struct IrInlineUnit
+@@ -90,6 +95,9 @@ struct IrInlineOptions
+     // before anything reads it (#2541's driver: SROA or promotion): neither is verified here, which would make each
+     // expansion's function be verified four times over.
+     bool trusted;
++    // The most expanded sites a caller's own operands move past by masked adds (IrInlineSites, #2541 step 3), the vector
++    // path's: a caller with more takes a gather through its destination tables. 0 gathers always.
++    uint8_t add_sites;
+ };
+ 
+ typedef enum IrInlineDecision
+@@ -207,6 +215,7 @@ static __attribute__((unused)) IrInlineOptions ir_inline_options(void)
+         .maximum_function_growth = 256,
+         .maximum_unit_instructions = BUSTER_IR_INLINE_MAX_TOTAL,
+         .enabled = true,
++        .add_sites = BUSTER_IR_INLINE_ADD_SITES,
+     };
+     return options;
+ }
+@@ -946,7 +955,11 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
+         {
+             decision = IR_INLINE_VARIADIC;
+         }
+-        else if (result->recursive[callee])
++        // A callee in a cycle: none is expanded where every function is rewritten. Where the caller alone is
++        // (IrInlineUnit.only, #2541 step 3), one in the caller's own cycle, whose copy would call back the caller, and the
++        // caller itself; another is copied as it is, its calls of its own cycle staying calls, as LLVM's inliner expands a
++        // recursive function into a caller outside its cycle.
++        else if (unit->only != 0 ? result->components[callee] == result->components[function] : result->recursive[callee])
+         {
+             decision = IR_INLINE_RECURSIVE;
+         }
+@@ -1063,6 +1076,21 @@ struct IrInlineBases
+     uint32_t passed;
+ };
+ 
++// A caller's expanded sites, in node order, where it has at most IrInlineOptions.add_sites of them (#2541 step 3): what
++// its own operands' destinations are a step function of. A node after site k moves by `growth[k]` (the expansion's nodes
++// less the call's one) and the site's own value is `result[k]` (its destination table's); a block after `block[k]` moves
++// by `blocks[k]` (the expansion's blocks and its continuation's, none for a straight line).
++typedef struct IrInlineSites IrInlineSites;
++struct IrInlineSites
++{
++    uint32_t node[16];
++    uint32_t growth[16];
++    uint32_t result[16];
++    uint32_t block[16];
++    uint32_t blocks[16];
++    uint32_t count;
++};
++
+ typedef struct IrInlineCursor IrInlineCursor;
+ struct IrInlineCursor
+ {
+@@ -1602,10 +1630,12 @@ static void ir_inline_expand_general(const IrFunction* source, uint32_t node, co
+ // its new place (`values`), a branch's block to its target's first part (`block_first`) and any other row kept, the
+ // caller's own; then each rebuilt node's slice, in node order: a call's descriptor, a phi's edges (each from its
+ // predecessor's last part, `block_last`), a switch's targets, an indirect branch's labels, a ternary intrinsic's third
+-// operand. The columns 16 nodes a vector, by a table lookup of the kinds and two masked gathers, or by the scalar twin,
+-// ir_inline_node's loop; the slices by both alike.
++// operand. The columns 16 nodes a vector, by a table lookup of the kinds and, where the caller has few expanded sites
++// (`sites`), a compare and masked add a site (a value after it moves by its growth, the site's own value is its result,
++// a block after its block moves by its blocks: the design's step function, #2541 step 3), or else two masked gathers
++// through the destination tables; or by the scalar twin, ir_inline_node's loop. The slices by both alike.
+ static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_t end, const IrInlineKinds* kinds, const uint32_t* values, const uint32_t* block_first,
+-                               const uint32_t* block_last, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
++                               const uint32_t* block_last, const IrInlineSites* sites, IrFunction* rewritten, bool scalar, IrInlineCursor* cursor)
+ {
+     (void)scalar;
+     (void)kinds;
+@@ -1640,8 +1670,29 @@ static void ir_inline_copy_run(const IrFunction* source, uint32_t first, uint32_
+                 const __mmask16 optional = _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_OPTIONAL)) & _mm512_cmpneq_epi32_mask(operand, none);
+                 const __mmask16 value = mask & (_mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_VALUE)) | optional);
+                 const __mmask16 target = mask & _mm512_cmpeq_epi32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INLINE_BLOCK));
+-                __m512i rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
+-                rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
++                __m512i rebased = operand;
++                if (sites != NULL)
++                {
++                    // Every site, not only those before the run: an operand may name a value laid out after its use.
++                    for (uint32_t k = 0; value != 0 && k < sites->count; k += 1)
++                    {
++                        const __m512i site = _mm512_set1_epi32((int32_t)sites->node[k]);
++                        const __mmask16 after = value & _mm512_cmpgt_epu32_mask(operand, site);
++                        const __mmask16 at = value & _mm512_cmpeq_epi32_mask(operand, site);
++                        rebased = _mm512_mask_add_epi32(rebased, after, rebased, _mm512_set1_epi32((int32_t)sites->growth[k]));
++                        rebased = _mm512_mask_mov_epi32(rebased, at, _mm512_set1_epi32((int32_t)sites->result[k]));
++                    }
++                    for (uint32_t k = 0; target != 0 && k < sites->count; k += 1)
++                    {
++                        const __mmask16 later = target & _mm512_cmpgt_epu32_mask(operand, _mm512_set1_epi32((int32_t)sites->block[k]));
++                        rebased = _mm512_mask_add_epi32(rebased, later, rebased, _mm512_set1_epi32((int32_t)sites->blocks[k]));
++                    }
++                }
++                else
++                {
++                    rebased = _mm512_mask_i32gather_epi32(operand, value, operand, values, 4);
++                    rebased = _mm512_mask_i32gather_epi32(rebased, target, operand, block_first, 4);
++                }
+                 _mm512_mask_storeu_epi32(outputs[column] + to, mask, rebased);
+             }
+         }
+@@ -1734,6 +1785,9 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+         .asm_body_count = source->asm_body_count,
+     };
+     uint32_t call = result->call_offsets[function];
++    // The caller's expanded sites (IrInlineSites), while they fit the add form's bound; one more and the gathers take it.
++    IrInlineSites expanded = { 0 };
++    uint32_t site_count = 0;
+     for (uint32_t block = 0; ok && block < source->block_count; block += 1)
+     {
+         block_first[block] = (uint32_t)sizes.block_count;
+@@ -1760,6 +1814,15 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+                     sizes.instruction_count += result->expanded_sizes[call];
+                     values[node] = source->type[node] == IR_VOID ? BUSTER_IR_NONE : (uint32_t)sizes.instruction_count - 1;
+                 }
++                if (site_count < 16)
++                {
++                    expanded.node[site_count] = node;
++                    expanded.growth[site_count] = result->expanded_sizes[call] - 1;
++                    expanded.result[site_count] = values[node];
++                    expanded.block[site_count] = block;
++                    expanded.blocks[site_count] = rows.blocks;
++                }
++                site_count += 1;
+                 sizes.block_count += rows.blocks;
+                 sizes.constant_count += callee->constant_count;
+                 sizes.address_count += callee->address_count + copies.addresses;
+@@ -1807,6 +1870,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+         }
+         block_last[block] = (uint32_t)sizes.block_count - 1;
+     }
++    expanded.count = site_count < 16 ? site_count : 16;
+     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
+     if (sizes.instruction_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.constant_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.address_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.extra_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+         sizes.call_type_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.slot_count > BUSTER_IR_INLINE_MAX_ITEMS || sizes.vector_constant_count > BUSTER_IR_INLINE_MAX_ITEMS ||
+@@ -1981,7 +2045,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
+                         sites += ir_inline_site(source, last);
+                         last += 1;
+                     }
+-                    ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, &rewritten, options.scalar, &cursor);
++                    ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, site_count <= options.add_sites && site_count <= 16 ? &expanded : NULL, &rewritten,
++                                       options.scalar, &cursor);
+                     node = last - 1;
+                     call += sites - site;
+                 }
+diff --git a/src/buster/compiler/ir_optimize_inline_test.c b/src/buster/compiler/ir_optimize_inline_test.c
+index d9ca9e2..79fe409 100644
+--- a/src/buster/compiler/ir_optimize_inline_test.c
++++ b/src/buster/compiler/ir_optimize_inline_test.c
+@@ -683,34 +683,55 @@ static void ir_inline_test_compare(IrInlineTest* test, const IrInlineUnit* input
+     ir_inline_test_compare_loads(test, input, result, entry, scratch, trials, true);
+ }
+ 
++// Whether a vector run's result is the scalar twin's, column for column.
++static void ir_inline_test_same_result(IrInlineTest* test, const IrInlineUnit* input, const IrInlineResult* result, const IrInlineResult* scalar)
++{
++    ir_inline_test_expect(test, result->function_count == scalar->function_count && result->call_count == scalar->call_count && result->inlined_calls == scalar->inlined_calls && result->component_count == scalar->component_count && result->input_instructions == scalar->input_instructions && result->output_instructions == scalar->output_instructions, "scalar/vector result counts");
++    for (uint32_t f = 0; f < input->count; f += 1)
++    {
++        ir_inline_test_expect(test, ir_inline_test_same_function(&result->functions[f], &scalar->functions[f]), "scalar/vector exact function columns");
++        ir_inline_test_expect(test, result->components[f] == scalar->components[f] && result->recursive[f] == scalar->recursive[f] && result->call_offsets[f] == scalar->call_offsets[f], "scalar/vector graph columns");
++    }
++    for (uint32_t c = 0; c < result->call_count; c += 1)
++    {
++        ir_inline_test_expect(test, result->call_nodes[c] == scalar->call_nodes[c] && result->callees[c] == scalar->callees[c] && result->costs[c] == scalar->costs[c] && result->expanded_sizes[c] == scalar->expanded_sizes[c] && result->decisions[c] == scalar->decisions[c], "scalar/vector exact call decisions");
++    }
++}
++
++// The unit by the scalar twin, and by the vector path twice: its caller's runs by the other form first (the masked adds
++// where `options` gathers, or the gathers where it adds: IrInlineOptions.add_sites, #2541 step 3), then by `options`'s,
++// whose result the caller reads; each column for column the twin's.
+ static bool ir_inline_test_run(IrInlineTest* test, const IrInlineUnit* input, IrInlineOptions options, Arena* output, Arena* scalar_output, Arena* scratch, IrInlineResult* result)
+ {
+     IrInlineResult scalar = { 0 };
+     uint32_t failed = 123;
+-    options.scalar = false;
+     const uint64_t mark = scratch->length;
++    const uint64_t output_mark = output->length;
++    options.scalar = true;
++    const IrCheck scalar_check = ir_optimize_inline(input, scalar_output, scratch, options, &scalar, &failed);
++    ir_inline_test_expect(test, scalar_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "scalar inline and scratch restoration");
++    IrInlineOptions other = options;
++    other.scalar = false;
++    other.add_sites = options.add_sites != 0 ? 0 : BUSTER_IR_INLINE_ADD_SITES;
++    IrInlineResult alternative = { 0 };
++    const IrCheck other_check = ir_optimize_inline(input, output, scratch, other, &alternative, &failed);
++    ir_inline_test_expect(test, other_check.error == scalar_check.error && scratch->length == mark, "the other caller-run form's inline and scratch restoration");
++    if (other_check.error == IR_OK && scalar_check.error == IR_OK)
++    {
++        ir_inline_test_same_result(test, input, &alternative, &scalar);
++    }
++    arena_pop_to(output, output_mark);
++    options.scalar = false;
+     const IrCheck vector_check = ir_optimize_inline(input, output, scratch, options, result, &failed);
+     ir_inline_test_expect(test, vector_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "vector inline and scratch restoration");
+     if (vector_check.error != IR_OK)
+     {
+         fprintf(stderr, "ir-inline diagnostic error=%u function=%u node=%u detail=%u\n", vector_check.error, failed, vector_check.instruction, vector_check.detail);
+     }
+-    options.scalar = true;
+-    const IrCheck scalar_check = ir_optimize_inline(input, scalar_output, scratch, options, &scalar, &failed);
+-    ir_inline_test_expect(test, scalar_check.error == IR_OK && failed == UINT32_MAX && scratch->length == mark, "scalar inline and scratch restoration");
+     const bool success = vector_check.error == IR_OK && scalar_check.error == IR_OK;
+     if (success)
+     {
+-        ir_inline_test_expect(test, result->function_count == scalar.function_count && result->call_count == scalar.call_count && result->inlined_calls == scalar.inlined_calls && result->component_count == scalar.component_count && result->input_instructions == scalar.input_instructions && result->output_instructions == scalar.output_instructions, "scalar/vector result counts");
+-        for (uint32_t f = 0; f < input->count; f += 1)
+-        {
+-            ir_inline_test_expect(test, ir_inline_test_same_function(&result->functions[f], &scalar.functions[f]), "scalar/vector exact function columns");
+-            ir_inline_test_expect(test, result->components[f] == scalar.components[f] && result->recursive[f] == scalar.recursive[f] && result->call_offsets[f] == scalar.call_offsets[f], "scalar/vector graph columns");
+-        }
+-        for (uint32_t c = 0; c < result->call_count; c += 1)
+-        {
+-            ir_inline_test_expect(test, result->call_nodes[c] == scalar.call_nodes[c] && result->callees[c] == scalar.callees[c] && result->costs[c] == scalar.costs[c] && result->expanded_sizes[c] == scalar.expanded_sizes[c] && result->decisions[c] == scalar.decisions[c], "scalar/vector exact call decisions");
+-        }
++        ir_inline_test_same_result(test, input, result, &scalar);
+     }
+     return success;
+ }
+@@ -1612,6 +1633,29 @@ static void ir_inline_test_graphs(IrInlineTest* test, Arena* input, Arena* outpu
+                 }
+             }
+         }
++        // The caller alone rewritten (IrInlineUnit.only, #2541 step 3): a callee in the caller's own cycle stays a call, and
++        // one in another component, recursive or not, is no recursive refusal.
++        const uint32_t caller = trial % count;
++        const IrInlineUnit only = {
++            .functions = functions,
++            .symbols = symbols,
++            .flags = flags,
++            .count = count,
++            .symbol_count = 128,
++            .only = caller + 1,
++        };
++        arena_pop_to(output, 0);
++        arena_pop_to(twin, 0);
++        IrInlineResult alone = { 0 };
++        if (ir_inline_test_run(test, &only, ir_inline_options(), output, twin, scratch, &alone))
++        {
++            for (uint32_t c = alone.call_offsets[caller]; c < alone.call_offsets[caller + 1]; c += 1)
++            {
++                const uint32_t callee = alone.callees[c];
++                const bool cycle = reachable[caller][callee] && reachable[callee][caller];
++                ir_inline_test_expect(test, (alone.decisions[c] == IR_INLINE_RECURSIVE) == cycle, "the caller alone: its own cycle's callees retained, others not as recursive");
++            }
++        }
+         arena_pop_to(input, 0);
+         arena_pop_to(output, 0);
+         arena_pop_to(twin, 0);
