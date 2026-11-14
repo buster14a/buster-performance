@@ -1,7 +1,10 @@
 # Tier 1 CFG scaling acceptance for Buster #1356
 
-**Status: NOT RUN. Acceptance remains pending.** This packet supplies original
-fixtures and a reproduction recipe, not measurements or a speedup claim.
+**Status: run on 2026-11-13; both shapes scale linearly.** The results are in
+[`results-2026-11-13-claude/`](results-2026-11-13-claude/README.md). The recipe
+below is unchanged; that record lists its one deviation (how runs were grouped
+into lock holds). This packet itself supplies original fixtures and a
+reproduction recipe, not measurements or a speedup claim.
 
 [Buster #1356](https://github.com/buster14a/buster/issues/1356) requires linear
 growth of the `tier0` stage under `--tier1` for large switches and label tables.
