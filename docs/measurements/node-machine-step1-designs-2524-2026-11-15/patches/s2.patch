@@ -1,0 +1,2102 @@
+diff --git a/docs/commands/lowering.md b/docs/commands/lowering.md
+index ec310ba58..3f7ef8f71 100644
+--- a/docs/commands/lowering.md
++++ b/docs/commands/lowering.md
+@@ -451,7 +451,10 @@ callee), the operators the code and template refusals stopped at, the
+ differences (values, entries, twin), the labels compared, T's nodes by row or
+ rule and by the action, by operator, the argument memo's entries filled and the
+ arguments the rule took instead (over every expression T typed, beside the taken
+-calls' arguments), and the times.
++calls' arguments), the fused sweep's census (`node-shadow: fusion`: what a T that
++classified each record's operands at its own visit would settle later; [the
++design](../node-machine.md#a-fused-sweep-what-it-would-settle-later)), and the
++times.
+ `--list N` prints the first N differences by file and line. The command exits 1
+ on a difference. `test-checker` runs its fixture (`node_shadow_test_text`, one
+ construct a line, each taken or refused by a named reason), with `--verify`
+diff --git a/docs/node-machine.md b/docs/node-machine.md
+index c3dc8d8d2..d106db34f 100644
+--- a/docs/node-machine.md
++++ b/docs/node-machine.md
+@@ -1890,6 +1890,45 @@ headroom on the gate's file; Lua and musl gain from it, as they did from
+ batching ([above](#sweeps-by-batches-what-the-predictor-loses)). The record is
+ [`node-machine-layout-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/8c00e4f5572a3e29e12c96b32c05ba23c4a2993d/docs/measurements/node-machine-layout-2524-2026-11-15).
+ 
++### A fused sweep: what it would settle later
++
++Neither batching nor a layout leaves headroom on `sqlite3.c`: what stands
++between the sweeps and the gate is instructions, about 585 a taken node where
++120 cycles at today's rate are about 440. About 170 of the 585 are C re-reading
++the records T has just written, and C costs least right after T on the same
++expression ([above](#sweeps-by-batches-what-the-predictor-loses)). A
++[recovered design exploration](https://github.com/buster14a/buster/issues/2524#issuecomment-6892875893)
++fuses C into T: as T types a record, it classifies the record's operands, as C
++does, since the record's operator decides their contexts and targets. What T's
++visit can't know waits for a later step:
++
++- a context that is the consumer's own (a `SELECT`'s operand and a comma's second
++  operand), which its consumer's consumer gives;
++- a record classified at its consumer's visit whose consumer turns out
++  unevaluated (under a folded constant, `sizeof`, a decided condition);
++- a call's depth among the evaluated calls, which numbers its row and is its
++  ancestors'.
++
++The shadow's census (`node-shadow: fusion`, `node_shadow_fusion`) counts them
++over the taken expressions, at main `d356f725`:
++
++| | `sqlite3.c` | Lua | musl |
++| --- | ---: | ---: | ---: |
++| evaluated records | 257,263 | 57,779 | 110,119 |
++| inherited contexts | 340 (0.13%) | 242 (0.42%) | 194 (0.18%) |
++| of them not a value | 0 | 0 | 0 |
++| unevaluated records | 34,829 | 16,384 | 20,708 |
++| of them under an unevaluated consumer | 2,893 (1.1% of the evaluated) | 5,780 (10.0%) | 3,057 (2.8%) |
++| evaluated calls, below another call | 13,351, 325 | 4,049, 176 | 5,357, 318 |
++| expressions with any of them | 1,554 of 51,135 (3.0%) | 1,281 of 10,444 (12.3%) | 1,550 of 21,604 (7.2%) |
++
++An inherited context was a plain value every time, as T's visit would assume
++it. A fused T would settle later 3.0% of `sqlite3.c`'s expressions, and its
++wasted classifications would be 1.1% of its records. The census shapes the
++design but doesn't measure it: what a fused T's code size and its predictions
++cost is the prototype's measurement, behind the shadow's `--verify`. The record is
++[`node-machine-fusion-census-2524-2026-11-15`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-fusion-census-2524-2026-11-15).
++
+ ## Expected gains
+ 
+ On `-c sqlite3.c`, of 681.5 M cycles a compile (user and kernel):
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 9c0a6964f..7e403aa70 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -7,7 +7,7 @@
+ // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
+ // would make before it takes it. Include after c_check_lower_inventory.c.
+ //
+-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...
++//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--shapes] [--fused] [--passes N] [--repeat N]] [preprocessor options] file...
+ //
+ // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
+ // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
+@@ -442,6 +442,11 @@ static uint32_t node_census_list;
+ // The current unit's -Wassign-enum (NodeCensusPolicy.assign_enum), for node_census_constant_changes.
+ static bool node_census_assign_enum;
+ 
++// The shapes' census's looser keys: the key itself, counted over every taken expression; without the leaves' integers;
++// without the records' action data (a cast's type, a member's name) too; without the leaves' types and flags too; and the
++// key with every leaf's object's kind and sharing dropped.
++#define BUSTER_NODE_SHADOW_VARIANTS 5u
++
+ // One file's state: the program and the unit's, and per node and pop the walks' columns, valid for the current
+ // expression's stamp alone.
+ typedef struct NodeCensusScratch NodeCensusScratch;
+@@ -498,6 +503,23 @@ struct NodeCensusScratch
+     // The current expression's temporaries' locals, by their number on the tape, and how many it has met.
+     uint32_t* temporary_locals;
+     uint32_t temporary_count;
++    // The current expression's records' consumers, for the fused sweep's census (node_shadow_fusion).
++    uint32_t* consumers;
++    // --shapes: the unit's shapes, and a hit's tape, labels, calls and their symbols as the shapes gave them, kept for
++    // the comparison with the sweeps' (node_shadow_shape).
++    NodeShapes* shapes;
++    uint8_t* shape_kinds;
++    uint8_t* shape_classes;
++    uint64_t* shape_tape;
++    uint32_t* shape_labels;
++    uint32_t* shape_calls;
++    uint32_t* shape_symbols;
++    uint32_t shape_counts[4];
++    // Room for each of the unit's shapes' weight (node_shadow_shape_unit).
++    uint64_t* shape_weights;
++    // The looser keys' hashes the unit has had, one open-addressing set a variant (0 for an empty slot).
++    uint64_t* shape_variants[BUSTER_NODE_SHADOW_VARIANTS];
++    uint32_t shape_variant_mask;
+ };
+ 
+ static double node_census_share(uint64_t part, uint64_t whole)
+@@ -1755,8 +1777,17 @@ struct NodeShadowExpression
+     uint8_t context;
+ };
+ 
+-// The sweeps timed: T alone, T and C, and all three.
+-#define BUSTER_NODE_SHADOW_SWEEPS 3u
++// The sets timed: T alone, T and C, and all three; with --fused, T and then C and X as one sweep (node_machine_lower);
++// with --shapes, the shapes with the three sweeps for the expressions they don't have; and with both, the shapes with T
++// and that one sweep.
++#define BUSTER_NODE_SHADOW_SWEEPS 6u
++#define BUSTER_NODE_SHADOW_SET_FUSED 3u
++#define BUSTER_NODE_SHADOW_SET_SHAPES 4u
++#define BUSTER_NODE_SHADOW_SET_SHAPES_FUSED 5u
++// The shapes' census's buckets of expressions by their records: 1, 2, 3, 4, 5, 6 to 8, 9 to 16, 17 to 32 and more.
++#define BUSTER_NODE_SHADOW_SIZES 9u
++// The shapes' census's tops: a unit's 16, 64, 256, 1024 and 4096 most used shapes.
++#define BUSTER_NODE_SHADOW_TOPS 5u
+ 
+ // One expression's result, for the shadow's tests (NodeShadow.records_out): its root's line and the machine's refusal.
+ typedef struct NodeShadowRecord NodeShadowRecord;
+@@ -1806,6 +1837,52 @@ struct NodeShadow
+     // lowering's by its number from the expression's first and by its entry (node_shadow_same_label).
+     uint64_t labeled_expressions;
+     uint64_t labels;
++    // The fused sweep's census (node_shadow_fusion): the taken expressions' records evaluated and not; of these, those
++    // whose consumer isn't evaluated either; the evaluated records whose context their consumer's own context gives (a
++    // SELECT's operand, a comma's second operand), and of those, the ones not evaluated as plain values; the evaluated
++    // calls, and those below another; the records followed by a segment or an update's first row; the update plans; and
++    // the expressions with anything such a sweep settles after the records' visits.
++    uint64_t fusion_evaluated;
++    uint64_t fusion_unevaluated;
++    uint64_t fusion_wasted;
++    uint64_t fusion_inherited;
++    uint64_t fusion_inherited_other;
++    uint64_t fusion_calls;
++    uint64_t fusion_nested_calls;
++    uint64_t fusion_hooked;
++    uint64_t fusion_updates;
++    uint64_t fusion_settled_expressions;
++    // --shapes (c_check_node_machine_shape.c): the expressions the machine ran on, each asked of the unit's shapes first;
++    // those the shapes had (hits), their evaluated nodes and entries; the hits whose tape, labels or calls differ from
++    // the sweeps' on the same expression, which must be none; the taken expressions kept as new shapes, and those not
++    // kept, by reason, with their evaluated nodes; by size (BUSTER_NODE_SHADOW_SIZES), the taken expressions, the hits
++    // and both's evaluated nodes; the hits' nodes that each unit's most used shapes give (BUSTER_NODE_SHADOW_TOPS); and
++    // the units' stores' bytes, those of the shapes used again, and their count.
++    // --fused: C and X as one sweep (c_check_node_machine_lower.c), run after the three sweeps on every expression T
++    // typed: those whose refusal, tape, labels or calls differ from C's and X's, which must be none.
++    bool fused;
++    uint64_t fused_expressions;
++    uint64_t fused_differences;
++    bool shapes;
++    uint64_t shape_probes;
++    uint64_t shape_hits;
++    uint64_t shape_hit_nodes;
++    uint64_t shape_hit_entries;
++    uint64_t shape_differences;
++    uint64_t shape_reasons[NODE_SHAPE_REASONS];
++    uint64_t shape_reason_nodes[NODE_SHAPE_REASONS];
++    uint64_t shape_sizes[BUSTER_NODE_SHADOW_SIZES][4];
++    uint64_t shape_tops[BUSTER_NODE_SHADOW_TOPS];
++    uint64_t shape_store_bytes;
++    uint64_t shape_used_bytes;
++    uint64_t shape_used;
++    // The census's looser keys (BUSTER_NODE_SHADOW_VARIANTS, node_shadow_shape_variants): for each, the taken expressions
++    // whose looser key an earlier taken expression of the unit had, and their evaluated nodes. Counts alone: nothing is
++    // instantiated from them.
++    uint64_t shape_variant_hits[BUSTER_NODE_SHADOW_VARIANTS];
++    uint64_t shape_variant_nodes[BUSTER_NODE_SHADOW_VARIANTS];
++    // The current file's shapes, for its timing passes.
++    NodeShapes* file_shapes;
+     // T's nodes by row and by action, and the row-typed nodes the action types otherwise (--verify).
+     uint64_t row_nodes;
+     uint64_t action_nodes;
+@@ -1983,6 +2060,279 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+     return same && t == machine->entry_count;
+ }
+ 
++// The fused sweep's census (docs/node-machine.md, "A fused sweep: what it would settle later"): for a taken expression,
++// what a T that classified each record's operands, as C does, at the record's own visit, up the postorder, would leave to
++// a later step. A record's consumer decides its context and target, but where they are the consumer's own context (a
++// SELECT's operand and a comma's second operand, check_lower_template_classify's), which its consumer's consumer gives
++// later; a record its consumer doesn't evaluate costs that visit nothing, but one whose consumer isn't evaluated either
++// was classified for nothing; and a call's depth among the evaluated calls, which numbers its row, is its ancestors'.
++static void node_shadow_fusion(NodeShadow* shadow, NodeCensusScratch* s, const NodeMachine* machine)
++{
++    const uint32_t count = machine->count;
++    uint32_t* consumers = s->consumers;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        consumers[r] = UINT32_MAX;
++    }
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        const CheckOp op = node_machine_record_op(machine, r);
++        const uint32_t operands[3] = {
++            node_machine_record_left(machine, r),
++            node_machine_record_right(machine, r),
++            op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX,
++        };
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            if (operands[k] < r)
++            {
++                consumers[operands[k]] = r;
++            }
++        }
++        for (uint32_t i = 0; op == CHECK_OP_CALL && i < node_machine_record_argument_count(machine, r); i += 1)
++        {
++            const uint32_t argument = node_machine_record_argument(machine, r, i);
++            if (argument < r)
++            {
++                consumers[argument] = r;
++            }
++        }
++    }
++    uint64_t settled = 0;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        const uint8_t state = node_machine_record_state(machine, r);
++        const bool evaluated = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0;
++        const uint32_t consumer = consumers[r];
++        const bool consumer_evaluated = consumer < count && (node_machine_record_state(machine, consumer) & BUSTER_NODE_MACHINE_EVALUATED) != 0;
++        const CheckOp consumer_op = consumer < count ? node_machine_record_op(machine, consumer) : CHECK_OP_COUNT;
++        const bool inherited = evaluated && (consumer_op == CHECK_OP_SELECT || (consumer_op == CHECK_OP_COMMA && r == node_machine_record_right(machine, consumer)));
++        const bool wasted = !evaluated && consumer < count && !consumer_evaluated;
++        const bool nested = evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL && node_machine_record_call_depth(machine, r) != 0;
++        shadow->fusion_evaluated += evaluated;
++        shadow->fusion_unevaluated += !evaluated;
++        shadow->fusion_wasted += wasted;
++        shadow->fusion_inherited += inherited;
++        shadow->fusion_inherited_other += inherited && node_machine_record_context(machine, r) != 0;
++        shadow->fusion_calls += evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL;
++        shadow->fusion_nested_calls += nested;
++        shadow->fusion_hooked += evaluated && state > BUSTER_NODE_MACHINE_EVALUATED;
++        settled += inherited || wasted || nested;
++    }
++    shadow->fusion_updates += machine->update_count;
++    shadow->fusion_settled_expressions += settled != 0;
++}
++
++// --shapes: the current expression's key and, where the unit's shapes have it, its tape from them, kept aside for
++// node_shadow_shape's comparison. The entry, or null.
++static NodeShapeEntry* node_shadow_shape_ask(NodeCensusScratch* s, uint32_t first, uint32_t root, uint32_t records, uint8_t context, TypeId target, uint32_t object)
++{
++    NodeMachine* machine = s->machine;
++    NodeShapes* shapes = s->shapes;
++    NodeShapeEntry* entry = node_shape_key(machine, shapes, first, root, records, context, target, object) ? node_shape_find(shapes) : NULL;
++    if (entry != NULL)
++    {
++        node_shape_instantiate(machine, shapes, entry);
++        memcpy(s->shape_kinds, machine->kinds, machine->entry_count);
++        memcpy(s->shape_classes, machine->classes, machine->entry_count);
++        memcpy(s->shape_tape, machine->tape, (uint64_t)machine->entry_count * sizeof(uint64_t));
++        memcpy(s->shape_labels, machine->label_entries, (uint64_t)machine->label_count * sizeof(uint32_t));
++        memcpy(s->shape_calls, machine->call_records, (uint64_t)machine->call_count * sizeof(uint32_t));
++        memcpy(s->shape_symbols, shapes->call_symbols, (uint64_t)machine->call_count * sizeof(uint32_t));
++        s->shape_counts[0] = machine->entry_count;
++        s->shape_counts[1] = machine->label_count;
++        s->shape_counts[2] = machine->call_count;
++        s->shape_counts[3] = machine->temporary_count;
++    }
++    return entry;
++}
++
++// --shapes' census of looser keys, for a taken expression of `nodes` evaluated nodes whose key is the shapes' current one
++// (three words a record, then the root's two; a call's arguments' words aren't told apart from records', which only
++// moves which words a variant drops): each variant's hash, counted where the unit had it before.
++static void node_shadow_shape_variants(NodeShadow* shadow, NodeCensusScratch* s, uint32_t nodes)
++{
++    const NodeShapes* shapes = s->shapes;
++    const uint64_t* key = shapes->key;
++    const uint32_t words = shapes->words;
++    for (uint32_t v = 0; v < BUSTER_NODE_SHADOW_VARIANTS; v += 1)
++    {
++        uint64_t hash = UINT64_C(0x9e3779b97f4a7c15) + v;
++        for (uint32_t w = 0; w + 2 < words; w += 3)
++        {
++            const bool leaf = (uint8_t)key[w + 2] == CHECK_OP_VALUE;
++            uint64_t word0 = key[w];
++            uint64_t word1 = key[w + 1];
++            uint64_t word2 = key[w + 2];
++            if (v >= 1 && v <= 3 && leaf)
++            {
++                word1 = 0;
++            }
++            if (v >= 2 && v <= 3 && !leaf)
++            {
++                word0 = 0;
++            }
++            if (v == 3 && leaf)
++            {
++                word0 = 0;
++            }
++            if (v == 4 && leaf)
++            {
++                word2 &= 0xffffffu;
++            }
++            hash = node_shape_mix(node_shape_mix(node_shape_mix(hash, word0), word1), word2);
++        }
++        hash = node_shape_mix(node_shape_mix(hash, key[words - 2] & (v == 4 ? UINT64_C(0xffffff) : UINT64_MAX)), key[words - 1]);
++        hash |= 1;
++        uint64_t* set = s->shape_variants[v];
++        uint32_t slot = (uint32_t)(hash >> 20) & s->shape_variant_mask;
++        while (set[slot] != 0 && set[slot] != hash)
++        {
++            slot = (slot + 1) & s->shape_variant_mask;
++        }
++        shadow->shape_variant_hits[v] += set[slot] == hash;
++        shadow->shape_variant_nodes[v] += set[slot] == hash ? nodes : 0;
++        set[slot] = hash;
++    }
++}
++
++// --shapes, after the sweeps ran on the expression (`refusal`, `actions` of its nodes typed by the action, `records`
++// records, `nodes` evaluated nodes): a hit's tape, labels and calls compared with the sweeps', which are its exact twin;
++// any other taken expression kept as a new shape where its key decides its answer.
++static void node_shadow_shape(NodeShadow* shadow, NodeCensusScratch* s, NodeShapeEntry* entry, NodeMachineRefusal refusal, uint64_t actions, uint32_t records, uint32_t nodes)
++{
++    NodeMachine* machine = s->machine;
++    const uint32_t size = records <= 5 ? records - 1 : records <= 8 ? 5 : records <= 16 ? 6 : records <= 32 ? 7 : 8;
++    shadow->shape_probes += 1;
++    shadow->shape_sizes[size][0] += refusal == NODE_MACHINE_TAKEN;
++    shadow->shape_sizes[size][2] += refusal == NODE_MACHINE_TAKEN ? nodes : 0;
++    if (entry != NULL)
++    {
++        bool same = refusal == NODE_MACHINE_TAKEN && machine->entry_count == s->shape_counts[0] && machine->label_count == s->shape_counts[1] &&
++                    machine->call_count == s->shape_counts[2] && machine->temporary_count == s->shape_counts[3];
++        same = same && memcmp(s->shape_kinds, machine->kinds, machine->entry_count) == 0 && memcmp(s->shape_classes, machine->classes, machine->entry_count) == 0 &&
++               memcmp(s->shape_tape, machine->tape, (uint64_t)machine->entry_count * sizeof(uint64_t)) == 0 &&
++               memcmp(s->shape_labels, machine->label_entries, (uint64_t)machine->label_count * sizeof(uint32_t)) == 0 &&
++               memcmp(s->shape_calls, machine->call_records, (uint64_t)machine->call_count * sizeof(uint32_t)) == 0;
++        for (uint32_t c = 0; same && c < machine->call_count; c += 1)
++        {
++            same = s->shape_symbols[c] == node_machine_call_target(machine, machine->call_records[c]);
++        }
++        entry->uses += 1;
++        shadow->shape_hits += 1;
++        shadow->shape_hit_nodes += nodes;
++        shadow->shape_hit_entries += s->shape_counts[0];
++        shadow->shape_differences += !same;
++        shadow->shape_sizes[size][1] += 1;
++        shadow->shape_sizes[size][3] += nodes;
++        if (!same && shadow->listed < node_census_list)
++        {
++            shadow->listed += 1;
++            printf("node-shadow: shape difference file=%s line=%u refusal=%s entries=%u (shape %u) labels=%u (%u) calls=%u (%u)\n", s->file,
++                   node_census_line(s->pp, s->program->parser, s->program->input->graph.tokens[node_machine_node(machine, machine->count - 1)]),
++                   node_machine_refusal_names[refusal], machine->entry_count, s->shape_counts[0], machine->label_count, s->shape_counts[1], machine->call_count,
++                   s->shape_counts[2]);
++        }
++    }
++    else if (refusal == NODE_MACHINE_TAKEN)
++    {
++        const NodeShapeReason reason = node_shape_insert(machine, s->shapes, actions, nodes);
++        shadow->shape_reasons[reason] += 1;
++        shadow->shape_reason_nodes[reason] += nodes;
++    }
++    if (refusal == NODE_MACHINE_TAKEN && s->shapes->reason != NODE_SHAPE_SIZE)
++    {
++        node_shadow_shape_variants(shadow, s, nodes);
++    }
++}
++
++// The words of `entry` in the store, its header's included.
++static uint64_t node_shadow_shape_words(const NodeShapeEntry* entry)
++{
++    return sizeof(NodeShapeEntry) / 8 + entry->words + (uint64_t)entry->entry_count + 2 * (uint64_t)node_shape_padded(entry->entry_count) +
++           node_shape_padded(4 * (uint32_t)entry->patch_count) + node_shape_padded(4 * (uint32_t)entry->label_count) + node_shape_padded(4 * (uint32_t)entry->call_count);
++}
++
++static int node_shadow_shape_order(const void* left, const void* right)
++{
++    const uint64_t a = *(const uint64_t*)left;
++    const uint64_t b = *(const uint64_t*)right;
++    return a < b ? 1 : a > b ? -1 : 0;
++}
++
++// --shapes, at a unit's end: its store's bytes, those of the shapes used again, and the hits' nodes its most used shapes
++// gave. `weights` has room for each shape's.
++static void node_shadow_shape_unit(NodeShadow* shadow, const NodeShapes* shapes, uint64_t* weights)
++{
++    uint64_t at = 0;
++    uint32_t count = 0;
++    while (at < shapes->store_words)
++    {
++        const NodeShapeEntry* entry = (const NodeShapeEntry*)(shapes->store + at);
++        const uint64_t words = node_shadow_shape_words(entry);
++        weights[count] = (uint64_t)entry->uses * entry->nodes;
++        count += 1;
++        shadow->shape_used += entry->uses != 0;
++        shadow->shape_used_bytes += entry->uses != 0 ? 8 * words : 0;
++        at += words;
++    }
++    shadow->shape_store_bytes += 8 * shapes->store_words;
++    qsort(weights, count, sizeof(uint64_t), node_shadow_shape_order);
++    uint64_t covered = 0;
++    uint32_t top = 16;
++    uint32_t k = 0;
++    for (uint32_t i = 0; i <= count && k < BUSTER_NODE_SHADOW_TOPS; i += 1)
++    {
++        while (k < BUSTER_NODE_SHADOW_TOPS && (i == top || i == count))
++        {
++            shadow->shape_tops[k] += covered;
++            k += 1;
++            top *= 4;
++        }
++        covered += i < count ? weights[i] : 0;
++    }
++}
++
++// --fused, after the three sweeps ran on the expression with `refusal` (C's or X's, or none): C and X as one sweep on the
++// same records, its refusal, tape, labels and calls compared with theirs, which are its exact twin.
++static void node_shadow_fused(NodeShadow* shadow, NodeCensusScratch* s, NodeMachineRefusal refusal, uint8_t context, TypeId target, uint32_t object)
++{
++    NodeMachine* machine = s->machine;
++    const uint32_t entries = machine->entry_count;
++    const uint32_t labels = machine->label_count;
++    const uint32_t calls = machine->call_count;
++    const uint32_t temporaries = machine->temporary_count;
++    const bool taken = refusal == NODE_MACHINE_TAKEN;
++    if (taken)
++    {
++        memcpy(s->shape_kinds, machine->kinds, entries);
++        memcpy(s->shape_classes, machine->classes, entries);
++        memcpy(s->shape_tape, machine->tape, (uint64_t)entries * sizeof(uint64_t));
++        memcpy(s->shape_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t));
++        memcpy(s->shape_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t));
++    }
++    const NodeMachineRefusal fused = node_machine_lower(machine, context, target, object);
++    bool same = fused == refusal;
++    if (same && taken)
++    {
++        same = machine->entry_count == entries && machine->label_count == labels && machine->call_count == calls && machine->temporary_count == temporaries &&
++               memcmp(s->shape_kinds, machine->kinds, entries) == 0 && memcmp(s->shape_classes, machine->classes, entries) == 0 &&
++               memcmp(s->shape_tape, machine->tape, (uint64_t)entries * sizeof(uint64_t)) == 0 &&
++               memcmp(s->shape_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t)) == 0 &&
++               memcmp(s->shape_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t)) == 0;
++    }
++    shadow->fused_expressions += 1;
++    shadow->fused_differences += !same;
++    if (!same && shadow->listed < node_census_list)
++    {
++        shadow->listed += 1;
++        printf("node-shadow: fused difference file=%s line=%u refusal=%s (fused %s) entries=%u (fused %u) labels=%u (%u) calls=%u (%u)\n", s->file,
++               node_census_line(s->pp, s->program->parser, s->program->input->graph.tokens[node_machine_node(machine, machine->count - 1)]),
++               node_machine_refusal_names[refusal], node_machine_refusal_names[fused], entries, machine->entry_count, labels, machine->label_count, calls, machine->call_count);
++    }
++    node_machine_tape_rewind(machine);
++}
++
+ // The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
+ // walk reached `walked` nodes, `nodes` of them evaluated.
+ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
+@@ -2011,7 +2361,13 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+     const uint64_t twins = machine->twin_differences;
+     const uint64_t memo_fills = machine->memo_fills;
+     const uint64_t memo_rules = machine->memo_rules;
++    NodeShapeEntry* shape = s->shapes != NULL && refusal == NODE_MACHINE_TAKEN ? node_shadow_shape_ask(s, first, root, records, root_context, pop->target, object) : NULL;
++    const bool ran = refusal == NODE_MACHINE_TAKEN;
+     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_run(machine, first, root, records, root_context, pop->target, object) : refusal;
++    if (s->shapes != NULL && ran)
++    {
++        node_shadow_shape(shadow, s, shape, refusal, machine->action_nodes - action_nodes, records, nodes);
++    }
+     shadow->memo_fills += machine->memo_fills - memo_fills;
+     shadow->memo_rules += machine->memo_rules - memo_rules;
+     shadow->expressions += 1;
+@@ -2054,6 +2410,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+         shadow->entry_differences += !entries;
+         shadow->labeled_expressions += machine->label_count != 0;
+         shadow->labels += machine->label_count;
++        node_shadow_fusion(shadow, s, machine);
+         shadow->row_nodes += machine->row_nodes - row_nodes;
+         shadow->action_nodes += machine->action_nodes - action_nodes;
+         shadow->twin_differences += machine->twin_differences - twins;
+@@ -2079,6 +2436,10 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+             };
+         }
+     }
++    if (shadow->fused && ran && (refusal == NODE_MACHINE_TAKEN || refusal == NODE_MACHINE_REFUSED_TEMPLATE || refusal == NODE_MACHINE_REFUSED_ROW))
++    {
++        node_shadow_fused(shadow, s, refusal, root_context, pop->target, object);
++    }
+ }
+ 
+ // A cycle or instruction counter of this thread's user code (`config`, PERF_COUNT_HW_*), or -1.
+@@ -2113,14 +2474,43 @@ static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, ui
+         // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
+         for (uint32_t time = 0; time < shadow->repeat; time += 1)
+         {
+-            NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
+-            if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
++            // The shapes' set: an expression of a shape the unit has had takes its entries from it, and any other the three
++            // sweeps', kept as a new shape.
++            const bool fused = sweeps == BUSTER_NODE_SHADOW_SET_FUSED || sweeps == BUSTER_NODE_SHADOW_SET_SHAPES_FUSED;
++            NodeShapes* shapes = sweeps >= BUSTER_NODE_SHADOW_SET_SHAPES ? shadow->file_shapes : NULL;
++            const NodeShapeEntry* shape = shapes != NULL && node_shape_key(machine, shapes, expression->first, expression->root, expression->count, expression->context,
++                                                                           expression->target, expression->object) ?
++                                          node_shape_find(shapes) : NULL;
++            if (shape != NULL)
+             {
+-                refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
++                node_shape_instantiate(machine, shapes, shape);
+             }
+-            if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
++            else
+             {
+-                node_machine_expand(machine, expression->object);
++                const uint64_t actions = machine->action_nodes;
++                NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
++                if (fused)
++                {
++                    if (refusal == NODE_MACHINE_TAKEN)
++                    {
++                        refusal = node_machine_lower(machine, expression->context, expression->target, expression->object);
++                    }
++                }
++                else
++                {
++                    if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
++                    {
++                        refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
++                    }
++                    if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
++                    {
++                        refusal = node_machine_expand(machine, expression->object);
++                    }
++                }
++                if (shapes != NULL && refusal == NODE_MACHINE_TAKEN)
++                {
++                    (void)node_shape_insert(machine, shapes, machine->action_nodes - actions, 0);
++                }
+             }
+         }
+     }
+@@ -2136,6 +2526,8 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+     const bool verify = machine->verify;
+     const uint64_t memo_fills = machine->memo_fills;
+     const uint64_t memo_rules = machine->memo_rules;
++    const uint64_t action_nodes = machine->action_nodes;
++    const bool enabled[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->file_shapes != NULL, shadow->fused && shadow->file_shapes != NULL };
+     machine->verify = false;
+     uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][3];
+     memset(least, 0xff, sizeof(least));
+@@ -2143,7 +2535,16 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+     {
+         for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+         {
++            if (!enabled[sweeps])
++            {
++                continue;
++            }
+             node_machine_forget(machine);
++            if (sweeps >= BUSTER_NODE_SHADOW_SET_SHAPES)
++            {
++                // The unit's shapes too: each pass keeps them anew, as one compile of the unit does.
++                node_shapes_forget(shadow->file_shapes);
++            }
+             const uint64_t c0 = node_shadow_read(cycles);
+             const uint64_t i0 = node_shadow_read(instructions);
+             const uint64_t t0 = __rdtsc();
+@@ -2160,6 +2561,10 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+     }
+     for (uint32_t sweeps = 0; shadow->passes != 0 && sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+     {
++        if (!enabled[sweeps])
++        {
++            continue;
++        }
+         shadow->cycles[sweeps] += least[sweeps][0];
+         shadow->instructions[sweeps] += least[sweeps][1];
+         shadow->ticks[sweeps] += least[sweeps][2];
+@@ -2169,6 +2574,7 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+     machine->verify = verify;
+     machine->memo_fills = memo_fills;
+     machine->memo_rules = memo_rules;
++    machine->action_nodes = action_nodes;
+     if (cycles >= 0)
+     {
+         close(cycles);
+@@ -2189,6 +2595,12 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
+            shadow->verify ? ", verified" : "");
+     printf("node-shadow: labels=%" PRIu64 " in taken expressions=%" PRIu64 "\n", shadow->labels, shadow->labeled_expressions);
++    printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
++           ") calls=%" PRIu64 " (below a call %" PRIu64 ") segments-or-splits=%" PRIu64 " updates=%" PRIu64 " labeled-expressions=%" PRIu64
++           " expressions-settled-later=%" PRIu64 " of %" PRIu64 "\n",
++           shadow->fusion_evaluated, shadow->fusion_unevaluated, shadow->fusion_wasted, shadow->fusion_inherited, shadow->fusion_inherited_other, shadow->fusion_calls,
++           shadow->fusion_nested_calls, shadow->fusion_hooked, shadow->fusion_updates, shadow->labeled_expressions, shadow->fusion_settled_expressions,
++           shadow->taken_expressions);
+     printf("node-shadow: argument-memo filled=%" PRIu64 " by-rule=%" PRIu64 " (taken calls' arguments %" PRIu64 ")\n", shadow->memo_fills, shadow->memo_rules,
+            shadow->arguments);
+     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
+@@ -2211,9 +2623,55 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+             printf("node-shadow: action-typed op=%s nodes=%" PRIu64 "\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", action_ops[op]);
+         }
+     }
+-    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X" };
++    if (shadow->shapes)
++    {
++        static const char* const size_names[BUSTER_NODE_SHADOW_SIZES] = { "1", "2", "3", "4", "5", "6-8", "9-16", "17-32", "33+" };
++        printf("node-shadow: shapes asked=%" PRIu64 " hits=%" PRIu64 " (%.2f%% of the taken expressions) hit-nodes=%" PRIu64 " (%.2f%% of the taken evaluated nodes) hit-entries=%" PRIu64
++               " differences=%" PRIu64 "\n",
++               shadow->shape_probes, shadow->shape_hits, node_census_share(shadow->shape_hits, shadow->taken_expressions), shadow->shape_hit_nodes,
++               node_census_share(shadow->shape_hit_nodes, shadow->taken_nodes), shadow->shape_hit_entries, shadow->shape_differences);
++        for (uint32_t r = 0; r < NODE_SHAPE_REASONS; r += 1)
++        {
++            if (shadow->shape_reasons[r] != 0)
++            {
++                printf("node-shadow: shapes %s expressions=%" PRIu64 " evaluated-nodes=%" PRIu64 " (%.2f%%)\n", r == NODE_SHAPE_KEPT ? "kept" : "not-kept", shadow->shape_reasons[r],
++                       shadow->shape_reason_nodes[r], node_census_share(shadow->shape_reason_nodes[r], shadow->taken_nodes));
++                if (r != NODE_SHAPE_KEPT)
++                {
++                    printf("node-shadow: shapes not-kept reason=%s expressions=%" PRIu64 "\n", node_shape_reason_names[r], shadow->shape_reasons[r]);
++                }
++            }
++        }
++        for (uint32_t k = 0; k < BUSTER_NODE_SHADOW_SIZES; k += 1)
++        {
++            printf("node-shadow: shapes records=%s expressions=%" PRIu64 " hits=%" PRIu64 " (%.1f%%) evaluated-nodes=%" PRIu64 " hit-nodes=%" PRIu64 " (%.1f%%)\n", size_names[k],
++                   shadow->shape_sizes[k][0], shadow->shape_sizes[k][1], node_census_share(shadow->shape_sizes[k][1], shadow->shape_sizes[k][0]), shadow->shape_sizes[k][2],
++                   shadow->shape_sizes[k][3], node_census_share(shadow->shape_sizes[k][3], shadow->shape_sizes[k][2]));
++        }
++        static const char* const variant_names[BUSTER_NODE_SHADOW_VARIANTS] = { "key", "no-integers", "no-integers-or-action-data", "no-integers-action-data-or-leaf-types", "no-objects" };
++        for (uint32_t v = 0; v < BUSTER_NODE_SHADOW_VARIANTS; v += 1)
++        {
++            printf("node-shadow: shapes looser=%s seen-before expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%)\n", variant_names[v], shadow->shape_variant_hits[v],
++                   node_census_share(shadow->shape_variant_hits[v], shadow->taken_expressions), shadow->shape_variant_nodes[v],
++                   node_census_share(shadow->shape_variant_nodes[v], shadow->taken_nodes));
++        }
++        printf("node-shadow: shapes store-bytes=%" PRIu64 " used-again=%" PRIu64 " used-again-bytes=%" PRIu64 " hit-nodes by the units' top 16/64/256/1024/4096 shapes=%" PRIu64 "/%" PRIu64
++               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 "\n",
++               shadow->shape_store_bytes, shadow->shape_used, shadow->shape_used_bytes, shadow->shape_tops[0], shadow->shape_tops[1], shadow->shape_tops[2], shadow->shape_tops[3],
++               shadow->shape_tops[4]);
++    }
++    if (shadow->fused)
++    {
++        printf("node-shadow: fused expressions=%" PRIu64 " differences=%" PRIu64 "\n", shadow->fused_expressions, shadow->fused_differences);
++    }
++    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X", "T+CX", "shapes", "shapes+CX" };
++    const bool timed[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->shapes, shadow->fused && shadow->shapes };
+     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
+     {
++        if (!timed[k])
++        {
++            continue;
++        }
+         printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
+                "ticks=%.1f%s\n",
+                sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
+@@ -2353,11 +2811,57 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+             s.local_objects = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+             s.local_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+             s.temporary_locals = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++            s.consumers = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++            static NodeShapes shapes;
++            shadow->file_shapes = NULL;
++            if (shadow->fused && !shadow->shapes)
++            {
++                s.shape_kinds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++                s.shape_classes = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++                s.shape_tape = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++                s.shape_labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, 2 * BUSTER_NODE_MACHINE_MOST);
++                s.shape_calls = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++            }
++            if (shadow->shapes)
++            {
++                s.shape_kinds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++                s.shape_classes = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++                s.shape_tape = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++                s.shape_labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, 2 * BUSTER_NODE_MACHINE_MOST);
++                s.shape_calls = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++                s.shape_symbols = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++                s.shape_weights = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, owners.count + 1);
++                uint32_t variant_slots = 64;
++                while (variant_slots < 2 * owners.count && variant_slots < (UINT32_C(1) << 30))
++                {
++                    variant_slots *= 2;
++                }
++                s.shape_variant_mask = variant_slots - 1;
++                for (uint32_t v = 0; v < BUSTER_NODE_SHADOW_VARIANTS; v += 1)
++                {
++                    s.shape_variants[v] = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, variant_slots);
++                    if (s.shape_variants[v] != NULL)
++                    {
++                        memset(s.shape_variants[v], 0, (uint64_t)variant_slots * sizeof(uint64_t));
++                    }
++                    else
++                    {
++                        s.shape_weights = NULL;
++                    }
++                }
++                if (s.shape_kinds != NULL && s.shape_classes != NULL && s.shape_tape != NULL && s.shape_labels != NULL && s.shape_calls != NULL && s.shape_symbols != NULL &&
++                    s.shape_weights != NULL && node_shapes_begin(&shapes, &selected.program, owners.count, &scratch))
++                {
++                    s.shapes = &shapes;
++                    shadow->file_shapes = &shapes;
++                }
++            }
+             shadow->timed_capacity = (uint32_t)(owners.count < UINT32_MAX ? owners.count : UINT32_MAX);
+             shadow->timed = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeShadowExpression, (uint64_t)shadow->timed_capacity + 1);
+             shadow->timed_count = 0;
+-            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL &&
+-                   shadow->timed != NULL &&
++            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL && s.consumers != NULL &&
++                   shadow->timed != NULL && (!shadow->shapes || s.shapes != NULL) &&
++                   (!shadow->fused || (s.shape_kinds != NULL && s.shape_classes != NULL && s.shape_tape != NULL && s.shape_labels != NULL && s.shape_calls != NULL)) &&
+                    node_machine_begin(&machine, &selected.program, shadow->scalar, shadow->verify, &scratch);
+             if (room)
+             {
+@@ -2396,6 +2900,10 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                 {
+                     shadow->action_ops[op] += machine.action_ops[op];
+                 }
++                if (shadow->file_shapes != NULL)
++                {
++                    node_shadow_shape_unit(shadow, shadow->file_shapes, s.shape_weights);
++                }
+                 node_shadow_time(shadow, &machine, shadow->file_nodes);
+                 shadow->file_nodes = 0;
+             }
+@@ -2493,6 +3001,14 @@ static int run_node_census(int count, char** arguments)
+         {
+             shadow.verify = true;
+         }
++        else if (strcmp(arguments[i], "--shapes") == 0)
++        {
++            shadow.shapes = true;
++        }
++        else if (strcmp(arguments[i], "--fused") == 0)
++        {
++            shadow.fused = true;
++        }
+         else if (strcmp(arguments[i], "--passes") == 0)
+         {
+             uint64_t number = 0;
+@@ -2523,7 +3039,7 @@ static int run_node_census(int count, char** arguments)
+             }
+         }
+     }
+-    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify));
++    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.shapes && !shadow.fused));
+     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
+     for (uint32_t i = 0; valid && i < file_count; i += 1)
+     {
+@@ -2540,11 +3056,12 @@ static int run_node_census(int count, char** arguments)
+     }
+     else
+     {
+-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...\n");
++        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--shapes] [--fused] [--passes N] [--repeat N]] [preprocessor options] file...\n");
+     }
+     free(files);
+     free(options);
+-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0);
++    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.shape_differences != 0 ||
++                                          shadow.fused_differences != 0);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index 41ccab4ed..c8fdb9b27 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -395,8 +395,22 @@ struct NodeMachine
+     uint32_t* call_records;
+     uint32_t call_count;
+     uint32_t temporary_count;
++    // The tape's columns' ends, past their BUSTER_NODE_MACHINE_TAPE_MOST entries: node_machine_lower writes the tape back
++    // from them and leaves `kinds`, `classes` and `tape` at its first entry; X and the shapes write from their starts
++    // (node_machine_tape_rewind). And node_machine_lower's own: each label's entry as its place from the tape's end, by
++    // the label's number in the sweep's order (`label_ends`), the labeled records in that order (`label_met`) and each
++    // call's CALL's place from the tape's end (`call_ends`).
++    uint8_t* kinds_end;
++    uint8_t* classes_end;
++    uint64_t* tape_end;
++    uint32_t* label_ends;
++    uint32_t* label_met;
++    uint32_t* call_ends;
+     // The record T, C or X stopped at, for a refusal's report.
+     uint32_t stopped;
++    // The current expression's rules' answers that a type isn't complete at their node (node_machine_complete): a later
++    // node may find it complete, so the shapes don't keep such an expression (c_check_node_machine_shape.c).
++    uint32_t incomplete;
+ };
+ 
+ // Forgets the unit's call answers, the types' pointers and the argument memo, as a unit starts without them:
+@@ -456,6 +470,9 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+     machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
+     machine->calls_written = node_machine_column(arena, most, sizeof(uint32_t), 60);
+     machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
++    machine->label_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
++    machine->label_met = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
++    machine->call_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+     machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+     machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
+     machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
+@@ -469,9 +486,12 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
+                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
+                       machine->updates != NULL && machine->pointers != NULL && machine->const_pointers != NULL &&
+-                      machine->argument_memo != NULL;
++                      machine->argument_memo != NULL && machine->label_ends != NULL && machine->label_met != NULL && machine->call_ends != NULL;
+     if (room)
+     {
++        machine->kinds_end = machine->kinds + entries;
++        machine->classes_end = machine->classes + entries;
++        machine->tape_end = machine->tape + entries;
+         node_machine_forget(machine);
+         (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
+         check_lower_classify_types(program->types, machine->type_count, classes, facts);
+@@ -489,6 +509,15 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+     return room && node_machine_tables_initialize();
+ }
+ 
++// The tape's columns back at their starts, for a sweep that writes the tape from its first entry (X, the shapes), after
++// one that left them at the first entry of a tape written from its end (node_machine_lower).
++static inline __attribute__((always_inline)) void node_machine_tape_rewind(NodeMachine* machine)
++{
++    machine->kinds = machine->kinds_end - BUSTER_NODE_MACHINE_TAPE_MOST;
++    machine->classes = machine->classes_end - BUSTER_NODE_MACHINE_TAPE_MOST;
++    machine->tape = machine->tape_end - BUSTER_NODE_MACHINE_TAPE_MOST;
++}
++
+ // Type `type`'s word (NodeMachine.type_words), or a class of UINT8_MAX and no facts past the table.
+ static inline uint32_t node_machine_word(const NodeMachine* machine, TypeId type)
+ {
+diff --git a/src/buster/compiler/c_check_node_machine_contexts.c b/src/buster/compiler/c_check_node_machine_contexts.c
+index 744a67823..f1ce40fdd 100644
+--- a/src/buster/compiler/c_check_node_machine_contexts.c
++++ b/src/buster/compiler/c_check_node_machine_contexts.c
+@@ -322,7 +322,7 @@ static __attribute__((noinline)) CheckLowerTemplate node_machine_classify_update
+ // object a root INITIALIZE initializes. The refusals every operator shares and a folded constant come first, then one
+ // case an operator, each with its own tests alone (a record's case was a chain of tests on its facts, which C fetched for
+ // every record: docs/node-machine.md, "C's and X's dispatch").
+-static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
++static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
+ {
+     const CheckProgram* program = machine->program;
+     const TypeTable* types = machine->types;
+@@ -538,7 +538,7 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
+ // its conversion's type, as the call's tasks push them. BUSTER_NODE_MACHINE_TEMPLATE_CALL, or CHECK_LOWER_TEMPLATE_NONE
+ // for any other call: a struct's, a union's, a long double's, a 128-bit integer's, a half-precision or an atomic value's
+ // argument, parameter or result, which the lowering passes otherwise.
+-static CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
++static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
+ {
+     const TypeTable* types = machine->types;
+     const uint32_t a = node_machine_record_left(machine, r);
+diff --git a/src/buster/compiler/c_check_node_machine_expand.c b/src/buster/compiler/c_check_node_machine_expand.c
+index a0adcf775..5551f03e8 100644
+--- a/src/buster/compiler/c_check_node_machine_expand.c
++++ b/src/buster/compiler/c_check_node_machine_expand.c
+@@ -457,6 +457,7 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
+ {
+     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+     const uint32_t count = machine->count;
++    node_machine_tape_rewind(machine);
+     machine->entry_count = 0;
+     machine->call_count = 0;
+     machine->temporary_count = 0;
+diff --git a/src/buster/compiler/c_check_node_machine_lower.c b/src/buster/compiler/c_check_node_machine_lower.c
+new file mode 100644
+index 000000000..dbdb2fe40
+--- /dev/null
++++ b/src/buster/compiler/c_check_node_machine_lower.c
+@@ -0,0 +1,621 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// #2524's node machine's C and X as one sweep (c_check_node_machine.c has the machine; docs/node-machine.md, "C and X
++// as one sweep"): node_machine_lower walks the records down from the root as C does, and writes each evaluated record's
++// row as soon as it has classified it, since the record's context and target, which its consumer gave it, are all its row
++// waits for. The records come in reverse postorder, so the tape is written from its end: a record's row lies after its
++// operands' entries, which are written after it. Within a record, what is last on the tape is written first: the
++// segment after its row (its consumer's test and branch, or an update's first row), then its conversion's entries, then
++// its own, each entry of a row from the row's last to its first.
++//
++// - The classification is C's own (node_machine_classify, _call, node_machine_logical, node_machine_classify_update),
++//   and so are the operands' contexts and targets.
++// - The rows are X's (node_machine_own, node_machine_convert, node_machine_hook, node_machine_update_first and _last),
++//   each written from its last entry.
++// - What X numbers by the order it writes in, the sweep numbers after its loop, for the few expressions that have any:
++//   the labels (C's node_machine_number_labels ranks the labeled records once C has met them all; the rows hold each
++//   label's place among the labeled records in the order the sweep met them until then), the calls' rows (X's rule,
++//   node_machine_call_own's, over the calls in the order X would have written them) and the temporaries (X's order is the
++//   reverse of this sweep's).
++//
++// node_machine_contexts and node_machine_expand are its exact twin: the shadow's --fused runs both on every expression
++// and compares the two tapes, their labels and their calls (c_check_node_census.c).
++#ifndef BUSTER_C_CHECK_NODE_MACHINE_LOWER_INCLUDED
++#define BUSTER_C_CHECK_NODE_MACHINE_LOWER_INCLUDED
++
++// The tape's three columns' ends, which the sweep writes back from.
++typedef struct NodeMachineBack NodeMachineBack;
++struct NodeMachineBack
++{
++    uint8_t* kinds;
++    uint8_t* classes;
++    uint64_t* tape;
++};
++
++// One more entry before the `n` written: the count with it.
++static inline __attribute__((always_inline)) uint32_t node_machine_back(NodeMachineBack out, uint32_t n, uint8_t kind, uint8_t class, uint64_t value)
++{
++    const int64_t at = -(int64_t)n - 1;
++    out.kinds[at] = kind;
++    out.classes[at] = class;
++    out.tape[at] = value;
++    return n + 1;
++}
++
++// node_machine_put_truth's entries, from the last.
++static inline __attribute__((always_inline)) uint32_t node_machine_back_truth(NodeMachineBack out, uint32_t n, uint8_t class, bool negate)
++{
++    const bool narrow = check_lower_narrow(class);
++    n = node_machine_back(out, n, negate ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
++    n = node_machine_back(out, n, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : class, 0);
++    if (narrow)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
++    }
++    return n;
++}
++
++// node_machine_address's entries, from the last.
++static uint32_t node_machine_back_address(const NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t object, int64_t offset)
++{
++    if (object == 0)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (uint64_t)offset);
++    }
++    else
++    {
++        if (offset != 0)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, (uint64_t)offset);
++        }
++        if (node_machine_local(machine, object))
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
++        }
++        else
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, machine->program->object_symbols[object]);
++        }
++    }
++    return n;
++}
++
++// node_machine_convert's entries, from the last: into `takes` whether the templates take the conversion.
++static inline __attribute__((always_inline)) uint32_t node_machine_back_convert(const NodeMachine* machine, NodeMachineBack out, uint32_t n, TypeId from, uint8_t from_facts,
++                                                                              uint8_t source, TypeId to, bool* takes)
++{
++    *takes = true;
++    if (to != 0 && from != to)
++    {
++        const uint8_t to_facts = node_machine_facts(machine, to);
++        const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
++        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
++                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
++                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
++                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
++        const bool mixed = ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 && target != BUSTER_TYPED_CLASS_VOID;
++        const bool complex = ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) != 0 && target != BUSTER_TYPED_CLASS_VOID;
++        if (empty)
++        {
++        }
++        else if (complex || mixed || source >= BUSTER_TYPED_CLASS_F80 || target >= BUSTER_TYPED_CLASS_F80)
++        {
++            *takes = false;
++        }
++        else if (target == BUSTER_TYPED_CLASS_VOID)
++        {
++            if (source != BUSTER_TYPED_CLASS_VOID)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_DISCARD, source, 0);
++            }
++        }
++        else if ((to_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0)
++        {
++            const bool narrow = check_lower_narrow(source);
++            n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
++            n = node_machine_back(out, n, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : source, 0);
++            if (narrow)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
++            }
++        }
++        else if (source != target)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, target, 0);
++        }
++    }
++    return n;
++}
++
++// Whether record `r`'s conversion folds into its integer constant's one CONST of class `*class` and bits `*bits`
++// (node_machine_fold_conversion's rule), which then become the conversion's.
++static __attribute__((noinline)) bool node_machine_back_fold(const NodeMachine* machine, uint32_t r, uint8_t* class, uint64_t* bits)
++{
++    const TypeId from = node_machine_record_type(machine, r);
++    const TypeId to = node_machine_record_target(machine, r);
++    const uint8_t source = node_machine_record_class(machine, r);
++    bool folded = false;
++    if (node_machine_record_context(machine, r) == 0 && to != 0 && from != to && *class == source)
++    {
++        const uint8_t from_facts = node_machine_record_facts(machine, r);
++        const uint8_t to_facts = node_machine_facts(machine, to);
++        const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
++        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
++                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
++                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
++                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
++        uint8_t converted_class = 0;
++        uint64_t converted_bits = *bits;
++        folded = !empty && check_lower_constant_conversion(source, from_facts, target, to_facts, &converted_class, &converted_bits);
++        if (folded)
++        {
++            *class = converted_class;
++            *bits = converted_bits;
++        }
++    }
++    return folded;
++}
++
++// node_machine_update_first's entries, from the last: an update's first row, after its destination's entries. Its
++// temporaries take their numbers in the order this sweep meets them (node_machine_lower numbers them as X does after
++// its loop). Into `takes` whether the templates take its conversion.
++static __attribute__((noinline)) uint32_t node_machine_back_update_first(NodeMachine* machine, NodeMachineBack out, uint32_t n, const NodeMachineUpdate* update, bool* takes)
++{
++    const uint8_t class = update->stored_class;
++    const uint64_t access = check_lower_access_value(machine->types, class, update->stored);
++    if (update->computing != update->calculated_class && !update->pointer)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, update->computing, 0);
++    }
++    n = node_machine_back_convert(machine, out, n, update->stored, node_machine_facts(machine, update->stored), class, update->calculated, takes);
++    if (update->direct)
++    {
++        if (update->postfix)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_DUP, class, 0);
++        }
++        n = node_machine_back(out, n, update->get, class, update->destination);
++    }
++    else if (!update->postfix)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, access);
++        n = node_machine_back(out, n, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
++    }
++    else
++    {
++        const uint64_t address = BUSTER_NODE_MACHINE_TEMPORARY | machine->temporary_count;
++        const uint64_t old = BUSTER_NODE_MACHINE_TEMPORARY | (machine->temporary_count + 1);
++        machine->temporary_count += 2;
++        n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, class, old);
++        n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
++        n = node_machine_back(out, n, BUSTER_TYPED_STORE_LOCAL, class, old);
++        n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, access);
++        n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
++        n = node_machine_back(out, n, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
++    }
++    return n;
++}
++
++// node_machine_update_last's entries, from the last: an update's own row.
++static __attribute__((noinline)) uint32_t node_machine_back_update_last(NodeMachine* machine, NodeMachineBack out, uint32_t n, const NodeMachineUpdate* update)
++{
++    const uint8_t class = update->stored_class;
++    bool takes = true;
++    n = node_machine_back(out, n, update->store, class, update->direct ? update->destination : check_lower_access_value(machine->types, class, update->stored));
++    n = node_machine_back_convert(machine, out, n, update->calculated, node_machine_facts(machine, update->calculated), update->calculated_class, update->stored, &takes);
++    if (update->pointer)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, update->stride);
++        if (update->subtract)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
++        }
++        if (update->increment)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1);
++        }
++    }
++    else
++    {
++        n = node_machine_back(out, n, update->kind, update->computing, 0);
++        if (update->increment || update->power)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, update->computing, update->constant);
++        }
++        else if (update->computing != update->calculated_class && update->kind != BUSTER_TYPED_SHL && update->kind != BUSTER_TYPED_SHR)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, update->computing, 0);
++        }
++    }
++    return n;
++}
++
++// What follows record `r`'s row (node_machine_after_row's, `state` its state past BUSTER_NODE_MACHINE_EVALUATED), from
++// the last entry: its consumer's segment (node_machine_hook's) or an update's first row (node_machine_split's). A label's
++// entry is kept as the entries written when the sweep reached it (`ends`, by the label's number in the sweep's order),
++// which is its place from the tape's end. Into `takes` whether an update's first row is a row the machine takes.
++static __attribute__((noinline)) uint32_t node_machine_back_after_row(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t r, uint8_t state, uint32_t* ends, bool* takes)
++{
++    *takes = true;
++    if ((state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)
++    {
++        const uint32_t consumer = node_machine_record_hook(machine, r);
++        const uint32_t alternate = node_machine_record_label_base(machine, consumer);
++        if ((state & BUSTER_NODE_MACHINE_AFTER_CONDITION) != 0)
++        {
++            n = node_machine_back(out, n, node_machine_record_op(machine, consumer) == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE,
++                                  BUSTER_TYPED_CLASS_I32, alternate);
++            n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, consumer, 0)), false);
++        }
++        else
++        {
++            const uint8_t class = node_machine_record_class(machine, consumer);
++            ends[alternate] = n;
++            n = node_machine_back(out, n, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
++        }
++    }
++    else
++    {
++        const uint32_t before = n;
++        n = node_machine_back_update_first(machine, out, n, node_machine_record_update(machine, r), takes);
++        *takes = *takes && n - before <= BUSTER_NODE_MACHINE_ROW_MOST;
++    }
++    return n;
++}
++
++// Record `r`'s own entries by its template `kind` (node_machine_own's), from the last. `object` as in C. A labeled
++// record's labels' entries as node_machine_back_after_row keeps them; a call's row is its number among the calls in the
++// sweep's order until node_machine_lower numbers it, and its entry's place from the tape's end is kept in `call_ends`.
++static inline __attribute__((always_inline)) uint32_t node_machine_back_own(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t r, CheckLowerTemplate kind,
++                                                                          uint32_t object, uint32_t* ends)
++{
++    const uint8_t class = node_machine_record_class(machine, r);
++    switch ((uint32_t)kind)
++    {
++        case CHECK_LOWER_TEMPLATE_LOCAL:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, class, node_machine_record_object(machine, r));
++        } break;
++        case CHECK_LOWER_TEMPLATE_CONSTANT:
++        {
++            // An integer constant's CONST is node_machine_lower's, with its conversion.
++            if ((node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0)
++            {
++                if (node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_ADDRESS)
++                {
++                    if (node_machine_record_category(machine, r) == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
++                    {
++                        n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, class, 0);
++                    }
++                    n = node_machine_back_address(machine, out, n, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
++                }
++                else if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
++                {
++                    uint64_t bits = node_machine_record_integer(machine, r);
++                    const uint32_t width = 8u << ((class - 1) / 2);
++                    if (width < 64)
++                    {
++                        const uint64_t mask = (UINT64_C(1) << width) - 1;
++                        bits &= mask;
++                        bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
++                    }
++                    n = node_machine_back(out, n, BUSTER_TYPED_CONST, class, bits);
++                }
++                else
++                {
++                    n = node_machine_back(out, n, BUSTER_TYPED_CONST, class, check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r)));
++                }
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_MEMBER:
++        {
++            const uint64_t offset = node_machine_record_member_offset(machine, r);
++            if (node_machine_loads(machine, r))
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++            }
++            if (offset / 8 != 0)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
++                n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_STORE_LOCAL: case CHECK_LOWER_TEMPLATE_STORE_GLOBAL:
++        {
++            const uint32_t target = node_machine_record_op(machine, r) == CHECK_OP_INITIALIZE ? object : node_machine_record_object(machine, node_machine_record_left(machine, r));
++            n = node_machine_back(out, n, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
++                                  kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : machine->program->object_symbols[target]);
++        } break;
++        case CHECK_LOWER_TEMPLATE_STORE:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_STORE, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++        } break;
++        case CHECK_LOWER_TEMPLATE_TRUTH:
++        {
++            n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, r, 0)), node_machine_record_op(machine, r) == CHECK_OP_NOT);
++        } break;
++        case CHECK_LOWER_TEMPLATE_BINARY:
++        {
++            n = node_machine_back(out, n, check_lower_binary(node_machine_record_op(machine, r)), class, 0);
++        } break;
++        case CHECK_LOWER_TEMPLATE_POINTER:
++        {
++            const CheckOp op = node_machine_record_op(machine, r);
++            if (op == CHECK_OP_SUBSCRIPT && node_machine_loads(machine, r))
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++            }
++            n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(machine->types, node_machine_record_converted(machine, r, 0)));
++            if (op == CHECK_OP_SUBTRACT)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_GLOBAL:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL, class, machine->program->object_symbols[node_machine_record_object(machine, r)]);
++        } break;
++        case CHECK_LOWER_TEMPLATE_ADDRESS:
++        {
++            n = node_machine_back_address(machine, out, n, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
++        } break;
++        case CHECK_LOWER_TEMPLATE_DEREFERENCE:
++        {
++            if (node_machine_loads(machine, r))
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_UNARY:
++        {
++            n = node_machine_back(out, n, node_machine_record_op(machine, r) == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
++        } break;
++        case NODE_MACHINE_TEMPLATE_BRANCH:
++        {
++            // From the last: its end; a logical operator's value at its alternate, the alternate, its jump to its end and
++            // its second operand's test.
++            const CheckOp op = node_machine_record_op(machine, r);
++            const uint32_t alternate = node_machine_record_label_base(machine, r);
++            ends[alternate + 1] = n;
++            if (op != CHECK_OP_CONDITIONAL)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
++                ends[alternate] = n;
++                n = node_machine_back(out, n, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
++                n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
++            }
++        } break;
++        case NODE_MACHINE_TEMPLATE_DECIDED:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, node_machine_record_op(machine, r) == CHECK_OP_LOGICAL_OR);
++        } break;
++        case NODE_MACHINE_TEMPLATE_SECOND:
++        {
++            n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
++        } break;
++        case NODE_MACHINE_TEMPLATE_UPDATE:
++        {
++            n = node_machine_back_update_last(machine, out, n, node_machine_record_update(machine, r));
++        } break;
++        case NODE_MACHINE_TEMPLATE_CALL:
++        {
++            // Its row waits for the calls before its subtree, which the sweep meets after it.
++            const uint32_t met = machine->call_count;
++            machine->calls_written[met] = r;
++            machine->call_count = met + 1;
++            n = node_machine_back(out, n, BUSTER_TYPED_CALL, class, met);
++            machine->call_ends[met] = n;
++        } break;
++        default:
++        {
++        } break;
++    }
++    return n;
++}
++
++// The labels', the calls' and the temporaries' numbers, after node_machine_lower's loop wrote `n` entries: what X numbers
++// by the order it writes in. Only an expression with one of them runs it.
++static __attribute__((noinline)) void node_machine_lower_number(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t* ends)
++{
++    const uint32_t labeled = machine->label_count / 2;
++    const uint32_t calls = machine->call_count;
++    const uint32_t temporaries = machine->temporary_count;
++    if (labeled != 0)
++    {
++        // The rows hold each label by its record's place among the labeled records as the sweep met them (2k and 2k + 1
++        // for the kth): C's ranks give its number, and its entry is its place from the tape's start.
++        uint32_t* met = machine->label_met;
++        for (uint32_t k = 0; k < labeled; k += 1)
++        {
++            met[k] = machine->stack[k];
++        }
++        node_machine_number_labels(machine);
++        for (uint32_t k = 0; k < labeled; k += 1)
++        {
++            const uint32_t base = node_machine_record_label_base(machine, met[k]);
++            machine->label_entries[base] = n - ends[2 * k];
++            machine->label_entries[base + 1] = n - ends[2 * k + 1];
++        }
++        for (uint32_t i = 1; i <= n; i += 1)
++        {
++            const uint8_t kind = out.kinds[-(int64_t)i];
++            if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_JUMP_VALUE)
++            {
++                const uint64_t label = out.tape[-(int64_t)i];
++                out.tape[-(int64_t)i] = node_machine_record_label_base(machine, met[label / 2]) + (label & 1);
++            }
++        }
++    }
++    if (calls != 0)
++    {
++        // The sweep met the calls from the last record to the first: X writes them in the other order, and a call's row is
++        // the calls X wrote before its subtree's least record, plus those that contain it (node_machine_call_own).
++        uint32_t* written = machine->calls_written;
++        for (uint32_t k = 0; k < calls / 2; k += 1)
++        {
++            const uint32_t record = written[k];
++            const uint32_t end = machine->call_ends[k];
++            written[k] = written[calls - 1 - k];
++            machine->call_ends[k] = machine->call_ends[calls - 1 - k];
++            written[calls - 1 - k] = record;
++            machine->call_ends[calls - 1 - k] = end;
++        }
++        for (uint32_t k = 0; k < calls; k += 1)
++        {
++            const uint32_t r = written[k];
++            const uint32_t lowest = node_machine_record_lowest(machine, r);
++            uint32_t before = k;
++            while (before != 0 && written[before - 1] >= lowest)
++            {
++                before -= 1;
++            }
++            const uint32_t row = before + node_machine_record_call_depth(machine, r);
++            machine->call_records[row] = r;
++            out.tape[-(int64_t)machine->call_ends[k]] = row;
++        }
++    }
++    if (temporaries != 0)
++    {
++        // An update's two temporaries are numbered together: X's first pair is the sweep's last.
++        for (uint32_t i = 1; i <= n; i += 1)
++        {
++            const uint8_t kind = out.kinds[-(int64_t)i];
++            const uint64_t value = out.tape[-(int64_t)i];
++            if ((kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL) && (value & BUSTER_NODE_MACHINE_TEMPORARY) != 0)
++            {
++                const uint64_t number = value & ~BUSTER_NODE_MACHINE_TEMPORARY;
++                out.tape[-(int64_t)i] = BUSTER_NODE_MACHINE_TEMPORARY | (temporaries - 2 - (number & ~UINT64_C(1)) + (number & 1));
++            }
++        }
++    }
++}
++
++// C and X as one sweep: every evaluated record's template and its operands' contexts and targets, down from the root,
++// which its consumer evaluates with `context` and converts to `target` (`object`: what a root INITIALIZE initializes),
++// and its row at once, the tape written from its end (the file's comment). The machine's tape then starts at its first
++// entry (NodeMachine.kinds, classes and tape), with its labels' entries and its calls' rows as X leaves them. A refusal
++// is C's or X's for the expression: where a row refuses, C's own sweep says whether a template refuses before it.
++static NodeMachineRefusal node_machine_lower(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object)
++{
++    NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
++    const uint32_t count = machine->count;
++    const NodeMachineBack out = {
++        .kinds = machine->kinds_end,
++        .classes = machine->classes_end,
++        .tape = machine->tape_end,
++    };
++    uint32_t* ends = machine->label_ends;
++    node_machine_records_set_unevaluated(machine, count);
++    machine->label_count = 0;
++    machine->update_count = 0;
++    machine->call_count = 0;
++    machine->temporary_count = 0;
++    const uint32_t root = count - 1;
++    node_machine_record_set_evaluated(machine, root);
++    node_machine_record_set_context(machine, root, context);
++    node_machine_record_set_target(machine, root, target);
++    node_machine_record_set_call_depth(machine, root, 0);
++    uint32_t r = count;
++    uint32_t stopped = root;
++    uint32_t n = 0;
++    bool rows = true;
++    while (refusal == NODE_MACHINE_TAKEN && r != 0)
++    {
++        r -= 1;
++        const uint8_t state = node_machine_record_state(machine, r);
++        if (__builtin_expect(state > BUSTER_NODE_MACHINE_EVALUATED, 0))
++        {
++            bool takes = true;
++            n = node_machine_back_after_row(machine, out, n, r, state, ends, &takes);
++            rows = rows && takes;
++        }
++        if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
++        {
++            NodeMachineUse use = {
++                .count = 0,
++            };
++            const uint32_t labels = machine->label_count;
++            const CheckLowerTemplate kind = node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
++                                                                                                   node_machine_classify(machine, r, r == root ? object : 0, &use);
++            refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;
++            stopped = r;
++            if (use.count != 0)
++            {
++                const uint32_t depth = node_machine_record_call_depth(machine, r);
++                node_machine_evaluate_at(machine, use.children[0], use.addresses[0], use.targets[0], depth);
++                if (use.count == 2)
++                {
++                    node_machine_evaluate_at(machine, use.children[1], use.addresses[1], use.targets[1], depth);
++                }
++            }
++            if (__builtin_expect(machine->label_count != labels, 0))
++            {
++                // A labeled record: its labels by its place among those the sweep has met, until they are numbered.
++                node_machine_record_set_label_base(machine, r, labels);
++            }
++            // Its row, from the last entry: its conversion's entries, then its own. An integer constant's one CONST takes
++            // its conversion where it folds, as the tasks' does (#2678).
++            const uint32_t before = n;
++            const uint8_t class = node_machine_record_class(machine, r);
++            bool takes = true;
++            if (kind == CHECK_LOWER_TEMPLATE_CONSTANT && node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_INTEGER &&
++                (node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0)
++            {
++                uint8_t constant_class = class;
++                uint64_t bits = 0;
++                if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
++                {
++                    bits = node_machine_record_integer(machine, r);
++                    const uint32_t width = 8u << ((class - 1) / 2);
++                    if (width < 64)
++                    {
++                        const uint64_t mask = (UINT64_C(1) << width) - 1;
++                        bits &= mask;
++                        bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
++                    }
++                }
++                else
++                {
++                    bits = check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r));
++                }
++                if (!node_machine_back_fold(machine, r, &constant_class, &bits) && node_machine_record_context(machine, r) == 0)
++                {
++                    n = node_machine_back_convert(machine, out, n, node_machine_record_type(machine, r), node_machine_record_facts(machine, r), class,
++                                                  node_machine_record_target(machine, r), &takes);
++                }
++                n = node_machine_back(out, n, BUSTER_TYPED_CONST, constant_class, bits);
++            }
++            else
++            {
++                if (node_machine_record_context(machine, r) == 0)
++                {
++                    n = node_machine_back_convert(machine, out, n, node_machine_record_type(machine, r), node_machine_record_facts(machine, r), class,
++                                                  node_machine_record_target(machine, r), &takes);
++                }
++                n = node_machine_back_own(machine, out, n, r, kind, r == root ? object : 0, ends);
++            }
++            rows = rows && takes && n - before <= BUSTER_NODE_MACHINE_ROW_MOST;
++        }
++    }
++    machine->stopped = stopped;
++    machine->kinds = out.kinds - n;
++    machine->classes = out.classes - n;
++    machine->tape = out.tape - n;
++    machine->entry_count = n;
++    if (__builtin_expect(refusal == NODE_MACHINE_TAKEN && !rows, 0))
++    {
++        // A row X refuses: C's sweep says whether a template the sweep hadn't reached refuses first, as the two sweeps do.
++        refusal = node_machine_contexts(machine, context, target, object);
++        refusal = refusal == NODE_MACHINE_TAKEN ? NODE_MACHINE_REFUSED_ROW : refusal;
++    }
++    else if (__builtin_expect(refusal == NODE_MACHINE_TAKEN && (machine->label_count | machine->call_count | machine->temporary_count) != 0, 0))
++    {
++        node_machine_lower_number(machine, out, n, ends);
++    }
++    return refusal;
++}
++
++#endif
+diff --git a/src/buster/compiler/c_check_node_machine_shape.c b/src/buster/compiler/c_check_node_machine_shape.c
+new file mode 100644
+index 000000000..3d002aed4
+--- /dev/null
++++ b/src/buster/compiler/c_check_node_machine_shape.c
+@@ -0,0 +1,535 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// #2524's node machine's shapes (c_check_node_machine.c has the machine): a whole expression's entries from the first
++// expression of its shape in the unit, with no sweep (docs/node-machine.md, "Shapes"). An expression's shape is all the
++// sweeps read of it that isn't an object's identity: each record's operator, its operands' places, its cast's or its
++// member's action data, and a leaf's type, flags, category, constant and object's kind (node_shape_object_kind); the
++// leaves' objects only up to renaming, as which leaves name the same object and which the same symbol; and the root's
++// context, target and initialized object. The sweeps' answer is a function of it, with the leaves' objects and their
++// symbols carried to the entries that name them: T, C and X read an object only for whether it is none, for its kind and
++// for its symbol, and copy it.
++//
++// - node_shape_key: the expression's key, from the graph alone (what T reads of it), and its leaves' objects.
++// - node_shape_find: the unit's earlier expression of that key (NodeShapes, an open-addressing table of entries).
++// - node_shape_instantiate: its entries onto the machine's tape, with this expression's objects and symbols in the
++//   entries that name one (the entry's patches), its labels' entries and its calls' rows.
++// - node_shape_insert: after the sweeps took an expression, its entry: the tape as it is, and a patch for each entry
++//   whose value is a leaf's object or its symbol. An expression whose answer the key doesn't decide isn't kept: one T
++//   typed a node of by the action (which reads the node's own context), one with a wide value, one whose rule asked a
++//   type's completeness at the node and found it incomplete (a later node may find it complete), one whose entry names an
++//   object no leaf does.
++//
++// The sweeps are the shapes' exact twin: the shadow's --shapes instantiates every hit and then runs the sweeps on the same
++// expression, and compares the two tapes, their labels and their calls (c_check_node_census.c).
++#ifndef BUSTER_C_CHECK_NODE_MACHINE_SHAPE_INCLUDED
++#define BUSTER_C_CHECK_NODE_MACHINE_SHAPE_INCLUDED
++
++// The most records of an expression the shapes key, and the most leaves with an object (the root's among them).
++#define BUSTER_NODE_SHAPE_RECORDS 256u
++#define BUSTER_NODE_SHAPE_LEAVES 64u
++// A key's words at most: three a record, a call's arguments four a word, and the root's two.
++#define BUSTER_NODE_SHAPE_WORDS (4u * BUSTER_NODE_SHAPE_RECORDS + 8u)
++// An object's kind (node_shape_object_kind): what the sweeps ask of an object but its identity and its symbol.
++#define BUSTER_NODE_SHAPE_OBJECT 0x80u
++#define BUSTER_NODE_SHAPE_KNOWN 0x01u
++#define BUSTER_NODE_SHAPE_LOCAL 0x02u
++#define BUSTER_NODE_SHAPE_COMPOUND 0x04u
++#define BUSTER_NODE_SHAPE_STATIC 0x08u
++#define BUSTER_NODE_SHAPE_REGISTER 0x10u
++#define BUSTER_NODE_SHAPE_TWICE 0x20u
++#define BUSTER_NODE_SHAPE_LABELLED 0x40u
++// A patch: its entry, the leaf whose object it names, and whether it holds that object's symbol.
++#define BUSTER_NODE_SHAPE_PATCH_SYMBOL 0x80000000u
++#define BUSTER_NODE_SHAPE_NO_LEAF 0x7fffu
++
++// Why an expression has no key (node_shape_key) or its answer isn't kept (node_shape_insert).
++typedef enum NodeShapeReason
++{
++    NODE_SHAPE_KEPT,
++    // Past BUSTER_NODE_SHAPE_RECORDS records, or not one range of the graph.
++    NODE_SHAPE_SIZE,
++    // A node in a constant context or a floating-point environment, which T refuses.
++    NODE_SHAPE_CONTEXT,
++    // A leaf the graph holds whole (a payload row, an overload set).
++    NODE_SHAPE_LEAF,
++    // Past BUSTER_NODE_SHAPE_LEAVES leaves with an object.
++    NODE_SHAPE_OBJECTS,
++    // T typed one of its nodes by the action.
++    NODE_SHAPE_ACTION,
++    // One of its values is wide.
++    NODE_SHAPE_WIDE,
++    // A rule found a type incomplete at one of its nodes.
++    NODE_SHAPE_INCOMPLETE,
++    // An entry names an object or a symbol that no leaf's object is or has.
++    NODE_SHAPE_UNRESOLVED,
++    // No room in the store or the table.
++    NODE_SHAPE_ROOM,
++    NODE_SHAPE_REASONS,
++} NodeShapeReason;
++
++static const char* const node_shape_reason_names[NODE_SHAPE_REASONS] = {
++    [NODE_SHAPE_KEPT] = "kept",
++    [NODE_SHAPE_SIZE] = "size",
++    [NODE_SHAPE_CONTEXT] = "context",
++    [NODE_SHAPE_LEAF] = "leaf",
++    [NODE_SHAPE_OBJECTS] = "objects",
++    [NODE_SHAPE_ACTION] = "action",
++    [NODE_SHAPE_WIDE] = "wide",
++    [NODE_SHAPE_INCOMPLETE] = "incomplete",
++    [NODE_SHAPE_UNRESOLVED] = "unresolved",
++    [NODE_SHAPE_ROOM] = "room",
++};
++
++// One shape's entry in the store, then its words: its key (`words`), its entries' values (`entry_count`), their kinds
++// and their classes (each padded to a word), its patches (`patch_count` of 32 bits), its labels' entries (`label_count`)
++// and its calls (`call_count`: the call's record, and above it the leaf whose object's symbol it calls or
++// BUSTER_NODE_SHAPE_NO_LEAF).
++typedef struct NodeShapeEntry NodeShapeEntry;
++struct NodeShapeEntry
++{
++    uint64_t hash;
++    uint32_t words;
++    uint32_t entry_count;
++    uint16_t patch_count;
++    uint16_t label_count;
++    uint16_t call_count;
++    uint16_t temporary_count;
++    // The census's: the expressions instantiated from it and its expression's evaluated nodes.
++    uint32_t uses;
++    uint32_t nodes;
++};
++
++_Static_assert(sizeof(NodeShapeEntry) == 32, "a shape's entry header is four words");
++
++// The unit's shapes and the current expression's key.
++typedef struct NodeShapes NodeShapes;
++struct NodeShapes
++{
++    // The table: a slot's tag (its entry's hash's high half with bit 0 set; 0 for none) and its entry's place in the
++    // store, in words.
++    uint32_t* tags;
++    uint32_t* offsets;
++    uint32_t slot_mask;
++    uint32_t filled;
++    uint64_t* store;
++    uint64_t store_words;
++    uint64_t store_capacity;
++    // Every object's kind, by object: 0 until asked.
++    uint8_t* object_kinds;
++    uint32_t object_count;
++    // The current expression's key, its hash, and its leaves with an object in record order (the root's initialized
++    // object last): their objects and symbols.
++    uint64_t* key;
++    uint32_t words;
++    uint64_t hash;
++    uint32_t leaf_count;
++    uint32_t leaf_objects[BUSTER_NODE_SHAPE_LEAVES + 1];
++    uint32_t leaf_symbols[BUSTER_NODE_SHAPE_LEAVES + 1];
++    NodeShapeReason reason;
++    // A hit's calls' symbols, by row (the machine's call_records hold their records).
++    uint32_t* call_symbols;
++};
++
++static inline __attribute__((always_inline)) uint64_t node_shape_mix(uint64_t hash, uint64_t word)
++{
++    const uint64_t mixed = (hash ^ word) * UINT64_C(0x9e3779b97f4a7c15);
++    return mixed ^ (mixed >> 32);
++}
++
++// The table's and the store's room for a unit of `expressions` expressions, from `arena`: whether there was room.
++static bool node_shapes_begin(NodeShapes* shapes, const CheckProgram* program, uint64_t expressions, Arena* arena)
++{
++    uint32_t slots = 64;
++    while (slots < 2 * expressions && slots < (UINT32_C(1) << 30))
++    {
++        slots *= 2;
++    }
++    *shapes = (NodeShapes){
++        .slot_mask = slots - 1,
++        .object_count = program->object_count,
++    };
++    // An entry is its key, about three words a record, and its tape, about a word and a quarter an entry.
++    shapes->store_capacity = 64 * expressions + 65536;
++    shapes->tags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
++    shapes->offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
++    shapes->store = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, shapes->store_capacity);
++    shapes->object_kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)program->object_count + 1);
++    shapes->key = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, BUSTER_NODE_SHAPE_WORDS);
++    shapes->call_symbols = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_NODE_MACHINE_MOST);
++    const bool room = shapes->tags != NULL && shapes->offsets != NULL && shapes->store != NULL && shapes->object_kinds != NULL && shapes->key != NULL &&
++                      shapes->call_symbols != NULL;
++    if (room)
++    {
++        memset(shapes->tags, 0, (uint64_t)slots * sizeof(uint32_t));
++        memset(shapes->object_kinds, 0, (uint64_t)program->object_count + 1);
++    }
++    return room;
++}
++
++// Forgets the unit's shapes and its objects' kinds, as a unit starts without them.
++static void node_shapes_forget(NodeShapes* shapes)
++{
++    memset(shapes->tags, 0, ((uint64_t)shapes->slot_mask + 1) * sizeof(uint32_t));
++    memset(shapes->object_kinds, 0, (uint64_t)shapes->object_count + 1);
++    shapes->filled = 0;
++    shapes->store_words = 0;
++}
++
++// Object `object`'s kind (no 0): what T, C and X ask of an object but its identity and its symbol. Whether it is the
++// unit's (node_machine_address_takes), a local (node_machine_local), a compound literal's, static or a register variable
++// (the declaration's bits C reads), a function that returns twice (node_machine_callee_refused's) or one with an asm
++// label (check_program_call_marked's).
++static __attribute__((noinline)) uint8_t node_shape_object_kind_make(const NodeMachine* machine, uint32_t object)
++{
++    const CheckProgram* program = machine->program;
++    uint8_t kind = BUSTER_NODE_SHAPE_OBJECT;
++    if (object < program->object_count)
++    {
++        const uint8_t bits = program->input->declaration_bits[object - 1];
++        const uint32_t declaration = program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
++        const IdentId name = program->parser != NULL && declaration < program->input->token_count ? program->parser->tokens.names[declaration] : 0;
++        bool twice = program->object_returns_twice != NULL && program->object_returns_twice[object] != 0;
++        for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
++        {
++            twice |= name != 0 && machine->twice_names[k] == name;
++        }
++        kind |= BUSTER_NODE_SHAPE_KNOWN;
++        kind |= program->object_symbols[object] == 0 ? BUSTER_NODE_SHAPE_LOCAL : 0;
++        kind |= (bits & BUSTER_CHECK_BITS_COMPOUND) != 0 ? BUSTER_NODE_SHAPE_COMPOUND : 0;
++        kind |= (bits & BUSTER_CHECK_BITS_STATIC) != 0 ? BUSTER_NODE_SHAPE_STATIC : 0;
++        kind |= (bits & BUSTER_CHECK_BITS_REGISTER) != 0 ? BUSTER_NODE_SHAPE_REGISTER : 0;
++        kind |= twice ? BUSTER_NODE_SHAPE_TWICE : 0;
++        kind |= program->object_labelled != NULL && program->object_labelled[object] != 0 ? BUSTER_NODE_SHAPE_LABELLED : 0;
++    }
++    return kind;
++}
++
++static inline __attribute__((always_inline)) uint8_t node_shape_object_kind(const NodeMachine* machine, NodeShapes* shapes, uint32_t object)
++{
++    uint8_t kind = object < shapes->object_count ? shapes->object_kinds[object] : 0;
++    if (__builtin_expect(kind == 0, 0))
++    {
++        kind = node_shape_object_kind_make(machine, object);
++        if (object < shapes->object_count)
++        {
++            shapes->object_kinds[object] = kind;
++        }
++    }
++    return kind;
++}
++
++// An operand `operand` of record `r` as its distance below it (0 for none, UINT16_MAX outside the expression's range).
++static inline __attribute__((always_inline)) uint64_t node_shape_operand(uint32_t operand, uint32_t first, uint32_t r)
++{
++    const uint32_t record = operand - first;
++    return operand == BUSTER_CHECK_NONE ? 0 : operand >= first && record < r ? r - record : UINT16_MAX;
++}
++
++// A leaf's object's word of the key, and the object among the expression's leaves: its kind, the first leaf with the same
++// object and the first with the same symbol (itself, for a new one).
++static inline __attribute__((always_inline)) uint64_t node_shape_leaf_object(const NodeMachine* machine, NodeShapes* shapes, uint32_t object, uint32_t* leaves)
++{
++    const CheckProgram* program = machine->program;
++    const uint32_t count = *leaves;
++    const uint8_t kind = node_shape_object_kind(machine, shapes, object);
++    const uint32_t symbol = (kind & BUSTER_NODE_SHAPE_KNOWN) != 0 ? program->object_symbols[object] : 0;
++    uint32_t same_object = 0;
++    while (same_object < count && shapes->leaf_objects[same_object] != object)
++    {
++        same_object += 1;
++    }
++    uint32_t same_symbol = UINT16_MAX;
++    if (symbol != 0)
++    {
++        same_symbol = 0;
++        while (same_symbol < count && shapes->leaf_symbols[same_symbol] != symbol)
++        {
++            same_symbol += 1;
++        }
++    }
++    shapes->leaf_objects[count] = object;
++    shapes->leaf_symbols[count] = symbol;
++    *leaves = count + (count < BUSTER_NODE_SHAPE_LEAVES);
++    return (uint64_t)kind << 24 | (uint64_t)same_object << 32 | (uint64_t)same_symbol << 48;
++}
++
++// The key of the expression of `count` records, graph nodes `first` to first + count - 2 and `root`, which its consumer
++// evaluates with `context` and converts to `target` (`object`: what a root INITIALIZE initializes): whether it has one
++// (else shapes->reason). Three words a record: a leaf's type and flags, its integer, and its operator, category, constant
++// kind and object; any other record's action data (its type name and its member), its operands' places and its
++// arguments' count, and its operator, then a call's arguments' places.
++static bool node_shape_key(const NodeMachine* machine, NodeShapes* shapes, uint32_t first, uint32_t root, uint32_t count, uint8_t context, TypeId target,
++                           uint32_t object)
++{
++    const CheckGraph* graph = machine->graph;
++    uint64_t* key = shapes->key;
++    NodeShapeReason reason = count != 0 && count <= BUSTER_NODE_SHAPE_RECORDS && root >= first + count - 1 && graph->dense_leaves == NULL ? NODE_SHAPE_KEPT : NODE_SHAPE_SIZE;
++    const uint32_t records = reason == NODE_SHAPE_KEPT ? count : 0;
++    uint32_t words = 0;
++    uint32_t leaves = 0;
++    uint64_t hash0 = UINT64_C(0x243f6a8885a308d3);
++    uint64_t hash1 = UINT64_C(0x13198a2e03707344);
++    uint64_t hash2 = UINT64_C(0xa4093822299f31d0);
++    uint32_t flagged = 0;
++    uint32_t whole = 0;
++    uint32_t placed = 0;
++    for (uint32_t r = 0; r < records; r += 1)
++    {
++        const uint32_t node = r + 1 == records ? root : first + r;
++        const CheckOp op = graph->ops[node];
++        flagged |= graph->contexts != NULL ? graph->contexts[node] : 0;
++        flagged |= graph->fp_environments != NULL ? graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK) : 0;
++        uint64_t word0 = 0;
++        uint64_t word1 = 0;
++        uint64_t word2 = (uint64_t)op;
++        uint32_t call_arguments = 0;
++        if (op == CHECK_OP_VALUE)
++        {
++            const CheckGraphLeaf* leaf = graph->leaf_records + graph->leaf_slots[node];
++            whole |= leaf->row | leaf->overload_head | (leaf->category > CHECK_FUNCTION) | (leaf->constant_kind > CHECK_CONSTANT_LABEL_DIFFERENCE);
++            word0 = (uint64_t)leaf->type | (uint64_t)leaf->flags << 32;
++            word1 = leaf->integer;
++            word2 |= (uint64_t)leaf->category << 8 | (uint64_t)leaf->constant_kind << 16;
++            if (leaf->object != 0)
++            {
++                word2 |= node_shape_leaf_object(machine, shapes, leaf->object, &leaves);
++            }
++        }
++        else
++        {
++            const uint32_t arguments = graph->argument_counts[node];
++            word0 = (uint64_t)(graph->types != NULL ? graph->types[node] : 0) | (uint64_t)(graph->members != NULL ? graph->members[node] : 0) << 32;
++            word1 = node_shape_operand(graph->operand0[node], first, r) | node_shape_operand(graph->operand1[node], first, r) << 16 |
++                    node_shape_operand(graph->operand2[node], first, r) << 32 | (uint64_t)(arguments < UINT16_MAX ? arguments : UINT16_MAX) << 48;
++            call_arguments = op == CHECK_OP_CALL ? arguments : 0;
++        }
++        key[words] = word0;
++        key[words + 1] = word1;
++        key[words + 2] = word2;
++        hash0 = node_shape_mix(hash0, word0);
++        hash1 = node_shape_mix(hash1, word1);
++        hash2 = node_shape_mix(hash2, word2);
++        words += 3;
++        if (__builtin_expect(call_arguments != 0, 0))
++        {
++            // A call's arguments' places, four a word, after its three: every call's together at most the records.
++            const uint32_t offset = graph->argument_offsets[node];
++            const uint32_t kept = call_arguments <= BUSTER_NODE_SHAPE_RECORDS - placed ? call_arguments : 0;
++            whole |= kept != call_arguments;
++            placed += kept;
++            for (uint32_t i = 0; i < kept; i += 4)
++            {
++                uint64_t places = 0;
++                for (uint32_t k = 0; k < 4 && i + k < kept; k += 1)
++                {
++                    places |= node_shape_operand(graph->argument_nodes[offset + i + k], first, r) << (16 * k);
++                }
++                key[words] = places;
++                hash1 = node_shape_mix(hash1, places);
++                words += 1;
++            }
++        }
++    }
++    // The root's: its context, its target, and the object it initializes as one more leaf's.
++    uint64_t rooted = (uint64_t)context | (uint64_t)count << 8;
++    if (object != 0)
++    {
++        rooted |= node_shape_leaf_object(machine, shapes, object, &leaves);
++    }
++    key[words] = rooted;
++    key[words + 1] = target;
++    hash0 = node_shape_mix(hash0, rooted);
++    hash1 = node_shape_mix(hash1, target);
++    words += 2;
++    reason = reason != NODE_SHAPE_KEPT ? reason : flagged != 0 ? NODE_SHAPE_CONTEXT : whole != 0 ? NODE_SHAPE_LEAF : leaves >= BUSTER_NODE_SHAPE_LEAVES ? NODE_SHAPE_OBJECTS : NODE_SHAPE_KEPT;
++    shapes->words = words;
++    shapes->leaf_count = leaves;
++    shapes->hash = node_shape_mix(node_shape_mix(hash0, hash1), hash2 + words);
++    shapes->reason = reason;
++    return reason == NODE_SHAPE_KEPT;
++}
++
++// The unit's entry of the current key, or null.
++static inline __attribute__((always_inline)) NodeShapeEntry* node_shape_find(const NodeShapes* shapes)
++{
++    const uint32_t tag = (uint32_t)(shapes->hash >> 32) | 1;
++    const uint32_t words = shapes->words;
++    uint32_t slot = (uint32_t)shapes->hash & shapes->slot_mask;
++    NodeShapeEntry* found = NULL;
++    while (found == NULL && shapes->tags[slot] != 0)
++    {
++        if (shapes->tags[slot] == tag)
++        {
++            NodeShapeEntry* entry = (NodeShapeEntry*)(shapes->store + shapes->offsets[slot]);
++            if (entry->words == words && memcmp(entry + 1, shapes->key, (uint64_t)words * sizeof(uint64_t)) == 0)
++            {
++                found = entry;
++            }
++        }
++        slot = (slot + 1) & shapes->slot_mask;
++    }
++    return found;
++}
++
++// The words of `bytes` bytes.
++static inline uint32_t node_shape_padded(uint32_t bytes)
++{
++    return (bytes + 7) / 8;
++}
++
++// `entry`'s entries onto the machine's tape for the current expression, whose key found it: its values, kinds and
++// classes as they are, then this expression's leaves' objects and symbols into the entries its patches name; its labels'
++// entries; its calls' records and their symbols; and its counts.
++static inline __attribute__((always_inline)) void node_shape_instantiate(NodeMachine* machine, NodeShapes* shapes, const NodeShapeEntry* entry)
++{
++    const uint32_t count = entry->entry_count;
++    const uint64_t* values = (const uint64_t*)(entry + 1) + entry->words;
++    const uint8_t* kinds = (const uint8_t*)(values + count);
++    const uint8_t* classes = kinds + 8 * (uint64_t)node_shape_padded(count);
++    const uint32_t* patches = (const uint32_t*)(classes + 8 * (uint64_t)node_shape_padded(count));
++    const uint32_t* labels = patches + 2 * (uint64_t)node_shape_padded(4 * (uint32_t)entry->patch_count);
++    const uint32_t* calls = labels + 2 * (uint64_t)node_shape_padded(4 * (uint32_t)entry->label_count);
++    node_machine_tape_rewind(machine);
++    // Whole words: the store pads each, and the tape has a row's room past its last entry.
++    for (uint32_t i = 0; i < count; i += 8)
++    {
++        memcpy(machine->tape + i, values + i, 64);
++        memcpy(machine->kinds + i, kinds + i, 8);
++        memcpy(machine->classes + i, classes + i, 8);
++    }
++    for (uint32_t p = 0; p < entry->patch_count; p += 1)
++    {
++        const uint32_t patch = patches[p];
++        const uint32_t leaf = (patch >> 16) & BUSTER_NODE_SHAPE_NO_LEAF;
++        machine->tape[patch & UINT16_MAX] = (patch & BUSTER_NODE_SHAPE_PATCH_SYMBOL) != 0 ? shapes->leaf_symbols[leaf] : shapes->leaf_objects[leaf];
++    }
++    for (uint32_t l = 0; l < entry->label_count; l += 1)
++    {
++        machine->label_entries[l] = labels[l];
++    }
++    for (uint32_t c = 0; c < entry->call_count; c += 1)
++    {
++        const uint32_t leaf = calls[c] >> 16;
++        machine->call_records[c] = calls[c] & UINT16_MAX;
++        shapes->call_symbols[c] = leaf != BUSTER_NODE_SHAPE_NO_LEAF ? shapes->leaf_symbols[leaf] : 0;
++    }
++    machine->entry_count = count;
++    machine->label_count = entry->label_count;
++    machine->call_count = entry->call_count;
++    machine->temporary_count = entry->temporary_count;
++}
++
++// Whether an entry of kind `kind` names a local's object, and whether a global's symbol.
++static inline bool node_shape_names_object(uint8_t kind)
++{
++    return kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
++}
++
++static inline bool node_shape_names_symbol(uint8_t kind)
++{
++    return kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
++}
++
++// The current expression's entry, after the sweeps took it with `actions` nodes typed by the action since its T began:
++// kept in the unit's shapes where its key decides the sweeps' answer (the file's comment), with `nodes` its evaluated
++// nodes. An entry that names an object or a symbol takes a patch from the first leaf with that object or symbol: the key
++// holds which leaves share one, so any expression of the key has the same there.
++static __attribute__((noinline)) NodeShapeReason node_shape_insert(NodeMachine* machine, NodeShapes* shapes, uint64_t actions, uint32_t nodes)
++{
++    const uint32_t count = machine->entry_count;
++    const uint32_t labels = machine->label_count;
++    const uint32_t calls = machine->call_count;
++    const uint32_t leaves = shapes->leaf_count;
++    NodeShapeReason reason = shapes->reason != NODE_SHAPE_KEPT ? shapes->reason :
++                             actions != 0 ? NODE_SHAPE_ACTION :
++                             machine->wide_count != 0 ? NODE_SHAPE_WIDE :
++                             machine->incomplete != 0 ? NODE_SHAPE_INCOMPLETE :
++                             count > UINT16_MAX || labels > UINT16_MAX || calls > UINT16_MAX || machine->temporary_count > UINT16_MAX ? NODE_SHAPE_ROOM : NODE_SHAPE_KEPT;
++    const uint64_t most = sizeof(NodeShapeEntry) / 8 + shapes->words + (uint64_t)count + 2 * (uint64_t)node_shape_padded(count) + node_shape_padded(4 * count) +
++                          node_shape_padded(4 * labels) + node_shape_padded(4 * calls);
++    reason = reason == NODE_SHAPE_KEPT && (shapes->store_words + most > shapes->store_capacity || shapes->store_words + most > UINT32_MAX || 2 * shapes->filled > shapes->slot_mask) ?
++             NODE_SHAPE_ROOM : reason;
++    if (reason == NODE_SHAPE_KEPT)
++    {
++        NodeShapeEntry* entry = (NodeShapeEntry*)(shapes->store + shapes->store_words);
++        uint64_t* values = (uint64_t*)(entry + 1) + shapes->words;
++        uint8_t* kinds = (uint8_t*)(values + count);
++        uint8_t* classes = kinds + 8 * (uint64_t)node_shape_padded(count);
++        uint32_t* patches = (uint32_t*)(classes + 8 * (uint64_t)node_shape_padded(count));
++        uint32_t patch_count = 0;
++        memcpy(entry + 1, shapes->key, (uint64_t)shapes->words * sizeof(uint64_t));
++        memset(kinds, 0, 16 * (uint64_t)node_shape_padded(count));
++        for (uint32_t i = 0; i < count; i += 1)
++        {
++            const uint8_t kind = machine->kinds[i];
++            const uint64_t value = machine->tape[i];
++            const bool object = node_shape_names_object(kind) && (value & BUSTER_NODE_MACHINE_TEMPORARY) == 0;
++            const bool symbol = node_shape_names_symbol(kind);
++            values[i] = value;
++            kinds[i] = kind;
++            classes[i] = machine->classes[i];
++            if (object || symbol)
++            {
++                const uint32_t* named = object ? shapes->leaf_objects : shapes->leaf_symbols;
++                uint32_t leaf = 0;
++                while (leaf < leaves && named[leaf] != value)
++                {
++                    leaf += 1;
++                }
++                reason = leaf == leaves || value == 0 ? NODE_SHAPE_UNRESOLVED : reason;
++                patches[patch_count] = i | leaf << 16 | (symbol ? BUSTER_NODE_SHAPE_PATCH_SYMBOL : 0);
++                patch_count += 1;
++            }
++        }
++        uint32_t* label_entries = patches + 2 * (uint64_t)node_shape_padded(4 * patch_count);
++        uint32_t* call_rows = label_entries + 2 * (uint64_t)node_shape_padded(4 * labels);
++        for (uint32_t l = 0; l < labels; l += 1)
++        {
++            label_entries[l] = machine->label_entries[l];
++        }
++        for (uint32_t c = 0; c < calls; c += 1)
++        {
++            // Its symbol is its direct callee's object's, a leaf's.
++            const uint32_t record = machine->call_records[c];
++            const uint32_t callee = node_machine_direct_callee(machine, node_machine_record_left(machine, record));
++            uint32_t leaf = BUSTER_NODE_SHAPE_NO_LEAF;
++            if (callee != 0)
++            {
++                leaf = 0;
++                while (leaf < leaves && shapes->leaf_objects[leaf] != callee)
++                {
++                    leaf += 1;
++                }
++                reason = leaf == leaves ? NODE_SHAPE_UNRESOLVED : reason;
++            }
++            call_rows[c] = record | leaf << 16;
++        }
++        if (reason == NODE_SHAPE_KEPT)
++        {
++            const uint64_t used = (uint64_t)((uint64_t*)(call_rows + 2 * (uint64_t)node_shape_padded(4 * calls)) - shapes->store);
++            *entry = (NodeShapeEntry){
++                .hash = shapes->hash,
++                .words = shapes->words,
++                .entry_count = count,
++                .patch_count = (uint16_t)patch_count,
++                .label_count = (uint16_t)labels,
++                .call_count = (uint16_t)calls,
++                .temporary_count = (uint16_t)machine->temporary_count,
++                .nodes = nodes,
++            };
++            uint32_t slot = (uint32_t)shapes->hash & shapes->slot_mask;
++            while (shapes->tags[slot] != 0)
++            {
++                slot = (slot + 1) & shapes->slot_mask;
++            }
++            shapes->tags[slot] = (uint32_t)(shapes->hash >> 32) | 1;
++            shapes->offsets[slot] = (uint32_t)shapes->store_words;
++            shapes->store_words = used;
++            shapes->filled += 1;
++        }
++    }
++    return reason;
++}
++
++#endif
+diff --git a/src/buster/compiler/c_check_node_machine_type.c b/src/buster/compiler/c_check_node_machine_type.c
+index 30fa480af..db971f1cd 100644
+--- a/src/buster/compiler/c_check_node_machine_type.c
++++ b/src/buster/compiler/c_check_node_machine_type.c
+@@ -346,7 +346,7 @@ static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGrap
+ 
+ // Whether `type` is complete at node `node`'s source position (check_action_source_complete's answer for an action at the
+ // node), by the unit's table, and by the function for a type past it.
+-static bool node_machine_complete(const NodeMachine* machine, TypeId type, uint32_t node)
++static bool node_machine_complete(NodeMachine* machine, TypeId type, uint32_t node)
+ {
+     const CheckGraph* graph = machine->graph;
+     const uint32_t index = type_index(type);
+@@ -364,6 +364,10 @@ static bool node_machine_complete(const NodeMachine* machine, TypeId type, uint3
+         context.context = check_graph_context(graph, node, false);
+         complete = check_action_source_complete(machine->types, type, &context);
+     }
++    if (__builtin_expect(!complete, 0))
++    {
++        machine->incomplete += 1;
++    }
+     return complete;
+ }
+ 
+@@ -2197,6 +2201,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
+     machine->count = records;
+     machine->wide_count = 0;
+     machine->argument_total = 0;
++    machine->incomplete = 0;
+     // The nodes a row or a rule typed, counted here and added to the machine's once: a store into the machine at each
+     // record would make every read of its fields after it a load again (-fno-strict-aliasing).
+     uint64_t rows = 0;
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index 7d42d76cd..5c8490b7e 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -705,6 +705,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
+ #include "buster/compiler/c_check_node_machine_type.c"
+ #include "buster/compiler/c_check_node_machine_contexts.c"
+ #include "buster/compiler/c_check_node_machine_expand.c"
++#include "buster/compiler/c_check_node_machine_lower.c"
++#include "buster/compiler/c_check_node_machine_shape.c"
+ #endif
+ // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
+ // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
+diff --git a/tools/ci/build_regression.c b/tools/ci/build_regression.c
+index 3b12894df..12848303a 100644
+--- a/tools/ci/build_regression.c
++++ b/tools/ci/build_regression.c
+@@ -1538,6 +1538,8 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
+         { "src/buster/compiler/c_check_node_machine_type.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_node_machine_contexts.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_node_machine_expand.c", "main_unit_checker.c", false },
++        { "src/buster/compiler/c_check_node_machine_lower.c", "main_unit_checker.c", false },
++        { "src/buster/compiler/c_check_node_machine_shape.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },

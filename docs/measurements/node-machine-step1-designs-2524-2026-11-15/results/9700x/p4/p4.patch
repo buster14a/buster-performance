@@ -1,0 +1,1274 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 35b9c001f..131fac048 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -7,7 +7,7 @@
+ // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
+ // would make before it takes it. Include after c_check_lower_inventory.c.
+ //
+-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...
++//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--fused] [--interleave N] [--passes N] [--repeat N]] [preprocessor options] file...
+ //
+ // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
+ // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
+@@ -500,6 +500,15 @@ struct NodeCensusScratch
+     // The current expression's temporaries' locals, by their number on the tape, and how many it has met.
+     uint32_t* temporary_locals;
+     uint32_t temporary_count;
++    // The current expression's records' consumers, for the fused sweep's census (node_shadow_fusion).
++    uint32_t* consumers;
++    // --fused: the three sweeps' tape, labels' entries and calls' records, kept for the comparison with the one sweep's
++    // (node_shadow_fused).
++    uint8_t* fused_kinds;
++    uint8_t* fused_classes;
++    uint64_t* fused_tape;
++    uint32_t* fused_labels;
++    uint32_t* fused_calls;
+ };
+ 
+ static double node_census_share(uint64_t part, uint64_t whole)
+@@ -1754,11 +1763,25 @@ struct NodeShadowExpression
+     uint32_t count;
+     uint32_t object;
+     TypeId target;
++    // Its body's stamp (NodeCensusScratch.body_stamp), its root pop's flags and its root's kind (NodeCensusRoot): the
++    // interleaved sets' chunks by bodies and the census's walk again (--interleave).
++    uint32_t body;
+     uint8_t context;
++    uint8_t flags;
++    uint8_t kind;
+ };
+ 
+-// The sweeps timed: T alone, T and C, and all three.
+-#define BUSTER_NODE_SHADOW_SWEEPS 3u
++// The sets timed: T alone, T and C, and all three; with --fused, T and then C and X as one sweep (node_machine_lower);
++// and with --interleave N, the census's own walk of each expression (node_census_expression: other code over the same
++// nodes, as the reader's is where a compile runs the machine) alone, then before the three sweeps, and before T and the
++// one sweep with --fused. The interleaved sets take the expressions by chunks of N (a body's for 0): the walk of each of a
++// chunk's expressions, then the sweeps of each, so that a set less the walk alone is what the sweeps cost where other
++// code runs between two of the machine's runs, and N is how many expressions a run takes.
++#define BUSTER_NODE_SHADOW_SWEEPS 7u
++#define BUSTER_NODE_SHADOW_SET_FUSED 3u
++#define BUSTER_NODE_SHADOW_SET_WALK 4u
++#define BUSTER_NODE_SHADOW_SET_WALK_SWEEPS 5u
++#define BUSTER_NODE_SHADOW_SET_WALK_FUSED 6u
+ 
+ // One expression's result, for the shadow's tests (NodeShadow.records_out): its root's line and the machine's refusal.
+ typedef struct NodeShadowRecord NodeShadowRecord;
+@@ -1808,6 +1831,35 @@ struct NodeShadow
+     // lowering's by its number from the expression's first and by its entry (node_shadow_same_label).
+     uint64_t labeled_expressions;
+     uint64_t labels;
++    // The fused sweep's census (node_shadow_fusion): the taken expressions' records evaluated and not; of these, those
++    // whose consumer isn't evaluated either; the evaluated records whose context their consumer's own context gives (a
++    // SELECT's operand, a comma's second operand), and of those, the ones not evaluated as plain values; the evaluated
++    // calls, and those below another; the records followed by a segment or an update's first row; the update plans; and
++    // the expressions with anything such a sweep settles after the records' visits.
++    uint64_t fusion_evaluated;
++    uint64_t fusion_unevaluated;
++    uint64_t fusion_wasted;
++    uint64_t fusion_inherited;
++    uint64_t fusion_inherited_other;
++    uint64_t fusion_calls;
++    uint64_t fusion_nested_calls;
++    uint64_t fusion_hooked;
++    uint64_t fusion_updates;
++    uint64_t fusion_settled_expressions;
++    // --fused: C and X as one sweep (c_check_node_machine_lower.c), run after the three sweeps on every expression T
++    // typed: those whose refusal, tape, labels or calls differ from C's and X's, which must be none.
++    bool fused;
++    uint64_t fused_expressions;
++    uint64_t fused_differences;
++    // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
++    // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
++    // an interleaved set: the last pass's, and each file's least over the passes, summed.
++    bool interleave;
++    uint32_t chunk;
++    NodeCensusScratch* scratch;
++    uint64_t walk_tests;
++    uint64_t inner_ticks;
++    uint64_t inner[BUSTER_NODE_SHADOW_SWEEPS];
+     // T's nodes by row and by action, and the row-typed nodes the action types otherwise (--verify).
+     uint64_t row_nodes;
+     uint64_t action_nodes;
+@@ -1985,6 +2037,109 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+     return same && t == machine->entry_count;
+ }
+ 
++// The fused sweep's census (docs/node-machine.md, "A fused sweep: what it would settle later"): for a taken expression,
++// what a T that classified each record's operands, as C does, at the record's own visit, up the postorder, would leave to
++// a later step. A record's consumer decides its context and target, but where they are the consumer's own context (a
++// SELECT's operand and a comma's second operand, check_lower_template_classify's), which its consumer's consumer gives
++// later; a record its consumer doesn't evaluate costs that visit nothing, but one whose consumer isn't evaluated either
++// was classified for nothing; and a call's depth among the evaluated calls, which numbers its row, is its ancestors'.
++static void node_shadow_fusion(NodeShadow* shadow, NodeCensusScratch* s, const NodeMachine* machine)
++{
++    const uint32_t count = machine->count;
++    uint32_t* consumers = s->consumers;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        consumers[r] = UINT32_MAX;
++    }
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        const CheckOp op = node_machine_record_op(machine, r);
++        const uint32_t operands[3] = {
++            node_machine_record_left(machine, r),
++            node_machine_record_right(machine, r),
++            op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX,
++        };
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            if (operands[k] < r)
++            {
++                consumers[operands[k]] = r;
++            }
++        }
++        for (uint32_t i = 0; op == CHECK_OP_CALL && i < node_machine_record_argument_count(machine, r); i += 1)
++        {
++            const uint32_t argument = node_machine_record_argument(machine, r, i);
++            if (argument < r)
++            {
++                consumers[argument] = r;
++            }
++        }
++    }
++    uint64_t settled = 0;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        const uint8_t state = node_machine_record_state(machine, r);
++        const bool evaluated = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0;
++        const uint32_t consumer = consumers[r];
++        const bool consumer_evaluated = consumer < count && (node_machine_record_state(machine, consumer) & BUSTER_NODE_MACHINE_EVALUATED) != 0;
++        const CheckOp consumer_op = consumer < count ? node_machine_record_op(machine, consumer) : CHECK_OP_COUNT;
++        const bool inherited = evaluated && (consumer_op == CHECK_OP_SELECT || (consumer_op == CHECK_OP_COMMA && r == node_machine_record_right(machine, consumer)));
++        const bool wasted = !evaluated && consumer < count && !consumer_evaluated;
++        const bool nested = evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL && node_machine_record_call_depth(machine, r) != 0;
++        shadow->fusion_evaluated += evaluated;
++        shadow->fusion_unevaluated += !evaluated;
++        shadow->fusion_wasted += wasted;
++        shadow->fusion_inherited += inherited;
++        shadow->fusion_inherited_other += inherited && node_machine_record_context(machine, r) != 0;
++        shadow->fusion_calls += evaluated && node_machine_record_op(machine, r) == CHECK_OP_CALL;
++        shadow->fusion_nested_calls += nested;
++        shadow->fusion_hooked += evaluated && state > BUSTER_NODE_MACHINE_EVALUATED;
++        settled += inherited || wasted || nested;
++    }
++    shadow->fusion_updates += machine->update_count;
++    shadow->fusion_settled_expressions += settled != 0;
++}
++
++// --fused, after the three sweeps ran on the expression with `refusal` (C's or X's, or none): C and X as one sweep on the
++// same records, its refusal, tape, labels and calls compared with theirs, which are its exact twin.
++static void node_shadow_fused(NodeShadow* shadow, NodeCensusScratch* s, NodeMachineRefusal refusal, uint8_t context, TypeId target, uint32_t object)
++{
++    NodeMachine* machine = s->machine;
++    const uint32_t entries = machine->entry_count;
++    const uint32_t labels = machine->label_count;
++    const uint32_t calls = machine->call_count;
++    const uint32_t temporaries = machine->temporary_count;
++    const bool taken = refusal == NODE_MACHINE_TAKEN;
++    if (taken)
++    {
++        memcpy(s->fused_kinds, machine->kinds, entries);
++        memcpy(s->fused_classes, machine->classes, entries);
++        memcpy(s->fused_tape, machine->tape, (uint64_t)entries * sizeof(uint64_t));
++        memcpy(s->fused_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t));
++        memcpy(s->fused_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t));
++    }
++    const NodeMachineRefusal fused = node_machine_lower(machine, context, target, object);
++    bool same = fused == refusal;
++    if (same && taken)
++    {
++        const uint32_t at = machine->entry_first;
++        same = machine->entry_count == entries && machine->label_count == labels && machine->call_count == calls && machine->temporary_count == temporaries &&
++               memcmp(s->fused_kinds, machine->kinds + at, entries) == 0 && memcmp(s->fused_classes, machine->classes + at, entries) == 0 &&
++               memcmp(s->fused_tape, machine->tape + at, (uint64_t)entries * sizeof(uint64_t)) == 0 &&
++               memcmp(s->fused_labels, machine->label_entries, (uint64_t)labels * sizeof(uint32_t)) == 0 &&
++               memcmp(s->fused_calls, machine->call_records, (uint64_t)calls * sizeof(uint32_t)) == 0;
++    }
++    shadow->fused_expressions += 1;
++    shadow->fused_differences += !same;
++    if (!same && shadow->listed < node_census_list)
++    {
++        shadow->listed += 1;
++        printf("node-shadow: fused difference file=%s line=%u refusal=%s (fused %s) entries=%u (fused %u) labels=%u (%u) calls=%u (%u)\n", s->file,
++               node_census_line(s->pp, s->program->parser, s->program->input->graph.tokens[node_machine_node(machine, machine->count - 1)]),
++               node_machine_refusal_names[refusal], node_machine_refusal_names[fused], entries, machine->entry_count, labels, machine->label_count, calls, machine->call_count);
++    }
++}
++
+ // The shadow of the census's taken expression whose root pop is `p` of the body's `pops`, of root kind `context`, whose
+ // walk reached `walked` nodes, `nodes` of them evaluated.
+ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, const CheckLowerOwnerPop* pops, uint32_t p, NodeCensusRoot context, uint32_t walked,
+@@ -2013,6 +2168,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+     const uint64_t twins = machine->twin_differences;
+     const uint64_t memo_fills = machine->memo_fills;
+     const uint64_t memo_rules = machine->memo_rules;
++    const bool ran = refusal == NODE_MACHINE_TAKEN;
+     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_run(machine, first, root, records, root_context, pop->target, object) : refusal;
+     shadow->memo_fills += machine->memo_fills - memo_fills;
+     shadow->memo_rules += machine->memo_rules - memo_rules;
+@@ -2056,6 +2212,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+         shadow->entry_differences += !entries;
+         shadow->labeled_expressions += machine->label_count != 0;
+         shadow->labels += machine->label_count;
++        node_shadow_fusion(shadow, s, machine);
+         shadow->row_nodes += machine->row_nodes - row_nodes;
+         shadow->action_nodes += machine->action_nodes - action_nodes;
+         shadow->twin_differences += machine->twin_differences - twins;
+@@ -2077,10 +2234,18 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+                 .count = records,
+                 .object = object,
+                 .target = pop->target,
++                .body = s->body_stamp,
+                 .context = root_context,
++                .flags = pop->flags,
++                .kind = (uint8_t)context,
+             };
+         }
+     }
++    // The one sweep, for every expression T typed: C and X took it or refused it.
++    if (shadow->fused && ran && (refusal == NODE_MACHINE_TAKEN || refusal == NODE_MACHINE_REFUSED_TEMPLATE || refusal == NODE_MACHINE_REFUSED_ROW))
++    {
++        node_shadow_fused(shadow, s, refusal, root_context, pop->target, object);
++    }
+ }
+ 
+ // A cycle or instruction counter of this thread's user code (`config`, PERF_COUNT_HW_*), or -1.
+@@ -2106,23 +2271,75 @@ static uint64_t node_shadow_read(int counter)
+     return value;
+ }
+ 
+-// Each of the file's taken expressions through the sweeps of set `sweeps` (0: T, 1: T and C, 2: all three).
+-static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, uint32_t sweeps)
++// One expression through the sweeps of set `sweeps`: T alone, T and C, or all three; or T and the one sweep of C and X.
++static inline __attribute__((always_inline)) void node_shadow_sweep_one(NodeMachine* machine, const NodeShadowExpression* expression, uint32_t sweeps)
++{
++    const bool fused = sweeps == BUSTER_NODE_SHADOW_SET_FUSED || sweeps == BUSTER_NODE_SHADOW_SET_WALK_FUSED;
++    NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
++    if (fused)
++    {
++        if (refusal == NODE_MACHINE_TAKEN)
++        {
++            node_machine_lower(machine, expression->context, expression->target, expression->object);
++        }
++    }
++    else
++    {
++        if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
++        {
++            refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
++        }
++        if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
++        {
++            node_machine_expand(machine, expression->object);
++        }
++    }
++}
++
++// Each of the file's taken expressions through set `sweeps` (the sets' comment). An interleaved set takes them by chunks:
++// the census's walk of each of a chunk's expressions, then the sweeps of each, whose TSC ticks alone are the pass's
++// `inner_ticks`.
++static void node_shadow_sweep(NodeMachine* machine, NodeShadow* shadow, uint32_t sweeps)
+ {
+-    for (uint32_t i = 0; i < shadow->timed_count; i += 1)
++    shadow->inner_ticks = 0;
++    if (sweeps >= BUSTER_NODE_SHADOW_SET_WALK)
+     {
+-        const NodeShadowExpression* expression = shadow->timed + i;
+-        // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
+-        for (uint32_t time = 0; time < shadow->repeat; time += 1)
++        uint64_t inner = 0;
++        uint32_t base = 0;
++        while (base < shadow->timed_count)
+         {
+-            NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
+-            if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
++            uint32_t end = base + 1;
++            while (end < shadow->timed_count && (shadow->chunk == 0 ? shadow->timed[end].body == shadow->timed[base].body : end - base < shadow->chunk))
+             {
+-                refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
++                end += 1;
+             }
+-            if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
++            for (uint32_t i = base; i < end; i += 1)
+             {
+-                node_machine_expand(machine, expression->object);
++                const NodeShadowExpression* expression = shadow->timed + i;
++                uint32_t walked = 0;
++                shadow->walk_tests += node_census_expression(shadow->scratch, expression->root, expression->flags, (NodeCensusRoot)expression->kind, &walked);
++            }
++            if (sweeps != BUSTER_NODE_SHADOW_SET_WALK)
++            {
++                const uint64_t t0 = __rdtsc();
++                for (uint32_t i = base; i < end; i += 1)
++                {
++                    node_shadow_sweep_one(machine, shadow->timed + i, sweeps);
++                }
++                inner += __rdtsc() - t0;
++            }
++            base = end;
++        }
++        shadow->inner_ticks = inner;
++    }
++    else
++    {
++        for (uint32_t i = 0; i < shadow->timed_count; i += 1)
++        {
++            // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
++            for (uint32_t time = 0; time < shadow->repeat; time += 1)
++            {
++                node_shadow_sweep_one(machine, shadow->timed + i, sweeps);
+             }
+         }
+     }
+@@ -2138,33 +2355,43 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+     const bool verify = machine->verify;
+     const uint64_t memo_fills = machine->memo_fills;
+     const uint64_t memo_rules = machine->memo_rules;
++    const bool enabled[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->interleave, shadow->interleave, shadow->interleave && shadow->fused };
+     machine->verify = false;
+-    uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][3];
++    uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][4];
+     memset(least, 0xff, sizeof(least));
+-    for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
++    // A set's passes run one after another, so that its least follows its own code, whichever other sets are timed: with
++    // the sets taken in turn inside a pass, a file's T ran after the walk's sets and read 7 cycles a node more on Lua.
++    for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+     {
+-        for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
++        for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+         {
+-            node_machine_forget(machine);
+-            const uint64_t c0 = node_shadow_read(cycles);
+-            const uint64_t i0 = node_shadow_read(instructions);
+-            const uint64_t t0 = __rdtsc();
+-            node_shadow_sweep(machine, shadow, sweeps);
+-            const uint64_t t1 = __rdtsc();
+-            const uint64_t i1 = node_shadow_read(instructions);
+-            const uint64_t c1 = node_shadow_read(cycles);
+-            const uint64_t measured[3] = { c1 - c0, i1 - i0, t1 - t0 };
+-            for (uint32_t k = 0; k < 3; k += 1)
++            if (enabled[sweeps])
+             {
+-                least[sweeps][k] = measured[k] < least[sweeps][k] ? measured[k] : least[sweeps][k];
++                node_machine_forget(machine);
++                const uint64_t c0 = node_shadow_read(cycles);
++                const uint64_t i0 = node_shadow_read(instructions);
++                const uint64_t t0 = __rdtsc();
++                node_shadow_sweep(machine, shadow, sweeps);
++                const uint64_t t1 = __rdtsc();
++                const uint64_t i1 = node_shadow_read(instructions);
++                const uint64_t c1 = node_shadow_read(cycles);
++                const uint64_t measured[4] = { c1 - c0, i1 - i0, t1 - t0, shadow->inner_ticks };
++                for (uint32_t k = 0; k < 4; k += 1)
++                {
++                    least[sweeps][k] = measured[k] < least[sweeps][k] ? measured[k] : least[sweeps][k];
++                }
+             }
+         }
+     }
+     for (uint32_t sweeps = 0; shadow->passes != 0 && sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+     {
+-        shadow->cycles[sweeps] += least[sweeps][0];
+-        shadow->instructions[sweeps] += least[sweeps][1];
+-        shadow->ticks[sweeps] += least[sweeps][2];
++        if (enabled[sweeps])
++        {
++            shadow->cycles[sweeps] += least[sweeps][0];
++            shadow->instructions[sweeps] += least[sweeps][1];
++            shadow->ticks[sweeps] += least[sweeps][2];
++            shadow->inner[sweeps] += least[sweeps][3];
++        }
+     }
+     shadow->timed_nodes += shadow->passes != 0 ? nodes : 0;
+     shadow->counted = cycles >= 0;
+@@ -2191,6 +2418,12 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
+            shadow->verify ? ", verified" : "");
+     printf("node-shadow: labels=%" PRIu64 " in taken expressions=%" PRIu64 "\n", shadow->labels, shadow->labeled_expressions);
++    printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
++           ") calls=%" PRIu64 " (below a call %" PRIu64 ") segments-or-splits=%" PRIu64 " updates=%" PRIu64 " labeled-expressions=%" PRIu64
++           " expressions-settled-later=%" PRIu64 " of %" PRIu64 "\n",
++           shadow->fusion_evaluated, shadow->fusion_unevaluated, shadow->fusion_wasted, shadow->fusion_inherited, shadow->fusion_inherited_other, shadow->fusion_calls,
++           shadow->fusion_nested_calls, shadow->fusion_hooked, shadow->fusion_updates, shadow->labeled_expressions, shadow->fusion_settled_expressions,
++           shadow->taken_expressions);
+     printf("node-shadow: argument-memo filled=%" PRIu64 " by-rule=%" PRIu64 " (taken calls' arguments %" PRIu64 ")\n", shadow->memo_fills, shadow->memo_rules,
+            shadow->arguments);
+     for (uint32_t r = 1; r < NODE_MACHINE_REFUSALS; r += 1)
+@@ -2213,14 +2446,27 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+             printf("node-shadow: action-typed op=%s nodes=%" PRIu64 "\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", action_ops[op]);
+         }
+     }
+-    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X" };
++    if (shadow->fused)
++    {
++        printf("node-shadow: fused expressions=%" PRIu64 " differences=%" PRIu64 "\n", shadow->fused_expressions, shadow->fused_differences);
++    }
++    static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X", "T+CX", "walk", "walk;T+C+X", "walk;T+CX" };
++    const bool timed[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->interleave, shadow->interleave, shadow->interleave && shadow->fused };
+     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
+     {
+-        printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
+-               "ticks=%.1f%s\n",
+-               sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
+-               (double)shadow->instructions[k] / (double)shadow->timed_nodes, (double)shadow->ticks[k] / (double)shadow->timed_nodes,
+-               shadow->counted ? "" : " (no cycle counter)");
++        if (timed[k])
++        {
++            printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f "
++                   "instructions=%.1f ticks=%.1f%s\n",
++                   sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k],
++                   (double)shadow->cycles[k] / (double)shadow->timed_nodes, (double)shadow->instructions[k] / (double)shadow->timed_nodes,
++                   (double)shadow->ticks[k] / (double)shadow->timed_nodes, shadow->counted ? "" : " (no cycle counter)");
++            if (k > BUSTER_NODE_SHADOW_SET_WALK)
++            {
++                printf("node-shadow: interleaved sweeps=%s chunk=%u sweeps' own ticks=%" PRIu64 " per-evaluated-node: ticks=%.1f\n", sweep_names[k], shadow->chunk,
++                       shadow->inner[k], (double)shadow->inner[k] / (double)shadow->timed_nodes);
++            }
++        }
+     }
+ }
+ 
+@@ -2355,11 +2601,17 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+             s.local_objects = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+             s.local_stamps = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, locals);
+             s.temporary_locals = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++            s.consumers = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
++            s.fused_kinds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++            s.fused_classes = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++            s.fused_tape = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint64_t, BUSTER_NODE_MACHINE_TAPE_MOST);
++            s.fused_labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, 2 * BUSTER_NODE_MACHINE_MOST);
++            s.fused_calls = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, BUSTER_NODE_MACHINE_MOST);
+             shadow->timed_capacity = (uint32_t)(owners.count < UINT32_MAX ? owners.count : UINT32_MAX);
+             shadow->timed = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeShadowExpression, (uint64_t)shadow->timed_capacity + 1);
+             shadow->timed_count = 0;
+-            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL &&
+-                   shadow->timed != NULL &&
++            room = s.object_locals != NULL && s.object_stamps != NULL && s.local_objects != NULL && s.local_stamps != NULL && s.temporary_locals != NULL && s.consumers != NULL &&
++                   s.fused_kinds != NULL && s.fused_classes != NULL && s.fused_tape != NULL && s.fused_labels != NULL && s.fused_calls != NULL && shadow->timed != NULL &&
+                    node_machine_begin(&machine, &selected.program, shadow->scalar, shadow->verify, &scratch);
+             if (room)
+             {
+@@ -2398,6 +2650,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                 {
+                     shadow->action_ops[op] += machine.action_ops[op];
+                 }
++                shadow->scratch = &s;
+                 node_shadow_time(shadow, &machine, shadow->file_nodes);
+                 shadow->file_nodes = 0;
+             }
+@@ -2495,6 +2748,17 @@ static int run_node_census(int count, char** arguments)
+         {
+             shadow.verify = true;
+         }
++        else if (strcmp(arguments[i], "--fused") == 0)
++        {
++            shadow.fused = true;
++        }
++        else if (strcmp(arguments[i], "--interleave") == 0)
++        {
++            uint64_t number = 0;
++            valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number <= 65536;
++            shadow.interleave = true;
++            shadow.chunk = (uint32_t)number;
++        }
+         else if (strcmp(arguments[i], "--passes") == 0)
+         {
+             uint64_t number = 0;
+@@ -2525,7 +2789,7 @@ static int run_node_census(int count, char** arguments)
+             }
+         }
+     }
+-    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify));
++    valid = valid && file_count != 0 && (shadowed || (!shadow.scalar && !shadow.verify && !shadow.fused && !shadow.interleave));
+     NodeCensus census = { .shadow = shadowed ? &shadow : NULL };
+     for (uint32_t i = 0; valid && i < file_count; i += 1)
+     {
+@@ -2546,7 +2810,7 @@ static int run_node_census(int count, char** arguments)
+     }
+     free(files);
+     free(options);
+-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0);
++    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index 3019bb8ed..d97a0729b 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -276,6 +276,8 @@ static const char node_shadow_test_text[] =
+     "    --*q; // machine: taken\n"
+     "    u /= 4; // machine: taken\n"
+     "    y = x++ + q[1]--; // machine: taken\n"
++    "    y = p->n++ + q[1]-- + p->a[a]++; // machine: taken\n"
++    "    x = a ? q[0]++ : (b && p->a[1]--); // machine: taken\n"
+     "    gl += 1; // machine: template\n"
+     "    x = a && b++; // machine: taken\n"
+     "    x = a ? b++ : --c; // machine: taken\n"
+@@ -329,18 +331,30 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char**
+     snprintf(path, sizeof(path), "%s/shadow.c", directory);
+     const char* text = node_shadow_test_text;
+     bool valid = parse_test_write(path, text, strlen(text));
+-    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1, .repeat = 1 };
++    NodeShadow shadow = {
++        .records_out = calloc(512, sizeof(NodeShadowRecord)),
++        .record_capacity = 512,
++        .scalar = scalar,
++        .verify = !scalar,
++        .fused = true,
++        .interleave = true,
++        .chunk = 3,
++        .passes = 1,
++        .repeat = 1,
++    };
+     NodeCensus census = { .shadow = &shadow };
+     fflush(stdout);
+     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
+             shadow.record_count < shadow.record_capacity;
++    // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
+     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
+-                      (scalar || shadow.row_nodes != 0);
++                      (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions;
+     if (!valid || !same)
+     {
+-        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 " differ; %" PRIu64 " expressions taken, %" PRIu64 " row-typed nodes\n",
+-                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.taken_expressions,
+-                shadow.row_nodes);
++        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", fused %" PRIu64 " (of %" PRIu64 ") differ; %" PRIu64
++                " expressions taken, %" PRIu64 " row-typed nodes\n",
++                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.fused_differences,
++                shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes);
+     }
+     uint32_t line = 1;
+     const char* at = text;
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index 41ccab4ed..3085ac1bd 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -395,6 +395,14 @@ struct NodeMachine
+     uint32_t* call_records;
+     uint32_t call_count;
+     uint32_t temporary_count;
++    // node_machine_lower's (c_check_node_machine_lower.c), which writes the tape back from its columns' ends: its first
++    // entry's place in them (X's tape starts at 0), each label's entry as its place from the tape's end, by the label's
++    // number in the sweep's order (`label_ends`), the labeled records in that order (`label_met`) and each call's CALL's
++    // place from the tape's end (`call_ends`).
++    uint32_t entry_first;
++    uint32_t* label_ends;
++    uint32_t* label_met;
++    uint32_t* call_ends;
+     // The record T, C or X stopped at, for a refusal's report.
+     uint32_t stopped;
+ };
+@@ -456,6 +464,9 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+     machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
+     machine->calls_written = node_machine_column(arena, most, sizeof(uint32_t), 60);
+     machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
++    machine->label_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
++    machine->label_met = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
++    machine->call_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+     machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+     machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
+     machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
+@@ -469,7 +480,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
+                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
+                       machine->updates != NULL && machine->pointers != NULL && machine->const_pointers != NULL &&
+-                      machine->argument_memo != NULL;
++                      machine->argument_memo != NULL && machine->label_ends != NULL && machine->label_met != NULL && machine->call_ends != NULL;
+     if (room)
+     {
+         node_machine_forget(machine);
+@@ -623,7 +634,7 @@ static inline int64_t node_machine_record_offset(const NodeMachine* machine, uin
+ }
+ 
+ // Whether its value's truth is known, check_action_truth's answer for its value made whole, and into `truth` that truth.
+-static inline bool node_machine_record_truth(const NodeMachine* machine, uint32_t r, bool* truth)
++static inline __attribute__((always_inline)) bool node_machine_record_truth(const NodeMachine* machine, uint32_t r, bool* truth)
+ {
+     CheckValue value;
+     node_machine_record_value(machine, r, &value);
+diff --git a/src/buster/compiler/c_check_node_machine_contexts.c b/src/buster/compiler/c_check_node_machine_contexts.c
+index a253924c2..f3e3535e7 100644
+--- a/src/buster/compiler/c_check_node_machine_contexts.c
++++ b/src/buster/compiler/c_check_node_machine_contexts.c
+@@ -163,7 +163,7 @@ static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* mach
+ // CHECK_LOWER_TEMPLATE_NONE. A condition the program knows (check_program_runtime_truth's, from its record) leaves its
+ // untaken operand unevaluated and numbers no label; a conditional of one operand twice (`a ?: b`), whose condition the
+ // tasks keep in a temporary, is the tasks'.
+-static CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
++static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_logical(NodeMachine* machine, uint32_t r, CheckOp op, uint8_t class)
+ {
+     const uint32_t a = node_machine_record_left(machine, r);
+     const uint32_t b = node_machine_record_right(machine, r);
+@@ -368,7 +368,7 @@ static __attribute__((noinline)) CheckLowerTemplate node_machine_classify_update
+ // object a root INITIALIZE initializes. The refusals every operator shares and a folded constant come first, then one
+ // case an operator, each with its own tests alone (a record's case was a chain of tests on its facts, which C fetched for
+ // every record: docs/node-machine.md, "C's and X's dispatch").
+-static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
++static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r, uint32_t object, NodeMachineUse* use)
+ {
+     const CheckProgram* program = machine->program;
+     const TypeTable* types = machine->types;
+@@ -584,7 +584,7 @@ static CheckLowerTemplate node_machine_classify(NodeMachine* machine, uint32_t r
+ // its conversion's type, as the call's tasks push them. BUSTER_NODE_MACHINE_TEMPLATE_CALL, or CHECK_LOWER_TEMPLATE_NONE
+ // for any other call: a struct's, a union's, a long double's, a 128-bit integer's, a half-precision or an atomic value's
+ // argument, parameter or result, which the lowering passes otherwise.
+-static CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
++static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_classify_call(NodeMachine* machine, uint32_t r)
+ {
+     const TypeTable* types = machine->types;
+     const uint32_t a = node_machine_record_left(machine, r);
+diff --git a/src/buster/compiler/c_check_node_machine_lower.c b/src/buster/compiler/c_check_node_machine_lower.c
+new file mode 100644
+index 000000000..b67db45b6
+--- /dev/null
++++ b/src/buster/compiler/c_check_node_machine_lower.c
+@@ -0,0 +1,620 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// #2524's node machine's C and X as one sweep (c_check_node_machine.c has the machine; docs/node-machine.md, "C and X
++// as one sweep"): node_machine_lower walks the records down from the root as C does, and writes each evaluated record's
++// row as soon as it has classified it, since the record's context and target, which its consumer gave it, are all its row
++// waits for. The records come in reverse postorder, so the tape is written from its end: a record's row lies after its
++// operands' entries, which are written after it. Within a record, what is last on the tape is written first: the
++// segment after its row (its consumer's test and branch, or an update's first row), then its conversion's entries, then
++// its own, each entry of a row from the row's last to its first.
++//
++// - The classification is C's own (node_machine_classify, _call, node_machine_logical, node_machine_classify_update),
++//   and so are the operands' contexts and targets.
++// - The rows are X's (node_machine_own, node_machine_convert, node_machine_hook, node_machine_update_first and _last),
++//   each written from its last entry.
++// - What X numbers by the order it writes in, the sweep numbers after its loop, for the few expressions that have any:
++//   the labels (C's node_machine_number_labels ranks the labeled records once C has met them all; the rows hold each
++//   label's place among the labeled records in the order the sweep met them until then), the calls' rows (X's rule,
++//   node_machine_call_own's, over the calls in the order X would have written them) and the temporaries (X's order is the
++//   reverse of this sweep's).
++//
++// node_machine_contexts and node_machine_expand are its exact twin: the shadow's --fused runs both on every expression
++// and compares the two tapes, their labels and their calls (c_check_node_census.c).
++#ifndef BUSTER_C_CHECK_NODE_MACHINE_LOWER_INCLUDED
++#define BUSTER_C_CHECK_NODE_MACHINE_LOWER_INCLUDED
++
++// The tape's three columns' ends, which the sweep writes back from.
++typedef struct NodeMachineBack NodeMachineBack;
++struct NodeMachineBack
++{
++    uint8_t* kinds;
++    uint8_t* classes;
++    uint64_t* tape;
++};
++
++// One more entry before the `n` written: the count with it.
++static inline __attribute__((always_inline)) uint32_t node_machine_back(NodeMachineBack out, uint32_t n, uint8_t kind, uint8_t class, uint64_t value)
++{
++    const int64_t at = -(int64_t)n - 1;
++    out.kinds[at] = kind;
++    out.classes[at] = class;
++    out.tape[at] = value;
++    return n + 1;
++}
++
++// node_machine_put_truth's entries, from the last.
++static inline __attribute__((always_inline)) uint32_t node_machine_back_truth(NodeMachineBack out, uint32_t n, uint8_t class, bool negate)
++{
++    const bool narrow = check_lower_narrow(class);
++    n = node_machine_back(out, n, negate ? BUSTER_TYPED_EQ : BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
++    n = node_machine_back(out, n, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : class, 0);
++    if (narrow)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
++    }
++    return n;
++}
++
++// node_machine_address's entries, from the last.
++static uint32_t node_machine_back_address(const NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t object, int64_t offset)
++{
++    if (object == 0)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, (uint64_t)offset);
++    }
++    else
++    {
++        if (offset != 0)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, (uint64_t)offset);
++        }
++        if (node_machine_local(machine, object))
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
++        }
++        else
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL_ADDRESS, BUSTER_TYPED_CLASS_U64, machine->program->object_symbols[object]);
++        }
++    }
++    return n;
++}
++
++// node_machine_convert's entries, from the last: into `takes` whether the templates take the conversion.
++static inline __attribute__((always_inline)) uint32_t node_machine_back_convert(const NodeMachine* machine, NodeMachineBack out, uint32_t n, TypeId from, uint8_t from_facts,
++                                                                              uint8_t source, TypeId to, bool* takes)
++{
++    *takes = true;
++    if (to != 0 && from != to)
++    {
++        const uint8_t to_facts = node_machine_facts(machine, to);
++        const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
++        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
++                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
++                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
++                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
++        const bool mixed = ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 && target != BUSTER_TYPED_CLASS_VOID;
++        const bool complex = ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) != 0 && target != BUSTER_TYPED_CLASS_VOID;
++        if (empty)
++        {
++        }
++        else if (complex || mixed || source >= BUSTER_TYPED_CLASS_F80 || target >= BUSTER_TYPED_CLASS_F80)
++        {
++            *takes = false;
++        }
++        else if (target == BUSTER_TYPED_CLASS_VOID)
++        {
++            if (source != BUSTER_TYPED_CLASS_VOID)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_DISCARD, source, 0);
++            }
++        }
++        else if ((to_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0)
++        {
++            const bool narrow = check_lower_narrow(source);
++            n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
++            n = node_machine_back(out, n, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, narrow ? BUSTER_TYPED_CLASS_I32 : source, 0);
++            if (narrow)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
++            }
++        }
++        else if (source != target)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, target, 0);
++        }
++    }
++    return n;
++}
++
++// Whether record `r`'s conversion folds into its integer constant's one CONST of class `*class` and bits `*bits`
++// (node_machine_fold_conversion's rule), which then become the conversion's.
++static __attribute__((noinline)) bool node_machine_back_fold(const NodeMachine* machine, uint32_t r, uint8_t* class, uint64_t* bits)
++{
++    const TypeId from = node_machine_record_type(machine, r);
++    const TypeId to = node_machine_record_target(machine, r);
++    const uint8_t source = node_machine_record_class(machine, r);
++    bool folded = false;
++    if (node_machine_record_context(machine, r) == 0 && to != 0 && from != to && *class == source)
++    {
++        const uint8_t from_facts = node_machine_record_facts(machine, r);
++        const uint8_t to_facts = node_machine_facts(machine, to);
++        const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
++        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
++                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
++                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
++                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
++        uint8_t converted_class = 0;
++        uint64_t converted_bits = *bits;
++        folded = !empty && check_lower_constant_conversion(source, from_facts, target, to_facts, &converted_class, &converted_bits);
++        if (folded)
++        {
++            *class = converted_class;
++            *bits = converted_bits;
++        }
++    }
++    return folded;
++}
++
++// node_machine_update_first's entries, from the last: an update's first row, after its destination's entries. Its
++// temporaries take their numbers in the order this sweep meets them (node_machine_lower numbers them as X does after
++// its loop). Into `takes` whether the templates take its conversion.
++static __attribute__((noinline)) uint32_t node_machine_back_update_first(NodeMachine* machine, NodeMachineBack out, uint32_t n, const NodeMachineUpdate* update, bool* takes)
++{
++    const uint8_t class = update->stored_class;
++    const uint64_t access = check_lower_access_value(machine->types, class, update->stored);
++    if (update->computing != update->calculated_class && !update->pointer)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, update->computing, 0);
++    }
++    n = node_machine_back_convert(machine, out, n, update->stored, node_machine_facts(machine, update->stored), class, update->calculated, takes);
++    if (update->direct)
++    {
++        if (update->postfix)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_DUP, class, 0);
++        }
++        n = node_machine_back(out, n, update->get, class, update->destination);
++    }
++    else if (!update->postfix)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, access);
++        n = node_machine_back(out, n, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
++    }
++    else
++    {
++        const uint64_t address = BUSTER_NODE_MACHINE_TEMPORARY | machine->temporary_count;
++        const uint64_t old = BUSTER_NODE_MACHINE_TEMPORARY | (machine->temporary_count + 1);
++        machine->temporary_count += 2;
++        n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, class, old);
++        n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
++        n = node_machine_back(out, n, BUSTER_TYPED_STORE_LOCAL, class, old);
++        n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, access);
++        n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
++        n = node_machine_back(out, n, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, address);
++    }
++    return n;
++}
++
++// node_machine_update_last's entries, from the last: an update's own row.
++static __attribute__((noinline)) uint32_t node_machine_back_update_last(NodeMachine* machine, NodeMachineBack out, uint32_t n, const NodeMachineUpdate* update)
++{
++    const uint8_t class = update->stored_class;
++    bool takes = true;
++    n = node_machine_back(out, n, update->store, class, update->direct ? update->destination : check_lower_access_value(machine->types, class, update->stored));
++    n = node_machine_back_convert(machine, out, n, update->calculated, node_machine_facts(machine, update->calculated), update->calculated_class, update->stored, &takes);
++    if (update->pointer)
++    {
++        n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, update->stride);
++        if (update->subtract)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
++        }
++        if (update->increment)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I64, 1);
++        }
++    }
++    else
++    {
++        n = node_machine_back(out, n, update->kind, update->computing, 0);
++        if (update->increment || update->power)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, update->computing, update->constant);
++        }
++        else if (update->computing != update->calculated_class && update->kind != BUSTER_TYPED_SHL && update->kind != BUSTER_TYPED_SHR)
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, update->computing, 0);
++        }
++    }
++    return n;
++}
++
++// What follows record `r`'s row (node_machine_after_row's, `state` its state past BUSTER_NODE_MACHINE_EVALUATED), from
++// the last entry: its consumer's segment (node_machine_hook's) or an update's first row (node_machine_split's). A label's
++// entry is kept as the entries written when the sweep reached it (`ends`, by the label's number in the sweep's order),
++// which is its place from the tape's end. Into `takes` whether an update's first row is a row the machine takes.
++static __attribute__((noinline)) uint32_t node_machine_back_after_row(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t r, uint8_t state, uint32_t* ends, bool* takes)
++{
++    *takes = true;
++    if ((state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM)) != 0)
++    {
++        const uint32_t consumer = node_machine_record_hook(machine, r);
++        const uint32_t alternate = node_machine_record_label_base(machine, consumer);
++        if ((state & BUSTER_NODE_MACHINE_AFTER_CONDITION) != 0)
++        {
++            n = node_machine_back(out, n, node_machine_record_op(machine, consumer) == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE,
++                                  BUSTER_TYPED_CLASS_I32, alternate);
++            n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, consumer, 0)), false);
++        }
++        else
++        {
++            const uint8_t class = node_machine_record_class(machine, consumer);
++            ends[alternate] = n;
++            n = node_machine_back(out, n, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
++        }
++    }
++    else
++    {
++        const uint32_t before = n;
++        n = node_machine_back_update_first(machine, out, n, node_machine_record_update(machine, r), takes);
++        *takes = *takes && n - before <= BUSTER_NODE_MACHINE_ROW_MOST;
++    }
++    return n;
++}
++
++// Record `r`'s own entries by its template `kind` (node_machine_own's), from the last. `object` as in C. A labeled
++// record's labels' entries as node_machine_back_after_row keeps them; a call's row is its number among the calls in the
++// sweep's order until node_machine_lower numbers it, and its entry's place from the tape's end is kept in `call_ends`.
++static inline __attribute__((always_inline)) uint32_t node_machine_back_own(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t r, CheckLowerTemplate kind,
++                                                                          uint32_t object, uint32_t* ends)
++{
++    const uint8_t class = node_machine_record_class(machine, r);
++    switch ((uint32_t)kind)
++    {
++        case CHECK_LOWER_TEMPLATE_LOCAL:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_LOCAL, class, node_machine_record_object(machine, r));
++        } break;
++        case CHECK_LOWER_TEMPLATE_CONSTANT:
++        {
++            // An integer constant's CONST is node_machine_lower's, with its conversion.
++            if ((node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0)
++            {
++                if (node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_ADDRESS)
++                {
++                    if (node_machine_record_category(machine, r) == CHECK_RVALUE && class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_I64)
++                    {
++                        n = node_machine_back(out, n, BUSTER_TYPED_CONVERT, class, 0);
++                    }
++                    n = node_machine_back_address(machine, out, n, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
++                }
++                else if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
++                {
++                    uint64_t bits = node_machine_record_integer(machine, r);
++                    const uint32_t width = 8u << ((class - 1) / 2);
++                    if (width < 64)
++                    {
++                        const uint64_t mask = (UINT64_C(1) << width) - 1;
++                        bits &= mask;
++                        bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
++                    }
++                    n = node_machine_back(out, n, BUSTER_TYPED_CONST, class, bits);
++                }
++                else
++                {
++                    n = node_machine_back(out, n, BUSTER_TYPED_CONST, class, check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r)));
++                }
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_MEMBER:
++        {
++            const uint64_t offset = node_machine_record_member_offset(machine, r);
++            if (node_machine_loads(machine, r))
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++            }
++            if (offset / 8 != 0)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
++                n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset / 8);
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_STORE_LOCAL: case CHECK_LOWER_TEMPLATE_STORE_GLOBAL:
++        {
++            const uint32_t target = node_machine_record_op(machine, r) == CHECK_OP_INITIALIZE ? object : node_machine_record_object(machine, node_machine_record_left(machine, r));
++            n = node_machine_back(out, n, kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
++                                  kind == CHECK_LOWER_TEMPLATE_STORE_LOCAL ? target : machine->program->object_symbols[target]);
++        } break;
++        case CHECK_LOWER_TEMPLATE_STORE:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_STORE, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++        } break;
++        case CHECK_LOWER_TEMPLATE_TRUTH:
++        {
++            n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, r, 0)), node_machine_record_op(machine, r) == CHECK_OP_NOT);
++        } break;
++        case CHECK_LOWER_TEMPLATE_BINARY:
++        {
++            n = node_machine_back(out, n, check_lower_binary(node_machine_record_op(machine, r)), class, 0);
++        } break;
++        case CHECK_LOWER_TEMPLATE_POINTER:
++        {
++            const CheckOp op = node_machine_record_op(machine, r);
++            if (op == CHECK_OP_SUBSCRIPT && node_machine_loads(machine, r))
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++            }
++            n = node_machine_back(out, n, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, check_action_pointer_stride(machine->types, node_machine_record_converted(machine, r, 0)));
++            if (op == CHECK_OP_SUBTRACT)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_NEG, BUSTER_TYPED_CLASS_I64, 0);
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_GLOBAL:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_GLOBAL, class, machine->program->object_symbols[node_machine_record_object(machine, r)]);
++        } break;
++        case CHECK_LOWER_TEMPLATE_ADDRESS:
++        {
++            n = node_machine_back_address(machine, out, n, node_machine_record_object(machine, r), node_machine_record_offset(machine, r));
++        } break;
++        case CHECK_LOWER_TEMPLATE_DEREFERENCE:
++        {
++            if (node_machine_loads(machine, r))
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_LOAD, class, check_lower_access_value(machine->types, class, node_machine_record_type(machine, r)));
++            }
++        } break;
++        case CHECK_LOWER_TEMPLATE_UNARY:
++        {
++            n = node_machine_back(out, n, node_machine_record_op(machine, r) == CHECK_OP_NEGATIVE ? BUSTER_TYPED_NEG : BUSTER_TYPED_NOT, class, 0);
++        } break;
++        case NODE_MACHINE_TEMPLATE_BRANCH:
++        {
++            // From the last: its end; a logical operator's value at its alternate, the alternate, its jump to its end and
++            // its second operand's test.
++            const CheckOp op = node_machine_record_op(machine, r);
++            const uint32_t alternate = node_machine_record_label_base(machine, r);
++            ends[alternate + 1] = n;
++            if (op != CHECK_OP_CONDITIONAL)
++            {
++                n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, op == CHECK_OP_LOGICAL_OR);
++                ends[alternate] = n;
++                n = node_machine_back(out, n, class == BUSTER_TYPED_CLASS_VOID ? BUSTER_TYPED_JUMP : BUSTER_TYPED_JUMP_VALUE, class, alternate + 1);
++                n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
++            }
++        } break;
++        case NODE_MACHINE_TEMPLATE_DECIDED:
++        {
++            n = node_machine_back(out, n, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, node_machine_record_op(machine, r) == CHECK_OP_LOGICAL_OR);
++        } break;
++        case NODE_MACHINE_TEMPLATE_SECOND:
++        {
++            n = node_machine_back_truth(out, n, node_machine_class(machine, node_machine_record_converted(machine, r, 1)), false);
++        } break;
++        case NODE_MACHINE_TEMPLATE_UPDATE:
++        {
++            n = node_machine_back_update_last(machine, out, n, node_machine_record_update(machine, r));
++        } break;
++        case NODE_MACHINE_TEMPLATE_CALL:
++        {
++            // Its row waits for the calls before its subtree, which the sweep meets after it.
++            const uint32_t met = machine->call_count;
++            machine->calls_written[met] = r;
++            machine->call_count = met + 1;
++            n = node_machine_back(out, n, BUSTER_TYPED_CALL, class, met);
++            machine->call_ends[met] = n;
++        } break;
++        default:
++        {
++        } break;
++    }
++    return n;
++}
++
++// The labels', the calls' and the temporaries' numbers, after node_machine_lower's loop wrote `n` entries: what X numbers
++// by the order it writes in. Only an expression with one of them runs it.
++static __attribute__((noinline)) void node_machine_lower_number(NodeMachine* machine, NodeMachineBack out, uint32_t n, uint32_t* ends)
++{
++    const uint32_t labeled = machine->label_count / 2;
++    const uint32_t calls = machine->call_count;
++    const uint32_t temporaries = machine->temporary_count;
++    if (labeled != 0)
++    {
++        // The rows hold each label by its record's place among the labeled records as the sweep met them (2k and 2k + 1
++        // for the kth): C's ranks give its number, and its entry is its place from the tape's start.
++        uint32_t* met = machine->label_met;
++        for (uint32_t k = 0; k < labeled; k += 1)
++        {
++            met[k] = machine->stack[k];
++        }
++        node_machine_number_labels(machine);
++        for (uint32_t k = 0; k < labeled; k += 1)
++        {
++            const uint32_t base = node_machine_record_label_base(machine, met[k]);
++            machine->label_entries[base] = n - ends[2 * k];
++            machine->label_entries[base + 1] = n - ends[2 * k + 1];
++        }
++        for (uint32_t i = 1; i <= n; i += 1)
++        {
++            const uint8_t kind = out.kinds[-(int64_t)i];
++            if (kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE || kind == BUSTER_TYPED_JUMP || kind == BUSTER_TYPED_JUMP_VALUE)
++            {
++                const uint64_t label = out.tape[-(int64_t)i];
++                out.tape[-(int64_t)i] = node_machine_record_label_base(machine, met[label / 2]) + (label & 1);
++            }
++        }
++    }
++    if (calls != 0)
++    {
++        // The sweep met the calls from the last record to the first: X writes them in the other order, and a call's row is
++        // the calls X wrote before its subtree's least record, plus those that contain it (node_machine_call_own).
++        uint32_t* written = machine->calls_written;
++        for (uint32_t k = 0; k < calls / 2; k += 1)
++        {
++            const uint32_t record = written[k];
++            const uint32_t end = machine->call_ends[k];
++            written[k] = written[calls - 1 - k];
++            machine->call_ends[k] = machine->call_ends[calls - 1 - k];
++            written[calls - 1 - k] = record;
++            machine->call_ends[calls - 1 - k] = end;
++        }
++        for (uint32_t k = 0; k < calls; k += 1)
++        {
++            const uint32_t r = written[k];
++            const uint32_t lowest = node_machine_record_lowest(machine, r);
++            uint32_t before = k;
++            while (before != 0 && written[before - 1] >= lowest)
++            {
++                before -= 1;
++            }
++            const uint32_t row = before + node_machine_record_call_depth(machine, r);
++            machine->call_records[row] = r;
++            out.tape[-(int64_t)machine->call_ends[k]] = row;
++        }
++    }
++    if (temporaries != 0)
++    {
++        // An update's two temporaries are numbered together: X's first pair is the sweep's last.
++        for (uint32_t i = 1; i <= n; i += 1)
++        {
++            const uint8_t kind = out.kinds[-(int64_t)i];
++            const uint64_t value = out.tape[-(int64_t)i];
++            if ((kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL) && (value & BUSTER_NODE_MACHINE_TEMPORARY) != 0)
++            {
++                const uint64_t number = value & ~BUSTER_NODE_MACHINE_TEMPORARY;
++                out.tape[-(int64_t)i] = BUSTER_NODE_MACHINE_TEMPORARY | (temporaries - 2 - (number & ~UINT64_C(1)) + (number & 1));
++            }
++        }
++    }
++}
++
++// C and X as one sweep: every evaluated record's template and its operands' contexts and targets, down from the root,
++// which its consumer evaluates with `context` and converts to `target` (`object`: what a root INITIALIZE initializes),
++// and its row at once, the tape written from its end (the file's comment). The machine's tape is then its columns'
++// last `entry_count` entries, from `entry_first`, with its labels' entries (counted from that first entry) and its
++// calls' rows as X leaves them. A refusal is C's or X's for the expression: where a row refuses, C's own sweep says
++// whether a template refuses before it.
++static NodeMachineRefusal node_machine_lower(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object)
++{
++    NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
++    const uint32_t count = machine->count;
++    const NodeMachineBack out = {
++        .kinds = machine->kinds + BUSTER_NODE_MACHINE_TAPE_MOST,
++        .classes = machine->classes + BUSTER_NODE_MACHINE_TAPE_MOST,
++        .tape = machine->tape + BUSTER_NODE_MACHINE_TAPE_MOST,
++    };
++    uint32_t* ends = machine->label_ends;
++    node_machine_records_set_unevaluated(machine, count);
++    machine->label_count = 0;
++    machine->update_count = 0;
++    machine->call_count = 0;
++    machine->temporary_count = 0;
++    const uint32_t root = count - 1;
++    node_machine_record_set_evaluated(machine, root);
++    node_machine_record_set_context(machine, root, context);
++    node_machine_record_set_target(machine, root, target);
++    node_machine_record_set_call_depth(machine, root, 0);
++    uint32_t r = count;
++    uint32_t stopped = root;
++    uint32_t n = 0;
++    bool rows = true;
++    while (refusal == NODE_MACHINE_TAKEN && r != 0)
++    {
++        r -= 1;
++        const uint8_t state = node_machine_record_state(machine, r);
++        if (__builtin_expect(state > BUSTER_NODE_MACHINE_EVALUATED, 0))
++        {
++            bool takes = true;
++            n = node_machine_back_after_row(machine, out, n, r, state, ends, &takes);
++            rows = rows && takes;
++        }
++        if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
++        {
++            NodeMachineUse use = {
++                .count = 0,
++            };
++            const uint32_t labels = machine->label_count;
++            const CheckLowerTemplate kind = node_machine_record_op(machine, r) == CHECK_OP_CALL ? node_machine_classify_call(machine, r) :
++                                                                                                   node_machine_classify(machine, r, r == root ? object : 0, &use);
++            refusal = kind == CHECK_LOWER_TEMPLATE_NONE ? NODE_MACHINE_REFUSED_TEMPLATE : NODE_MACHINE_TAKEN;
++            stopped = r;
++            if (use.count != 0)
++            {
++                const uint32_t depth = node_machine_record_call_depth(machine, r);
++                node_machine_evaluate_at(machine, use.children[0], use.addresses[0], use.targets[0], depth);
++                if (use.count == 2)
++                {
++                    node_machine_evaluate_at(machine, use.children[1], use.addresses[1], use.targets[1], depth);
++                }
++            }
++            if (__builtin_expect(machine->label_count != labels, 0))
++            {
++                // A labeled record: its labels by its place among those the sweep has met, until they are numbered.
++                node_machine_record_set_label_base(machine, r, labels);
++            }
++            // Its row, from the last entry: its conversion's entries, then its own. An integer constant's one CONST takes
++            // its conversion where it folds, as the tasks' does (#2678).
++            const uint32_t before = n;
++            const uint8_t class = node_machine_record_class(machine, r);
++            bool takes = true;
++            if (kind == CHECK_LOWER_TEMPLATE_CONSTANT && node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_INTEGER &&
++                (node_machine_record_context(machine, r) & BUSTER_CHECK_LOWER_TEMPLATE_DISCARD) == 0)
++            {
++                uint8_t constant_class = class;
++                uint64_t bits = 0;
++                if (class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64)
++                {
++                    bits = node_machine_record_integer(machine, r);
++                    const uint32_t width = 8u << ((class - 1) / 2);
++                    if (width < 64)
++                    {
++                        const uint64_t mask = (UINT64_C(1) << width) - 1;
++                        bits &= mask;
++                        bits |= (class & 1) != 0 && (bits >> (width - 1)) != 0 ? ~mask : 0;
++                    }
++                }
++                else
++                {
++                    bits = check_lower_float_bits(NULL, class, node_machine_record_floating(machine, r));
++                }
++                if (!node_machine_back_fold(machine, r, &constant_class, &bits) && node_machine_record_context(machine, r) == 0)
++                {
++                    n = node_machine_back_convert(machine, out, n, node_machine_record_type(machine, r), node_machine_record_facts(machine, r), class,
++                                                  node_machine_record_target(machine, r), &takes);
++                }
++                n = node_machine_back(out, n, BUSTER_TYPED_CONST, constant_class, bits);
++            }
++            else
++            {
++                if (node_machine_record_context(machine, r) == 0)
++                {
++                    n = node_machine_back_convert(machine, out, n, node_machine_record_type(machine, r), node_machine_record_facts(machine, r), class,
++                                                  node_machine_record_target(machine, r), &takes);
++                }
++                n = node_machine_back_own(machine, out, n, r, kind, r == root ? object : 0, ends);
++            }
++            rows = rows && takes && n - before <= BUSTER_NODE_MACHINE_ROW_MOST;
++        }
++    }
++    machine->stopped = stopped;
++    machine->entry_first = BUSTER_NODE_MACHINE_TAPE_MOST - n;
++    machine->entry_count = n;
++    if (__builtin_expect(refusal == NODE_MACHINE_TAKEN && !rows, 0))
++    {
++        // A row X refuses: C's sweep says whether a template the sweep hadn't reached refuses first, as the two sweeps do.
++        refusal = node_machine_contexts(machine, context, target, object);
++        refusal = refusal == NODE_MACHINE_TAKEN ? NODE_MACHINE_REFUSED_ROW : refusal;
++    }
++    else if (__builtin_expect(refusal == NODE_MACHINE_TAKEN && (machine->label_count | machine->call_count | machine->temporary_count) != 0, 0))
++    {
++        node_machine_lower_number(machine, out, n, ends);
++    }
++    return refusal;
++}
++
++#endif
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index 0bdec53e1..f45784082 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -705,6 +705,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
+ #include "buster/compiler/c_check_node_machine_type.c"
+ #include "buster/compiler/c_check_node_machine_contexts.c"
+ #include "buster/compiler/c_check_node_machine_expand.c"
++#include "buster/compiler/c_check_node_machine_lower.c"
+ #endif
+ // bake-tables (#590): the backend's tables written into this executable's own file, built, by build.sh, from this
+ // unit, whose Tier 0 and unwind copies the C driver above uses (baked.h).
+diff --git a/tools/ci/build_regression.c b/tools/ci/build_regression.c
+index 7eda941f8..96b64bca7 100644
+--- a/tools/ci/build_regression.c
++++ b/tools/ci/build_regression.c
+@@ -1538,6 +1538,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
+         { "src/buster/compiler/c_check_node_machine_type.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_node_machine_contexts.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_node_machine_expand.c", "main_unit_checker.c", false },
++        { "src/buster/compiler/c_check_node_machine_lower.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },
