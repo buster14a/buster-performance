@@ -134,6 +134,69 @@ dominators of functions with no branch backward in block order (a filter with
 twins) took 3–4 M off: 729 of the 1,018 have a loop and carry the analysis'
 cost. It wasn't kept.
 
-## Results: znver5 and the programs
+## Results: kernels at -march=znver5
 
-PENDING
+`9700x/znver5/` (`measure.sh znver5`: placement 0, a pair per hold; `tables.md`
+from `results.txt`). Every build gives every kernel the same digest, and the
+head's default `--tier1` object is the base's byte for byte (`build.log`).
+
+| Ratio (larger is slower) | 19 vectorized | 6 controls |
+| --- | ---: | ---: |
+| tier1-base / tier1-unroll | 1.40 | 1.05 |
+| clang-O2-novec-nounroll / clang-O2-novec | 1.65 | 1.05 |
+| tier1-unroll / clang-O2-novec | 1.29 | 1.03 |
+| tier1-base / clang-O2-novec-nounroll | 1.09 | 1.03 |
+| tier1-unroll / clang-O2 | 11.96 | 1.04 |
+
+Cycles per element give 1.39 and 1.05 for the first row. At znver5 clang's
+unroller is worth 1.65, and the unroller recovers 1.40 of it: clang's unrolled
+loops also fold loads into their arithmetic, which Tier 1's don't (below). The
+kernels' text grows from 1,807 to 6,969 bytes (clang without its vectorizer:
+1,853 to 6,661); 24 of 27 loops unroll, with 184 copies and 7 split reductions.
+
+Two kernels gain little or lose, and two small programs (`src/convert.c`,
+`src/saxpy.c`, run by `scripts/9700x/convert.sh` and `saxpy.sh`, one hold each,
+CPU 2, `9700x/forms/`) find why:
+
+- **`i32_to_f32`** gains 1.02 (0.185 to 0.182 ns; 1.009 cycles per element),
+  where clang's unrolled loop runs 0.582. Tier 1 converts from a register
+  (`mov; xorps; cvtsi2ss r32`), clang from memory (`vcvtsi2ssl m32`).
+  `convert.txt`: on the 9700X, `cvtsi2ss` from a register runs one per cycle
+  (1.000 cycles per conversion, legacy or VEX) and from memory two (0.500). The
+  register form caps the loop at one element per cycle, unrolled or not.
+- **`saxpy_f32`** is 0.99 at placement 0. `9700x/forms/saxpy-repeat.txt`
+  (`repeat-kernel.sh`, five rounds at each placement): `+unroll` runs 0.1944 ns
+  everywhere, the base 0.1909 to 0.1927 at placements 0 and 16 and 0.1840 at 32
+  and 48, so `+unroll` is 1.0 to 5.7% slower, with 38% fewer instructions.
+  `saxpy-forms.txt` (eight-copy loop bodies, cycles per element): Tier 1's body
+  1.070, the same with VEX moves 1.071 or the `x` load first 1.070, Tier 1's
+  rolled loop 1.056; with the `x` load folded into `vfmadd231ss` 1.008, as
+  clang's body (1.009). Folding the load, not the unrolling, decides it: Tier 1
+  folds no load into floating-point arithmetic.
+- **Dirty upper state.** Without `vzeroupper` after `main`'s AVX-512 code, the
+  first run of `saxpy.c` (`saxpy-forms-first.txt`, `src/saxpy-first.c`) ran the
+  bodies with legacy SSE moves at 6.0 cycles per element; mode 6 of the second
+  run measures it on purpose: 6.002 after a `vpternlogd` on zmm9 against 1.070
+  after `vzeroupper`. Tier 1 writes `movss`, `movd`, `xorps` and `cvtsi2ss` in
+  their legacy forms beside VEX FMAs at znver5, and returns from 512-bit code
+  without `vzeroupper`.
+
+## Results: the programs
+
+`9700x/programs/programs.txt` (`programs.sh`: `measure-tier1-programs --runs 5
+--variant --tier1-passes=+unroll`, the head, one hold): speedtest1's verification
+hash and every Lua script's output match clang -O0's. Medians of five runs,
+`+unroll` against `--tier1`:
+
+| Program | User cycles | Instructions |
+| --- | ---: | ---: |
+| speedtest1 | +1.40% (741.2–744.7 M against 752.4–755.7 M) | −0.17% |
+| Lua arithmetic | −1.07% | −0.00% |
+| Lua calls | +0.07% | +0.73% |
+| Lua closures | +2.02% (282.1–287.8 M against 287.9–291.6 M) | +0.71% |
+| Lua strings | −0.44% | −0.07% |
+| Lua tables | +0.16% | +0.05% |
+| Lua's five scripts | +0.35% | +0.28% |
+
+speedtest1's wall time varies by 20% from run to run (its database's I/O), so
+its cycles are the measure. LAYOUT PENDING
