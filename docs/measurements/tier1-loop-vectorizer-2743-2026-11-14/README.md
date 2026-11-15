@@ -9,8 +9,8 @@ The 9700X measurement of [buster#2743](https://github.com/buster14a/buster/issue
 **Status:** complete. With the option, Tier 1 vectorizes 12 of the 19 loops clang -O2 vectorizes at znver5 and 5 at
 x86-64; those loops run 12.6x and 4.8x faster than Tier 1 without it, at 1.53x and 1.36x clang -O2's time (from 19.32x
 and 6.50x). Nothing else changes: the other loops' and the controls' code is the same, and without the option the
-branch's objects are main's byte for byte. Compiling sqlite3.c with the option cost 2.3% more cycles at znver5 in the first build; the rerun
-after the pass stopped building a CFG and dominators is pending (see "Compile cost").
+branch's objects are main's byte for byte. Compiling sqlite3.c with the option cost 2.30% more cycles at znver5 in the first build and 1.23% after
+the pass stopped building a CFG and dominators (0.63% at x86-64); see "Compile cost".
 
 ## Results
 
@@ -62,10 +62,18 @@ CPU 2, medians (`9700x/cost/`):
 | a1a0892, with | znver5 | 3,421.1 M (+2.30%) | 8,397.58 M (+2.29%) | 0.6419 s (+2.26%) |
 | a1a0892, without | x86-64 | 3,346.6 M | 8,208.77 M | 0.6285 s |
 | a1a0892, with | x86-64 | 3,397.0 M (+1.51%) | 8,335.57 M (+1.54%) | 0.6377 s (+1.46%) |
+| 6380781, without | znver5 | 3,340.5 M | 8,209.36 M | 0.6276 s |
+| 6380781, with | znver5 | 3,381.5 M (+1.23%) | 8,298.18 M (+1.08%) | 0.6351 s (+1.20%) |
+| 6380781, without | x86-64 | 3,336.6 M | 8,208.89 M | 0.6266 s |
+| 6380781, with | x86-64 | 3,357.5 M (+0.63%) | 8,236.17 M (+0.33%) | 0.6304 s (+0.61%) |
 
 The pass vectorizes 2 of sqlite3.c's loops. In-process cycle counters in a local build put 84% of its time in the CFG
 (44%) and the dominator analysis (40%), built for the 890 of 2,602 functions with a phi on a back edge in block order;
-buster 6380781 finds its loops from the blocks' terminators instead (`scripts/cost2.sh`, results pending).
+buster 6380781 finds its loops from the blocks' terminators instead (`scripts/cost2.sh`), which halves the cost. Both
+targets vectorize 2 loops (at znver5 `sqlite3_randomness` and `unixShmLock` grow and `sqlite3VdbeExec` shrinks by 394
+bytes), yet znver5's extra instructions are three times x86-64's: the rest of the cost is not only the pass's analysis.
+`scripts/cost3.sh` measures a5b52808d, which skips the per-row work in functions without a loop of the admitted shape,
+and profiles both variants (results pending).
 
 ## What is measured
 
