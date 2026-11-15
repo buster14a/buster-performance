@@ -151,7 +151,7 @@ from the change's own effect: speedtest1's cycles don't follow its 0.56% fewer i
 ## 4. After #2774 merged
 
 Main took #2774 (continuations, buster#2787) and #2745 before the pull request merged; the branch merged main `efc8e029`
-as `f09b8a9b`, its allocator and CFG code unchanged. By section 1's callgrind method, main `efc8e029` against
+as `f09b8a9b`, its own changes as they were. By section 1's callgrind method, main `efc8e029` against
 `f09b8a9b` (`counts/main-efc8e029/`, `counts/head-f09b8a9b/`):
 
 | | main | head |
