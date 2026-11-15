@@ -70,6 +70,10 @@ CPU 2, medians (`9700x/cost/`):
 | a5b52808d, with | znver5 | 3,368.5 M (+1.04%) | 8,289.85 M (+0.98%) | 0.6325 s (+1.07%) |
 | a5b52808d, without | x86-64 | 3,328.4 M | 8,208.77 M | 0.6246 s |
 | a5b52808d, with | x86-64 | 3,343.1 M (+0.44%) | 8,227.84 M (+0.23%) | 0.6277 s (+0.50%) |
+| a5b52808d, `-inline` | znver5 | 2,106.5 M | 4,627.91 M | 0.4027 s |
+| a5b52808d, `-inline,+vectorize` | znver5 | 2,111.9 M (+0.25%) | 4,635.85 M (+0.17%) | 0.4038 s (+0.27%) |
+| a5b52808d, `-inline` | x86-64 | 2,104.1 M | 4,627.19 M | 0.4021 s |
+| a5b52808d, `-inline,+vectorize` | x86-64 | 2,113.4 M (+0.44%) | 4,634.91 M (+0.17%) | 0.4040 s (+0.47%) |
 
 The pass vectorizes 2 of sqlite3.c's loops. In-process cycle counters in a local build put 84% of its time in the CFG
 (44%) and the dominator analysis (40%), built for the 890 of 2,602 functions with a phi on a back edge in block order;
@@ -79,9 +83,12 @@ pass's own time by the same counters: 56.3, 16.2 and 11.3 million). The rest is 
 option adds 80.6 M instructions against x86-64's 19.1 M for the same analysis, and its two loops are `unixShmLock`'s and
 `chacha_block`'s, which unit inlining puts in `sqlite3_randomness` and from there in `sqlite3VdbeExec` (which changes
 size and gains 8 zmm and 5 ymm operands; without inlining, the option vectorizes 4 loops in `chacha_block`,
-`unixShmLock` and `vdbeSorterAddToTree` and `sqlite3VdbeExec` has no zmm operand). Its profiles (`base-symbols.txt`,
-`vectorize-symbols.txt`, one run each, about 12 M instructions of sampling noise on the largest symbols) can't place the
-61 million; `scripts/cost4.sh` times both sides without unit inlining (results pending).
+`unixShmLock` and `vdbeSorterAddToTree` and `sqlite3VdbeExec` has no zmm operand). Without unit inlining on both sides
+(`scripts/cost4.sh`, `cost-flags.sh`) the option costs 7.9 M instructions at either target (+0.17%; +0.25% and +0.44%
+cycles): the pass's own cost. With inlining it runs on more and larger bodies (19.1 M at x86-64), and at znver5 the
+64-byte loop that inlining copies into `sqlite3VdbeExec` costs about 61 M more in Tier 1's later stages. a5b52808d's
+first profiles (`base-symbols.txt`, `vectorize-symbols.txt`, one run each, about 12 M instructions of sampling noise on
+the largest symbols) can't place them; `scripts/profile5.sh` profiles three runs of each at a tenth of the period.
 
 ## What is measured
 
