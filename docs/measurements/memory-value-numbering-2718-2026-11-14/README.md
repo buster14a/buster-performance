@@ -43,6 +43,15 @@ Instructions: speedtest1 2,562.8 M with against 2,537.7 M without, Lua 4,855.1 M
 
 The prototype's Lua gain (0.9745, below) is gone: the program without the pass got faster (arithmetic.lua 166.4 M to 154.9 M cycles), while callgrind counts nearly the same code with it (arithmetic.lua +5.8% instructions in both). main's only Tier 1 change in between is #2773 (#2768, allocation ranges that wait in their value's slot).
 
+**Loads dispatched** (`loads.txt`, `scripts/9700x/loads.sh`: speedtest1 and Lua built by the head with the pass and with `-memory`, then `perf stat` of user cycles, instructions and Zen 5's `ls_dispatch` events, ten runs of each in two rounds; medians, Lua's summed over its five scripts):
+
+| | Cycles | Instructions | Loads dispatched | Stores dispatched |
+| --- | ---: | ---: | ---: | ---: |
+| speedtest1, with / without | 1.0074 | 1.0099 | 0.9332 | 1.0082 |
+| Lua, with / without | 0.9832 | 1.0166 | 0.9605 | 0.9990 |
+
+Per Lua script, loads dispatched with over without: arithmetic 0.9551, calls 0.9592, closures 0.9739, strings 0.9646, tables 0.9422. The cycles again show a small loss on speedtest1 and a small gain on Lua, with calls.lua's 0.8825 the largest swing.
+
 **Compile time, whole processes** (`stages.txt`, `scripts/9700x/stages.sh`, `measure-compile --runs 11 --variant --tier1-passes=-memory -- --tier1 --lanes 1 -c sqlite3.c`, the head's own executable): 653.6 ms with the pass against 634.6 ms without, 1.030 times, 18.9 ms; 3,516.4 M against 3,410.8 M user cycles, 8,447.5 M against 8,371.0 M instructions. `compile.txt` (`time-runs`, head against main and main again): sqlite3.c 653.2 ms against 634.8 and 635.1 ms; `lvm.c` 29.50 ms against 29.18 and 29.20 ms (1.011).
 
 **Compile time per pass** (`passes-*.txt`, `benchmark-ir-source --passes --only ROW` on sqlite3.c: 2,602 functions, 599,619 lowered IR instructions; medians of 21 rounds):
