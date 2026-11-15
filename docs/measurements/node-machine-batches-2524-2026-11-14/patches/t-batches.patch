@@ -1,0 +1,686 @@
+From a50a2288fa732e209fb5789dc7fcb350eabcd211 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 21:42:51 +0000
+Subject: [PATCH] Node machine: T by batches of expressions (#2524)
+
+T takes a batch's records from a base: it types a batch's expressions
+one after another in the columns, from base 0, and C and X then take
+each one, X right after C (node_machine_select). The wide values and
+the call arguments are the batch's, started by its first expression.
+node_machine_run keeps one expression alone, at base 0.
+
+The shadow's timing passes run T by batches (--batch N, 1 by
+default), then C and X an expression at a time; node_shadow_batches
+makes a file's batches once. With --verify, each taken expression's
+result by batches (its refusal, tape, labels and calls) is checked
+against its result alone; the census test runs by batches of three.
+
+Part of #2524.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQtUTU2NzKNtCgdUaJP
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/c_check_node_census.c     | 182 +++++++++++++++---
+ .../compiler/c_check_node_census_test.c       |  20 +-
+ src/buster/compiler/c_check_node_machine.c    |  53 +++--
+ .../compiler/c_check_node_machine_contexts.c  |  13 +-
+ .../compiler/c_check_node_machine_expand.c    |   8 +-
+ .../compiler/c_check_node_machine_type.c      |  49 ++---
+ 6 files changed, 245 insertions(+), 80 deletions(-)
+
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 9c0a696..2cd173e 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -7,7 +7,7 @@
+ // expression the tasks lowered is read again from the finished graph, stream and parser's tree, by the tests the machine
+ // would make before it takes it. Include after c_check_lower_inventory.c.
+ //
+-//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...
++//   build/compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--batch N] [--repeat N]] [preprocessor options] file...
+ //
+ // A full expression is a tree of the tasks' pops under one root: a pop that a statement's control pushed (an expression
+ // statement's, a condition's, a return's, a switch's, an initializer's) or a nested control (a statement expression's).
+@@ -1740,8 +1740,10 @@ static void node_census_mark_controls(NodeCensusScratch* s, const CheckProgramBo
+ // takes, after the pipeline, its records compared with the stream's values and conversions node by node and its tape
+ // with the lowering's entries entry by entry, then timed. --scalar types every node by the action, --verify checks T's
+ // rows and rules against the action at every node they type, --passes N times each file's taken expressions N times a
+-// sweep set, and --repeat N runs each expression's sweeps N times in a row within a pass (the runs after the first find
+-// their inputs in the caches).
++// sweep set, --batch N runs the sweeps by batches of N expressions (T over the batch, then C and X an expression at a
++// time; docs/node-machine.md, "Sweeps by batches"), and --repeat N runs each batch's sweeps N times in a row within a
++// pass (the runs after the first find their inputs in the caches). With --verify and --batch, each taken expression's
++// tape by batches is checked against its tape alone (node_shadow_batch_check).
+ 
+ // One expression the machine took, for the timing passes.
+ typedef struct NodeShadowExpression NodeShadowExpression;
+@@ -1753,10 +1755,15 @@ struct NodeShadowExpression
+     uint32_t object;
+     TypeId target;
+     uint8_t context;
++    // Its records' first in its batch's (node_shadow_batches), and at a batch's first expression, the end of its batch.
++    uint32_t base;
++    uint32_t batch_end;
+ };
+ 
+ // The sweeps timed: T alone, T and C, and all three.
+ #define BUSTER_NODE_SHADOW_SWEEPS 3u
++// The most expressions a batch takes (--batch).
++#define BUSTER_NODE_SHADOW_BATCH_MOST 1024u
+ 
+ // One expression's result, for the shadow's tests (NodeShadow.records_out): its root's line and the machine's refusal.
+ typedef struct NodeShadowRecord NodeShadowRecord;
+@@ -1776,8 +1783,13 @@ struct NodeShadow
+     bool scalar;
+     bool verify;
+     uint32_t passes;
+-    // --repeat N: each expression's sweeps N times in a row in the timing passes (1 by default).
++    // --repeat N: each batch's sweeps N times in a row in the timing passes (1 by default).
+     uint32_t repeat;
++    // --batch N: the expressions a batch of the timing passes takes, at most (1 by default: each expression's three
++    // sweeps before the next's), and the taken expressions whose tape or refusal by batches differs from theirs alone.
++    uint32_t batch;
++    uint64_t batch_differences;
++    bool batch_checked;
+     // The expressions the census took and their evaluated nodes, and of them those the machine took.
+     uint64_t expressions;
+     uint64_t nodes;
+@@ -1942,7 +1954,8 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+ {
+     const Tier0Function* function = s->function;
+     const uint32_t first = machine->first;
+-    const uint32_t last = first + machine->count - 2;
++    const uint32_t records = machine->end - machine->base;
++    const uint32_t last = first + records - 2;
+     const uint32_t root = machine->root;
+     uint32_t e = pop->entry;
+     uint32_t t = 0;
+@@ -1954,7 +1967,7 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+     {
+         const uint32_t owner = s->owners[e];
+         const uint32_t node = owner & ~BUSTER_CHECK_LOWER_OWNER_CONVERSION;
+-        inside = (owner & BUSTER_CHECK_LOWER_OWNER_CONTROL) == 0 && ((node >= first && node <= last && machine->count > 1) || node == root);
++        inside = (owner & BUSTER_CHECK_LOWER_OWNER_CONTROL) == 0 && ((node >= first && node <= last && records > 1) || node == root);
+         if (inside)
+         {
+             const uint8_t kind = function->kinds[e];
+@@ -2026,14 +2039,14 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+     }
+     shadow->refused_expressions[refusal] += 1;
+     shadow->refused_nodes[refusal] += nodes;
+-    const CheckOp stopped = machine->stopped < machine->count ? program->input->graph.ops[node_machine_node(machine, machine->stopped)] : CHECK_OP_COUNT;
++    const CheckOp stopped = machine->stopped < machine->end ? program->input->graph.ops[node_machine_node(machine, machine->stopped)] : CHECK_OP_COUNT;
+     shadow->refused_codes[refusal == NODE_MACHINE_REFUSED_CODE && stopped < CHECK_OP_COUNT ? stopped : 0] += refusal == NODE_MACHINE_REFUSED_CODE;
+     shadow->refused_templates[refusal == NODE_MACHINE_REFUSED_TEMPLATE && stopped < CHECK_OP_COUNT ? stopped : 0] += refusal == NODE_MACHINE_REFUSED_TEMPLATE;
+     if (refusal == NODE_MACHINE_TAKEN)
+     {
+         bool values = true;
+         uint32_t different = UINT32_MAX;
+-        for (uint32_t r = 0; r < machine->count; r += 1)
++        for (uint32_t r = machine->base; r < machine->end; r += 1)
+         {
+             const bool same = node_shadow_same_value(machine, r);
+             different = !same && different == UINT32_MAX ? r : different;
+@@ -2043,7 +2056,7 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+         const bool entries = node_shadow_same_entries(s, machine, pop, &compared);
+         shadow->taken_expressions += 1;
+         shadow->taken_nodes += nodes;
+-        shadow->taken_records += machine->count;
++        shadow->taken_records += machine->end - machine->base;
+         shadow->entries += machine->entry_count;
+         shadow->calls += machine->call_count;
+         for (uint32_t c = 0; c < machine->call_count; c += 1)
+@@ -2104,26 +2117,128 @@ static uint64_t node_shadow_read(int counter)
+     return value;
+ }
+ 
+-// Each of the file's taken expressions through the sweeps of set `sweeps` (0: T, 1: T and C, 2: all three).
+-static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, uint32_t sweeps)
++// An expression's result after the sweep that refused it or after X, for node_shadow_batch_check: its refusal and the
++// record it stopped at from its base, and where X took it, its tape, its labels' entries and its calls' records from its
++// base.
++static uint64_t node_shadow_result(const NodeMachine* machine, NodeMachineRefusal refusal)
+ {
+-    for (uint32_t i = 0; i < shadow->timed_count; i += 1)
++    uint64_t hash = UINT64_C(0xcbf29ce484222325);
++    const uint64_t prime = UINT64_C(0x100000001b3);
++    hash = (hash ^ (uint64_t)refusal) * prime;
++    hash = (hash ^ (uint64_t)(machine->stopped - machine->base)) * prime;
++    for (uint32_t e = 0; refusal == NODE_MACHINE_TAKEN && e < machine->entry_count; e += 1)
+     {
+-        const NodeShadowExpression* expression = shadow->timed + i;
+-        // --repeat: each expression's sweeps again at once, its inputs in the caches as the reader leaves them in step 2.
++        hash = (hash ^ ((uint64_t)machine->kinds[e] << 8 | machine->classes[e])) * prime;
++        hash = (hash ^ machine->tape[e]) * prime;
++    }
++    for (uint32_t l = 0; refusal == NODE_MACHINE_TAKEN && l < machine->label_count; l += 1)
++    {
++        hash = (hash ^ machine->label_entries[l]) * prime;
++    }
++    for (uint32_t c = 0; refusal == NODE_MACHINE_TAKEN && c < machine->call_count; c += 1)
++    {
++        hash = (hash ^ (uint64_t)(machine->call_records[c] - machine->base)) * prime;
++    }
++    hash = refusal == NODE_MACHINE_TAKEN ? (hash ^ ((uint64_t)machine->entry_count << 32 | machine->temporary_count)) * prime : hash;
++    return hash;
++}
++
++// The file's taken expressions' batches of at most `batch` expressions whose records fit the machine's columns together,
++// for node_shadow_sweep: each expression's base, from the end of the one before in its batch, and at a batch's first
++// expression, the end of the batch.
++static void node_shadow_batches(NodeShadow* shadow, uint32_t batch)
++{
++    NodeShadowExpression* expressions = shadow->timed;
++    uint32_t i = 0;
++    while (i < shadow->timed_count)
++    {
++        uint32_t j = i;
++        uint32_t end = 0;
++        while (j < shadow->timed_count && j - i < batch && (j == i || expressions[j].count <= BUSTER_NODE_MACHINE_MOST - end))
++        {
++            expressions[j].base = end;
++            end += expressions[j].count;
++            j += 1;
++        }
++        expressions[i].batch_end = j;
++        i = j;
++    }
++}
++
++// Each of the file's taken expressions through the sweeps of set `sweeps` (0: T, 1: T and C, 2: all three), by
++// node_shadow_batches's batches: T over a batch's expressions, each after the one before in the columns, then C and X an
++// expression at a time, each expression as node_machine_select picks it. X runs right after C on the same expression,
++// whose path through C predicts X's branches (docs/node-machine.md, "Sweeps by batches"). --repeat runs a batch's sweeps
++// again at once, its inputs in the caches as the reader leaves them in step 2. With `results`, each expression's result
++// after all three sweeps (node_shadow_result), by its place among the file's.
++static void node_shadow_sweep(NodeMachine* machine, const NodeShadow* shadow, uint32_t sweeps, uint64_t* results)
++{
++    NodeMachineRefusal refusals[BUSTER_NODE_SHADOW_BATCH_MOST];
++    const NodeShadowExpression* expressions = shadow->timed;
++    uint32_t i = 0;
++    while (i < shadow->timed_count)
++    {
++        const uint32_t j = expressions[i].batch_end;
+         for (uint32_t time = 0; time < shadow->repeat; time += 1)
+         {
+-            NodeMachineRefusal refusal = node_machine_type(machine, expression->first, expression->root, expression->count);
+-            if (sweeps >= 1 && refusal == NODE_MACHINE_TAKEN)
++            for (uint32_t k = i; k < j; k += 1)
+             {
+-                refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
++                const NodeShadowExpression* expression = expressions + k;
++                const NodeMachineRefusal refusal = node_machine_type(machine, expression->base, expression->first, expression->root, expression->count);
++                refusals[k - i] = refusal;
++                if (results != NULL && refusal != NODE_MACHINE_TAKEN)
++                {
++                    results[k] = node_shadow_result(machine, refusal);
++                }
+             }
+-            if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
++            for (uint32_t k = i; sweeps >= 1 && k < j; k += 1)
+             {
+-                node_machine_expand(machine, expression->object);
++                const NodeShadowExpression* expression = expressions + k;
++                if (refusals[k - i] == NODE_MACHINE_TAKEN)
++                {
++                    node_machine_select(machine, expression->base, expression->first, expression->root, expression->count);
++                    NodeMachineRefusal refusal = node_machine_contexts(machine, expression->context, expression->target, expression->object);
++                    if (sweeps >= 2 && refusal == NODE_MACHINE_TAKEN)
++                    {
++                        refusal = node_machine_expand(machine, expression->object);
++                    }
++                    if (results != NULL)
++                    {
++                        results[k] = node_shadow_result(machine, refusal);
++                    }
++                }
+             }
+         }
++        i = j;
++    }
++}
++
++// --verify with --batch: the file's taken expressions through all three sweeps alone and by batches, each expression's
++// result compared (node_shadow_result), the differences counted. The machine's counts are the comparison's.
++static void node_shadow_batch_check(NodeShadow* shadow, NodeMachine* machine)
++{
++    uint64_t* alone = calloc((size_t)shadow->timed_count + 1, sizeof(uint64_t));
++    uint64_t* batched = calloc((size_t)shadow->timed_count + 1, sizeof(uint64_t));
++    if (alone != NULL && batched != NULL)
++    {
++        node_machine_forget(machine);
++        node_shadow_batches(shadow, 1);
++        node_shadow_sweep(machine, shadow, BUSTER_NODE_SHADOW_SWEEPS - 1, alone);
++        node_machine_forget(machine);
++        node_shadow_batches(shadow, shadow->batch);
++        node_shadow_sweep(machine, shadow, BUSTER_NODE_SHADOW_SWEEPS - 1, batched);
++        for (uint32_t k = 0; k < shadow->timed_count; k += 1)
++        {
++            shadow->batch_differences += alone[k] != batched[k];
++        }
++        shadow->batch_checked = true;
++    }
++    else
++    {
++        shadow->batch_differences += shadow->timed_count;
+     }
++    free(alone);
++    free(batched);
+ }
+ 
+ // The timing passes over the file's taken expressions (`nodes` evaluated nodes in them): each sweep set `passes` times,
+@@ -2139,6 +2254,7 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+     machine->verify = false;
+     uint64_t least[BUSTER_NODE_SHADOW_SWEEPS][3];
+     memset(least, 0xff, sizeof(least));
++    node_shadow_batches(shadow, shadow->batch);
+     for (uint32_t pass = 0; pass < shadow->passes; pass += 1)
+     {
+         for (uint32_t sweeps = 0; sweeps < BUSTER_NODE_SHADOW_SWEEPS; sweeps += 1)
+@@ -2147,7 +2263,7 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+             const uint64_t c0 = node_shadow_read(cycles);
+             const uint64_t i0 = node_shadow_read(instructions);
+             const uint64_t t0 = __rdtsc();
+-            node_shadow_sweep(machine, shadow, sweeps);
++            node_shadow_sweep(machine, shadow, sweeps, NULL);
+             const uint64_t t1 = __rdtsc();
+             const uint64_t i1 = node_shadow_read(instructions);
+             const uint64_t c1 = node_shadow_read(cycles);
+@@ -2164,6 +2280,10 @@ static void node_shadow_time(NodeShadow* shadow, NodeMachine* machine, uint64_t
+         shadow->instructions[sweeps] += least[sweeps][1];
+         shadow->ticks[sweeps] += least[sweeps][2];
+     }
++    if (verify && shadow->batch > 1)
++    {
++        node_shadow_batch_check(shadow, machine);
++    }
+     shadow->timed_nodes += shadow->passes != 0 ? nodes : 0;
+     shadow->counted = cycles >= 0;
+     machine->verify = verify;
+@@ -2211,12 +2331,16 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+             printf("node-shadow: action-typed op=%s nodes=%" PRIu64 "\n", lower_inventory_op_names[op] != NULL ? lower_inventory_op_names[op] : "?", action_ops[op]);
+         }
+     }
++    if (shadow->batch_checked)
++    {
++        printf("node-shadow: batch=%u expressions whose result by batches differs from theirs alone=%" PRIu64 "\n", shadow->batch, shadow->batch_differences);
++    }
+     static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X" };
+     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
+     {
+-        printf("node-shadow: time sweeps=%s passes=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f instructions=%.1f "
+-               "ticks=%.1f%s\n",
+-               sweep_names[k], shadow->passes, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
++        printf("node-shadow: time sweeps=%s passes=%u batch=%u repeat=%u cycles=%" PRIu64 " instructions=%" PRIu64 " ticks=%" PRIu64 " per-evaluated-node: cycles=%.1f "
++               "instructions=%.1f ticks=%.1f%s\n",
++               sweep_names[k], shadow->passes, shadow->batch, shadow->repeat, shadow->cycles[k], shadow->instructions[k], shadow->ticks[k], (double)shadow->cycles[k] / (double)shadow->timed_nodes,
+                (double)shadow->instructions[k] / (double)shadow->timed_nodes, (double)shadow->ticks[k] / (double)shadow->timed_nodes,
+                shadow->counted ? "" : " (no cycle counter)");
+     }
+@@ -2472,7 +2596,7 @@ static int run_node_census(int count, char** arguments)
+     uint32_t file_count = 0;
+     bool valid = options != 0 && files != 0;
+     bool shadowed = false;
+-    NodeShadow shadow = { .passes = 5, .repeat = 1 };
++    NodeShadow shadow = { .passes = 5, .repeat = 1, .batch = 1 };
+     for (int i = 0; valid && i < count; i += 1)
+     {
+         if (strcmp(arguments[i], "--list") == 0)
+@@ -2505,6 +2629,12 @@ static int run_node_census(int count, char** arguments)
+             valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number >= 1 && number <= 16;
+             shadow.repeat = (uint32_t)number;
+         }
++        else if (strcmp(arguments[i], "--batch") == 0)
++        {
++            uint64_t number = 0;
++            valid = i + 1 < count && check_corpus_number(arguments[++i], &number) && number >= 1 && number <= BUSTER_NODE_SHADOW_BATCH_MOST;
++            shadow.batch = (uint32_t)number;
++        }
+         else if (strcmp(arguments[i], "--no-default-config") == 0)
+         {
+             // Clang's option, which the corpora's command lines take: nothing for pp_parse_options to read.
+@@ -2540,11 +2670,11 @@ static int run_node_census(int count, char** arguments)
+     }
+     else
+     {
+-        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--repeat N]] [preprocessor options] file...\n");
++        fprintf(stderr, "usage: compiler measure-node-machine [--list N] [--shadow [--scalar] [--verify] [--passes N] [--batch N] [--repeat N]] [preprocessor options] file...\n");
+     }
+     free(files);
+     free(options);
+-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0);
++    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.batch_differences != 0);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index 3019bb8..f551e70 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -329,18 +329,28 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char**
+     snprintf(path, sizeof(path), "%s/shadow.c", directory);
+     const char* text = node_shadow_test_text;
+     bool valid = parse_test_write(path, text, strlen(text));
+-    NodeShadow shadow = { .records_out = calloc(512, sizeof(NodeShadowRecord)), .record_capacity = 512, .scalar = scalar, .verify = !scalar, .passes = 1, .repeat = 1 };
++    // By batches of three expressions, which --verify checks against each expression alone.
++    NodeShadow shadow = {
++        .records_out = calloc(512, sizeof(NodeShadowRecord)),
++        .record_capacity = 512,
++        .scalar = scalar,
++        .verify = !scalar,
++        .passes = 1,
++        .repeat = 1,
++        .batch = 3,
++    };
+     NodeCensus census = { .shadow = &shadow };
+     fflush(stdout);
+     valid = valid && shadow.records_out != NULL && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
+             shadow.record_count < shadow.record_capacity;
+     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
+-                      (scalar || shadow.row_nodes != 0);
++                      (scalar || (shadow.row_nodes != 0 && shadow.batch_checked && shadow.batch_differences == 0));
+     if (!valid || !same)
+     {
+-        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 " differ; %" PRIu64 " expressions taken, %" PRIu64 " row-typed nodes\n",
+-                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.taken_expressions,
+-                shadow.row_nodes);
++        fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", batches %" PRIu64 " differ; %" PRIu64
++                " expressions taken, %" PRIu64 " row-typed nodes\n",
++                scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.batch_differences,
++                shadow.taken_expressions, shadow.row_nodes);
+     }
+     uint32_t line = 1;
+     const char* at = text;
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index 41ccab4..b9c51ce 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -69,7 +69,8 @@
+ // - node_machine_local and node_machine_address_takes: what C and X ask of an object; node_machine_callee_function,
+ //   node_machine_direct_callee, node_machine_call_target and node_machine_call_variadic: what T, C, X and the shadow ask
+ //   of a call.
+-// - node_machine_run: the three sweeps, one after another.
++// - node_machine_run: the three sweeps, one after another, on an expression alone; node_machine_select: a batch's
++//   expression, for C and X after T typed the batch.
+ #ifndef BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
+ #define BUSTER_C_CHECK_NODE_MACHINE_INCLUDED
+ 
+@@ -338,10 +339,15 @@ struct NodeMachine
+     uint64_t twin_differences;
+     // The nodes T typed by the action, by operator.
+     uint64_t action_ops[CHECK_OP_COUNT];
+-    // The current expression: its records are the graph's nodes first to first + count - 2, and its root the last, which is
+-    // the next node or a later one (a condition's wrapper, which the reader makes after the statement it controls).
++    // The current expression: its records are `base` to `end` - 1 of the batch's, the graph's nodes first to first + end -
++    // base - 2, and its root the last, which is the next node or a later one (a condition's wrapper, which the reader makes
++    // after the statement it controls). A batch (docs/node-machine.md, "Sweeps by batches") is the records of the
++    // expressions T typed one after another from base 0, each after the one before; C and X then take them one at a time,
++    // X right after C on each (node_machine_select). Outside a batch, as node_machine_run runs them, an expression's base
++    // is 0.
++    uint32_t base;
+     uint32_t first;
+-    uint32_t count;
++    uint32_t end;
+     uint32_t root;
+     // The records' columns (NodeMachineColumns), which C and X read through the record accessors alone. T's (docs/node-
+     // machine.md, "The records and the tapes"): each record's operator and its first two operands' records (UINT32_MAX for
+@@ -355,11 +361,13 @@ struct NodeMachine
+     // expression's list (`arguments`) and its count. C's: each record's state, its context
+     // (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), the type its consumer converts it to, its template
+     // (CheckLowerTemplate, or past it NodeMachineTemplate), its hook and label base (below) and the evaluated calls among
+-    // its ancestors.
++    // its ancestors. The wide values (`wide_count`) and the call arguments (`argument_total`) are the batch's: an
++    // expression's follow the earlier ones', which C and X read after T has gone past them, and a batch's first
++    // expression (base 0) starts them.
+     NodeMachineColumns* columns;
+     CheckValue* wides;
+     uint32_t wide_count;
+-    // A call's arguments: their records, by place in the expression's list, and each argument's conversion.
++    // A call's arguments: their records, by place in the batch's list, and each argument's conversion.
+     // `argument_values` and `verified` are an action's arguments and --verify's conversions, for one call at a time.
+     uint32_t* arguments;
+     CheckConversion* argument_conversions;
+@@ -378,7 +386,7 @@ struct NodeMachine
+     uint32_t* stack;
+     uint32_t label_count;
+     // For an update and its destination (BUSTER_NODE_MACHINE_SPLIT), its plan among the expression's `update_count`
+-    // `updates` (node_machine_record_update).
++    // `updates` (node_machine_record_update): X takes an expression right after C.
+     uint32_t* consumers;
+     NodeMachineUpdate* updates;
+     uint32_t update_count;
+@@ -414,7 +422,7 @@ static void node_machine_forget(NodeMachine* machine)
+ static bool node_machine_tables_initialize(void);
+ static uint32_t node_machine_complete_at(const TypeTable* types, const CheckGraph* graph, TypeId type);
+ static uint32_t node_machine_operand(const NodeMachine* machine, uint32_t r, uint32_t k);
+-static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count);
++static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t base, uint32_t first, uint32_t root, uint32_t count);
+ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object);
+ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object);
+ 
+@@ -509,7 +517,7 @@ static uint8_t node_machine_facts(const NodeMachine* machine, TypeId type)
+ // Record `r`'s graph node.
+ static inline uint32_t node_machine_node(const NodeMachine* machine, uint32_t r)
+ {
+-    return r + 1 == machine->count ? machine->root : machine->first + r;
++    return r + 1 == machine->end ? machine->root : machine->first + (r - machine->base);
+ }
+ 
+ // The record accessors: what C and X read of record `r`, which T wrote, and C's own columns, read and written. Each is
+@@ -752,11 +760,12 @@ static inline const NodeMachineUpdate* node_machine_record_update(const NodeMach
+     return machine->updates + machine->consumers[r];
+ }
+ 
+-// C's writes: the first `count` records not evaluated, then a record evaluated, its context, its target and its template;
+-// an evaluated record's consumer `consumer` whose segment `hook` follows its row; and a labeled record's first label.
+-static inline void node_machine_records_set_unevaluated(NodeMachine* machine, uint32_t count)
++// C's writes: records `base` to `end` - 1 not evaluated, then a record evaluated, its context, its target and its
++// template; an evaluated record's consumer `consumer` whose segment `hook` follows its row; and a labeled record's first
++// label.
++static inline void node_machine_records_set_unevaluated(NodeMachine* machine, uint32_t base, uint32_t end)
+ {
+-    memset(machine->columns->states, 0, count);
++    memset(machine->columns->states + base, 0, end - base);
+ }
+ 
+ static inline void node_machine_record_set_evaluated(NodeMachine* machine, uint32_t r)
+@@ -860,12 +869,22 @@ static bool node_machine_call_variadic(const NodeMachine* machine, uint32_t r)
+     return function != 0 && (machine->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+ }
+ 
+-// The three sweeps over the expression of `count` records (node_machine_type's), whose consumer evaluates it with
+-// `context` and converts it to `target` (`object`: what a root INITIALIZE initializes): its refusal, or NODE_MACHINE_TAKEN
+-// with its entries on the tape.
++// The batch's expression of `count` records from record `base` (node_machine_type's), for C and X after T has typed the
++// batch: T left the last one's range in the machine.
++static void node_machine_select(NodeMachine* machine, uint32_t base, uint32_t first, uint32_t root, uint32_t count)
++{
++    machine->base = base;
++    machine->first = first;
++    machine->end = base + count;
++    machine->root = root;
++}
++
++// The three sweeps over the expression of `count` records (node_machine_type's), alone in its batch, whose consumer
++// evaluates it with `context` and converts it to `target` (`object`: what a root INITIALIZE initializes): its refusal, or
++// NODE_MACHINE_TAKEN with its entries on the tape.
+ static NodeMachineRefusal node_machine_run(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count, uint8_t context, TypeId target, uint32_t object)
+ {
+-    NodeMachineRefusal refusal = node_machine_type(machine, first, root, count);
++    NodeMachineRefusal refusal = node_machine_type(machine, 0, first, root, count);
+     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_contexts(machine, context, target, object) : refusal;
+     refusal = refusal == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : refusal;
+     return refusal;
+diff --git a/src/buster/compiler/c_check_node_machine_contexts.c b/src/buster/compiler/c_check_node_machine_contexts.c
+index 744a678..f465cba 100644
+--- a/src/buster/compiler/c_check_node_machine_contexts.c
++++ b/src/buster/compiler/c_check_node_machine_contexts.c
+@@ -600,22 +600,23 @@ static __attribute__((noinline)) void node_machine_number_labels(NodeMachine* ma
+ 
+ // C: every evaluated record's template and its operands' contexts and targets, down from the root, which its consumer
+ // evaluates with `context` and converts to `target`; `object` is what a root INITIALIZE initializes. Then the labels'
+-// numbers, where a record numbers any.
++// numbers, where a record numbers any. The expression is the machine's, T's last or a batch's (node_machine_select).
+ static NodeMachineRefusal node_machine_contexts(NodeMachine* machine, uint8_t context, TypeId target, uint32_t object)
+ {
+     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+-    const uint32_t count = machine->count;
+-    node_machine_records_set_unevaluated(machine, count);
++    const uint32_t base = machine->base;
++    const uint32_t end = machine->end;
++    node_machine_records_set_unevaluated(machine, base, end);
+     machine->label_count = 0;
+     machine->update_count = 0;
+-    const uint32_t root = count - 1;
++    const uint32_t root = end - 1;
+     node_machine_record_set_evaluated(machine, root);
+     node_machine_record_set_context(machine, root, context);
+     node_machine_record_set_target(machine, root, target);
+     node_machine_record_set_call_depth(machine, root, 0);
+-    uint32_t r = count;
++    uint32_t r = end;
+     uint32_t stopped = root;
+-    while (refusal == NODE_MACHINE_TAKEN && r != 0)
++    while (refusal == NODE_MACHINE_TAKEN && r != base)
+     {
+         r -= 1;
+         if (node_machine_record_evaluated(machine, r))
+diff --git a/src/buster/compiler/c_check_node_machine_expand.c b/src/buster/compiler/c_check_node_machine_expand.c
+index dd40ce2..c9a062b 100644
+--- a/src/buster/compiler/c_check_node_machine_expand.c
++++ b/src/buster/compiler/c_check_node_machine_expand.c
+@@ -423,12 +423,12 @@ static NodeMachineRefusal node_machine_after_row(NodeMachine* machine, uint32_t
+ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
+ {
+     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+-    const uint32_t count = machine->count;
++    const uint32_t end = machine->end;
+     machine->entry_count = 0;
+     machine->call_count = 0;
+     machine->temporary_count = 0;
+-    uint32_t r = 0;
+-    while (refusal == NODE_MACHINE_TAKEN && r < count)
++    uint32_t r = machine->base;
++    while (refusal == NODE_MACHINE_TAKEN && r < end)
+     {
+         const uint8_t state = node_machine_record_state(machine, r);
+         if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
+@@ -440,7 +440,7 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
+             }
+             else
+             {
+-                node_machine_own(machine, r, r == count - 1 ? object : 0);
++                node_machine_own(machine, r, r == end - 1 ? object : 0);
+             }
+             const bool takes = node_machine_conversion(machine, r);
+             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+diff --git a/src/buster/compiler/c_check_node_machine_type.c b/src/buster/compiler/c_check_node_machine_type.c
+index 30fa480..254b8b2 100644
+--- a/src/buster/compiler/c_check_node_machine_type.c
++++ b/src/buster/compiler/c_check_node_machine_type.c
+@@ -481,7 +481,7 @@ static uint32_t node_machine_operand(const NodeMachine* machine, uint32_t r, uin
+     const CheckGraph* graph = machine->graph;
+     const uint32_t node = node_machine_node(machine, r);
+     const uint32_t operand = k == 0 ? graph->operand0[node] : k == 1 ? graph->operand1[node] : graph->operand2[node];
+-    const uint32_t record = operand - machine->first;
++    const uint32_t record = operand - machine->first + machine->base;
+     return operand == BUSTER_CHECK_NONE ? UINT32_MAX : operand >= machine->first && record < r ? record : BUSTER_NODE_MACHINE_MOST;
+ }
+ 
+@@ -1174,7 +1174,7 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
+     for (uint32_t i = 0; inside && i < count; i += 1)
+     {
+         const uint32_t argument = graph->argument_nodes[offset + i];
+-        const uint32_t record = argument - machine->first;
++        const uint32_t record = argument - machine->first + machine->base;
+         inside = argument != BUSTER_CHECK_NONE && argument >= machine->first && record < r;
+         machine->arguments[first + i] = record;
+         lowest = inside && columns->lowest[record] < lowest ? columns->lowest[record] : lowest;
+@@ -2161,11 +2161,12 @@ static inline __attribute__((always_inline)) uint32_t node_machine_leaf(NodeMach
+     return overload;
+ }
+ 
+-// Graph node `operand` (BUSTER_CHECK_NONE for none) as a record of the expression whose first node is `first`, an operand of
+-// record `r`: node_machine_operand's answer, from the node itself, which T's loop has found already.
+-static inline __attribute__((always_inline)) uint32_t node_machine_record_of(uint32_t operand, uint32_t first, uint32_t r)
++// Graph node `operand` (BUSTER_CHECK_NONE for none) as a record of the expression whose first node is `first`, its record
++// that node less `offset` (first less its base), an operand of record `r`: node_machine_operand's answer, from the node
++// itself, which T's loop has found already.
++static inline __attribute__((always_inline)) uint32_t node_machine_record_of(uint32_t operand, uint32_t first, uint32_t offset, uint32_t r)
+ {
+-    const uint32_t record = operand - first;
++    const uint32_t record = operand - offset;
+     return operand == BUSTER_CHECK_NONE ? UINT32_MAX : operand >= first && record < r ? record : BUSTER_NODE_MACHINE_MOST;
+ }
+ 
+@@ -2182,28 +2183,32 @@ static __attribute__((cold, noinline)) NodeMachineRefusal node_machine_type_acti
+     return refusal;
+ }
+ 
+-// T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
+-// nodes `first` to first + count - 2 and `root`. A refusal stops it, at machine->stopped.
+-static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count)
++// T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records from the
++// batch's record `base` (0 for its first expression, and else the end of the one before), graph nodes `first` to first +
++// count - 2 and `root`. A refusal stops it, at machine->stopped.
++static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t base, uint32_t first, uint32_t root, uint32_t count)
+ {
+     NodeMachineColumns* columns = machine->columns;
+     const CheckGraph* graph = machine->graph;
+-    NodeMachineRefusal refusal = count != 0 && count <= BUSTER_NODE_MACHINE_MOST && root >= first + count - 1 ? NODE_MACHINE_TAKEN : NODE_MACHINE_REFUSED_SHAPE;
++    NodeMachineRefusal refusal = count != 0 && count <= BUSTER_NODE_MACHINE_MOST - base && root >= first + count - 1 ? NODE_MACHINE_TAKEN : NODE_MACHINE_REFUSED_SHAPE;
+     // The expression's range, kept in locals for the loop as well as in the machine for the rules: the machine's fields
+-    // would be loaded again after each of the loop's stores.
+-    const uint32_t records = refusal == NODE_MACHINE_TAKEN ? count : 0;
++    // would be loaded again after each of the loop's stores. A node's record is the node less `offset`.
++    const uint32_t end = refusal == NODE_MACHINE_TAKEN ? base + count : base;
++    const uint32_t offset = first - base;
++    machine->base = base;
+     machine->first = first;
+     machine->root = root;
+-    machine->count = records;
+-    machine->wide_count = 0;
+-    machine->argument_total = 0;
++    machine->end = end;
++    // A batch's first expression starts its wide values and its arguments' list; the others add theirs after.
++    machine->wide_count = base == 0 ? 0 : machine->wide_count;
++    machine->argument_total = base == 0 ? 0 : machine->argument_total;
+     // The nodes a row or a rule typed, counted here and added to the machine's once: a store into the machine at each
+     // record would make every read of its fields after it a load again (-fno-strict-aliasing).
+     uint64_t rows = 0;
+-    uint32_t r = 0;
+-    while (refusal == NODE_MACHINE_TAKEN && r < records)
++    uint32_t r = base;
++    while (refusal == NODE_MACHINE_TAKEN && r < end)
+     {
+-        const uint32_t node = r + 1 == records ? root : first + r;
++        const uint32_t node = r + 1 == end ? root : offset + r;
+         const CheckOp op = graph->ops[node];
+         const bool context = (graph->contexts != NULL && graph->contexts[node] != 0) ||
+                              (graph->fp_environments != NULL && (graph->fp_environments[node] & (BUSTER_CHECK_FP_ENV_ACCESS | BUSTER_CHECK_FP_EVAL_MASK)) != 0);
+@@ -2228,9 +2233,9 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
+         }
+         else
+         {
+-            const uint32_t a = node_machine_record_of(graph->operand0[node], first, r);
+-            const uint32_t b = node_machine_record_of(graph->operand1[node], first, r);
+-            const uint32_t c = node_machine_record_of(graph->operand2[node], first, r);
++            const uint32_t a = node_machine_record_of(graph->operand0[node], first, offset, r);
++            const uint32_t b = node_machine_record_of(graph->operand1[node], first, offset, r);
++            const uint32_t c = node_machine_record_of(graph->operand2[node], first, offset, r);
+             columns->left[r] = a;
+             columns->right[r] = b;
+             // Its subtree's least record (a call's arguments' too, node_machine_arguments).
+@@ -2281,7 +2286,7 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
+     }
+     machine->row_nodes += rows;
+     // The record T stopped at: the one that refused, or else the last; none where the shape refused before the loop.
+-    if (records != 0)
++    if (end != base)
+     {
+         machine->stopped = refusal == NODE_MACHINE_TAKEN ? r - 1 : r;
+     }
+-- 
+2.43.0
+
