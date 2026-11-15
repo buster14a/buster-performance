@@ -147,3 +147,18 @@ from the change's own effect: speedtest1's cycles don't follow its 0.56% fewer i
 | `sqlite3.c`, wall | 609.8 ms | 610.9 ms | +0.18% |
 | `lvm.c` (41 runs), user cycles | 128.5 M | 128.4 M | −0.08% |
 | `lvm.c`, user instructions | 368.0 M | 368.3 M | +0.08% |
+
+## 4. After #2774 merged
+
+Main took #2774 (continuations, buster#2787) and #2745 before the pull request merged; the branch merged main `efc8e029`
+as `f09b8a9b`, its allocator and CFG code unchanged. By section 1's callgrind method, main `efc8e029` against
+`f09b8a9b` (`counts/main-efc8e029/`, `counts/head-f09b8a9b/`):
+
+| | main | head |
+| --- | ---: | ---: |
+| Lua's five scripts | 4,656.9 M | 4,634.3 M (−0.49%) |
+| speedtest1 | 2,550.53 M | 2,544.49 M (−0.24%) |
+
+`str_gsub` 73.3 M → 69.8 M, `luaD_precall` 249.1 M → 230.8 M, `luaV_execute` −0.74 M; speedtest1's `sqlite3VdbeExec`
+−4.32 M (#2774 had taken part of section 1's −13.00 M), `balance_nonroot` −0.53 M. No function of either program runs
+0.05 M more. Every script printed clang -O0's output and speedtest1 gave its hash.
