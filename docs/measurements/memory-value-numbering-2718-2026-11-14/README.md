@@ -88,4 +88,4 @@ The test runs each function's vector version first. The scalar one finds the fun
 
 ## Tests (buster)
 
-On the final code: `test-ir-optimize` (the six `tests/ir/optimize/memory-*.ir` pairs and 400 generated programs, both twins exact, with an independent interpreter), `test-checker --seed 133`, `test-ir-lowering`, `test-ir`, `test-interpreter`, `test-ir-interpreter`, `test-tier0 --cross-check`, `test-snapshot`, `test-check-lanes`, `test-check-units`, `test-emission-metadata`, `test-ir-sroa`, `test-ir-inline`, `test-ssa` and `test-check-debug` passed. `test-checker-driver`'s eight parts are running.
+On the final code: `test-ir-optimize` (the six `tests/ir/optimize/memory-*.ir` pairs and 400 generated programs, both twins exact, with an independent interpreter), `test-checker --seed 133`, `test-ir-lowering`, `test-ir`, `test-interpreter`, `test-ir-interpreter`, `test-tier0 --cross-check`, `test-snapshot`, `test-check-lanes`, `test-check-units`, `test-emission-metadata`, `test-ir-sroa`, `test-ir-inline`, `test-ssa` and `test-check-debug` passed. `test-checker-driver --executable ./build/compiler`'s eight parts passed (196,099 checks, 0 failures).
