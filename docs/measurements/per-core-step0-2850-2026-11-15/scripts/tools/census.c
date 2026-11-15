@@ -979,7 +979,12 @@ static void census_list(const CensusTable* table, uint8_t op)
     free(rows);
 }
 
-int main(int argc, char** argv)
+// lanes.c includes this file for its search, and names this function otherwise.
+#ifndef CENSUS_MAIN
+#define CENSUS_MAIN main
+#endif
+
+int CENSUS_MAIN(int argc, char** argv)
 {
     bool print_rows = false;
     const char* list_table = NULL;
