@@ -104,6 +104,36 @@ and Lua outputs agree. `local/reports.txt`: `--tier1-report` and text sizes of
 `sqlite3.c` (2,748 loops, 53 unrolled, text +0.77%), the compiler's `main.c`
 (2,448, 297, +3.20%) and the kernels.
 
-## Results: compile cost, znver5 and the programs
+## Results: compile cost and code growth
+
+`9700x/compile/` (`compile.sh`, the head `7ad1353e`, one lane, CPU 2, a hold per
+step: `holds.txt`). `drive.txt`: every compile's status is 0, and both inputs'
+default objects are the base's byte for byte. `measure-*.txt`: `measure-compile
+--runs 11 --variant --tier1-passes=+unroll`, medians of 11 alternating runs.
+
+| Input | Default | `+unroll` | Wall | Cycles | Instructions | Peak RSS | Text |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 636.2 ms | 650.2 ms | +2.20% | +2.20% | +1.95% | +1.4% | 1,722,876 → 1,736,148 (+0.77%) |
+| the compiler's `main.c` | 1,270.1 ms | 1,327.9 ms | +4.54% | +4.79% | +4.55% | +0.5% | 2,596,186 → 2,679,138 (+3.20%) |
+
+The ranges don't meet: `sqlite3.c` 635.4–637.4 ms against 648.8–651.1 ms,
+`main.c` 1,268.5–1,276.2 against 1,323.9–1,332.7. `report-*-unroll.txt`'s
+`tier1-unroll` lines: `sqlite3.c` 2,748 loops, 53 unrolled (308 copies, 4 split
+reductions, 12,744 instructions added); `main.c` 2,448 loops, 297 unrolled (1,786
+copies, 47 reductions, 63,422 added).
+
+**Where it goes** (`local/callgrind-compile.txt`: callgrind of a baseline-host
+build of `--tier1 -c sqlite3.c` on a cloud container, at the head merged with
+main `20cd8e5`; the 9700X's instructions are for its AVX-512 paths, these for the
+scalar twins): Tier 1 executes 237.5 M more instructions with `+unroll` (+2.3% of
+its 10,507 M). The pass itself is 109.3 M of them: the dominators of the 1,018
+functions with a phi 37.9 M, its own scan and rewrite about 25 M, their CFGs
+13 M, and zeroing its arrays; the sink and the optimizer that follow take 69.3 M
+more and the back end 44.4 M more, for the bigger functions. Skipping the CFG and
+dominators of functions with no branch backward in block order (a filter with
+twins) took 3–4 M off: 729 of the 1,018 have a loop and carry the analysis'
+cost. It wasn't kept.
+
+## Results: znver5 and the programs
 
 PENDING

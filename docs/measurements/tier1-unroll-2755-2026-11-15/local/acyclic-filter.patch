@@ -1,0 +1,328 @@
+diff --git a/src/buster/compiler/ir_optimize_unroll.c b/src/buster/compiler/ir_optimize_unroll.c
+index 5f72b96..047039d 100644
+--- a/src/buster/compiler/ir_optimize_unroll.c
++++ b/src/buster/compiler/ir_optimize_unroll.c
+@@ -32,7 +32,8 @@
+ // function grows by at most `growth` instructions.
+ //
+ // Data-parallel parts with exact scalar twins: the opcode classes (one byte permute of a 128-entry table per 64
+-// instructions), each loop block's class union (64-byte masked loads, or-reduced) and the operand remap of every
++// instructions), the test for a branch backward in block order that gates the CFG and dominators (16 blocks' terminators
++// at a time, by gathers), each loop block's class union (64-byte masked loads, or-reduced) and the operand remap of every
+ // copied range (16 instructions at a time: the operand tables' masks and masked gathers from the old-to-new map). The
+ // per-loop recognition and the CFG and phi construction are the small ordered part: a loop's blocks, its header's phis
+ // and its liveness walk, bounded by BUSTER_IR_UNROLL_LOOP_LIMIT instructions. Both twins give identical functions.
+@@ -79,6 +80,8 @@
+ #define BUSTER_IR_UNROLL_PHI 16u
+ #define BUSTER_IR_UNROLL_EFFECT 32u
+ #define BUSTER_IR_UNROLL_FREE 64u
++// A branch to blocks named in its operands: with BUSTER_IR_UNROLL_FREE `br` (a), without it `cbr` (b, c).
++#define BUSTER_IR_UNROLL_BRANCH 128u
+ 
+ // A header phi's role (IrUnrollWork.roles).
+ #define BUSTER_IR_UNROLL_CARRIED 0u
+@@ -243,8 +246,8 @@ static const uint8_t ir_unroll_classes[BUSTER_IR_OP_TABLE] = {
+     [IR_CALL] = BUSTER_IR_UNROLL_CALL | BUSTER_IR_UNROLL_EFFECT,
+     [IR_CALL_INDIRECT] = BUSTER_IR_UNROLL_CALL | BUSTER_IR_UNROLL_EFFECT,
+     [IR_PHI] = BUSTER_IR_UNROLL_PHI | BUSTER_IR_UNROLL_FREE,
+-    [IR_BR] = BUSTER_IR_UNROLL_EFFECT | BUSTER_IR_UNROLL_FREE,
+-    [IR_CBR] = BUSTER_IR_UNROLL_EFFECT,
++    [IR_BR] = BUSTER_IR_UNROLL_BRANCH | BUSTER_IR_UNROLL_EFFECT | BUSTER_IR_UNROLL_FREE,
++    [IR_CBR] = BUSTER_IR_UNROLL_BRANCH | BUSTER_IR_UNROLL_EFFECT,
+     [IR_SWITCH] = BUSTER_IR_UNROLL_CONTROL | BUSTER_IR_UNROLL_EFFECT,
+     [IR_BR_INDIRECT] = BUSTER_IR_UNROLL_CONTROL | BUSTER_IR_UNROLL_EFFECT,
+     [IR_RET] = BUSTER_IR_UNROLL_EXIT | BUSTER_IR_UNROLL_EFFECT,
+@@ -290,6 +293,70 @@ static bool ir_unroll_classify(const IrFunction* f, uint8_t* classes, bool scala
+     return phis;
+ }
+ 
++// Whether some block may branch back to itself or to a block before it. Without such a branch, block order is a
++// topological order of the CFG, which then has no cycle and no loop, and neither the graph nor its dominators are built:
++// most functions with a phi have no loop. A switch, an indirect branch and a block without a terminator answer yes, and
++// the whole analysis decides. `classes` has padding past the last instruction for the vector path's 4-byte gathers.
++static bool ir_unroll_backward(const IrFunction* f, const uint8_t* classes, bool scalar)
++{
++    const uint32_t blocks = f->block_count;
++    bool backward = false;
++#if BUSTER_HOST_VECTOR
++    if (!scalar)
++    {
++        const __m512i zero = _mm512_setzero_si512();
++        const __m512i one = _mm512_set1_epi32(1);
++        const __m512i lanes_index = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++        __mmask16 found = 0;
++        for (uint32_t first = 0; first < blocks; first += 16)
++        {
++            const uint32_t lanes = blocks - first < 16 ? blocks - first : 16;
++            const __mmask16 valid = (__mmask16)(0xffffu >> (16 - lanes));
++            const __m512i begins = _mm512_maskz_loadu_epi32(valid, f->block_offsets + first);
++            const __m512i ends = _mm512_maskz_loadu_epi32(valid, f->block_offsets + first + 1);
++            const __mmask16 full = _mm512_mask_cmpgt_epu32_mask(valid, ends, begins);
++            const __m512i last = _mm512_sub_epi32(ends, one);
++            const __m512i kinds = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, full, last, classes, 1), _mm512_set1_epi32(0xff));
++            const __mmask16 branch = _mm512_mask_test_epi32_mask(full, kinds, _mm512_set1_epi32(BUSTER_IR_UNROLL_BRANCH));
++            const __mmask16 jump = _mm512_mask_test_epi32_mask(branch, kinds, _mm512_set1_epi32(BUSTER_IR_UNROLL_FREE));
++            const __mmask16 conditional = branch & (__mmask16)~jump;
++            const __mmask16 terminal = _mm512_mask_test_epi32_mask(full, kinds, _mm512_set1_epi32(BUSTER_IR_UNROLL_EXIT));
++            const __m512i a = _mm512_mask_i32gather_epi32(zero, jump, last, f->a, 4);
++            const __m512i b = _mm512_mask_i32gather_epi32(zero, conditional, last, f->b, 4);
++            const __m512i c = _mm512_mask_i32gather_epi32(zero, conditional, last, f->c, 4);
++            // Target t goes forward from block k when k < t < blocks: t - (k + 1) < blocks - (k + 1), unsigned.
++            const __m512i next = _mm512_add_epi32(_mm512_set1_epi32((int)(first + 1)), lanes_index);
++            const __m512i room = _mm512_sub_epi32(_mm512_set1_epi32((int)blocks), next);
++            const __mmask16 a_forward = _mm512_cmplt_epu32_mask(_mm512_sub_epi32(a, next), room);
++            const __mmask16 b_forward = _mm512_cmplt_epu32_mask(_mm512_sub_epi32(b, next), room);
++            const __mmask16 c_forward = _mm512_cmplt_epu32_mask(_mm512_sub_epi32(c, next), room);
++            const __mmask16 forward = (jump & a_forward) | (conditional & b_forward & c_forward) | terminal;
++            found |= valid & (__mmask16)~forward;
++        }
++        backward = found != 0;
++    }
++    else
++#endif
++    {
++        for (uint32_t block = 0; !backward && block < blocks; block += 1)
++        {
++            const uint32_t begin = f->block_offsets[block];
++            const uint32_t end = f->block_offsets[block + 1];
++            const uint32_t kind = end > begin ? classes[end - 1] : 0;
++            const bool branch = (kind & BUSTER_IR_UNROLL_BRANCH) != 0;
++            const bool jump = branch && (kind & BUSTER_IR_UNROLL_FREE) != 0;
++            const uint32_t next = block + 1;
++            const uint32_t room = blocks - next;
++            const bool forward = jump     ? f->a[end - 1] - next < room :
++                                 branch   ? f->b[end - 1] - next < room && f->c[end - 1] - next < room :
++                                            (kind & BUSTER_IR_UNROLL_EXIT) != 0;
++            backward = !forward;
++        }
++    }
++    (void)scalar;
++    return backward;
++}
++
+ // The union of the classes of instructions [first, end).
+ static uint32_t ir_unroll_block_classes(const uint8_t* classes, uint32_t first, uint32_t end, bool scalar)
+ {
+@@ -1589,14 +1656,15 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
+     const uint32_t count = function->instruction_count;
+     const uint32_t blocks = function->block_count;
+     bool ok = check.error == IR_OK;
+-    work.classes = ir_allocate(scratch, count, 1, &ok);
++    work.classes = ir_allocate(scratch, (uint64_t)count + BUSTER_IR_UNROLL_BATCH, 1, &ok);
+     check.error = check.error == IR_OK && !ok ? IR_ERROR_MEMORY : check.error;
+     const bool phis = check.error == IR_OK && count != 0 && ir_unroll_classify(function, work.classes, scalar);
+-    if (check.error == IR_OK && phis)
++    const bool cyclic = phis && ir_unroll_backward(function, work.classes, scalar);
++    if (check.error == IR_OK && cyclic)
+     {
+         check.error = ir_cfg_validated(function, scratch, scratch, &work.cfg);
+     }
+-    if (check.error == IR_OK && phis)
++    if (check.error == IR_OK && cyclic)
+     {
+         const DominatorCfg cfg = {
+             .block_count = work.cfg.block_count,
+@@ -1614,7 +1682,7 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
+         // A function past the analysis' limits is left as it is.
+         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_UNSUPPORTED;
+     }
+-    if (check.error == IR_OK && phis && work.loops.loop_count != 0)
++    if (check.error == IR_OK && cyclic && work.loops.loop_count != 0)
+     {
+         work.labeled = ir_allocate(scratch, blocks, 1, &ok);
+         work.positions = ir_allocate(scratch, blocks, 4, &ok);
+diff --git a/src/buster/compiler/ir_optimize_unroll_test.c b/src/buster/compiler/ir_optimize_unroll_test.c
+index 31029a5..2eedbb0 100644
+--- a/src/buster/compiler/ir_optimize_unroll_test.c
++++ b/src/buster/compiler/ir_optimize_unroll_test.c
+@@ -411,8 +411,44 @@ static uint32_t ir_unroll_test_parameters(uint32_t bits, uint64_t* parameters, u
+ 
+ // The fixture by both twins: the same function and counts; `expected`'s outcome counted once; an unrolled one verified,
+ // optimized and executed against the original on every parameter.
++// ir_unroll_backward's twins agree, and neither misses a branch backward in block order: the oracle reads every edge by
++// ir_successor, as the CFG does. Returns the vector twin's answer.
++static bool ir_unroll_test_backward(IrOptimizeTest* test, const IrFunction* f, const char* label)
++{
++    uint8_t* vector_classes = calloc((size_t)f->instruction_count + BUSTER_IR_UNROLL_BATCH, 1);
++    uint8_t* scalar_classes = calloc((size_t)f->instruction_count + BUSTER_IR_UNROLL_BATCH, 1);
++    bool exact = false;
++    for (uint32_t block = 0; block < f->block_count; block += 1)
++    {
++        const uint32_t end = f->block_offsets[block + 1];
++        const bool terminated = end > f->block_offsets[block];
++        const uint32_t count = terminated ? ir_successor_count(f, end - 1) : 0;
++        exact = exact || !terminated;
++        for (uint32_t edge = 0; edge < count; edge += 1)
++        {
++            exact = exact || ir_successor(f, end - 1, edge) <= block;
++        }
++    }
++    bool vector = false;
++    bool scalar = false;
++    if (vector_classes != NULL && scalar_classes != NULL)
++    {
++        (void)ir_unroll_classify(f, vector_classes, false);
++        (void)ir_unroll_classify(f, scalar_classes, true);
++        vector = ir_unroll_backward(f, vector_classes, false);
++        scalar = ir_unroll_backward(f, scalar_classes, true);
++    }
++    char message[256] = { 0 };
++    snprintf(message, sizeof(message), "%s: the backward-branch test's twins agree (%d, %d) and miss no backward edge (%d)", label, (int)vector, (int)scalar, (int)exact);
++    ir_optimize_test_expect(test, vector_classes != NULL && scalar_classes != NULL && vector == scalar && (vector || !exact), message);
++    free(vector_classes);
++    free(scalar_classes);
++    return vector;
++}
++
+ static void ir_unroll_test_run(IrOptimizeTest* test, const IrFunction* f, IrUnrollOptions options, IrUnrollRefusal expected, uint32_t bits, const char* label)
+ {
++    (void)ir_unroll_test_backward(test, f, label);
+     Arena vector = arena_reserve(UINT64_C(1) << 28);
+     Arena scalar = arena_reserve(UINT64_C(1) << 28);
+     Arena scratch = arena_reserve(UINT64_C(1) << 30);
+@@ -979,6 +1015,137 @@ static void ir_unroll_test_limits(IrOptimizeTest* test)
+     arena_release(&scratch);
+ }
+ 
++// Functions without a loop: a diamond with a phi answers no backward branch and is left as it is without its CFG; a
++// branch to an earlier block of a DAG and a forward switch answer yes, conservatively, and the dominators find no loop.
++// Then random CFGs of up to 40 blocks (a ret, br, cbr or switch each, to any block) check the twins against the exact
++// edges, across the vector path's 16-block groups and its last partial one.
++static void ir_unroll_test_acyclic(IrOptimizeTest* test, uint32_t random_functions)
++{
++    for (uint32_t k = 0; k < 3 + random_functions; k += 1)
++    {
++        IrUnrollTestText* text = calloc(1, sizeof(IrUnrollTestText));
++        Arena input = arena_reserve(UINT64_C(1) << 24);
++        Arena scratch = arena_reserve(UINT64_C(1) << 26);
++        Arena output = arena_reserve(UINT64_C(1) << 24);
++        char label[64] = { 0 };
++        bool expected = true;
++        if (text != NULL)
++        {
++            snprintf(text->header, sizeof(text->header), "function (i64) -> i64 {");
++            ir_unroll_test_label(text, 0);
++            ir_unroll_test_line(text, "p", "param.i64 0");
++            ir_unroll_test_constant(text, "zero", "i64", 64, 0);
++            ir_unroll_test_line(text, "t", "icmp.i1 {p}, {zero} ult");
++        }
++        if (text != NULL && k == 0)
++        {
++            snprintf(label, sizeof(label), "a diamond with a phi");
++            expected = false;
++            ir_unroll_test_line(text, "", "cbr.void {t}, b1, b2");
++            ir_unroll_test_label(text, 1);
++            ir_unroll_test_line(text, "x", "add.i64 {p}, {p}");
++            ir_unroll_test_line(text, "", "br.void b3");
++            ir_unroll_test_label(text, 2);
++            ir_unroll_test_line(text, "y", "sub.i64 {p}, {zero}");
++            ir_unroll_test_line(text, "", "br.void b3");
++            ir_unroll_test_label(text, 3);
++            ir_unroll_test_line(text, "r", "phi.i64 [{x}, b1], [{y}, b2]");
++            ir_unroll_test_line(text, "", "ret.void {r}");
++        }
++        else if (text != NULL && k == 1)
++        {
++            snprintf(label, sizeof(label), "a DAG branching to an earlier block");
++            ir_unroll_test_line(text, "", "cbr.void {t}, b2, b3");
++            ir_unroll_test_label(text, 1);
++            ir_unroll_test_line(text, "", "ret.void {p}");
++            ir_unroll_test_label(text, 2);
++            ir_unroll_test_line(text, "", "br.void b1");
++            ir_unroll_test_label(text, 3);
++            ir_unroll_test_line(text, "r", "phi.i64 [{p}, b0]");
++            ir_unroll_test_line(text, "", "ret.void {r}");
++        }
++        else if (text != NULL && k == 2)
++        {
++            snprintf(label, sizeof(label), "a forward switch");
++            ir_unroll_test_line(text, "", "switch.void {p}, default b1, [0x00000000000000000000000000000002, b2]");
++            ir_unroll_test_label(text, 1);
++            ir_unroll_test_line(text, "", "br.void b2");
++            ir_unroll_test_label(text, 2);
++            ir_unroll_test_line(text, "r", "phi.i64 [{p}, b0], [{zero}, b1]");
++            ir_unroll_test_line(text, "", "ret.void {r}");
++        }
++        else if (text != NULL)
++        {
++            const uint32_t blocks = 2 + (uint32_t)(ir_optimize_test_random(test) % 39);
++            snprintf(label, sizeof(label), "random CFG %" PRIu32 " of %" PRIu32 " blocks", k - 3, blocks);
++            for (uint32_t block = 0; block < blocks; block += 1)
++            {
++                if (block != 0)
++                {
++                    ir_unroll_test_label(text, block);
++                }
++                const uint64_t r = ir_optimize_test_random(test);
++                // Mostly forward targets, so that whole functions answer no as often as yes.
++                const bool forward = block + 1 < blocks && (r >> 8) % 8 != 0;
++                const uint32_t span = forward ? blocks - block - 1 : blocks;
++                const uint32_t first = forward ? block + 1 : 0;
++                const uint32_t x = first + (uint32_t)((r >> 16) % span);
++                const uint32_t y = first + (uint32_t)((r >> 32) % span);
++                const uint32_t kind = block + 1 == blocks ? 0 : (uint32_t)(r % 8);
++                if (kind == 0 || kind == 1)
++                {
++                    ir_unroll_test_line(text, "", "ret.void {p}");
++                }
++                else if (kind <= 4)
++                {
++                    ir_unroll_test_line(text, "", "br.void b%" PRIu32, x);
++                }
++                else if (kind <= 6)
++                {
++                    ir_unroll_test_line(text, "", "cbr.void {t}, b%" PRIu32 ", b%" PRIu32, x, y);
++                }
++                else
++                {
++                    ir_unroll_test_line(text, "", "switch.void {p}, default b%" PRIu32 ", [0x00000000000000000000000000000002, b%" PRIu32 "]", x, y);
++                }
++            }
++        }
++        IrFunction f = { 0 };
++        const bool parsed = text != NULL && ir_unroll_test_parse(text, &input, &scratch, &f);
++        arena_pop_to(&scratch, 0);
++        char message[256] = { 0 };
++        snprintf(message, sizeof(message), "%s: parses", label);
++        ir_optimize_test_expect(test, parsed, message);
++        if (parsed)
++        {
++            const bool backward = ir_unroll_test_backward(test, &f, label);
++            if (k < 3)
++            {
++                snprintf(message, sizeof(message), "%s: the backward-branch test answers %d", label, (int)expected);
++                ir_optimize_test_expect(test, backward == expected, message);
++                for (uint32_t twin = 0; twin < 2; twin += 1)
++                {
++                    IrUnrollOptions options = ir_unroll_options();
++                    options.scalar = twin != 0;
++                    IrUnrollResult result = { 0 };
++                    const IrCheck check = ir_optimize_unroll(&f, &output, &scratch, options, &result);
++                    uint64_t outcomes = 0;
++                    for (uint32_t o = 0; o < IR_UNROLL_OUTCOME_COUNT; o += 1)
++                    {
++                        outcomes += result.outcomes[o];
++                    }
++                    snprintf(message, sizeof(message), "%s: no loop, the input itself, scratch and output returned (twin %u)", label, twin);
++                    ir_optimize_test_expect(test, check.error == IR_OK && outcomes == 0 && result.function.op == f.op && output.length == 0 && scratch.length == 0, message);
++                }
++            }
++        }
++        free(text);
++        arena_release(&input);
++        arena_release(&scratch);
++        arena_release(&output);
++    }
++}
++
+ static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
+ {
+     IrOptimizeTest test = { .random = 2755 };
+@@ -1013,6 +1180,7 @@ static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
+         ir_unroll_test_refusals(&test);
+         ir_unroll_test_limits(&test);
+         ir_unroll_test_rollback(&test);
++        ir_unroll_test_acyclic(&test, shapes);
+         printf("ir-unroll: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
+         result = test.failures == 0 ? 0 : 1;
+     }
