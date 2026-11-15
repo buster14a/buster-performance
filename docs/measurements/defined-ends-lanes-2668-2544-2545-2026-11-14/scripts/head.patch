@@ -1,0 +1,317 @@
+diff --git a/docs/object-writer-and-linker.md b/docs/object-writer-and-linker.md
+index 34a26b6..44c225d 100644
+--- a/docs/object-writer-and-linker.md
++++ b/docs/object-writer-and-linker.md
+@@ -5223,6 +5223,21 @@ spin's 133,355; the native build's `mwaitx` took 33.2 s there and 0.83 s. The
+ watchdog didn't fire in either run. A group with no more lanes than CPUs waits
+ as before, in `mwaitx` or in the spin.
+ 
++**A lane short of a CPU sleeps at once too (#2545).** A CPU that another
++process computes on is the same shortage, which the affinity mask doesn't
++show: with one of seven CPUs busy, every sync of the driver's seven-lane link
++of SQLite's shell waited out the whole 1 ms budget, and the 2 ms link took
++63. A wait that runs out its budget reads `/proc/loadavg`'s runnable count
++(`lane_cpus_short`, a few microseconds after the millisecond spent): if the
++machine has more runnable threads than the process's CPUs, the thread's next
++8 waits past the spins sleep at once, then one tries `mwaitx` again, twice as
++many after each try that runs the budget out as well (up to 1,024), and back to
++8 after one that doesn't. With every lane on a CPU, a long serial stretch
++runs the budget out too but finds no more runnable threads than CPUs, so its
++next syncs still wait in `mwaitx`. The driver's mixed link takes the lanes its
++objects pay for (`foreign_driver_lanes`), as `link-foreign`'s does, where it
++took every lane of the session.
++
+ `benchmark-lanes` ends with the same measurement for its largest group: lane 0
+ works alone for the wait, then every lane works for 1 ms. Medians of three
+ runs, against full speed, with the wake as in the table above:
+diff --git a/src/buster/compiler/c_check_debug_values.c b/src/buster/compiler/c_check_debug_values.c
+index 346e39a..28b4b94 100644
+--- a/src/buster/compiler/c_check_debug_values.c
++++ b/src/buster/compiler/c_check_debug_values.c
+@@ -108,7 +108,15 @@ struct CheckDebugValues
+     // By token: CHECK_DEBUG_ROOT where the token is in one of the unit's roots, CHECK_DEBUG_USED at a file-scope typedef's
+     // name that one names (check_debug_value_roots).
+     uint8_t* marks;
++    // By token, the last token of its statement's subtree. The parser's column where it kept one; otherwise derived for a
++    // body's tokens when the body's first lexical block needs them (check_debug_body_ends, #2544), with `ends_ready`
++    // marking those bodies for the second pass and `ends_children`, `ends_queue` its scratch.
+     const uint32_t* ends;
++    uint32_t* derived_ends;
++    uint32_t* ends_children;
++    uint32_t* ends_queue;
++    uint8_t* ends_ready;
++    bool ends_failed;
+     DebugWriter info;
+     DebugWriter ranges;
+     DebugWriter locations;
+@@ -1000,6 +1008,45 @@ static void check_debug_value_roots(CheckDebugValues* values, uint32_t* starts,
+     }
+ }
+ 
++// The statement ends of one body's tokens, `opening` to `closing`, its closing brace their root (#2544). The whole
++// unit's derivation (check_program_statement_ends) walked every file-scope token as well, which -g's blocks never read.
++// The same bounded leaf queue, over the body alone: a body's statements are its own tokens' subtrees.
++static bool check_debug_body_ends(CheckDebugValues* values, uint32_t opening, uint32_t closing)
++{
++    const uint32_t* parents = values->parser->tree.parents;
++    uint32_t* ends = values->derived_ends;
++    uint32_t* children = values->ends_children;
++    uint32_t* queue = values->ends_queue;
++    memset(&children[opening], 0, ((uint64_t)closing - opening + 1) * sizeof(uint32_t));
++    for (uint32_t token = opening; token <= closing; token += 1)
++    {
++        ends[token] = token;
++        const uint32_t parent = parents[token];
++        const bool inner = parent >= opening && parent <= closing && parent != token;
++        children[inner ? parent : token] += inner;
++    }
++    uint32_t length = 0;
++    for (uint32_t token = opening; token <= closing; token += 1)
++    {
++        queue[length] = token;
++        length += children[token] == 0;
++    }
++    for (uint32_t at = 0; at < length; at += 1)
++    {
++        const uint32_t token = queue[at];
++        const uint32_t parent = parents[token];
++        if (parent >= opening && parent <= closing && parent != token)
++        {
++            ends[parent] = ends[token] > ends[parent] ? ends[token] : ends[parent];
++            children[parent] -= 1;
++            queue[length] = parent;
++            length += children[parent] == 0;
++        }
++    }
++    const bool result = length == closing - opening + 1;
++    return result;
++}
++
+ static void check_debug_values_write(CheckDebugValues* values)
+ {
+     const CheckProgram* program = values->program;
+@@ -1092,10 +1139,16 @@ static void check_debug_values_write(CheckDebugValues* values)
+         {
+             const uint32_t role = parser->tree.roles[token];
+             const bool block = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION;
++            if (block && values->ends == NULL)
++            {
++                values->ends_ready[b] = values->ends_ready[b] != 0 || check_debug_body_ends(values, body.opening, closing);
++                values->ends_failed = values->ends_failed || values->ends_ready[b] == 0;
++            }
+             if (block)
+             {
+                 const uint32_t parent = parser->tree.parents[token];
+-                const uint32_t end = parent < input->token_count ? values->ends[parent] : input->token_count;
++                const uint32_t* ends = values->ends != NULL ? values->ends : values->derived_ends;
++                const uint32_t end = parent < input->token_count ? ends[parent] : input->token_count;
+                 debug_uleb(&values->info, CHECK_DEBUG_BLOCK);
+                 check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
+                 check_debug_value_range(values, b, token, end, NULL, 0);
+@@ -1173,12 +1226,17 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
+     values.expanded = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1);
+     values.inline_open = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)most_inlines + 1);
+     values.inline_order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)most_inlines + 1);
+-    // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now.
+-    // Reuse the bounded statement-end derivation without changing the already checked program's status.
+-    CheckProgram traversal = *program;
+-    values.ends = parser->ends != NULL ? parser->ends : check_program_statement_ends(&traversal, parser, scratch);
++    // The driver uses tree_only parsing: the checker's derived traversal was scratch-owned and is gone now. The blocks'
++    // statement ends are derived by body where a block needs them (check_debug_body_ends, #2544), not for the whole unit.
++    values.ends = parser->ends;
++    const bool derive = values.ends == NULL;
++    values.derived_ends = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : NULL;
++    values.ends_children = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : NULL;
++    values.ends_queue = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1) : NULL;
++    values.ends_ready = derive ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : NULL;
++    const bool ends_valid = !derive || (values.derived_ends != NULL && values.ends_children != NULL && values.ends_queue != NULL && values.ends_ready != NULL);
+     bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL &&
+-                 values.scopes != NULL && values.marks != NULL && values.ends != NULL && values.function_offsets != NULL && values.expanded != NULL &&
++                 values.scopes != NULL && values.marks != NULL && ends_valid && values.function_offsets != NULL && values.expanded != NULL &&
+                  values.inline_open != NULL && values.inline_order != NULL;
+     if (valid)
+     {
+@@ -1188,6 +1246,10 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
+         check_debug_value_roots(&values, values.local_ids, values.scopes);
+         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
+         memset(values.expanded, 0, (uint64_t)program->body_count + 1);
++        if (derive)
++        {
++            memset(values.ends_ready, 0, (uint64_t)program->body_count + 1);
++        }
+         for (uint32_t b = 0; b < program->body_count; b += 1)
+         {
+             for (uint32_t k = 0; k < rows->values[b].inline_count; k += 1)
+@@ -1276,7 +1338,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
+             }
+         }
+         check_debug_values_write(&values);
+-        valid = values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
++        valid = !values.ends_failed && values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
+     }
+     const uint64_t info_size = values.info.size;
+     const uint64_t range_size = values.ranges.size;
+diff --git a/src/buster/compiler/c_driver_mixed.c b/src/buster/compiler/c_driver_mixed.c
+index 826849f..ce99d57 100644
+--- a/src/buster/compiler/c_driver_mixed.c
++++ b/src/buster/compiler/c_driver_mixed.c
+@@ -164,7 +164,9 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
+     {
+         WorkerBudgetLease lease = { .control = -1, .reply = -1, .child = -1 };
+         run.most = check_units_slots(lanes->budget, lanes->lanes, &lease);
+-        run.driver.lanes = run.most;
++        // The lanes its objects pay for (foreign_driver_lanes), at most the lease's, as link-foreign's own: every lane
++        // costs its syncs, and a lane short of a CPU about a millisecond each (#2545).
++        run.driver.lanes = 0;
+         run.arguments_end = foreign_driver_now();
+         // Enter the nested flow on EVERY session lane, including those outside the lease. Its inner rounds narrow
+         // to the lease; the others stay parked. A narrowed outer group would let the session settle widen past it.
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index ae929f7..d2c3c0e 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -7132,12 +7132,29 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
+     pp->history_current = saved_history;
+ }
+ 
+-// A numeric constant spelled in the scratch space.
++// `value` in decimal, then `suffix` (0 for none), into the scratch space: the location of its first byte, with its
++// length in `*length`. A direct conversion, from the last digit back, with no format string to read (#2668).
++static uint32_t pp_scratch_decimal(Preprocessor* pp, uint64_t value, uint8_t suffix, uint32_t* length)
++{
++    uint8_t digits[24];
++    uint32_t begin = sizeof(digits) - (suffix != 0);
++    digits[sizeof(digits) - 1] = suffix;
++    uint64_t rest = value;
++    do
++    {
++        begin -= 1;
++        digits[begin] = (uint8_t)('0' + rest % 10);
++        rest /= 10;
++    } while (rest != 0);
++    *length = (uint32_t)sizeof(digits) - begin;
++    return pp_scratch_clean(pp, &digits[begin], *length);
++}
++
++// A numeric constant spelled in the scratch space; 0 and 1, which every `defined` gives, use their ready-made spellings.
+ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
+ {
+-    char digits[24];
+-    const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%lu", (unsigned long)value);
+-    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_clean(pp, (const uint8_t*)digits, length);
++    uint32_t length = 1;
++    const uint32_t location = value == 0 ? pp->zero_location : value == 1 ? pp->one_location : pp_scratch_decimal(pp, value, 0, &length);
+     return (PPToken){ .kind = C_TOKEN_NUMERIC_CONSTANT, .flags = (uint8_t)(flags | BUSTER_PP_FROM_MACRO), .value = location + length, .location = location,
+                       .origin = pp->history_current };
+ }
+@@ -7146,12 +7163,11 @@ static PPToken pp_number_token(Preprocessor* pp, uint64_t value, uint8_t flags)
+ // spell it (EvaluateFeatureLikeBuiltinMacro); __has_include's is never past 1.
+ static PPToken pp_feature_token(Preprocessor* pp, uint64_t value, uint8_t flags)
+ {
+-    PPToken result = pp_number_token(pp, value, flags);
++    PPToken result = pp_number_token(pp, value > 1 ? 0 : value, flags);
+     if (value > 1)
+     {
+-        char digits[24];
+-        const uint32_t length = (uint32_t)snprintf(digits, sizeof(digits), "%luL", (unsigned long)value);
+-        result.location = pp_scratch_clean(pp, (const uint8_t*)digits, length);
++        uint32_t length = 0;
++        result.location = pp_scratch_decimal(pp, value, 'L', &length);
+         result.value = result.location + length;
+     }
+     return result;
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index b172e7e..b4c2386 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -60,7 +60,9 @@
+ // A group with more lanes than the CPUs the process may run on shares them (lane_group_shares_cpus), and there a lane
+ // that would wait in mwaitx sleeps at once instead: a wait in mwaitx, or the spin that takes its place in a build without
+ // it, keeps the lane's CPU for up to BUSTER_LANE_WAIT_NANOSECONDS, and the lanes that haven't arrived need those CPUs
+-// before they can arrive, so that every sync would cost a timeslice.
++// before they can arrive, so that every sync would cost a timeslice. Another process computing on one of the CPUs is the
++// same shortage, which the affinity mask doesn't show: a lane whose wait ran out the mwaitx budget while the machine had
++// more runnable threads than the process's CPUs sleeps at once for its next waits as well (BUSTER_LANE_STARVED_WAITS).
+ 
+ #include <stdint.h>
+ #include <stdbool.h>
+@@ -1216,6 +1218,11 @@ struct ThreadContext
+     uint64_t wait_ticks;
+     uint64_t wait_origin_ticks;
+     uint64_t wait_origin_nanoseconds;
++    // lane_wait's measure of a CPU short (#2545): how many more of its waits past the spins sleep at once, as a group that
++    // shares CPUs does, since a wait ran out its whole mwaitx budget; and how many the next such wait sets, 0 for
++    // BUSTER_LANE_STARVED_WAITS, doubling while each wait that tries mwaitx again runs it out too.
++    uint32_t wait_starved;
++    uint32_t wait_backoff;
+ };
+ 
+ // main.c's units share one context, the driver's unit's, since a command's code runs in more than one of them (main.c:
+@@ -1365,6 +1372,15 @@ static void scratch_empty(void)
+ // (docs/object-writer-and-linker.md, "Lanes"). Past 1 ms the lane sleeps, since the waits that slow it down do so
+ // whichever way it waits, and on the futex its core can go into its deepest idle state, at 0.07 W.
+ #define BUSTER_LANE_WAIT_NANOSECONDS 1000000ull
++// A wait that runs out that budget while the machine has more runnable threads than the process's CPUs
++// (lane_cpus_short) is a CPU short, as when another process computes on one of the CPUs the group's lanes run on
++// (#2545): the lane that hasn't arrived waits for a CPU the waiting lanes hold in mwaitx, and every sync costs the
++// budget; a link of 2 ms took 63. The thread's next waits past the spins sleep at once, as a group that shares CPUs does
++// (lane_group_shares_cpus), then one tries mwaitx again: this many at first, twice as many after each such try that
++// runs it out as well, up to BUSTER_LANE_STARVED_WAITS_MOST. A wait that ends within the budget starts over from the
++// first count.
++#define BUSTER_LANE_STARVED_WAITS 8u
++#define BUSTER_LANE_STARVED_WAITS_MOST 1024u
+ // The same in TSC ticks at the 9700X's 3.79 GHz, which a thread waits until it has measured its own TSC's rate: the
+ // TSC runs at a rate of each CPU's own, so that another CPU's 1 ms is another number of ticks.
+ #define BUSTER_LANE_MWAITX_TICKS 3800000ull
+@@ -1617,6 +1633,27 @@ static uint32_t lane_sleep(uint32_t* word, uint32_t value)
+     return current & ~1u;
+ }
+ 
++static uint32_t lane_cpu_count(void);
++
++// Whether the machine has more runnable threads than the CPUs the process may run on: /proc/loadavg's fourth field,
++// the scheduling entities running or ready to run now, this thread and the other waiting lanes among them, against
++// lane_cpu_count. A wait that ran out its mwaitx budget asks (#2545), a few microseconds after a millisecond spent:
++// with every lane on a CPU, a long stretch of serial work runs the budget out too, and a lane that then slept at once
++// would only pay the futex's wake at the syncs that follow.
++static bool lane_cpus_short(void)
++{
++    char text[128];
++    const int file = open("/proc/loadavg", O_RDONLY | O_CLOEXEC);
++    const ssize_t length = file >= 0 ? read(file, text, sizeof(text)) : -1;
++    if (file >= 0)
++    {
++        close(file);
++    }
++    const uint64_t runnable = length > 0 ? arena_loadavg_runnable(text, (uint64_t)length) : 0;
++    const bool result = runnable > lane_cpu_count();
++    return result;
++}
++
+ // Waits while *word, but for its bit 0, is `value`, and returns its new value without bit 0. Spins first, then waits in
+ // mwaitx; then sleeps (lane_sleep). A lane of a group that shares CPUs (LaneGroup.shares_cpus) leaves the waiting to
+ // lane_sleep: a wait in mwaitx, or the spin that takes its place in a build without it, keeps the lane's CPU for up to
+@@ -1632,8 +1669,10 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
+     }
+     const LaneGroup* group = thread_context.lane.group;
+     const bool shares_cpus = group != 0 && __atomic_load_n(&group->shares_cpus, __ATOMIC_RELAXED);
++    const bool starved = thread_context.wait_starved != 0;
++    thread_context.wait_starved -= starved && (current & ~1u) == value;
+     // A wait that ended while spinning, as at most syncs, doesn't read the clock (rdtsc is 27 µops on Zen 5).
+-    if (!shares_cpus && (current & ~1u) == value)
++    if (!shares_cpus && !starved && (current & ~1u) == value)
+     {
+         const uint64_t begin = __rdtsc();
+         const uint64_t budget = lane_wait_ticks(begin);
+@@ -1659,6 +1698,11 @@ static uint32_t lane_wait(uint32_t* word, uint32_t value)
+ #endif
+             waited = __rdtsc() - begin;
+         }
++        // Ran out the budget: a CPU short (BUSTER_LANE_STARVED_WAITS).
++        const bool short_of_cpu = (current & ~1u) == value && lane_cpus_short();
++        const uint32_t backoff = thread_context.wait_backoff != 0 ? thread_context.wait_backoff : BUSTER_LANE_STARVED_WAITS;
++        thread_context.wait_starved = short_of_cpu ? backoff : 0;
++        thread_context.wait_backoff = !short_of_cpu ? 0 : backoff < BUSTER_LANE_STARVED_WAITS_MOST ? 2 * backoff : backoff;
+     }
+     return (current & ~1u) == value ? lane_sleep(word, value) : current & ~1u;
+ }

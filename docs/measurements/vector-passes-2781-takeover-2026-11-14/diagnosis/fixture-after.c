@@ -1,0 +1,19 @@
+#include <stdio.h>
+typedef int Tier1Vector __attribute__((vector_size(16)));
+__attribute__((noinline)) int tier1_vector_passes(Tier1Vector a, int n)
+{
+    Tier1Vector total = { 0, 0, 0, 0 };
+    for (int i = 0; i < n; i += 1)
+    {
+        const Tier1Vector low = { 1, 3, 5, 7 };
+        const Tier1Vector high = { 1, 3, 5, 7 };
+        total += (a & low) + (a ^ high);
+    }
+    return total[0] + total[1] + total[2] + total[3];
+}
+int main(void)
+{
+    Tier1Vector a = { 1, 2, 3, 4 };
+    printf("%d\n", tier1_vector_passes(a, 7));
+    return 0;
+}
