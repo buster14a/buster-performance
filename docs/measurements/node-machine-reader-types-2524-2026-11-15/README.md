@@ -67,6 +67,15 @@ All on main `639e730ed` (#2861 merged).
 | `t3` | `m11` with `patches/t3.patch` | `t2` with the three program-or-reader helpers inline |
 | `t4` | `m11` with `patches/t4.patch` | `t3` with the pointer type's making out of line: the pull request's sources |
 
+After main gained #2850's fact words (buster#2863, main `fdf0de745`), for section 5:
+
+| label | sources | what |
+| --- | --- | --- |
+| `m12` | main `fdf0de745` | the baseline with the fact words' kernel |
+| `u1` | `m12` with `patches/u1.patch` | the pull request's branch with that main merged in (`55ad392b4`) |
+| `m13` | `m12` with `patches/align.patch` | `m12` with the fact words' eight kernel functions aligned to 64 bytes |
+| `u2` | `m12` with `patches/u2.patch` | `u1` with the same alignment |
+
 ## 1. Exact
 
 The shadow's reading by `t4` (`results/tables.txt`, sections 3 and 4); the same counts in every run of a corpus:
@@ -212,6 +221,55 @@ sources with 19 single faults in the reader-time path, each selected by an envir
 - **Faults 11 and 19:** a type made late is an array's or a pointer's, complete wherever it is asked; and no
   expression here reads the word of a type the action made before something else settled it.
 
+## 5. After main gained the fact words (buster#2863)
+
+#2863 merged while this pull request was open. Both add a file to the node machine's part of the checker unit, and
+this one changes T's file. Does it slow the other session's kernel? `measure-node-machine --shadow --facts` by that
+record's own script and settings (`scripts/facts.sh`, from `per-core-step1-2850-2026-11-15`, with a run's number
+given): `--passes 5`, the labels in turn, CPU 2, each run its own hold of the lock (`scripts/job14.sh`,
+`scripts/job15.sh`). Medians, by that record's `tables.py` (`scripts/facts-tables.py`).
+
+Cycles a taken leaf or lookup, `m12` against `u1`, six runs each (`results/9700x/facts-m12-u1-six.txt`):
+
+| | a body a window | packed to 384 | packed to 4,096 |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 26.23, 26.45 (+0.8%) | 22.26, 22.44 (+0.8%) | 21.47, 22.27 (+3.7%) |
+| Lua | 17.36, 17.33 (-0.2%) | 15.00, 15.02 (+0.1%) | 15.74, 15.95 (+1.3%) |
+| musl | 16.01, 15.96 (-0.3%) | 15.04, 15.02 (-0.1%) | 15.10, 15.12 (+0.1%) |
+| instructions, both builds | 73.27, 75.76, 71.32 | 68.91, 67.63, 67.38 | 70.29, 67.58, 66.95 |
+
+- **The kernel does the same work.** Its instructions a taken leaf or lookup are the same to the hundredth on the nine
+  rows, its mispredicted branches the same (0.376 and 0.371, 0.241, 0.145 and 0.146 on `sqlite3.c`), every record is
+  T's in all 162 runs, and `symdiff.py` lists none of its functions (`results/9700x/symbols-m12-u1.txt`): their sizes
+  are the same.
+- **Its cycles move with its place.** The widest windows on `sqlite3.c` read 3.7% slower, three runs and three more
+  apart: a lookup 38.5 to 39.7 cycles, a leaf 5.43 to 5.26. This branch's code comes before the kernel's in the unit,
+  and each of the kernel's eight functions is 0x2c50 bytes further on, 16 bytes into its 64-byte line
+  (`results/9700x/facts-addresses.txt`).
+
+The same pair with those eight functions aligned to 64 bytes, `m13` against `u2`, three runs each
+(`results/9700x/facts-m13-u2.txt`):
+
+| | a body a window | packed to 384 | packed to 4,096 |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` | 26.66, 26.24 (-1.6%) | 22.38, 22.34 (-0.2%) | 21.71, 21.86 (+0.7%) |
+| Lua | 17.50, 17.38 (-0.7%) | 15.13, 15.02 (-0.7%) | 15.94, 15.88 (-0.4%) |
+| musl | 16.95, 15.99 (-5.7%) | 16.13, 15.08 (-6.5%) | 16.22, 15.22 (-6.2%) |
+
+- **With the kernel's functions at one place in both builds the 3.7% is 0.7%**, and the other `sqlite3.c` and Lua rows
+  read faster with this branch.
+- **Aligning them is no cure.** `m13` is `m12` with the alignment alone, and its musl rows read 6% slower than
+  `m12`'s, with the same ticks a leaf and a lookup (6.59 and 30.09 against 6.45 and 30.11): what moved is the rest of
+  a window's pass, which musl's small units have most of. These figures move a few percent with the code's place,
+  either way; the fact words' own record has 26.54 where `m12` has 26.23 for the same kernel.
+
+`-c sqlite3.c`, `m12` against `u1`, as section 3's (`results/9700x/ab-copies-m12-u1-1`, `-2`):
+
+| | wall ms, `m12` | `u1` | against `m12` (over copies) | instructions, M |
+| --- | ---: | ---: | --- | --- |
+| first | 123.344 | 122.934 | -0.33% (-0.71% to -0.11%) | 1,363.438, 1,363.464 |
+| second | 123.799 | 123.071 | -0.59% (-1.76% to -0.16%) | 1,363.438, 1,363.464 |
+
 ## Checks
 
 - `test-checker --seed 133` in its eight parts on the final sources (cloud, Develop): 842,216 checks, 0 failures on
@@ -229,16 +287,25 @@ sources with 19 single faults in the reader-time path, each selected by an envir
 - **The census hides T's refusals.** A refusal the census makes first can't be compared through the shadow; compare
   the facts behind it, and count it in a fixture.
 - **The cloud VM's ticks mislead**, as in the earlier records: conclusions here are the 9700X's.
+- **Another kernel's cycles move when code is added before it.** Section 5: the same instructions and the same
+  mispredicted branches, 16 bytes further into the line, and 3.7% more cycles on one setting. Compare a kernel's
+  builds at one main, and read a cross-main difference of a few percent as its place until an aligned pair says
+  otherwise.
 
 ## Files
 
 - `scripts/`: `build-label.sh`, `lock.sh`; the readings: `types-o.sh`, `types-musl-o.sh`, `job10.sh` to `job13.sh`;
   `ab-copies.sh`, `ab-copies-n.sh`; `symdiff.py` (text symbols whose sizes differ between two executables);
   `tables.py`; the cloud's `shapes-local.sh`, `mutate_types.py`, `mutations.sh`.
-- `patches/`: `t1.patch` to `t4.patch` (each against main `639e730ed`).
+- `patches/`: `t1.patch` to `t4.patch` (each against main `639e730ed`); `u1.patch`, `align.patch` and `u2.patch`
+  (each against main `fdf0de745`).
 - `results/9700x/LABEL/`: each build's log, revision and checksum, and its runs:
   `types-TAG-{sqlite3,lua,musl}-SUFFIX-N.txt` (suffix `k`: job10, `t1`; `l`: job11, `t2`; `m`: job12, `t3`; `n`: job13,
   `t4`; tags `types1` and `types7`: T at reader time with one and seven timed passes after the pipeline;
   `leantypes1`: with the lean front; `firsttypes1`: the front before the walk; `plain7`, `plain1`: no front);
   `ab-copies-m11-*/`; `symbols-m11-*.txt`; the holds and the jobs' logs.
+- Section 5's: `scripts/job14.sh`, `job15.sh`, `facts.sh` and `facts-tables.py` (the fact words' record's `facts.sh`
+  and `tables.py`), `lock-merge.sh` (the lock's title for these runs); `results/9700x/{m12,u1,m13,u2}/facts-CORPUS[-SETTING]-N.txt`
+  (runs 1 to 3: job14; 4 to 6: job15), `facts-m12-u1-six.txt`, `facts-m13-u2.txt`, `facts-addresses.txt`,
+  `symbols-m12-u1.txt`, `ab-copies-m12-u1-*/`, `job14.log`, `job15.log`.
 - `results/cloud/mutations.txt`: the faults' runs. `results/tables.txt`: `tables.py`'s output.
