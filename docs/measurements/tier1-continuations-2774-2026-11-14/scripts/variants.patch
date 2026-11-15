@@ -1,0 +1,210 @@
+diff --git a/src/buster/compiler/tier1_allocate.c b/src/buster/compiler/tier1_allocate.c
+index fff9e8b..e2744d7 100644
+--- a/src/buster/compiler/tier1_allocate.c
++++ b/src/buster/compiler/tier1_allocate.c
+@@ -19,6 +19,8 @@
+ #include <stdint.h>
+ #include <stdbool.h>
+ #include <string.h>
++#include <stdlib.h>
++#include <stdio.h>
+ #include "host_isa.h"
+ 
+ #define BUSTER_TIER1_ALLOCATE_MAX_INTERVALS (1u << 20)
+@@ -85,6 +87,11 @@ struct Tier1AllocationInput
+     // and it is free there (UINT32_MAX for none): a phi whose block passes it to a phi of its one successor takes the
+     // place that phi's first interval took, where it is settled, rather than its operand's (#2734).
+     const uint32_t* alternate_intervals;
++    // Optional, with hint_intervals: per interval, an interval of its value starting no later than it, whose opening
++    // register is the value's place where it continues after this interval's end (UINT32_MAX for none): a successor's
++    // entry laid out before the interval's block (#2774). Where that opening is the value's slot, an edge stores the
++    // value there anyway, so the scan with required uses evicts it first once no use is left in the interval.
++    const uint32_t* continuation_intervals;
+     const uint8_t* rematerializable;
+     // Both use columns may be absent (next use then conservatively means interval end). Otherwise each slice is
+     // sorted, contains positions inside its interval, and may be empty. Duplicate positions are legal.
+@@ -481,6 +488,17 @@ static void tier1_allocation_evict(const Tier1AllocationInput* columns, Tier1All
+ {
+     const uint32_t first = columns->use_offsets[victim] < columns->use_offsets[victim + 1] ? columns->use_positions[columns->use_offsets[victim]] : UINT32_MAX;
+     const bool undone = unread && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && kinds[victim] == BUSTER_TIER1_ALLOCATE_REGISTER && begins[victim] == columns->starts[victim] && first >= position;
++    static int open_switch = -1;
++    if (open_switch < 0)
++    {
++        const char* text = getenv("P2774_OPEN");
++        open_switch = text != 0 ? atoi(text) : 1;
++    }
++    const bool empty = open_switch != 0 && kinds[victim] == BUSTER_TIER1_ALLOCATE_REGISTER && begins[victim] == position && position == columns->starts[victim];
++    if (empty)
++    {
++        tier1_allocation_note_opening(columns, last, victim, UINT32_MAX);
++    }
+     if (undone)
+     {
+         tier1_allocation_note_opening(columns, last, victim, UINT32_MAX);
+@@ -530,6 +548,17 @@ static bool tier1_allocation_yields(const Tier1AllocationInput* columns, const u
+     return holder != UINT32_MAX && tier1_allocation_spill_kind(columns, holder) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && !tier1_allocation_required_at(columns, holder, position);
+ }
+ 
++// Whether `interval`, whose next use from here is `next`, has none left and continues after its end in its value's slot
++// (#2774): its continuation opened without a register, so the edge after it stores the value there anyway, and evicting
++// it here only moves that store.
++static bool tier1_allocation_stored_after(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint32_t next)
++{
++    const uint32_t continued = last != 0 && columns->hint_intervals != 0 && columns->continuation_intervals != 0 ? columns->continuation_intervals[interval] : UINT32_MAX;
++    return continued != UINT32_MAX && next == columns->ends[interval] && last[(uint64_t)columns->value_count + 1 + continued] == BUSTER_TIER1_ALLOCATE_MEMORY_HINT;
++}
++
++static int tier1_allocation_variant_2774 = -1;
++
+ // Reload at required uses, with the same next-use eviction rule as the simpler scan. All values needed at the
+ // current position are pinned before processing any one event, so input order cannot evict a simultaneous operand.
+ // Each start/use creates at most two transitions (its own and its victim's), bounding the temporary piece capacity.
+@@ -687,23 +716,45 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+             else
+             {
+                 // The victim: a recomputable value first, then the farthest next use, then the fewest uses.
++                if (tier1_allocation_variant_2774 < 0)
++                {
++                    const char* text = getenv("P2774");
++                    tier1_allocation_variant_2774 = text != 0 ? atoi(text) : 1;
++                }
+                 uint32_t farthest = tier1_allocation_next_use(&columns, interval, position);
+                 bool cheapest = recomputed;
++                bool freest = false;
+                 uint32_t lightest = weights[columns.values[interval]];
+                 for (uint32_t r = 0; r < 32; r += 1)
+                 {
+                     const uint32_t victim = active[r];
+                     if (((allowed[interval] >> r) & 1) != 0 && victim != UINT32_MAX && !tier1_allocation_required_at(&columns, victim, position))
+                     {
+-                        const uint32_t next = tier1_allocation_next_use(&columns, victim, position);
++                        const uint32_t used = tier1_allocation_next_use(&columns, victim, position);
++                        static int begin_switch = -1;
++                        if (begin_switch < 0)
++                        {
++                            begin_switch = getenv("P2774_BEGIN") != 0 ? atoi(getenv("P2774_BEGIN")) : 0;
++                        }
++                        const bool stored = tier1_allocation_variant_2774 != 0 && tier1_allocation_stored_after(&columns, last, victim, used) && (begin_switch == 0 || begins[victim] == columns.starts[victim]);
++                        const bool free_ = tier1_allocation_variant_2774 == 2 && stored;
++                        const uint32_t next = stored && tier1_allocation_variant_2774 == 1 ? UINT32_MAX : used;
+                         const bool cheap = tier1_allocation_spill_kind(&columns, victim) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+                         const uint32_t weight = weights[columns.values[victim]];
+-                        const bool better = (cheap && !cheapest) || (cheap == cheapest && (next > farthest || (next == farthest && weight < lightest)));
++                        const bool ranked = (cheap && !cheapest) || (cheap == cheapest && (next > farthest || (next == farthest && weight < lightest)));
++                        const bool better = (free_ && !freest) || (free_ == freest && ranked);
++                        if (getenv("P2774_DEBUG") != 0)
++                        {
++                            const uint32_t continued = columns.continuation_intervals != 0 ? columns.continuation_intervals[victim] : UINT32_MAX;
++                            fprintf(stderr, "2774 at %u for %u(v%u): r%u holds %u(v%u) [%u,%u) used %u cont %u open %u stored %d\n", position, interval, columns.values[interval], r, victim, columns.values[victim], columns.starts[victim], columns.ends[victim], used, continued,
++                                    continued != UINT32_MAX && last != 0 ? last[(uint64_t)columns.value_count + 1 + continued] : 999, stored);
++                        }
+                         if ((required && chosen == UINT32_MAX) || better)
+                         {
+                             chosen = r;
+                             farthest = next;
+                             cheapest = cheap;
++                            freest = free_;
+                             lightest = weight;
+                         }
+                     }
+@@ -726,6 +777,11 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
+             {
+                 tier1_allocation_note_opening(&columns, last, interval, chosen);
+             }
++            if (getenv("P2774_AT") != 0 && position == (uint32_t)atoi(getenv("P2774_AT")))
++            {
++                fprintf(stderr, "2774start at %u %s %u(v%u) [%u,%u) follow %u first %u waits %d idle %d required %d open %x chosen %u named %x hintv %u\n", position, use_event ? "use" : "start", interval, columns.values[interval], columns.starts[interval], columns.ends[interval], follow, first, waits, idle, required, open, chosen,
++                        columns.hint_intervals != 0 ? columns.hint_intervals[interval] : 0, columns.hint_values[interval]);
++            }
+             if (chosen != UINT32_MAX)
+             {
+                 tier1_allocation_finish_piece(pieces, interval, begins[interval], position, kinds[interval], regs[interval]);
+@@ -1410,6 +1466,9 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
+         const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+         valid = valid && (named == UINT32_MAX || (earlier < input->count && input->classes != 0 && input->starts != 0 && input->classes[earlier] == input->classes[i] && input->starts[earlier] < input->starts[i] &&
+                                                   (!exit || (input->ends != 0 && input->ends[earlier] <= input->starts[i]))));
++        const uint32_t continued = input->continuation_intervals != 0 ? input->continuation_intervals[i] : UINT32_MAX;
++        valid = valid && (continued == UINT32_MAX || (input->hint_intervals != 0 && continued < input->count && input->values != 0 && input->starts != 0 && input->values[continued] == input->values[i] &&
++                                                      input->starts[continued] <= input->starts[i]));
+     }
+     return valid;
+ }
+diff --git a/src/buster/compiler/tier1_cfg.c b/src/buster/compiler/tier1_cfg.c
+index 49ed060..fdefadc 100644
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -1055,6 +1055,7 @@ struct Tier1CfgPieces
+     uint32_t* hints;
+     uint32_t* hint_intervals;
+     uint32_t* alternates;
++    uint32_t* continuations;
+     uint32_t* split_positions;
+     uint32_t* split_values;
+     uint64_t count;
+@@ -1079,6 +1080,7 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input,
+         pieces->hints[i] = hint;
+         pieces->hint_intervals[i] = earlier;
+         pieces->alternates[i] = BUSTER_TIER1_CFG_NONE;
++        pieces->continuations[i] = BUSTER_TIER1_CFG_NONE;
+         if (split)
+         {
+             pieces->split_positions[pieces->splits] = start;
+@@ -2074,10 +2076,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                 pieces.hints = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.hint_intervals = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.alternates = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
++                pieces.continuations = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 use_offsets = ready ? arena_push_array(output, interval_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.split_positions = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                 pieces.split_values = ready ? arena_push_array(scratch, split_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+-                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.alternates != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
++                ready = ready && pieces.starts != 0 && pieces.ends != 0 && pieces.values != 0 && pieces.allowed != 0 && pieces.classes != 0 && pieces.remat != 0 && pieces.hints != 0 && pieces.hint_intervals != 0 && pieces.alternates != 0 && pieces.continuations != 0 && use_offsets != 0 && pieces.split_positions != 0 && pieces.split_values != 0;
+                 pieces.fill = ready;
+             }
+             if (ready)
+@@ -2176,6 +2179,29 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                     {
+                         exit_stamps[b] = v + 1;
+                         exit_pieces[b] = (uint32_t)pieces.count - 1;
++                        // The value's place after the block (#2774), at the entry of the block's first successor in layout: its
++                        // entry range there where that block comes no later than this one, else the range that block's entry
++                        // takes its opening from, as a dispatch loop's join, laid out after its handlers, takes their first
++                        // one's (`joined` above). A range a merged block continues opens before that block, not at it.
++                        const uint32_t next = firsts[b];
++                        const bool later = next != BUSTER_TIER1_CFG_NONE && next > b && dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)next * words, dense[v]);
++                        const uint32_t model = !later ? BUSTER_TIER1_CFG_NONE : siblings[next] != BUSTER_TIER1_CFG_NONE ? siblings[next] : firsts[next] < next ? firsts[next] : BUSTER_TIER1_CFG_NONE;
++                        const uint32_t taken = next <= b ? next : model;
++                        if (pieces.fill && getenv("P2774_DEBUG") != 0 && next != BUSTER_TIER1_CFG_NONE && next > b)
++                        {
++                            fprintf(stderr, "2774cfg b %u [%u,%u) v %u next %u [%u) later %d model %u taken %u stamp %d home %u succs %u\n", b, input->block_starts[b], input->block_starts[b + 1], v, next, input->block_starts[next], later, model, taken,
++                                    taken != BUSTER_TIER1_CFG_NONE && entry_stamps[taken] == v + 1, home[v], input->successor_offsets[b + 1] - input->successor_offsets[b]);
++                        }
++                        static int single_switch = -1;
++                        if (single_switch < 0)
++                        {
++                            single_switch = getenv("P2774_SINGLE") != 0 ? atoi(getenv("P2774_SINGLE")) : 0;
++                        }
++                        const bool single = single_switch == 0 || input->successor_offsets[b + 1] - input->successor_offsets[b] == 1;
++                        if (pieces.fill && single && taken <= b && entry_stamps[taken] == v + 1 && home[v] != taken && (later || pieces.starts[entry_pieces[taken]] == input->block_starts[taken]))
++                        {
++                            pieces.continuations[pieces.count - 1] = entry_pieces[taken];
++                        }
+                     }
+                 }
+                 ready = !stray && use == use_end;
+@@ -2216,6 +2242,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
+                     .classes = pieces.classes,
+                     .hint_values = pieces.hints,
+                     .alternate_intervals = pieces.alternates,
++                    .continuation_intervals = pieces.continuations,
+                     .hint_intervals = pieces.hint_intervals,
+                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
+                     .use_offsets = use_offsets,
+@@ -2890,6 +2917,7 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
+            tier1_cfg_same_column(a->allowed_registers, b->allowed_registers, count * 4) && tier1_cfg_same_column(a->classes, b->classes, count);
+     differs = same || differs != 0 ? differs : 2;
+     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
++           tier1_cfg_same_column(a->alternate_intervals, b->alternate_intervals, count * 4) && tier1_cfg_same_column(a->continuation_intervals, b->continuation_intervals, count * 4) &&
+            tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
+     differs = same || differs != 0 ? differs : 3;
+     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
