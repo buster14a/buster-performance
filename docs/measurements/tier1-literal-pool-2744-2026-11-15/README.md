@@ -85,16 +85,23 @@ one hold a round, three rounds (two runs and two copies for `--tier1` of SQLite)
 
 The SQLite file is the frozen corpus's, with its pinned predefines and headers.
 
-- **Tier 0:** flat. Its 0.18 M more instructions were the window path's copy of each body's literals, a call for every
-  Tier 0 body, which has none; `2b3c5c4` checks the count first.
+- **Tier 0:** flat in time. Its instructions: +0.18 M (+0.014%) at `5e33fe8`, of which the window path's copy of each
+  body's literals (a call for every Tier 0 body, which has none) was about 20 K: at `2b3c5c4`, which checks the count
+  first (`run5.sh`, `results/ab-sqlite-head4.log`, one round), +0.16 M (+0.012%), user cycles −0.27% against main
+  where main again gives −0.22%. The rest isn't attributed: `EmittedCode`'s two new fields, copied and cleared per
+  body, and the binary's layout are the candidates.
 - **`--tier1` of SQLite:** 0.26% more user cycles in two rounds of three, 0.011% more instructions.
 - **The lexer's unit's wall time** is not its compile: user and system time are main's, but 20 of 27 runs of step 2
   waited 9 to 32 ms off the CPU (in steps), main's never. The object writer writes an existing output file in place and
   truncates it only when it was longer (`object_write_file`); every build of the A/B writes the same `out-lexer.o` on
   `/home`, btrfs; step 2's object is 807 KB and main's 862 KB, so a step 2 run after a main run shrinks the file and
   waits for btrfs's truncation, and main's runs only grow it. Not the exit helper: `ab-lexer-no-exit-helper.log`, with
-  `BUSTER_EXIT_HELPER=0`, gives the same (+10.68% and +10.77%, 14 of 18 runs waiting), and `strace -f -c` shows the same calls by both (one `clone3`, 17
-  `munmap`, 40 `madvise`; no futex or sleep), a single run of each 179.4 and 179.7 ms elapsed (`results/perf-*.txt`).
+  `BUSTER_EXIT_HELPER=0`, gives the same (+10.68% and +10.77%, 14 of 18 runs waiting), and `strace -f -c` shows the
+  same calls by both (one `clone3`, 17 `munmap`, 40 `madvise`; no futex or sleep), a single run of each 179.4 and
+  179.7 ms elapsed (`results/perf-*.txt`). With the output on tmpfs (`run6.sh`, `results/ab-lexer-head4-tmpfs.log`,
+  `2b3c5c4` against main, two rounds) no run waits (idle 1.1 to 1.2 ms on average by every build), and the compile is
+  +0.35% and +0.15% in wall time, +0.38% and +0.12% in user cycles, where main again gives −0.22% and −0.19%, −0.11%
+  and −0.07%; on btrfs again (`run5.sh`, `results/ab-lexer-head4.log`) `2b3c5c4` waits in 7 of 9 runs, +11.48%.
 
 ## Method
 
@@ -104,7 +111,7 @@ The SQLite file is the frozen corpus's, with its pinned predefines and headers.
 taskset -c 1 ./stephist --entry "$(nm DIR/lexer-tier1 | grep ' t c_tokenize$' | cut -d' ' -f1)" --calls 1 --output mid200.hist -- DIR/lexer-tier1 mid200.c
 python3 annotate.py DIR/lexer-tier1 mid200.hist; python3 annotate.py DIR/lexer-tier1 mid200.hist dump > d; python3 runs.py d
 # On the 9700X: 9700x/run.sh, then run4.sh (the rounds, the rows and the A/Bs), diag.sh (the counts and the A/B
-# without the exit helper).
+# without the exit helper), run5.sh (2b3c5c4's A/Bs) and run6.sh (the lexer's A/B with its output on tmpfs).
 ```
 
 `run.sh`'s pinned runs held the lock once each and waited behind other sessions; its `timeout` wrapped the lock's
@@ -112,7 +119,8 @@ wait, so its first file run timed out unrun (`lexer-base-mid-1.log`). `run4.sh` 
 
 ## Files
 
-- `9700x/`: the scripts (`run.sh`, `run4.sh`, `round.sh`, `drive.sh`, `diag.sh`, `counts.sh`), their logs, and
+- `9700x/`: the scripts (`run.sh`, `run4.sh`, `round.sh`, `drive.sh`, `diag.sh`, `counts.sh`, `run5.sh`, `run6.sh`),
+  their logs, and
   `results/`: the rounds' logs (`rN-PROGRAM-INPUT.log`), the harness's `rows.log`, the A/Bs, the Zen 5 table, the
   `strace` and `perf stat` counts, the hashes and `host.txt`.
 - `results/`: the VM's single-stepped counts and their classifications.
