@@ -1,0 +1,958 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index a6c55501c..d1f197374 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1640,6 +1640,7 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t
+ }
+ 
+ #include "c_check_node_machine_front.c"
++#include "c_check_node_machine_flat.c"
+ 
+ // The front's hooks in the coded walk (PPOptions.node_front): out of line and called only where the front runs, so that
+ // a compile's walk is its own code but for a test of the front a chunk.
+@@ -1672,6 +1673,13 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front,
+         }
+         fronting = __rdtsc() - ready;
+     }
++    if (front->flat != NULL && (fronted & BUSTER_NODE_FRONT_FLAT_FIRST) != 0)
++    {
++        // The flat front before the walk acts at the chunk: its ticks are its own too.
++        const uint64_t flattening = __rdtsc();
++        node_front_chunk_flat(front->flat, reader, literals);
++        fronting += __rdtsc() - flattening;
++    }
+     return fronting;
+ }
+ 
+@@ -1705,14 +1713,34 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
+         node_machine_reader_chunk(front->typer, front, reader);
+     }
+ #endif
++    if (front->flat != NULL)
++    {
++        // The flat front, where it runs after the walk, and its records against the lean front's of the same chunk.
++        if ((fronted & BUSTER_NODE_FRONT_FLAT_FIRST) == 0)
++        {
++            node_front_chunk_flat(front->flat, reader, literals);
++        }
++        node_flat_compare(front->flat, front, reader);
++    }
+     return flushed;
+ }
+ 
+-// The machine's state at reader time for a unit the front reads, where the options ask for T there
+-// (BUSTER_NODE_FRONT_TYPES): the checker unit's alone, as the machine is.
+-static __attribute__((noinline)) void node_front_typer(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
++// What else the options ask of a unit the front reads, begun: the machine's state at reader time for T there
++// (BUSTER_NODE_FRONT_TYPES), the checker unit's alone, as the machine is; and the flat front's state
++// (BUSTER_NODE_FRONT_FLAT), on the scratch as the front's, touched beforehand where the front's is
++// (BUSTER_NODE_FRONT_WARM).
++static __attribute__((noinline)) void node_front_started(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
+ {
+     front->typer = NULL;
++    front->flat = (fronted & BUSTER_NODE_FRONT_FLAT) != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFlat), 64) : NULL;
++    if (front->flat != NULL)
++    {
++        if ((fronted & BUSTER_NODE_FRONT_WARM) != 0)
++        {
++            memset(front->flat, 0, sizeof(NodeFlat));
++        }
++        node_flat_begin(front->flat, front->shadow);
++    }
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
+     {
+@@ -1800,7 +1828,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+             front->argument_count = 0;
+             front->wide_count = 0;
+             reader->output->node_front = shadow;
+-            node_front_typer(front, reader, fronted);
++            node_front_started(front, reader, fronted);
+         }
+         else
+         {
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index e26af151d..b8881a000 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -1899,6 +1899,23 @@ struct NodeShadow
+     // --list N: the taken expressions the front didn't make, listed up to N.
+     uint32_t front_missed_listed;
+     uint32_t front_listed;
++    // --front-flat, --front-flat-first: the flat front beside the lean one (c_check_node_machine_flat.c). The files'
++    // reports summed (NodeFrontShadow's flat_ fields): its pass's and its compaction's ticks, the tokens it visited, its
++    // records, the children hopped over, the tokens with a child past the ring's reach and those left; and its
++    // comparison with the lean front: the records both made, those that differ, and those only one made.
++    uint64_t flat_ticks;
++    uint64_t flat_compact_ticks;
++    uint64_t flat_tokens;
++    uint64_t flat_records;
++    uint64_t flat_hops;
++    uint64_t flat_beyond;
++    uint64_t flat_left;
++    uint64_t flat_compared;
++    uint64_t flat_differences;
++    uint64_t flat_only;
++    uint64_t flat_lean_only;
++    uint64_t flat_unread;
++    uint32_t flat_listed;
+     // --front-types: T run at reader time on the front's expressions (c_check_node_machine_reader.c). The files' reports
+     // summed (NodeFrontTypes'): the expressions it ran on, their records, its refusals, its ticks, its state's making and
+     // the types its derivations added. And after the pipeline: of the expressions it ran on, those the lowering popped
+@@ -2947,6 +2964,20 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+         printf("node-shadow: walk prepare ticks compact=%" PRIu64 " identifiers=%" PRIu64 " literals=%" PRIu64 "\n", shadow->front_compact_ticks,
+                shadow->front_identifier_ticks, shadow->front_literal_ticks);
+     }
++    if ((shadow->front & BUSTER_NODE_FRONT_FLAT) != 0 && shadow->front_units != 0)
++    {
++        // The flat front: what it visited and made, how it compares with the lean front, and its ticks beside its own
++        // compaction's.
++        printf("node-shadow: flat front %s tokens=%" PRIu64 " (the lean front's less the %" PRIu64 " that pass values on) left=%" PRIu64 " records=%" PRIu64 " hops=%" PRIu64
++               " (%.2f a token) past-the-ring's-reach=%" PRIu64 "\n",
++               (shadow->front & BUSTER_NODE_FRONT_FLAT_FIRST) != 0 ? "before-the-walk" : "after-the-walk", shadow->flat_tokens, shadow->front_tokens - shadow->flat_tokens,
++               shadow->flat_left, shadow->flat_records, shadow->flat_hops, shadow->flat_tokens != 0 ? (double)shadow->flat_hops / (double)shadow->flat_tokens : 0.0,
++               shadow->flat_beyond);
++        printf("node-shadow: flat front against the lean front: compared=%" PRIu64 " differences=%" PRIu64 " only-the-flat-front's=%" PRIu64 " only-the-lean-front's=%" PRIu64
++               " past-the-records'-ring=%" PRIu64 "\n",
++               shadow->flat_compared, shadow->flat_differences, shadow->flat_only, shadow->flat_lean_only, shadow->flat_unread);
++        printf("node-shadow: flat front ticks=%" PRIu64 " compact-ticks=%" PRIu64 "\n", shadow->flat_ticks, shadow->flat_compact_ticks);
++    }
+     if ((shadow->front & BUSTER_NODE_FRONT_TYPES) != 0 && shadow->front_units != 0)
+     {
+         // T at reader time: what it ran on and made, then how it compares with the shadow's T after the pipeline.
+@@ -3235,6 +3266,27 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                         shadow->front_left[code] += front->left[code];
+                     }
+                     shadow->front_left_queries += front->left_queries;
++                    shadow->flat_ticks += front->flat_ticks;
++                    shadow->flat_compact_ticks += front->flat_compact_ticks;
++                    shadow->flat_tokens += front->flat_tokens;
++                    shadow->flat_records += front->flat_records;
++                    shadow->flat_hops += front->flat_hops;
++                    shadow->flat_beyond += front->flat_beyond;
++                    shadow->flat_left += front->flat_left;
++                    shadow->flat_compared += front->flat_compared;
++                    shadow->flat_only += front->flat_only;
++                    shadow->flat_lean_only += front->flat_lean_only;
++                    shadow->flat_unread += front->flat_unread;
++                    static const char* const flat_fields[] = { "compaction", "operator", "count", "distance", "root", "consumer", "leaf", "arguments", "operand" };
++                    for (uint32_t d = 0; d < front->flat_differences && d < BUSTER_NODE_FRONT_LISTED && shadow->flat_listed < node_census_list; d += 1)
++                    {
++                        const uint32_t token = front->flat_difference_tokens[d];
++                        const uint32_t field = front->flat_difference_fields[d] - BUSTER_NODE_FLAT_FIELD_COMPACTION;
++                        shadow->flat_listed += 1;
++                        printf("node-shadow: flat front difference file=%s line=%u token=%u field=%s\n", file, node_census_line(&source.pp, &source.parser, token), token,
++                               field < BUSTER_ARRAY_LENGTH(flat_fields) ? flat_fields[field] : "?");
++                    }
++                    shadow->flat_differences += front->flat_differences;
+                 }
+                 const NodeFrontTypes* typed = front != NULL ? front->types : NULL;
+                 if (typed != NULL)
+@@ -3423,6 +3475,13 @@ static int run_node_census(int count, char** arguments)
+                                                                                                                                                   BUSTER_NODE_FRONT_TYPES;
+             shadow.front = (uint8_t)(shadow.front | flag | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+         }
++        else if (strcmp(arguments[i], "--front-flat") == 0 || strcmp(arguments[i], "--front-flat-first") == 0)
++        {
++            // The flat front beside the lean one, its twin: after the walk as the lean front, or before the walk's
++            // actions (the lean front stays where the other options put it, after the walk unless they say before).
++            const uint8_t flags = (uint8_t)(BUSTER_NODE_FRONT_FLAT | BUSTER_NODE_FRONT_LEAN | (strcmp(arguments[i], "--front-flat-first") == 0 ? BUSTER_NODE_FRONT_FLAT_FIRST : 0));
++            shadow.front = (uint8_t)(shadow.front | flags | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
++        }
+         else if (strcmp(arguments[i], "--interleave") == 0)
+         {
+             uint64_t number = 0;
+@@ -3488,7 +3547,7 @@ static int run_node_census(int count, char** arguments)
+     const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
+                                           shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
+                                           shadow.front_differences != 0 || shadow.typed_differences != 0 || shadow.typed_object_differences != 0 ||
+-                                          shadow.typed_library_differences != 0);
++                                          shadow.typed_library_differences != 0 || shadow.flat_differences != 0);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_machine_flat.c b/src/buster/compiler/c_check_node_machine_flat.c
+new file mode 100644
+index 000000000..63c60ccd3
+--- /dev/null
++++ b/src/buster/compiler/c_check_node_machine_flat.c
+@@ -0,0 +1,715 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// The node machine's flat front (#2524, docs/node-machine.md): the lean front's records made without its stack. The
++// lean front (c_check_node_machine_front.c) keeps the values not yet taken on a stack, in groups by consumer: every value
++// loads its parent and its parent's class to find its group, every token that takes values matches the top group, and a
++// token that only passes values on moves its group. This front finds a token's values from the tree's shape alone.
++//
++// In postorder a token's children are the runs of positions just before it, and the reader has each run's length
++// (CheckInputReader.subtree_sizes, by postorder position). A token that takes values hops back over its children by
++// those lengths, and reads one word a child from a ring by position: the place in the unit of the record that is the
++// child's value, a mark for a value the front doesn't know (a left token's), a mark for a token that passes its
++// children's values on, whose children the hops then visit as the token's own, or nothing. A value is one word stored
++// at its position; nothing is pushed, popped, grouped or matched, and no parent is loaded.
++//
++// The tokens that only pass values on (a list, a separator that is no comma operator, a group's closing) are not
++// visited at all: the front's own compaction of a chunk writes their marks, and every other position's "nothing", 16
++// positions at a time, and leaves them out of the tokens it compacts. They are a quarter of sqlite3.c's acting tokens
++// and over half of Lua's and musl's.
++//
++// A record is one 16-byte store (NodeFlatRecord): the token, the operator, the operand count, three distances back, the
++// root and leaf bits and a payload (an identifier's declaration; a literal's or a string's place among the chunk's
++// values; a call's place among the chunk's argument distances). Its consumer later writes two bytes into it, the
++// consumer's distance forward and the place, as the lean front's consumer does.
++//
++// The lean front is its twin (node_flat_compare): after a chunk both have made, every record both made is compared field
++// for field, by token, and the records only one of them made are counted. The lean front's records are compared with the
++// walk's nodes in the same run, so a flat record that equals the lean one is the walk's node. Where the two legitimately
++// differ the report counts it: the stack keeps a value however far its consumer is (a loop's step, a condition whose
++// body is thousands of tokens) and forgets everything when it is full; the ring reaches BUSTER_NODE_FLAT_WINDOW
++// positions back and never fills. In the shadow only (PPOptions.node_front's BUSTER_NODE_FRONT_FLAT): no compile takes
++// it. Included by c_check_expression_input.c after the front.
++
++// The positions the ring of words holds, a power of two and a multiple of the compaction's 16: a child further back than
++// this from its chunk's end is out of reach, and the token that would take its value is left.
++#define BUSTER_NODE_FLAT_WINDOW 8192u
++// The records the ring of records holds, a power of two: a chunk's, for the comparison, and those a consumer writes its
++// two bytes into.
++#define BUSTER_NODE_FLAT_RECORDS 4096u
++// A position's word: no value (a token that gives none, or one the walk doesn't act at), a token that passes its
++// children's values on, a value the front doesn't know, or else the value's record's place in the unit.
++#define BUSTER_NODE_FLAT_NONE UINT32_MAX
++#define BUSTER_NODE_FLAT_PASS (UINT32_MAX - 1u)
++#define BUSTER_NODE_FLAT_UNKNOWN (UINT32_MAX - 2u)
++// A record's flags: a full expression's root, and a leaf's kind (BUSTER_NODE_FRONT_LEAF_*) from the second bit.
++#define BUSTER_NODE_FLAT_ROOT 0x01u
++#define BUSTER_NODE_FLAT_LEAF_SHIFT 1u
++#define BUSTER_NODE_FLAT_LEAF_MASK 0x06u
++// The argument distances a chunk's calls list, and a call's payload without room for its list.
++#define BUSTER_NODE_FLAT_ARGUMENTS 4096u
++// The fields of a record that the comparison with the lean front names (NodeFrontShadow.flat_difference_fields), after
++// the front's own (BUSTER_NODE_FRONT_FIELD_*).
++#define BUSTER_NODE_FLAT_FIELD_COMPACTION 16u
++#define BUSTER_NODE_FLAT_FIELD_OPERATOR 17u
++#define BUSTER_NODE_FLAT_FIELD_COUNT 18u
++#define BUSTER_NODE_FLAT_FIELD_DISTANCE 19u
++#define BUSTER_NODE_FLAT_FIELD_ROOT 20u
++#define BUSTER_NODE_FLAT_FIELD_CONSUMER 21u
++#define BUSTER_NODE_FLAT_FIELD_LEAF 22u
++#define BUSTER_NODE_FLAT_FIELD_ARGUMENTS 23u
++#define BUSTER_NODE_FLAT_FIELD_OPERAND 24u
++
++// A record: 16 bytes, one store. `count` is the operand count (a call's callee and arguments; 255 for that or more),
++// `distances` each of its first three operands' distance back in the unit's records (0 for none, BUSTER_NODE_FRONT_FAR for
++// that or more), `up` and `place` what its consumer writes (the consumer's distance forward and the record's place among
++// its operands, as NodeFront.ups and places).
++typedef struct NodeFlatRecord NodeFlatRecord;
++struct NodeFlatRecord
++{
++    uint32_t token;
++    uint8_t op;
++    uint8_t count;
++    uint8_t distances[3];
++    uint8_t up;
++    uint8_t place;
++    uint8_t flags;
++    uint32_t payload;
++};
++_Static_assert(sizeof(NodeFlatRecord) == 16, "a flat record is one 16-byte store");
++
++// The flat front's state for a unit, on the reader's scratch.
++typedef struct NodeFlat NodeFlat;
++struct NodeFlat
++{
++    NodeFrontShadow* shadow;
++    // The next chunk's first postorder position, the last chunk's, the records made in the unit so far, and the first
++    // of the last chunk's.
++    uint32_t position;
++    uint32_t chunk_first;
++    uint32_t ordinal;
++    uint32_t chunk_ordinal;
++    // The chunk's tokens the front visits, in postorder, each with its visits byte and its position: 16 more slots than a
++    // chunk has, which the compaction's whole-register stores write past its count.
++    uint32_t work;
++    uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK + 16];
++    uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK + 16];
++    uint32_t positions[BUSTER_CHECK_EXPRESSION_CHUNK + 16];
++    // The chunk's literals' and strings' values, by a leaf's payload: its type and its integer or object.
++    uint32_t side_count;
++    TypeId side_types[BUSTER_CHECK_EXPRESSION_CHUNK];
++    uint64_t side_integers[BUSTER_CHECK_EXPRESSION_CHUNK];
++    // The chunk's calls' arguments, by a call's payload: each argument's distance back from its call, in a byte, first
++    // argument first (what #2850's call rule reads from the call's side).
++    uint32_t argument_count;
++    uint8_t argument_distances[BUSTER_NODE_FLAT_ARGUMENTS];
++    // A binary and a prefix operator's CheckOp by its token's kind (CHECK_OP_COUNT for none), made once a unit.
++    uint8_t binary_ops[256];
++    uint8_t prefix_ops[256];
++    // The ring of words, by position, and the ring of records, by place in the unit.
++    uint32_t words[BUSTER_NODE_FLAT_WINDOW];
++    NodeFlatRecord records[BUSTER_NODE_FLAT_RECORDS];
++};
++
++// The classes whose tokens only pass their children's values on, a bit a class: the compaction marks them.
++#define BUSTER_NODE_FLAT_PASSING (1u << CHECK_INPUT_CODE_LIST | 1u << CHECK_INPUT_CODE_SEPARATOR | 1u << CHECK_INPUT_CODE_GROUP)
++
++// The flat front's compaction of postorder positions [first, end), at most a chunk: the tokens it visits into `tokens`
++// with their visits bytes in `classes` and their positions in `positions`, in postorder, and every position's mark into
++// the ring `words` (BUSTER_NODE_FLAT_PASS for a token of a passing class, else BUSTER_NODE_FLAT_NONE); returns how many
++// it visits. A token is visited where the walk acts at it (check_input_expression_compact's test, a DROP left out) and
++// its class is no passing one. The vector path gathers 16 tokens' bytes, stores their 16 marks and compresses the tokens
++// it keeps in registers, each stored whole (the arrays have 16 slots more than a chunk); the scalar path, its twin, takes
++// a token at a time. Out of line: a stage of its own, with its own ticks.
++static __attribute__((noinline)) uint32_t node_flat_compact(const CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t* tokens, uint32_t* classes,
++                                                            uint32_t* positions, uint32_t* words, bool scalar)
++{
++    const uint8_t* visits = reader->visits;
++    const uint32_t* postorder = reader->postorder;
++    const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++    // Gathers index by signed 32-bit offsets.
++    const bool indexed = reader->parser->tokens.count <= (uint32_t)INT32_MAX;
++    uint32_t result = 0;
++    uint32_t position = first;
++#if BUSTER_HOST_VECTOR
++    const __m512i steps = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++    for (; !BUSTER_SCALAR_PATH(scalar) && indexed && position < end; position += 16)
++    {
++        const uint32_t length = end - position < 16 ? end - position : 16;
++        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
++        const __m512i order = _mm512_maskz_loadu_epi32(lanes, postorder + position);
++        const __m512i bytes = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, order, visits, 1);
++        const __m512i visit = _mm512_and_si512(bytes, _mm512_set1_epi32(0xff));
++        const __mmask16 acting = _mm512_mask_test_epi32_mask(lanes, visit, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_ACTS)) &
++                                 _mm512_cmpneq_epu32_mask(visit, _mm512_set1_epi32((int32_t)dropped));
++        // A class's bit of the passing classes, shifted down by the class: a class is five bits of the byte.
++        const __m512i codes = _mm512_srli_epi32(_mm512_and_si512(visit, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK)), BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++        const __mmask16 passing = acting & _mm512_test_epi32_mask(_mm512_srlv_epi32(_mm512_set1_epi32((int32_t)BUSTER_NODE_FLAT_PASSING), codes), _mm512_set1_epi32(1));
++        const __mmask16 visited = acting & (__mmask16)~passing;
++        const __m512i marks = _mm512_mask_blend_epi32(passing, _mm512_set1_epi32((int32_t)BUSTER_NODE_FLAT_NONE), _mm512_set1_epi32((int32_t)BUSTER_NODE_FLAT_PASS));
++        // A chunk's first position and the ring's length are multiples of 16: the 16 marks never wrap.
++        _mm512_mask_storeu_epi32(words + (position & (BUSTER_NODE_FLAT_WINDOW - 1)), lanes, marks);
++        _mm512_storeu_si512(tokens + result, _mm512_maskz_compress_epi32(visited, order));
++        _mm512_storeu_si512(classes + result, _mm512_maskz_compress_epi32(visited, visit));
++        _mm512_storeu_si512(positions + result, _mm512_maskz_compress_epi32(visited, _mm512_add_epi32(_mm512_set1_epi32((int32_t)position), steps)));
++        result += (uint32_t)__builtin_popcount(visited);
++    }
++#else
++    (void)indexed;
++    (void)scalar;
++#endif
++    for (; position < end; position += 1)
++    {
++        const uint32_t token = postorder[position];
++        const uint8_t visit = visits[token];
++        const uint32_t code = (visit & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++        const bool acting = (visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && visit != dropped;
++        const bool passing = acting && (BUSTER_NODE_FLAT_PASSING >> code & 1) != 0;
++        words[position & (BUSTER_NODE_FLAT_WINDOW - 1)] = passing ? BUSTER_NODE_FLAT_PASS : BUSTER_NODE_FLAT_NONE;
++        // The compress store a token at a time, as check_input_expression_compact's: each is written at `result`, and
++        // the next writes over it unless counting keeps it.
++        tokens[result] = token;
++        classes[result] = visit;
++        positions[result] = position;
++        result += acting && !passing;
++    }
++    return result;
++}
++
++// A unit's flat front begun: nothing made, and the operators' tables by kind.
++static void node_flat_begin(NodeFlat* flat, NodeFrontShadow* shadow)
++{
++    flat->shadow = shadow;
++    flat->position = 0;
++    flat->chunk_first = 0;
++    flat->ordinal = 0;
++    flat->chunk_ordinal = 0;
++    flat->work = 0;
++    flat->side_count = 0;
++    flat->argument_count = 0;
++    for (uint32_t kind = 0; kind < 256; kind += 1)
++    {
++        CheckOp prefix = CHECK_OP_COUNT;
++        switch (kind)
++        {
++            case PARSE_KIND_PLUS: prefix = CHECK_OP_POSITIVE; break;
++            case PARSE_KIND_EXTENSION: prefix = CHECK_OP_SELECT; break;
++            case PARSE_KIND_MINUS: prefix = CHECK_OP_NEGATIVE; break;
++            case PARSE_KIND_EXCLAIM: prefix = CHECK_OP_NOT; break;
++            case PARSE_KIND_TILDE: prefix = CHECK_OP_BIT_NOT; break;
++            case PARSE_KIND_AMP: prefix = CHECK_OP_ADDRESS; break;
++            case PARSE_KIND_STAR: prefix = CHECK_OP_DEREFERENCE; break;
++            case PARSE_KIND_PLUSPLUS: prefix = CHECK_OP_PRE_INCREMENT; break;
++            case PARSE_KIND_MINUSMINUS: prefix = CHECK_OP_PRE_DECREMENT; break;
++            default: break;
++        }
++        flat->prefix_ops[kind] = (uint8_t)prefix;
++        flat->binary_ops[kind] = (uint8_t)check_input_binary((uint8_t)kind);
++    }
++}
++
++// The values of the token at `position`, last first, into `values` (BUSTER_NODE_FRONT_VALUES + 2 slots): how many, or
++// BUSTER_NODE_FRONT_UNKNOWN where one is unknown, they are more than BUSTER_NODE_FRONT_VALUES, or a child is past the
++// ring's reach (`reach`: the first position the ring still holds). From the token's last child back to its first by the
++// children's lengths: a child with a value gives it, a passing child's children are visited as the token's own (its last
++// child is the position before it, and its first child's hop leaves it where the passing child's own would), and any
++// other child gives nothing. `walked` counts the children visited, and `beyond` the tokens with a child out of reach.
++static inline __attribute__((always_inline)) uint32_t node_flat_values(const uint32_t* words, const uint32_t* sizes, uint32_t position, int64_t reach, uint32_t* values,
++                                                                       uint64_t* walked, uint64_t* beyond)
++{
++    const int64_t lower = (int64_t)position - sizes[position] + 1;
++    const int64_t bound = lower > reach ? lower : reach;
++    int64_t child = (int64_t)position - 1;
++    uint32_t count = 0;
++    uint32_t hops = 0;
++    bool known = true;
++    while (child >= bound && count <= BUSTER_NODE_FRONT_VALUES)
++    {
++        const uint32_t word = words[(uint32_t)child & (BUSTER_NODE_FLAT_WINDOW - 1)];
++        const uint32_t length = word == BUSTER_NODE_FLAT_PASS ? 1 : sizes[child];
++        values[count] = word;
++        count += word < BUSTER_NODE_FLAT_PASS;
++        known = known && word != BUSTER_NODE_FLAT_UNKNOWN;
++        child -= length;
++        hops += 1;
++    }
++    const bool out = child >= lower && count <= BUSTER_NODE_FRONT_VALUES;
++    *walked += hops;
++    *beyond += out;
++    return known && !out && count <= BUSTER_NODE_FRONT_VALUES ? count : BUSTER_NODE_FRONT_UNKNOWN;
++}
++
++// The record at the unit's place `ordinal`, stored whole: its consumer's bytes are 0 until one writes them.
++static inline __attribute__((always_inline)) void node_flat_store(NodeFlatRecord* records, uint32_t ordinal, uint32_t token, uint32_t op, uint32_t count, uint32_t first,
++                                                                  uint32_t second, uint32_t third, uint32_t flags, uint32_t payload)
++{
++    const uint64_t low = (uint64_t)token | (uint64_t)op << 32 | (uint64_t)count << 40 | (uint64_t)first << 48 | (uint64_t)second << 56;
++    const uint64_t high = (uint64_t)third | (uint64_t)flags << 24 | (uint64_t)payload << 32;
++    uint8_t* record = (uint8_t*)(records + (ordinal & (BUSTER_NODE_FLAT_RECORDS - 1)));
++    memcpy(record, &low, sizeof(low));
++    memcpy(record + sizeof(low), &high, sizeof(high));
++}
++
++// An operand's distance back from the record at `ordinal`, in a byte.
++static inline uint32_t node_flat_distance(uint32_t ordinal, uint32_t operand)
++{
++    const uint32_t distance = ordinal - operand;
++    return distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR;
++}
++
++// The record at `operand` taken by the one at `ordinal`, at `place`: the consumer's distance forward and the place,
++// both in one store, where the ring still holds the record.
++static inline __attribute__((always_inline)) void node_flat_take(NodeFlatRecord* records, uint32_t ordinal, uint32_t operand, uint32_t place)
++{
++    if (ordinal - operand < BUSTER_NODE_FLAT_RECORDS)
++    {
++        const uint16_t bytes = (uint16_t)(node_flat_distance(ordinal, operand) | (place < 255 ? place : 255) << 8);
++        memcpy(&records[operand & (BUSTER_NODE_FLAT_RECORDS - 1)].up, &bytes, sizeof(bytes));
++    }
++}
++
++// An operator's record of its `count` values (`values`, last first; `wanted` of them, or a conditional's two with its
++// middle omitted), or none where the values are not those: the word it gives its consumer.
++static inline __attribute__((always_inline)) uint32_t node_flat_operator(NodeFlatRecord* records, uint32_t* ordinal, uint32_t token, uint32_t op, uint32_t count,
++                                                                         uint32_t wanted, const uint32_t* values, uint32_t flags, uint64_t* lefts)
++{
++    uint32_t word = BUSTER_NODE_FLAT_UNKNOWN;
++    if (op != CHECK_OP_COUNT && count == wanted)
++    {
++        const uint32_t place = *ordinal;
++        // In source order: a conditional with its middle omitted (x ?: y) takes its first value twice.
++        const bool omitted = op == CHECK_OP_CONDITIONAL && count == 2;
++        const uint32_t a = values[count - 1];
++        const uint32_t b = omitted ? a : count >= 2 ? values[count - 2] : BUSTER_NODE_FLAT_NONE;
++        const uint32_t c = omitted ? values[0] : count == 3 ? values[0] : BUSTER_NODE_FLAT_NONE;
++        node_flat_store(records, place, token, op, (a != BUSTER_NODE_FLAT_NONE) + (b != BUSTER_NODE_FLAT_NONE) + (c != BUSTER_NODE_FLAT_NONE),
++                        node_flat_distance(place, a), b != BUSTER_NODE_FLAT_NONE ? node_flat_distance(place, b) : 0, c != BUSTER_NODE_FLAT_NONE ? node_flat_distance(place, c) : 0,
++                        flags, 0);
++        // From the last operand to the first, as the lean front: an operand taken twice ends at its first place.
++        if (c != BUSTER_NODE_FLAT_NONE)
++        {
++            node_flat_take(records, place, c, 2);
++        }
++        if (b != BUSTER_NODE_FLAT_NONE)
++        {
++            node_flat_take(records, place, b, 1);
++        }
++        node_flat_take(records, place, a, 0);
++        *ordinal = place + 1;
++        word = place;
++    }
++    else
++    {
++        *lefts += 1;
++    }
++    return word;
++}
++
++// The flat front's pass over a chunk: its own compaction of the chunk's positions, then each visited token's record, or
++// none, by its class, as the lean front decides it (node_front_chunk_by, whose cases these mirror), with the chunk's
++// literals' entries (check_input_expression_literals). Its ticks are the compaction's and the pass's, apart.
++static __attribute__((noinline)) void node_front_chunk_flat(NodeFlat* flat, CheckInputReader* reader, const CheckInputLiterals* literals)
++{
++    const Parser* parser = reader->parser;
++    const CheckInput* input = reader->output;
++    NodeFrontShadow* shadow = flat->shadow;
++    const uint32_t token_count = parser->tokens.count;
++    const uint32_t first = flat->position;
++    const uint32_t end = token_count - first < BUSTER_CHECK_EXPRESSION_CHUNK ? token_count : first + BUSTER_CHECK_EXPRESSION_CHUNK;
++    const uint64_t start = __rdtsc();
++    const uint32_t work = node_flat_compact(reader, first, end, flat->tokens, flat->classes, flat->positions, flat->words, false);
++    const uint64_t compacted = __rdtsc();
++    const uint32_t* sizes = reader->subtree_sizes;
++    const uint8_t* kinds = parser->tokens.kinds;
++    uint32_t* words = flat->words;
++    NodeFlatRecord* records = flat->records;
++    // The first position the ring still holds, once the chunk's marks are in it.
++    const int64_t reach = end > BUSTER_NODE_FLAT_WINDOW ? (int64_t)end - BUSTER_NODE_FLAT_WINDOW : 0;
++    const bool kr = input->kr_parameter_count != 0;
++    uint32_t ordinal = flat->ordinal;
++    uint32_t literal = 0;
++    uint32_t side = 0;
++    uint32_t arguments = 0;
++    uint64_t walked = 0;
++    uint64_t beyond = 0;
++    uint64_t lefts = 0;
++    uint32_t values[BUSTER_NODE_FRONT_VALUES + 2];
++    flat->chunk_ordinal = ordinal;
++    for (uint32_t i = 0; i < work; i += 1)
++    {
++        const uint32_t token = flat->tokens[i];
++        const uint32_t code = (flat->classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++        const uint32_t position = flat->positions[i];
++        // What the token gives its consumer: its record's place, an unknown value, a pass, or nothing.
++        uint32_t word = BUSTER_NODE_FLAT_NONE;
++        switch (code)
++        {
++            case CHECK_INPUT_CODE_IDENTIFIER:
++            {
++                // As the lean front's: left in a K&R unit and for a constexpr object's use, a value where it has a
++                // declared type. The record is written whether or not it is one: the next overwrites one that is none.
++                const TypeId type = reader->declared_types[token];
++                const uint32_t declared = input->declarations[token];
++                const uint32_t declaration = type != 0 ? declared : 0;
++                const bool left = kr || (type != 0 && (reader->declaration_flags[declaration] & BUSTER_CHECK_DECLARATION_CONSTEXPR) != 0);
++                const bool made = !left && type != 0;
++                node_flat_store(records, ordinal, token, CHECK_OP_VALUE, 0, 0, 0, 0, BUSTER_NODE_FRONT_LEAF_IDENTIFIER << BUSTER_NODE_FLAT_LEAF_SHIFT, declaration);
++                word = made ? ordinal : left ? BUSTER_NODE_FLAT_UNKNOWN : BUSTER_NODE_FLAT_NONE;
++                ordinal += made;
++                lefts += left;
++                break;
++            }
++            case CHECK_INPUT_CODE_LITERAL:
++            {
++                const uint32_t at = literal;
++                literal += 1;
++                CheckLiteral decoded = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
++                const bool left = check_input_function_name_token(parser, token) || (literals->values[at] == BUSTER_CHECK_NONE && !node_front_literal(reader, token, &decoded));
++                word = BUSTER_NODE_FLAT_UNKNOWN;
++                lefts += left;
++                if (!left)
++                {
++                    flat->side_types[side] = decoded.type;
++                    flat->side_integers[side] = decoded.integer;
++                    node_flat_store(records, ordinal, token, CHECK_OP_VALUE, 0, 0, 0, 0, BUSTER_NODE_FRONT_LEAF_LITERAL << BUSTER_NODE_FLAT_LEAF_SHIFT, side);
++                    side += 1;
++                    word = ordinal;
++                    ordinal += 1;
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_STRING:
++            {
++                const CheckInitString* string = check_input_string(reader, token);
++                if (string != 0)
++                {
++                    flat->side_types[side] = string->type;
++                    flat->side_integers[side] = string->object;
++                    node_flat_store(records, ordinal, token, CHECK_OP_VALUE, 0, 0, 0, 0, BUSTER_NODE_FRONT_LEAF_STRING << BUSTER_NODE_FLAT_LEAF_SHIFT, side);
++                    side += 1;
++                    word = ordinal;
++                    ordinal += 1;
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_PREFIX:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                word = node_flat_operator(records, &ordinal, token, flat->prefix_ops[kinds[token]], count, 1, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_POSTFIX:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                const uint8_t kind = kinds[token];
++                const uint32_t op = kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : kind == PARSE_KIND_MINUSMINUS ? CHECK_OP_POST_DECREMENT : CHECK_OP_COUNT;
++                word = node_flat_operator(records, &ordinal, token, op, count, 1, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_BINARY:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                word = node_flat_operator(records, &ordinal, token, flat->binary_ops[kinds[token]], count, 2, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_CAST:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                word = node_flat_operator(records, &ordinal, token, reader->query_types[token] != 0 ? CHECK_OP_CAST : CHECK_OP_COUNT, count, 1, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_SUBSCRIPT:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                word = node_flat_operator(records, &ordinal, token, CHECK_OP_SUBSCRIPT, count, 2, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_TERNARY:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                word = node_flat_operator(records, &ordinal, token, CHECK_OP_CONDITIONAL, count, count == 2 ? 2 : 3, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_MEMBER:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                const bool named = token + 1 < token_count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER;
++                const uint32_t op = !named ? CHECK_OP_COUNT : kinds[token] == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
++                word = node_flat_operator(records, &ordinal, token, op, count, 1, values, 0, &lefts);
++                break;
++            }
++            case CHECK_INPUT_CODE_CALL:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                const bool left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || kr || input->no_builtin;
++                word = BUSTER_NODE_FLAT_UNKNOWN;
++                lefts += left;
++                if (!left)
++                {
++                    // Its operands are its callee and its arguments: the callee's distance in the record, and each
++                    // argument's in the chunk's list where that has room, first argument first.
++                    const uint32_t callee = values[count - 1];
++                    const bool listed = arguments + count - 1 <= BUSTER_NODE_FLAT_ARGUMENTS;
++                    node_flat_store(records, ordinal, token, CHECK_OP_CALL, count < 255 ? count : 255, node_flat_distance(ordinal, callee), 0, 0, 0,
++                                    listed ? arguments : BUSTER_NODE_FLAT_NONE);
++                    node_flat_take(records, ordinal, callee, 0);
++                    for (uint32_t k = 1; k < count; k += 1)
++                    {
++                        const uint32_t argument = values[count - 1 - k];
++                        node_flat_take(records, ordinal, argument, k);
++                        if (listed)
++                        {
++                            flat->argument_distances[arguments] = (uint8_t)node_flat_distance(ordinal, argument);
++                            arguments += 1;
++                        }
++                    }
++                    word = ordinal;
++                    ordinal += 1;
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_TERMINATOR:
++            {
++                // Each of its values discarded, or tested in a condition's context, in source order.
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                if (count != 0)
++                {
++                    const bool condition = reader->conditions[token] != 0;
++                    bool region = false;
++                    if (input->region_count != 0)
++                    {
++                        const uint32_t parent = parser->tree.parents[token];
++                        uint32_t selected = parent < token_count ? input->expression_regions[parent] : 0;
++                        if (selected == 0 && parent < token_count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
++                        {
++                            selected = check_input_labeled_region(reader, parent);
++                        }
++                        region = selected != 0 && input->regions[selected - 1].final_statement == token;
++                    }
++                    const bool left = count == BUSTER_NODE_FRONT_UNKNOWN || (condition && count > 1) || (region && count != 1);
++                    lefts += left;
++                    for (uint32_t k = 0; !left && k < count; k += 1)
++                    {
++                        const uint32_t value = values[count - 1 - k];
++                        node_flat_store(records, ordinal, token, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, 1, node_flat_distance(ordinal, value), 0, 0,
++                                        BUSTER_NODE_FLAT_ROOT, 0);
++                        node_flat_take(records, ordinal, value, 0);
++                        ordinal += 1;
++                    }
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_CONDITION:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                if (count == 1)
++                {
++                    const uint32_t keyword = reader->first_child[token];
++                    const bool switched = keyword < token_count && kinds[keyword] == PARSE_KIND_SWITCH;
++                    node_flat_store(records, ordinal, token, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, 1, node_flat_distance(ordinal, values[0]), 0, 0,
++                                    BUSTER_NODE_FLAT_ROOT, 0);
++                    node_flat_take(records, ordinal, values[0], 0);
++                    ordinal += 1;
++                }
++                else
++                {
++                    lefts += 1;
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_RETURN:
++            {
++                const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                const bool left = reader->return_types[token] == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
++                lefts += left;
++                if (!left && count == 1)
++                {
++                    node_flat_store(records, ordinal, token, CHECK_OP_CONVERT, 1, node_flat_distance(ordinal, values[0]), 0, 0, BUSTER_NODE_FLAT_ROOT, 0);
++                    node_flat_take(records, ordinal, values[0], 0);
++                    ordinal += 1;
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_INITIALIZE:
++            {
++                // A braced initializer's assignment passes its values on.
++                if (reader->initializers[token] == 2)
++                {
++                    word = BUSTER_NODE_FLAT_PASS;
++                }
++                else
++                {
++                    const uint32_t count = node_flat_values(words, sizes, position, reach, values, &walked, &beyond);
++                    word = node_flat_operator(records, &ordinal, token, CHECK_OP_INITIALIZE, count, 1, values, BUSTER_NODE_FLAT_ROOT, &lefts);
++                }
++                break;
++            }
++            default:
++            {
++                // The walk's own visit, whose value the front doesn't know.
++                word = BUSTER_NODE_FLAT_UNKNOWN;
++                lefts += 1;
++                break;
++            }
++        }
++        words[position & (BUSTER_NODE_FLAT_WINDOW - 1)] = word;
++    }
++    flat->ordinal = ordinal;
++    flat->position = end;
++    flat->chunk_first = first;
++    flat->work = work;
++    flat->side_count = side;
++    flat->argument_count = arguments;
++    shadow->flat_ticks += __rdtsc() - compacted;
++    shadow->flat_compact_ticks += compacted - start;
++    shadow->flat_tokens += work;
++    shadow->flat_records += ordinal - flat->chunk_ordinal;
++    shadow->flat_hops += walked;
++    shadow->flat_beyond += beyond;
++    shadow->flat_left += lefts;
++}
++
++// A difference between the flat front and the lean one, counted and, the first ones, listed.
++static void node_flat_differs(NodeFrontShadow* shadow, uint32_t token, uint32_t field)
++{
++    if (shadow->flat_differences < BUSTER_NODE_FRONT_LISTED)
++    {
++        shadow->flat_difference_tokens[shadow->flat_differences] = token;
++        shadow->flat_difference_fields[shadow->flat_differences] = field;
++    }
++    shadow->flat_differences += 1;
++}
++
++// The flat front's chunk against the lean front's, after both made it (the lean front's records compared with the walk's
++// nodes already): the compaction against its scalar twin, then the two fronts' records of the chunk in postorder, a pair
++// at a token (a terminator's discards in their order). A pair must agree in every field: the operator, the operand
++// count, the distances, the root bit, the consumer's two bytes as they are now, and a leaf's kind and value. A flat
++// record's operands, by its distances, must carry its distance and their places, whichever chunk made them, and a call's
++// list must name its arguments. A record only one front made is counted.
++static void node_flat_compare(NodeFlat* flat, const NodeFront* front, const CheckInputReader* reader)
++{
++    NodeFrontShadow* shadow = flat->shadow;
++    const uint32_t* placed = reader->postorder_positions;
++    const uint32_t first = flat->chunk_first;
++    const uint32_t end = flat->position;
++    // The compaction's twin: the same tokens, bytes and positions, and a passing mark at exactly the positions whose
++    // token the twin marks and the front didn't visit.
++    uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK + 16];
++    uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK + 16];
++    uint32_t positions[BUSTER_CHECK_EXPRESSION_CHUNK + 16];
++    const uint64_t scratch_mark = reader->scratch->length;
++    uint32_t* marks = arena_push_array(reader->scratch, BUSTER_NODE_FLAT_WINDOW, sizeof(uint32_t), 64);
++    if (marks != NULL)
++    {
++        const uint32_t work = node_flat_compact(reader, first, end, tokens, classes, positions, marks, true);
++        bool same = work == flat->work;
++        for (uint32_t i = 0; same && i < work; i += 1)
++        {
++            same = tokens[i] == flat->tokens[i] && classes[i] == flat->classes[i] && positions[i] == flat->positions[i];
++        }
++        uint32_t visited = 0;
++        for (uint32_t position = first; same && position < end; position += 1)
++        {
++            const bool mine = visited < work && positions[visited] == position;
++            visited += mine;
++            same = mine || (marks[position & (BUSTER_NODE_FLAT_WINDOW - 1)] == BUSTER_NODE_FLAT_PASS) ==
++                               (flat->words[position & (BUSTER_NODE_FLAT_WINDOW - 1)] == BUSTER_NODE_FLAT_PASS);
++        }
++        if (!same)
++        {
++            node_flat_differs(shadow, first < reader->parser->tokens.count ? reader->postorder[first] : 0, BUSTER_NODE_FLAT_FIELD_COMPACTION);
++        }
++    }
++    arena_pop_to(reader->scratch, scratch_mark);
++    uint32_t theirs = front->made;
++    uint32_t mine = flat->chunk_ordinal;
++    while (theirs < front->count || mine != flat->ordinal)
++    {
++        const NodeFlatRecord* record = mine != flat->ordinal ? &flat->records[mine & (BUSTER_NODE_FLAT_RECORDS - 1)] : NULL;
++        const uint32_t their_position = theirs < front->count ? placed[front->tokens[theirs]] : UINT32_MAX;
++        const uint32_t my_position = record != NULL ? placed[record->token] : UINT32_MAX;
++        if (record != NULL && flat->ordinal - mine >= BUSTER_NODE_FLAT_RECORDS)
++        {
++            // More records than the ring holds in one chunk: the first are gone (the slot after the last record may
++            // hold an identifier's record that was none).
++            shadow->flat_unread += 1;
++            mine += 1;
++        }
++        else if (their_position < my_position)
++        {
++            shadow->flat_lean_only += 1;
++            theirs += 1;
++        }
++        else if (my_position < their_position)
++        {
++            shadow->flat_only += 1;
++            mine += 1;
++        }
++        else
++        {
++            const uint32_t token = record->token;
++            const uint32_t kind = (record->flags & BUSTER_NODE_FLAT_LEAF_MASK) >> BUSTER_NODE_FLAT_LEAF_SHIFT;
++            const bool leaf = record->op == CHECK_OP_VALUE;
++            uint32_t field = 0;
++            if (record->op != front->ops[theirs])
++            {
++                field = BUSTER_NODE_FLAT_FIELD_OPERATOR;
++            }
++            else if (record->count != front->counts[theirs])
++            {
++                field = BUSTER_NODE_FLAT_FIELD_COUNT;
++            }
++            else if (record->distances[0] != front->distances[0][theirs] || record->distances[1] != front->distances[1][theirs] ||
++                     record->distances[2] != front->distances[2][theirs])
++            {
++                field = BUSTER_NODE_FLAT_FIELD_DISTANCE;
++            }
++            else if (((record->flags & BUSTER_NODE_FLAT_ROOT) != 0) != (front->roots[theirs] != 0))
++            {
++                field = BUSTER_NODE_FLAT_FIELD_ROOT;
++            }
++            else if (record->up != front->ups[theirs] || record->place != front->places[theirs])
++            {
++                field = BUSTER_NODE_FLAT_FIELD_CONSUMER;
++            }
++            else if (leaf)
++            {
++                const bool same = kind != front->leaf_categories[theirs] ? false :
++                                  kind == BUSTER_NODE_FRONT_LEAF_IDENTIFIER ? record->payload == front->leaf_integers[theirs] :
++                                  record->payload < flat->side_count && flat->side_types[record->payload] == front->leaf_types[theirs] &&
++                                  flat->side_integers[record->payload] == front->leaf_integers[theirs];
++                field = same ? 0 : BUSTER_NODE_FLAT_FIELD_LEAF;
++            }
++            // Its operands from its own side: each within the rings' reach carries this record's distance and its place
++            // (an operand taken twice its first), and a call's list names each argument's.
++            for (uint32_t k = 0; field == 0 && k < 3; k += 1)
++            {
++                const uint32_t distance = record->distances[k];
++                if (distance != 0 && distance != BUSTER_NODE_FRONT_FAR)
++                {
++                    const NodeFlatRecord* operand = &flat->records[(mine - distance) & (BUSTER_NODE_FLAT_RECORDS - 1)];
++                    const uint32_t place = k == 1 && record->distances[1] == record->distances[0] ? 0 : k;
++                    field = operand->up == distance && operand->place == place ? 0 : BUSTER_NODE_FLAT_FIELD_OPERAND;
++                }
++            }
++            if (field == 0 && record->op == CHECK_OP_CALL && record->payload != BUSTER_NODE_FLAT_NONE)
++            {
++                bool same = record->payload + record->count - 1 <= flat->argument_count;
++                for (uint32_t k = 1; same && k < record->count; k += 1)
++                {
++                    const uint32_t distance = flat->argument_distances[record->payload + k - 1];
++                    const NodeFlatRecord* argument = &flat->records[(mine - distance) & (BUSTER_NODE_FLAT_RECORDS - 1)];
++                    same = distance == BUSTER_NODE_FRONT_FAR || (distance != 0 && argument->up == distance && argument->place == k);
++                }
++                field = same ? 0 : BUSTER_NODE_FLAT_FIELD_ARGUMENTS;
++            }
++            if (field != 0)
++            {
++                node_flat_differs(shadow, token, field);
++            }
++            shadow->flat_compared += 1;
++            theirs += 1;
++            mine += 1;
++        }
++    }
++}
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+index dfa955ae3..f87304866 100644
+--- a/src/buster/compiler/c_check_node_machine_front.c
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -61,6 +61,11 @@
+ // T run at reader time on the full expressions the front makes whole (measure-node-machine --shadow --front-types): the
+ // front after the walk, and its results in NodeFrontShadow.types.
+ #define BUSTER_NODE_FRONT_TYPES 16u
++// The flat front beside the lean one, its twin (measure-node-machine --shadow --front-flat; c_check_node_machine_flat.c):
++// after the walk acted at a chunk, as the lean front, or with BUSTER_NODE_FRONT_FLAT_FIRST before the walk's actions,
++// where the machine would run. Its records are compared with the lean front's after both made the chunk's.
++#define BUSTER_NODE_FRONT_FLAT 32u
++#define BUSTER_NODE_FRONT_FLAT_FIRST 64u
+ // A lean leaf's kind, in its record's `leaf_categories`.
+ #define BUSTER_NODE_FRONT_LEAF_IDENTIFIER 0u
+ #define BUSTER_NODE_FRONT_LEAF_LITERAL 1u
+@@ -166,6 +171,26 @@ struct NodeFrontShadow
+     uint8_t* contexts;
+     // T's results at reader time, or null (BUSTER_NODE_FRONT_TYPES).
+     NodeFrontTypes* types;
++    // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its pass's ticks and its own compaction's,
++    // the tokens it visited, the records it made, the children its tokens hopped over, the tokens with a child past the
++    // ring's reach, and the tokens it left.
++    uint64_t flat_ticks;
++    uint64_t flat_compact_ticks;
++    uint64_t flat_tokens;
++    uint64_t flat_records;
++    uint64_t flat_hops;
++    uint64_t flat_beyond;
++    uint64_t flat_left;
++    // Its comparison with the lean front: the records both made, those that differ (a failure), the records only one of
++    // them made, and the flat records a chunk made past its ring's room, which nothing compared.
++    uint64_t flat_compared;
++    uint64_t flat_differences;
++    uint64_t flat_only;
++    uint64_t flat_lean_only;
++    uint64_t flat_unread;
++    // The first records that differed: each one's token and field (BUSTER_NODE_FLAT_FIELD_*).
++    uint32_t flat_difference_tokens[BUSTER_NODE_FRONT_LISTED];
++    uint32_t flat_difference_fields[BUSTER_NODE_FRONT_LISTED];
+ };
+ 
+ #define BUSTER_NODE_FRONT_CONTEXT_UNKNOWN 0xffu
+@@ -295,6 +320,8 @@ struct NodeFront
+     uint8_t sizes_stagger[BUSTER_NODE_FRONT_STAGGER];
+     // The machine's state at reader time (c_check_node_machine_reader.c), or null.
+     struct NodeMachineReader* typer;
++    // The flat front's state (c_check_node_machine_flat.c), or null.
++    struct NodeFlat* flat;
+     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
+ };
+ 
+diff --git a/tools/ci/build_regression.c b/tools/ci/build_regression.c
+index eecff38f6..ee529b514 100644
+--- a/tools/ci/build_regression.c
++++ b/tools/ci/build_regression.c
+@@ -1544,6 +1544,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
+         { "src/buster/compiler/c_check_node_machine_facts.c", "main_unit_checker.c", false },
+         // Its own front (step 1b) is the reader's, included by the coded walk beside whose chunks it runs.
+         { "src/buster/compiler/c_check_node_machine_front.c", source, false },
++        { "src/buster/compiler/c_check_node_machine_flat.c", source, false },
+         { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },
