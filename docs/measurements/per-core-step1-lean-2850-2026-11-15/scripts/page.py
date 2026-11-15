@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-# page.py RESULTS_DIRECTORY LABEL PASSES [BEFORE]: the design page's tables of the follow-up from a label's runs and
-# profiles: the three kernels' cycles a taken leaf or lookup (and a record of the window) with their mispredicted
-# branches, by corpus and window setting; the kernels by part on sqlite3.c, packed, side by side (parts.py's figures);
-# and, with BEFORE (an earlier label that has the lean kernel's profile), the lean kernel's parts before and after.
+# page.py RESULTS_DIRECTORY LABEL PASSES [BEFORE BEFORE_PASSES]: the design page's tables of the follow-up from a
+# label's runs and profiles: the three kernels' cycles a taken leaf or lookup (and a record of the window) with their
+# mispredicted branches, by corpus and window setting; the kernels by part on sqlite3.c, packed, side by side
+# (parts.py's figures); and, with BEFORE (an earlier label that has the lean kernel's profile, of BEFORE_PASSES passes
+# a run), the lean kernel's parts before and after.
 import glob
 import os
 import re
@@ -67,6 +68,7 @@ def parts(directory, label, passes, variant):
 def main():
     directory, label, passes = sys.argv[1], sys.argv[2], int(sys.argv[3])
     before = sys.argv[4] if len(sys.argv) > 4 else None
+    before_passes = int(sys.argv[5]) if len(sys.argv) > 5 else passes
     runs = {}
     for path in sorted(glob.glob(os.path.join(directory, label, "facts-*.txt"))):
         m = re.match(r"facts-([a-z0-9]+?)(-[a-z0-9]+)?-(\d+)\.txt$", os.path.basename(path))
@@ -102,7 +104,7 @@ def main():
         print("| %s | %s | %s |" % (title, "{:,}".format(count), " | ".join(cells)))
     if before:
         print()
-        old = parts(directory, before, passes, "lean")
+        old = parts(directory, before, before_passes, "lean")
         new = tables["lean"]
         print("| the lean kernel's | cycles before | after | mispredicted branches before | after |")
         print("| --- | ---: | ---: | ---: | ---: |")
