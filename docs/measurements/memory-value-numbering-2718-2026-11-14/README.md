@@ -1,10 +1,10 @@
-# #2718's value numbering with memory: policy, phases, loads removed, twins and campaigns (2026-11-14)
+# #2718's value numbering with memory: run and compile time, policy, phases, loads removed, twins and campaigns (2026-11-14)
 
-This is the evidence for [buster#2718](https://github.com/buster14a/buster/issues/2718) (Tier 1: value numbering with memory, repeated loads and store-to-load forwarding) and the pull request from `claude/loving-goodall-lj1n26`. By Claude, in David's directed session ([the session](https://claude.ai/code/session_01NNmNQub8akmWiSMaWbaw8L)), from the claim of 14 November ([comment 6885272067](https://github.com/buster14a/buster/issues/2718#issuecomment-6885272067)).
+This is the evidence for [buster#2718](https://github.com/buster14a/buster/issues/2718) (Tier 1: value numbering with memory, repeated loads and store-to-load forwarding) and [buster#2821](https://github.com/buster14a/buster/pull/2821), from `claude/loving-goodall-lj1n26`. By Claude, in David's directed session ([the session](https://claude.ai/code/session_01NNmNQub8akmWiSMaWbaw8L)), from the claim of 14 November ([comment 6885272067](https://github.com/buster14a/buster/issues/2718#issuecomment-6885272067)).
 
-The pull request adds `ir_optimize_memory.c`, the optimizer's `BUSTER_IR_OPTIMIZE_MEMORY` pass. It runs after SCCP and the identities and before dead-code removal, and forwards a load's value from an earlier access of the same bytes along the dominator tree. `--tier1` runs it by default, and `--tier1-passes=-memory` turns it off. It also marks volatile and `_Atomic` locals' slots volatile (`BUSTER_TYPED_LOCAL_VOLATILE`, then `BUSTER_IR_SLOT_VOLATILE`), which the pass's first version forwarded through. The design and its rules are in buster's `docs/ir-memory-value-numbering.md`.
+The pull request adds `ir_optimize_memory.c`, the optimizer's `BUSTER_IR_OPTIMIZE_MEMORY` pass. It runs after SCCP and the identities and before dead-code removal, and forwards a load's value from an earlier access of the same bytes along the dominator tree. `--tier1-passes=+memory` (or `+all`) runs it. The final head's 9700X measurements below left it off by default. It also marks volatile and `_Atomic` locals' slots volatile (`BUSTER_TYPED_LOCAL_VOLATILE`, then `BUSTER_IR_SLOT_VOLATILE`), which the pass's first version forwarded through. The design and its rules are in buster's `docs/ir-memory-value-numbering.md`.
 
-**Status:** the final head's 9700X queue (`scripts/9700x/final.sh`: identity, compile time per pass and per compile, run time, loads dispatched) is still running. Its results will go in `9700x/final/`, and this file will be updated with them.
+**Decision:** with the pass, speedtest1 took 1.0026 times the cycles it took without, and Lua's five scripts 0.9963, both within noise. sqlite3.c's `--tier1` compile took 1.030 times as long. So `--tier1` leaves the pass off by default (buster `c58e7e3`), as #139 left LICM, SROA and the solver off.
 
 ## Revisions
 
@@ -14,8 +14,46 @@ The pull request adds `ir_optimize_memory.c`, the optimizer's `BUSTER_IR_OPTIMIZ
 | prototype | `42a7c1e2c3d167bc53a24ce0dad944251a8a1ab7` | | environment switches choose the rules: `local/survey/`, `9700x/prototype/` |
 | phases | `5a4e56beb74987e025dc15a39143ad54c5960cae` | `44a36f65708d1b50a06ab5223e8abf18b4d609f9` | `scripts/9700x/phases.patch` over it: `9700x/phases/`; the first differential campaigns, `differential/memory` and `differential/all` |
 | before the volatile fix | `894d9716c96c8efd2500b3f188c907755cedbe2f` | | `local/894d971/` |
-| measured head | `566770be50aa74295a60687c381eb9876597a568` | `a7f9a21e77efe3624fec7c70adecb7baafbd10e1` | the 9700X's final queue and the final campaigns |
+| measured head | `566770be50aa74295a60687c381eb9876597a568` | `a7f9a21e77efe3624fec7c70adecb7baafbd10e1` | the pass on by default: the 9700X's final queue (`9700x/final/`) and the final campaigns |
 | final code | `a694d362b29bad11401698fc899d5d0f0745e78e` | `71990abefccea4697e0caae97850297af5c0c710` | the measured head with a comment and a usage line changed: `local/final/` |
+| x86-64 host fix | `8c042b7c0eea7a00fed5db64e4eb6fbfd4732cee` | `ab2f9e28f3f1badeee34c8211fefdf6f3d453b91` | an unused variable under `BUSTER_HOST_ARCH=x86-64` |
+| default off | `c58e7e3a6fae2a934b595173ec4dd4d5466bfc66` | `c5d35a31d9dea046d02648afeb56aeb1ae408e34` | the default without the pass: what the measured head's `--tier1-passes=-memory` runs |
+
+The default's change only clears the pass's bit in `BUSTER_CHECK_TIER1_PASSES_DEFAULT`, so the measured head's `-memory` variant is the final default, and its `+memory` default the final `+memory`. Locally, the final build's `--tier1` and `--tier1-passes=-memory` give the same objects for speedtest1's unit and `lvm.c`.
+
+## The final head on the 9700X (`9700x/final/`)
+
+**Host** (`host.txt`): Ryzen 7 9700X, Linux 6.18.50, CPU 2 with governor and EPP `performance`, clang 23.1.1. Both compilers were built there by `BUSTER_DEBUG_INFO=0 ./build.sh --config Release` (`build-*.log`; hashes in `host.txt`). Every step ran in its own `exclusive.sh` hold pinned to CPU 2, and no step's receipt lists another process above 5% CPU. The inputs are the frozen corpus's `sqlite3.c`, SQLite 3.53.2's `speedtest1.c`, Lua 5.4.8 and the `tier1-reciprocal-141-2026-11-01` record's five scripts, as in #139's record.
+
+**Identity** (`identity.txt`, `scripts/9700x/identity.sh`): the head's `--tier1 --tier1-passes=-memory` against main's `--tier1`, on speedtest1's unit and Lua's 33 units: every object byte for byte (`identity status 0`), and the head's default (the pass on) differs.
+
+**Run time** (`programs.txt`, `measure-tier1-programs --runs 11 --variant --tier1-passes=-memory`), user cycles with the pass (the measured head's default) and without:
+
+| Program | With | Without | With / without |
+| --- | ---: | ---: | ---: |
+| speedtest1 | 738.1 M | 736.2 M | 1.0026 |
+| Lua's five scripts | 981.3 M | 984.9 M | 0.9963 |
+| calls.lua | 108.4 M | 113.5 M | 0.955 |
+| tables.lua | 195.8 M | 197.4 M | 0.991 |
+| strings.lua | 235.2 M | 233.2 M | 1.009 |
+| arithmetic.lua | 156.9 M | 154.9 M | 1.013 |
+| closures.lua | 285.0 M | 286.0 M | 0.996 |
+
+Instructions: speedtest1 2,562.8 M with against 2,537.7 M without, Lua 4,855.1 M against 4,773.4 M. Every speedtest1 build gave the verification hash `1248168 a7fa3957…`. Against clang -O2 the measured head's `--tier1` (with the pass) took 1.16 times the cycles on speedtest1 and 1.09 times on Lua.
+
+The prototype's Lua gain (0.9745, below) is gone: the program without the pass got faster (arithmetic.lua 166.4 M to 154.9 M cycles), while callgrind counts nearly the same code with it (arithmetic.lua +5.8% instructions in both). main's only Tier 1 change in between is #2773 (#2768, allocation ranges that wait in their value's slot).
+
+**Compile time, whole processes** (`stages.txt`, `scripts/9700x/stages.sh`, `measure-compile --runs 11 --variant --tier1-passes=-memory -- --tier1 --lanes 1 -c sqlite3.c`, the head's own executable): 653.6 ms with the pass against 634.6 ms without, 1.030 times, 18.9 ms; 3,516.4 M against 3,410.8 M user cycles, 8,447.5 M against 8,371.0 M instructions. `compile.txt` (`time-runs`, head against main and main again): sqlite3.c 653.2 ms against 634.8 and 635.1 ms; `lvm.c` 29.50 ms against 29.18 and 29.20 ms (1.011).
+
+**Compile time per pass** (`passes-*.txt`, `benchmark-ir-source --passes --only ROW` on sqlite3.c: 2,602 functions, 599,619 lowered IR instructions; medians of 21 rounds):
+
+| Row | Vector, ms | Scalar, ms | Scalar / vector |
+| --- | ---: | ---: | ---: |
+| `tier1` (Tier 1's optimizer set) | 49.8 | 47.7 | 0.96 |
+| `tier1-memory` (with the pass) | 56.3 | 56.6 | 1.01 |
+| `memory` (the pass and dead-code removal) | 31.2 | 40.3 | 1.29 |
+
+The driver's cost is about twice the `tier1-memory` row's 6.5 ms: it runs the pass after the inlining, on larger functions. On the scalar host (`local/final/compile-callgrind.txt`), callgrind of the compile counts 203 M more instructions in `check_tier1_passes`, which the pass is inlined into, and about 100 M fewer in selection, row checks and emission.
 
 ## Which rules pay (`9700x/prototype/`)
 
@@ -27,7 +65,7 @@ The prototype's three policies by `measure-tier1-programs --runs 11 --variant` o
 | No forwarding from a load a user could fold (`fold.txt`) | 0.9957 | 0.9998 | 0.9961 | 1.0009 |
 | One block, one key's own stores (`block.txt`) | 1.0104 | 0.9968 | 0.9918 | 1.0006 |
 
-`--tier1`'s own row across the three runs: speedtest1 736.6 to 742.6 M user cycles (0.8%), Lua 985.1 to 994.8 M (1.0%). speedtest1's differences are within that, and every rule's Lua gain is not. Every rule ships.
+`--tier1`'s own row across the three runs: speedtest1 736.6 to 742.6 M user cycles (0.8%), Lua 985.1 to 994.8 M (1.0%). speedtest1's differences are within that, and every rule's Lua gain was not. Every rule is the pass's (`+memory`); the final head's run time above no longer shows that gain.
 
 ## Exact counts (`local/`)
 
