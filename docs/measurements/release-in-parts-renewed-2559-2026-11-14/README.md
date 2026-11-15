@@ -11,8 +11,9 @@ TODO-RESULT
 ## 1. What the splitter does now
 
 Release builds every `main.c` unit in parts before the optimizer, as Develop does, with
-`presplit --import 200 --simplified-size --constant-arguments --anchor 24 --cohere 150000 --spread 2 --keep-statics
---benchmark-bodies` (and `--strip-debug` without debug information). Each change was found by comparing the whole unit's
+`presplit --import 200 --simplified-size --constant-arguments --promote-arguments --copy-limit 40 --anchor 24 --cohere
+150000 --spread 2 --keep-statics --benchmark-bodies` (and `--strip-debug` without debug information), and the join
+drops what no part's live code refers to (`tools/codegen/unreferenced.c`). Each change was found by comparing the whole unit's
 inlining remarks with its parts' (clang's `-Rpass=inline -Rpass-missed=inline`, every `main.c` unit; `scripts/local/`),
 then the 9700X's instructions by function (`scripts/9700x/profile2.sh`):
 
@@ -26,6 +27,11 @@ then the 9700X's instructions by function (`scripts/9700x/profile2.sh`):
 | The input's `available_externally` bodies in every code part | `pthread_equal`, `bsearch`; `printf("\n")` becomes `putchar('\n')`, whose body was missing |
 | `--simplified-size` | `arena_release` (79 inlined sites) was one instruction over the raw limit; `asm_word_registers_vector` (721 raw, 337 after SROA) inlines at a threshold of 1,574 (LLVM's vector bonus) |
 | `--constant-arguments` | An alias hides a static function's callers from IPSCCP: the whole unit folded `instruction_is_valid`'s flags into `mode_register_is_valid` (cost 195 against the parts' 265 to 290) |
+| `--promote-arguments` | The whole unit passed `check_action_operand_value`'s 96-byte operand in `zmm0` and `ymm1`; the parts, calling it through its alias, passed a pointer, whose wide loads missed store forwarding (`check-units` +0.72%, `checker-source-musl` +1.85% user cycles). A forked child inlines the always-inline calls and runs argument promotion; the parent promotes the functions it reports. Copying them into their callers' parts instead (`--copy-promoted`, ph2) gave `check_action_operand_value` 20 copies and cost `backend-source` 1.1% |
+| `--copy-limit 40` | Local copies grew the checker's unit by 1.21 MB, 1.19 of it the same function copied in several parts; past one part, only bodies of up to 40 instructions or with one call are copied (0.31 MB) |
+| always_inline bodies always copied, and the limit weighs a body with them | An always_inline function past the limit stayed in its owner part, alive through its alias though every call was inlined (342 KB); `tier1_allocate_impl` weighed 22 KB once its always_inline callees were inlined, in three parts |
+| The join's unreferenced sections (`unreferenced.c`) | An owner part keeps a local function alive through its alias even where every part inlined or folded its calls: relocations from every other allocated section reach what is live, and the rest (170 sections, 115 KB) goes in the `-r` link's `/DISCARD/` |
+| Start-order names `.text.NAME.buster_split` | A part's optimizer folds a function into its alias: 368 of the start list's 511 functions had only the alias's section, so the start region held 197 KB of functions against the whole build's 787 (ph8: 874) |
 
 `raw/local/inlining/summary.txt` has each unit's pairs the whole unit inlines and no part does (`missing`, and those
 outside tests) and the reverse (`extra`), for the versions p5, p7 and p8 (`*.log` for p1, p2, p10). With `k5` the
@@ -37,6 +43,20 @@ time, which reshaped other code: `benchmark-environments` +2.65% user cycles (+2
 floor ±0.26%) and 1,450 lines of `run_c_environment_benchmark`'s IR before the inliner differed from the whole unit's
 (62 without it). `--constant-arguments` takes from a forked child's SROA and IPSCCP only the arguments every call passes
 as one constant (310 in the checker's unit, 5.9 s locally against 12.2 s for a cloned module).
+
+**Also didn't pay:** copies only for functions one part calls (their `available_externally` reads lose argument
+promotion: 121 more missing pairs); `--copy-limit 1000` (25% more code); running `function-attrs`, or `ipsccp` with
+`globaldce`, on the whole unit before the split (missing pairs 425 → 738; 22 functions); `ld.lld -r --gc-sections`
+for the join (a relocatable link keeps every global symbol as a root, the aliases among them).
+
+**What the split can't reproduce.** The checker's unit compiles to 11.35 MB of code whole, 12.09 MB at ph4 and
+11.49 MB now; the executable's `.text` is 48.54, 50.26 and 49.13 MB. What remains comes from interprocedural decisions
+the whole unit makes after inlining, which no part can see: dead return values removed once every caller inlined or
+dropped them, `fastcc` for local functions, the last-call bonus where the other caller dies after inlining
+(`tier1_cfg_location_mode`), inline costs 25 higher for one more call left by attributes the whole unit inferred, the
+cold call sites' threshold of 45 under another part's block frequencies (`dominators_scalar`), and 186 small functions
+copied in several parts (193 KB). Instructions by function on the 9700X (`raw/9700x/results/profile/*.ph8.ins.all.txt`)
+put `tier1-code-certificate`'s +0.70%, `sqlite-c-tier1`'s +0.48% and `ir-source`'s +0.34% there.
 
 ## 2. The 9700X
 
