@@ -161,6 +161,6 @@ Lua's gate passes at both.
 
 ## Limits
 
-- One host for the timings, one driver for the kernels: #1382's microbenchmarks. Program run times on the 9700X are the
-  pull request's CI's (its Tier 1 programs comparison against the base); the counts here are instructions.
+- One host for the timings, one driver for the kernels: #1382's microbenchmarks. The programs' run times weren't measured
+  on the 9700X (a pull request's CI skips the hardware job, #2055): their counts here are instructions.
 - The 9700X was shared; each round and run was one hold of the lock, and no other process was busy in any.
