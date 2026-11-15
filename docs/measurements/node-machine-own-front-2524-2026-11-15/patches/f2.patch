@@ -1,0 +1,1662 @@
+diff --git a/docs/commands/lowering.md b/docs/commands/lowering.md
+index 784ece060..b68ad3177 100644
+--- a/docs/commands/lowering.md
++++ b/docs/commands/lowering.md
+@@ -309,7 +309,7 @@ written first. [The design](../node-machine.md)'s
+ 
+ ### The shadow (step 1)
+ 
+-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
++`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+ is step 1: the machine itself, run after the pipeline on every full expression
+ the census takes, compared with what the pipeline made and timed. No compile
+ takes its entries.
+@@ -502,6 +502,53 @@ takes its entries.
+   `walk`'s is what the sweeps add there, the walk's own slowdown included;
+   the line `node-shadow: interleaved` gives the sweeps' own TSC ticks alone,
+   to compare with the same set's ticks in the tight loop.
++- `--front` and `--front-first` run **the machine's own front** (step 1b,
++  [the design](../node-machine.md#step-1b-the-machines-own-front)) in the
++  files' one reading. The sweeps above read their inputs from the graph the
++  reader's coded walk writes; the front (`c_check_node_machine_front.c`, which
++  `c_check_expression_input.c` includes; `PPOptions.node_front`) makes the
++  machine's records itself, from each chunk's acting tokens and classes and
++  the chunk's identifier and literal entries, without the walk's value chains
++  or the graph.
++  - **A record** is a node's operator, token, operands (as earlier records,
++    and each as a byte, its distance back in the postorder, 255 for that or
++    more), a leaf's value, a member's name, a call's arguments and library
++    mark, the requested type and the context.
++  - **Values wait on a stack** in groups that share a consumer, a value's
++    consumer being its token's parent. A token that only passes values on (a
++    list, a separator, a group's closing, a braced initializer's `=`) hands
++    its group to its parent in one step (`node_front_pass`). A token the front
++    doesn't model is **left** to the walk: its value is unknown, so is every
++    record that would take it, and the context of what it took. A stack with
++    no room (4,096 values: a static table's elements wait for its end) makes
++    every waiting value unknown, once (`node_front_forget`).
++  - **Between chunks** only the waiting values' records are kept
++    (`node_front_keep`): a condition's value waits for its statement's body,
++    whose tokens the tree puts before the control's closing.
++  - **The comparison** (`node_front_compare`): each record against the walk's
++    node at the same token (a discard's by a search from the record before),
++    field by field, operator, operands' nodes, leaf value, member, arguments,
++    type, and each distance against the front's own records between the two
++    nodes; contexts at the walk's end (`node_front_finish`), where the walk's
++    lists have given theirs. `--front` runs the front after the walk acted at
++    a chunk, `--front-first` before it, where the machine would run: the same
++    records, and the caches' first touches the front's.
++  - **The report:** `node-shadow: front after-the-walk|before-the-walk
++    tokens=N left=N records=N compared=N differences=0 resets=N
++    waiting-at-the-end=0` (no value may wait when a unit ends), the tokens
++    left by class and the `sizeof` and `_Alignof` ones among them, `front
++    taken-expressions=N (x%) evaluated-nodes=N (y%)` (the machine-taken
++    expressions whose every record the front made), the operands by distance
++    (`within-64`, `in-a-byte`, `further`, a call's arguments and the roots'
++    apart: a condition's or a discard's operand is a body away where the
++    tree puts the control's closing after it) with the taken expressions that
++    have an operand past 64 records back, and `front ticks=N`. `--list N`
++    lists the first differences and the taken expressions the front missed.
++    A difference fails the command.
++  - Every shadow run prints `node-shadow: walk ticks classes=N prepare=N
++    actions=N visits=N`, the coded walk's parts in the files' one reading
++    (TSC ticks; the batch's flushes are the actions'): with no front option,
++    the walk as it is.
+ 
+ The report gives the expressions, evaluated nodes and calls taken, each
+ refusal's (shape, code, leaf, context, diagnostic, template, row, root,
+@@ -519,5 +566,12 @@ construct a line, each taken or refused by a named reason), with `--verify`
+ and with `--scalar`, each time with `--fused` and `--interleave 3`: the one
+ sweep must give C's and X's refusal, tape, labels and calls for every
+ expression of the fixture, nested calls, labels under and around calls and
+-several postfix updates through addresses in one expression among them. [The design](../node-machine.md)'s "Step 1: the shadow"
+-has the results.
++several postfix updates through addresses in one expression among them. The
++front runs over the fixture too (after the walk in the `--verify` run, before
++it in the `--scalar` one): every record the walk's node, no value left
++waiting, and each taken line's expressions the front's but those of the lines
++marked `// front: left`. Two generated texts take it to its limits
++(`node_front_test_limits`): a body whose chunk ends fall at every place within
++a library call by its name and through its address, and an initializer with
++more values waiting than the stack holds, with a call astride its last entry.
++[The design](../node-machine.md)'s "Step 1: the shadow" has the results.
+diff --git a/src/buster/compiler/c_check_attested_test.c b/src/buster/compiler/c_check_attested_test.c
+index 96dcb3e3e..44c8d18aa 100644
+--- a/src/buster/compiler/c_check_attested_test.c
++++ b/src/buster/compiler/c_check_attested_test.c
+@@ -869,6 +869,7 @@ static const CheckAttestedField check_attested_input_fields[] =
+     { "expression_numbering_nodes", CHECK_ATTESTED_FIELD_MEASURE },
+     { "expression_numbering_checked", CHECK_ATTESTED_FIELD_MEASURE },
+     { "expression_numbering_mismatches", CHECK_ATTESTED_FIELD_MEASURE },
++    { "node_front", CHECK_ATTESTED_FIELD_MEASURE },
+     { "sizeof_queries", CHECK_ATTESTED_FIELD_MEASURE },
+     { "sizeof_query_tokens", CHECK_ATTESTED_FIELD_MEASURE },
+     { "diagnostic_limits", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 8d2b8184f..a3388437b 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1639,6 +1639,8 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t
+     }
+ }
+ 
++#include "c_check_node_machine_front.c"
++
+ // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
+ // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
+ // reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
+@@ -1676,6 +1678,43 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         batch->leaves = 0;
+         check_graph_classes(batch->classes);
+     }
++    // The node machine's front in the shadow (PPOptions.node_front, #2524): over the whole unit's coded walk, its state on
++    // the scratch and its report, with a bit a node the graph has room for, in the output's arena.
++    const uint8_t fronted = coded && begin == 0 && stop == count ? reader->pp->options.node_front : 0;
++    NodeFront* front = fronted != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64) : NULL;
++    if (front != NULL)
++    {
++        const uint32_t words = reader->output->graph.capacity / 64 + 1;
++        NodeFrontShadow* shadow = arena_push_array(reader->arena, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
++        uint64_t* bits = arena_push_array(reader->arena, words, sizeof(uint64_t), _Alignof(uint64_t));
++        uint8_t* contexts = arena_push_array(reader->arena, (uint64_t)words * 64, sizeof(uint8_t), 1);
++        uint64_t* past = arena_push_array(reader->arena, words, sizeof(uint64_t), _Alignof(uint64_t));
++        if (shadow != NULL && bits != NULL && contexts != NULL && past != NULL)
++        {
++            memset(shadow, 0, sizeof(*shadow));
++            memset(bits, 0, (uint64_t)words * sizeof(uint64_t));
++            memset(contexts, 0, (uint64_t)words * 64);
++            memset(past, 0, (uint64_t)words * sizeof(uint64_t));
++            shadow->nodes = bits;
++            shadow->contexts = contexts;
++            shadow->past = past;
++            shadow->node_capacity = words * 64;
++            front->shadow = shadow;
++            front->count = 0;
++            front->pending = 0;
++            front->stack_count = 0;
++            front->group_count = 0;
++            front->full = false;
++            front->ordinal = 0;
++            front->argument_count = 0;
++            front->wide_count = 0;
++            reader->output->node_front = shadow;
++        }
++        else
++        {
++            front = NULL;
++        }
++    }
+     // The parts' ticks (CheckInput.expression_part_ticks): three TSC reads a chunk, and two a visit of a coded unit's,
+     // which are the actions' less their visits'. And the tokens of each class the actions reached, in four histograms
+     // that a chunk's run of one class doesn't make a chain of: those the classes' actions acted at are the rest of the
+@@ -1697,6 +1736,13 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+             check_input_expression_literals(reader, tokens, classes, acting, &literals, false);
+         }
+         const uint64_t ready = __rdtsc();
++        uint64_t fronting = 0;
++        if (front != NULL && fronted == 2)
++        {
++            // Before the walk acts at the chunk, where the machine would run; its ticks are its own, not the actions'.
++            node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
++            fronting = __rdtsc() - ready;
++        }
+         uint32_t identifier = 0;
+         uint32_t literal = 0;
+         uint32_t i = 0;
+@@ -1726,7 +1772,19 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         }
+         const uint64_t done = __rdtsc();
+         prepared += ready - start;
+-        acted += done - ready;
++        acted += done - ready - fronting;
++        if (front != NULL)
++        {
++            // The comparison reads the graph: the batch's nodes go to it first, as the actions' time.
++            const uint64_t flushing = __rdtsc();
++            check_input_expression_flush(reader, batch, false);
++            acted += __rdtsc() - flushing;
++            if (fronted == 1)
++            {
++                node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
++            }
++            node_front_compare(front, reader);
++        }
+     }
+     // The last batch's nodes, written as the actions' (and its time theirs).
+     if (batch != NULL)
+@@ -1735,6 +1793,10 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         check_input_expression_flush(reader, batch, false);
+         acted += __rdtsc() - start;
+     }
++    if (front != NULL)
++    {
++        node_front_finish(front, reader, base);
++    }
+     // A coded unit's visits lie within its chunks' actions; another's actions are all visits.
+     visited = coded ? (visited < acted ? visited : acted) : acted;
+     reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE] = prepared;
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 5316c8b45..ad566946b 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1215,6 +1215,9 @@ struct CheckInput
+     uint32_t expression_numbering_nodes;
+     uint32_t expression_numbering_checked;
+     uint32_t expression_numbering_mismatches;
++    // Under PPOptions.node_front alone, the node machine's front's report (c_check_node_machine_front.c, #2524): null in
++    // every other run.
++    struct NodeFrontShadow* node_front;
+     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
+     uint32_t sizeof_queries;
+     uint64_t sizeof_query_tokens;
+diff --git a/src/buster/compiler/c_check_lower_inventory.c b/src/buster/compiler/c_check_lower_inventory.c
+index b917b6794..5fe1e9768 100644
+--- a/src/buster/compiler/c_check_lower_inventory.c
++++ b/src/buster/compiler/c_check_lower_inventory.c
+@@ -616,6 +616,9 @@ struct LowerSource
+     bool prepared;
+ };
+ 
++// PPOptions.node_front for the sources lower_source_open opens (measure-node-machine --shadow --front, #2524); 0 for none.
++static uint8_t lower_source_node_front;
++
+ // Opens `file`, read with `options`, into `source`, with the backend's tables built: whether its options could be read
+ // (source->prepared says whether it reached its selected program).
+ static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count)
+@@ -637,6 +640,7 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
+     }
+     valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &source->option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
+     pp_options.semantic_pragmas = true;
++    pp_options.node_front = lower_source_node_front;
+     source->path = (CheckCorpusPath){ 0 };
+     source->data = (CheckDataPrepared){ 0 };
+     source->program = (CheckProgram){ 0 };
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 131fac048..f2ddf2f46 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -1789,6 +1789,8 @@ struct NodeShadowRecord
+ {
+     uint32_t line;
+     NodeMachineRefusal refusal;
++    // A taken expression's, where the front ran (`front`): whether the front made its every record.
++    bool fronted;
+ };
+ 
+ typedef struct NodeShadow NodeShadow;
+@@ -1851,6 +1853,37 @@ struct NodeShadow
+     bool fused;
+     uint64_t fused_expressions;
+     uint64_t fused_differences;
++    // --front, --front-first: the machine's front in the reader (c_check_node_machine_front.c, PPOptions.node_front 1 and
++    // 2), its records compared there with the walk's nodes: the files' reports summed (NodeFrontShadow's), the walk's own
++    // parts' ticks beside the front's, and the taken expressions whose every node agreed, with their evaluated nodes.
++    uint8_t front;
++    uint64_t front_ticks;
++    uint64_t front_tokens;
++    uint64_t front_records;
++    uint64_t front_checked;
++    uint64_t front_differences;
++    uint64_t front_resets;
++    uint64_t front_waiting;
++    uint64_t front_left[BUSTER_CHECK_EXPRESSION_CODES];
++    uint64_t front_left_queries;
++    uint64_t walk_ticks[BUSTER_CHECK_EXPRESSION_PARTS];
++    uint64_t front_expressions;
++    uint64_t front_nodes;
++    // The front's records' operands by their distance back in the postorder (NodeFrontShadow's), and of the taken
++    // expressions the front made, those with an operand further back than BUSTER_NODE_FRONT_NEAR, with their nodes.
++    uint64_t front_operands;
++    uint64_t front_operands_near;
++    uint64_t front_operands_byte;
++    uint64_t front_operands_far;
++    uint64_t front_root_operands;
++    uint64_t front_root_operands_past;
++    uint64_t front_arguments;
++    uint64_t front_arguments_past;
++    uint64_t front_past_expressions;
++    uint64_t front_past_nodes;
++    // --list N: the taken expressions the front didn't make, listed up to N.
++    uint32_t front_missed_listed;
++    uint32_t front_listed;
+     // --interleave N: the interleaved sets' chunk (0: a body's expressions), the current file's scratch for the census's
+     // walk in the timing passes, the walks' tests (so that the walks aren't dead code), and the sweeps' own TSC ticks in
+     // an interleaved set: the last pass's, and each file's least over the passes, summed.
+@@ -2175,9 +2208,11 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+     shadow->expressions += 1;
+     shadow->nodes += nodes;
+     shadow->records += walked;
+-    if (shadow->records_out != NULL && shadow->record_count < shadow->record_capacity)
++    NodeShadowRecord* out = shadow->records_out != NULL && shadow->record_count < shadow->record_capacity ? shadow->records_out + shadow->record_count : NULL;
++    if (out != NULL)
+     {
+-        shadow->records_out[shadow->record_count++] = (NodeShadowRecord){
++        shadow->record_count += 1;
++        *out = (NodeShadowRecord){
+             .line = node_census_line(s->pp, program->parser, program->input->graph.tokens[root]),
+             .refusal = refusal,
+         };
+@@ -2202,6 +2237,31 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+         shadow->taken_expressions += 1;
+         shadow->taken_nodes += nodes;
+         shadow->taken_records += machine->count;
++        const NodeFrontShadow* front = program->input->node_front;
++        if (front != NULL)
++        {
++            // The front made the expression where each of its nodes' records agreed with the walk's.
++            bool made = root < front->node_capacity && (front->nodes[root >> 6] >> (root & 63) & 1) != 0;
++            bool past = made && (front->past[root >> 6] >> (root & 63) & 1) != 0;
++            for (uint32_t node = first; made && node + 1 < first + records; node += 1)
++            {
++                made = (front->nodes[node >> 6] >> (node & 63) & 1) != 0;
++                past = past || (front->past[node >> 6] >> (node & 63) & 1) != 0;
++            }
++            shadow->front_expressions += made;
++            shadow->front_nodes += made ? nodes : 0;
++            shadow->front_past_expressions += made && past;
++            shadow->front_past_nodes += made && past ? nodes : 0;
++            if (out != NULL)
++            {
++                out->fronted = made;
++            }
++            if (!made && shadow->front_missed_listed < node_census_list)
++            {
++                shadow->front_missed_listed += 1;
++                printf("node-shadow: front missed file=%s line=%u nodes=%u\n", s->file, node_census_line(s->pp, program->parser, program->input->graph.tokens[root]), nodes);
++            }
++        }
+         shadow->entries += machine->entry_count;
+         shadow->calls += machine->call_count;
+         for (uint32_t c = 0; c < machine->call_count; c += 1)
+@@ -2450,6 +2510,43 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+     {
+         printf("node-shadow: fused expressions=%" PRIu64 " differences=%" PRIu64 "\n", shadow->fused_expressions, shadow->fused_differences);
+     }
++    if (shadow->front != 0)
++    {
++        uint64_t left = 0;
++        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
++        {
++            left += shadow->front_left[code];
++        }
++        printf("node-shadow: front %s tokens=%" PRIu64 " left=%" PRIu64 " records=%" PRIu64 " compared=%" PRIu64 " differences=%" PRIu64 " resets=%" PRIu64
++               " waiting-at-the-end=%" PRIu64 "\n",
++               shadow->front == 2 ? "before-the-walk" : "after-the-walk", shadow->front_tokens, left, shadow->front_records, shadow->front_checked, shadow->front_differences,
++               shadow->front_resets, shadow->front_waiting);
++        for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
++        {
++            if (shadow->front_left[code] != 0)
++            {
++                printf("node-shadow: front left class=%s tokens=%" PRIu64 "\n", check_input_expression_code_names[code] != NULL ? check_input_expression_code_names[code] : "?",
++                       shadow->front_left[code]);
++            }
++        }
++        printf("node-shadow: front left sizeof-and-alignof tokens=%" PRIu64 "\n", shadow->front_left_queries);
++        printf("node-shadow: front taken-expressions=%" PRIu64 " (%.2f%%) evaluated-nodes=%" PRIu64 " (%.2f%%)\n", shadow->front_expressions,
++               node_census_share(shadow->front_expressions, shadow->taken_expressions), shadow->front_nodes, node_census_share(shadow->front_nodes, shadow->taken_nodes));
++        printf("node-shadow: front operands=%" PRIu64 " within-%u=%" PRIu64 " (%.3f%%) in-a-byte=%" PRIu64 " further=%" PRIu64 " arguments=%" PRIu64 " (past %u: %" PRIu64
++               ") roots'=%" PRIu64 " (past %u: %" PRIu64 ")\n",
++               shadow->front_operands, BUSTER_NODE_FRONT_NEAR, shadow->front_operands_near, node_census_share(shadow->front_operands_near, shadow->front_operands),
++               shadow->front_operands_byte, shadow->front_operands_far, shadow->front_arguments, BUSTER_NODE_FRONT_NEAR, shadow->front_arguments_past,
++               shadow->front_root_operands, BUSTER_NODE_FRONT_NEAR, shadow->front_root_operands_past);
++        printf("node-shadow: front taken-expressions with an operand past %u records back=%" PRIu64 " (%.3f%%) evaluated-nodes=%" PRIu64 " (%.3f%%)\n", BUSTER_NODE_FRONT_NEAR,
++               shadow->front_past_expressions, node_census_share(shadow->front_past_expressions, shadow->taken_expressions), shadow->front_past_nodes,
++               node_census_share(shadow->front_past_nodes, shadow->taken_nodes));
++        printf("node-shadow: front ticks=%" PRIu64 "\n", shadow->front_ticks);
++    }
++    // The reader's coded walk in the files' one reading, by its parts (TSC ticks): beside the front's where it ran, and
++    // alone where it didn't, the walk as it is.
++    printf("node-shadow: walk ticks classes=%" PRIu64 " prepare=%" PRIu64 " actions=%" PRIu64 " visits=%" PRIu64 "\n",
++           shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_CLASSES], shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_PREPARE],
++           shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_ACTIONS], shadow->walk_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS]);
+     static const char* const sweep_names[BUSTER_NODE_SHADOW_SWEEPS] = { "T", "T+C", "T+C+X", "T+CX", "walk", "walk;T+C+X", "walk;T+CX" };
+     const bool timed[BUSTER_NODE_SHADOW_SWEEPS] = { true, true, true, shadow->fused, shadow->interleave, shadow->interleave, shadow->interleave && shadow->fused };
+     for (uint32_t k = 0; shadow->timed_nodes != 0 && k < BUSTER_NODE_SHADOW_SWEEPS; k += 1)
+@@ -2539,7 +2636,9 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t
+ static bool node_census_file(NodeCensus* census, const char* file, char** options, uint32_t option_count)
+ {
+     static LowerSource source;
++    lower_source_node_front = census->shadow != NULL ? census->shadow->front : 0;
+     const bool valid = lower_source_open(&source, file, options, option_count);
++    lower_source_node_front = 0;
+     const bool prepared = source.prepared;
+     CheckCorpusPath* path = &source.path;
+     CheckProgramSelection selected = source.selected;
+@@ -2653,6 +2752,42 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                 shadow->scratch = &s;
+                 node_shadow_time(shadow, &machine, shadow->file_nodes);
+                 shadow->file_nodes = 0;
++                const NodeFrontShadow* front = path->input.node_front;
++                if (front != NULL)
++                {
++                    shadow->front_ticks += front->ticks;
++                    shadow->front_tokens += front->tokens;
++                    shadow->front_records += front->records;
++                    shadow->front_checked += front->checked;
++                    shadow->front_resets += front->resets;
++                    shadow->front_waiting += front->waiting;
++                    shadow->front_operands += front->operands;
++                    shadow->front_operands_near += front->operands_near;
++                    shadow->front_operands_byte += front->operands_byte;
++                    shadow->front_operands_far += front->operands_far;
++                    shadow->front_root_operands += front->root_operands;
++                    shadow->front_root_operands_past += front->root_operands_past;
++                    shadow->front_arguments += front->arguments;
++                    shadow->front_arguments_past += front->arguments_past;
++                    static const char* const fields[] = { "?", "node", "operator", "operand", "leaf", "member", "arguments", "type", "context", "distance" };
++                    for (uint32_t d = 0; d < front->differences && d < BUSTER_NODE_FRONT_LISTED && shadow->front_listed < node_census_list; d += 1)
++                    {
++                        const uint32_t token = front->difference_tokens[d];
++                        shadow->front_listed += 1;
++                        printf("node-shadow: front difference file=%s line=%u token=%u field=%s\n", file, node_census_line(&source.pp, &source.parser, token), token,
++                               fields[front->difference_fields[d] < BUSTER_ARRAY_LENGTH(fields) ? front->difference_fields[d] : 0]);
++                    }
++                    shadow->front_differences += front->differences;
++                    for (uint32_t code = 0; code < BUSTER_CHECK_EXPRESSION_CODES; code += 1)
++                    {
++                        shadow->front_left[code] += front->left[code];
++                    }
++                    shadow->front_left_queries += front->left_queries;
++                }
++                for (uint32_t part = 0; part < BUSTER_CHECK_EXPRESSION_PARTS; part += 1)
++                {
++                    shadow->walk_ticks[part] += path->input.expression_part_ticks[part];
++                }
+             }
+             census->files += 1;
+         }
+@@ -2752,6 +2887,10 @@ static int run_node_census(int count, char** arguments)
+         {
+             shadow.fused = true;
+         }
++        else if (strcmp(arguments[i], "--front") == 0 || strcmp(arguments[i], "--front-first") == 0)
++        {
++            shadow.front = strcmp(arguments[i], "--front") == 0 ? 1 : 2;
++        }
+         else if (strcmp(arguments[i], "--interleave") == 0)
+         {
+             uint64_t number = 0;
+@@ -2810,7 +2949,8 @@ static int run_node_census(int count, char** arguments)
+     }
+     free(files);
+     free(options);
+-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0);
++    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
++                                          shadow.front_differences != 0);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index d97a0729b..776e62bbf 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -179,6 +179,14 @@ static const char node_census_test_atomic[] =
+ // void, an integer, bool and a pointer, constants among them; a static object's members and its array's subscripts,
+ // constant and not; a pointer's equality with a null pointer constant; sizeof and _Alignof of a type name and an
+ // expression; the comma; and stores of a null pointer constant and of a pointer to a pointer of another pointee.
++// The machine's own front (step 1b) runs over the fixture too, after the walk acted at a chunk and, in the --scalar run,
++// before it: its every record must be the walk's node, and it must make each taken line's expressions but those of the
++// lines that say `// front: left` (sizeof and _Alignof, which the front leaves to the walk). For the front alone, with
++// no expectation of the machine: a static braced initializer (its elements' value context), an automatic array's and a
++// record's with a nested list (their lists' values dropped where nothing takes them, none left waiting), an enumerator's
++// value, a library function called by its name and through its
++// address (the call's library mark), and a switch (its condition's operator, and a case label's constant, whose context
++// the walk's visit gives: unknown to the front).
+ static const char node_shadow_test_text[] =
+     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
+     "struct __jmp_buf_tag { long b[8]; };\n"
+@@ -194,6 +202,8 @@ static const char node_shadow_test_text[] =
+     "int ldf(long double);\n"
+     "int ap(int (*)(int), int);\n"
+     "int getcontext(void*);\n"
++    "unsigned long strlen(const char*);\n"
++    "enum E { E0, E1 = 5 };\n"
+     "long h(struct S* p, struct S s, int a, int b, unsigned u, char c, double d, float e, int* q, const int* r, int (*fp)(int, double),\n"
+     "       int (*sj)(struct __jmp_buf_tag*))\n"
+     "{\n"
+@@ -213,7 +223,7 @@ static const char node_shadow_test_text[] =
+     "    *q = q[1] + p->a[2] + *r; // machine: taken\n"
+     "    q = &g; // machine: taken\n"
+     "    q = q + a; // machine: taken\n"
+-    "    y = (long)sizeof(*p) + (long)q; // machine: taken\n"
++    "    y = (long)sizeof(*p) + (long)q; // front: left // machine: taken\n"
+     "    x = (a < b) == (u >= 3u); // machine: taken\n"
+     "    x = (a % 7) | ((b & 1) ^ c); // machine: taken\n"
+     "    z = z / 3 + (z >> 1) - (unsigned long)y; // machine: taken\n"
+@@ -303,12 +313,22 @@ static const char node_shadow_test_text[] =
+     "    x = 0 != p; // machine: taken\n"
+     "    if (r == 0) // machine: taken\n"
+     "        x = 3; // machine: taken\n"
+-    "    y = sizeof(struct S) + sizeof(int) + _Alignof(double) + sizeof g + sizeof ga; // machine: taken\n"
++    "    y = sizeof(struct S) + sizeof(int) + _Alignof(double) + sizeof g + sizeof ga; // front: left // machine: taken\n"
+     "    x = (f(a), b); // machine: taken\n"
+     "    y = (f(a), q[0]); // machine: taken\n"
+     "    r = q; // machine: taken\n"
+     "    w(0, q); // machine: taken\n"
+     "    p->cb = 0; // machine: taken\n"
++    "    static const int st[3] = { 1, 2, 3 };\n"
++    "    int au[2] = { a, b };\n"
++    "    struct S ls = { a, b, { 1, 2, a, b }, 0, 0 };\n"
++    "    x = E1 + st[1] + au[0] + (int)ls.m;\n"
++    "    x = (int)strlen(\"ef\") + (int)(&strlen)(\"gh\");\n"
++    "    switch (a)\n"
++    "    {\n"
++    "        case 1: x = 1; break;\n"
++    "        default: break;\n"
++    "    }\n"
+     "    return y + x + (long)z; // machine: taken\n"
+     "}\n";
+ 
+@@ -338,6 +358,7 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char**
+         .verify = !scalar,
+         .fused = true,
+         .interleave = true,
++        .front = scalar ? 2 : 1,
+         .chunk = 3,
+         .passes = 1,
+         .repeat = 1,
+@@ -348,13 +369,17 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char**
+             shadow.record_count < shadow.record_capacity;
+     // C and X as one sweep too: every expression T typed, with C's and X's refusal, tape, labels and calls.
+     const bool same = shadow.value_differences == 0 && shadow.entry_differences == 0 && shadow.twin_differences == 0 && shadow.taken_expressions != 0 &&
+-                      (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions;
++                      (scalar || shadow.row_nodes != 0) && shadow.fused_differences == 0 && shadow.fused_expressions >= shadow.taken_expressions &&
++                      shadow.front_differences == 0 && shadow.front_records != 0 && shadow.front_checked == shadow.front_records && shadow.front_resets == 0 &&
++                      shadow.front_waiting == 0;
+     if (!valid || !same)
+     {
+         fprintf(stderr, "test-checker: node-shadow%s: %s: values %" PRIu64 ", entries %" PRIu64 ", twin %" PRIu64 ", fused %" PRIu64 " (of %" PRIu64 ") differ; %" PRIu64
+-                " expressions taken, %" PRIu64 " row-typed nodes\n",
++                " expressions taken, %" PRIu64 " row-typed nodes; the front's records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64
++                " values left waiting\n",
+                 scalar ? " --scalar" : "", valid ? "read" : "NOT READ", shadow.value_differences, shadow.entry_differences, shadow.twin_differences, shadow.fused_differences,
+-                shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes);
++                shadow.fused_expressions, shadow.taken_expressions, shadow.row_nodes, shadow.front_records, shadow.front_checked, shadow.front_differences,
++                shadow.front_resets, shadow.front_waiting);
+     }
+     uint32_t line = 1;
+     const char* at = text;
+@@ -363,23 +388,29 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, char**
+         const char* end = strchr(at, '\n');
+         end = end != NULL ? end : at + strlen(at);
+         const char* expectation = NULL;
++        bool left = false;
+         for (const char* c = at; c + 2 < end && expectation == NULL; c += 1)
+         {
++            left = left || strncmp(c, "// front: left", 14) == 0;
+             expectation = strncmp(c, "// machine: ", 12) == 0 ? c + 12 : NULL;
+         }
+         const uint32_t expected = expectation != NULL ? node_shadow_test_named(expectation, (uint32_t)(end - expectation)) : NODE_MACHINE_REFUSALS;
+         uint32_t found = 0;
+         uint32_t matched = 0;
++        uint32_t fronted = 0;
+         for (uint32_t r = 0; r < shadow.record_count; r += 1)
+         {
+             found += shadow.records_out[r].line == line;
+             matched += shadow.records_out[r].line == line && shadow.records_out[r].refusal == expected;
++            fronted += shadow.records_out[r].line == line && shadow.records_out[r].fronted;
+         }
+-        const bool held = expectation == NULL || (expected != NODE_MACHINE_REFUSALS && (expected == NODE_MACHINE_TAKEN ? found != 0 && matched == found : matched != 0));
++        // A taken line's expressions are the front's too, each of them, or (`// front: left`) none.
++        const bool made = expected != NODE_MACHINE_TAKEN || (left ? fronted == 0 : fronted == found);
++        const bool held = expectation == NULL || (expected != NODE_MACHINE_REFUSALS && (expected == NODE_MACHINE_TAKEN ? found != 0 && matched == found : matched != 0) && made);
+         if (!held)
+         {
+-            fprintf(stderr, "test-checker: node-shadow%s: line %u: expected %.*s, found %u expressions, %u as expected\n", scalar ? " --scalar" : "", line,
+-                    (int)(expectation != NULL ? end - expectation : 0), expectation != NULL ? expectation : "", found, matched);
++            fprintf(stderr, "test-checker: node-shadow%s: line %u: expected %.*s, found %u expressions, %u as expected, %u the front's%s\n", scalar ? " --scalar" : "", line,
++                    (int)(expectation != NULL ? end - expectation : 0), expectation != NULL ? expectation : "", found, matched, fronted, left ? " (expected none)" : "");
+         }
+         valid = valid && held;
+         line += 1;
+@@ -458,6 +489,63 @@ static bool node_census_test_fixture(const char* directory, const char* name, co
+     return valid;
+ }
+ 
++// The front at its limits, on generated text read with `options`, the front run after the walk acted at a chunk or
++// (`first`) before it. `boundaries`: a body of statements whose tokens are 29 a round, so that the chunks' ends (1,024
++// postorder positions each) fall at every place within a call of a library function by its name and through its address:
++// a callee's record waits for its call in the next chunk, kept with its use. Else (`!boundaries`) more values waiting than
++// the front's stack holds: an automatic array's initializer of some 4,150 elements with ten calls about its 4,096th
++// value, one of them astride the stack's last entry, which must make every waiting value unknown (a reset) and leave the
++// call to the walk. Whether every record was the walk's node, none was left waiting, and the stack was reset as expected.
++static bool node_front_test_limits(const char* directory, bool boundaries, bool first, char** options, uint32_t option_count)
++{
++    char path[512];
++    snprintf(path, sizeof(path), "%s/limits.c", directory);
++    const uint32_t capacity = 1u << 18;
++    char* text = malloc(capacity);
++    uint32_t length = 0;
++    bool valid = text != NULL;
++    if (valid && boundaries)
++    {
++        length += (uint32_t)snprintf(text + length, capacity - length, "unsigned long strlen(const char*);\nint lb(int a)\n{\n    int x = a;\n");
++        for (uint32_t round = 0; round < 1100 && length + 128 < capacity; round += 1)
++        {
++            length += (uint32_t)snprintf(text + length, capacity - length, "    x += (int)(&strlen)(\"ab\"); x += (int)strlen(\"cd\"); x++; x++;\n");
++        }
++        length += (uint32_t)snprintf(text + length, capacity - length, "    return x;\n}\n");
++    }
++    else if (valid)
++    {
++        length += (uint32_t)snprintf(text + length, capacity - length, "int f2(int, int);\nint lc(int a, int b)\n{\n    int big[4200] = {\n");
++        for (uint32_t element = 0; element < 4150 && length + 64 < capacity; element += 1)
++        {
++            const bool call = element >= 4089 && element < 4099;
++            length += (uint32_t)snprintf(text + length, capacity - length, call ? "f2(a, b),\n" : (element & 31) == 31 ? "1,\n" : "1, ");
++        }
++        length += (uint32_t)snprintf(text + length, capacity - length, "1 };\n    return big[0];\n}\n");
++    }
++    valid = valid && length + 256 < capacity && parse_test_write(path, text, length);
++    NodeShadow shadow = {
++        .scalar = true,
++        .front = first ? 2 : 1,
++        .passes = 1,
++        .repeat = 1,
++    };
++    NodeCensus census = { .shadow = &shadow };
++    fflush(stdout);
++    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
++    const bool same = shadow.front_differences == 0 && shadow.front_records != 0 && shadow.front_checked == shadow.front_records && shadow.front_waiting == 0 &&
++                      (shadow.front_resets != 0) == !boundaries;
++    if (!valid || !same)
++    {
++        fprintf(stderr, "test-checker: node-front %s%s: %s: records %" PRIu64 ", compared %" PRIu64 ", %" PRIu64 " differ, %" PRIu64 " resets, %" PRIu64 " values left waiting\n",
++                boundaries ? "chunk boundaries" : "full stack", first ? " (before the walk)" : "", valid ? "read" : "NOT READ", shadow.front_records, shadow.front_checked,
++                shadow.front_differences, shadow.front_resets, shadow.front_waiting);
++    }
++    free(text);
++    unlink(path);
++    return valid && same;
++}
++
+ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+ {
+     char directory[] = "/tmp/buster-node-census-XXXXXX";
+@@ -499,6 +587,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+     char* unsigned_char[] = { "-nostdinc", "-Wall", "-Wextra", "-Wshift-sign-overflow", "-Wassign-enum", "-funsigned-char" };
+     check_test_expect(test, ready && node_shadow_test_fixture(directory, false, unsigned_char, BUSTER_ARRAY_LENGTH(unsigned_char)),
+                       "node-shadow -funsigned-char: the machine converts plain char constants as the unit's char is signed");
++    // The machine's own front at its limits (step 1b): a chunk's end at every place within a call, and a full stack.
++    check_test_expect(test, ready && node_front_test_limits(directory, true, false, loud, BUSTER_ARRAY_LENGTH(loud)),
++                      "node-front: a callee waiting across a chunk's end keeps its use, a library call's mark the walk's");
++    check_test_expect(test, ready && node_front_test_limits(directory, true, true, loud, BUSTER_ARRAY_LENGTH(loud)),
++                      "node-front before the walk: a callee waiting across a chunk's end keeps its use");
++    check_test_expect(test, ready && node_front_test_limits(directory, false, false, loud, BUSTER_ARRAY_LENGTH(loud)),
++                      "node-front: a full stack makes every waiting value unknown and leaves the call astride its end to the walk");
+     // Every warning has the census's class (node_census_warning_classes): one added since fails here until it has one.
+     uint32_t unclassified = 0;
+     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+new file mode 100644
+index 000000000..43e2f11ce
+--- /dev/null
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -0,0 +1,979 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// The node machine's front (#2524, step 1b, docs/node-machine.md): the records the machine's T would type, made from the
++// tokens the expressions' walk acts at, their classes and the reader's answers, without the walk's chains of values
++// through the token columns and without its graph. In the shadow it runs beside the coded walk (PPOptions.node_front),
++// which is its oracle: each record is compared with the node the walk made at the same token. No compile takes it.
++//
++// A record is a node's operator, its token, its operands as earlier records, each also as a byte, its distance back in
++// the postorder (what #2850's layout asks of the front: an operand's facts are then a permute over the block of records
++// before it, not a gather), and what the operator reads beside them: a leaf's value (the chunk's identifiers' and literals' entries, a string's object), a member's name, a call's arguments
++// and its library mark, the type the token's query asked for. The operands come from a stack of the values not yet
++// taken, in groups that share a consumer: a value's is its token's parent, and a token that passes its children's values
++// on (a list, a group, a separator, a braced initializer) gives its group to its own parent, in one store however many
++// values it holds. A token's values are then the top group's, where the token is its consumer, in source order, and a
++// value whose consumer never acts is no entry at all. So a token costs its class's case, a load of its parent, and its
++// record's stores, all in arrays a chunk long; nothing is written a token.
++//
++// A token the front has no case for (the walk's own visits, a class's action's rarer branches, a literal whose decoding
++// reports) is left: its values are taken and it gives an unknown one, which leaves its consumer in turn. A full
++// expression with such a token has records only for the subtrees below it, and the shadow counts its nodes as not the
++// front's (NodeFrontShadow.nodes).
++// Included by c_check_input.c after the coded walk.
++
++// The records the front holds: a chunk's, and those a full expression that began in an earlier chunk still needs.
++#define BUSTER_NODE_FRONT_RECORDS 4096u
++// The most values a token takes here: a call's callee and arguments, a terminator's values.
++#define BUSTER_NODE_FRONT_VALUES 64u
++// A stack entry whose value a left token gave, and an operand a record doesn't have.
++#define BUSTER_NODE_FRONT_UNKNOWN UINT32_MAX
++// A leaf's value with more than a record's columns hold (a floating constant, a wide integer), by its place among them.
++#define BUSTER_NODE_FRONT_WIDES 1024u
++// An operand's distance where it doesn't fit its byte: 255 records back or more. And the distance within which an operand's
++// facts are in the block of 64 records before its record's (#2850).
++#define BUSTER_NODE_FRONT_FAR 255u
++#define BUSTER_NODE_FRONT_NEAR 64u
++
++// The differing records a file's report lists.
++#define BUSTER_NODE_FRONT_LISTED 16u
++
++// What the shadow reports of the front (CheckInput.node_front), in the output's arena.
++typedef struct NodeFrontShadow NodeFrontShadow;
++struct NodeFrontShadow
++{
++    // The TSC's ticks of the front's own pass over the chunks (the comparison is outside them), the acting tokens it
++    // read and the records it made.
++    uint64_t ticks;
++    uint64_t tokens;
++    uint64_t records;
++    // The records compared with the walk's nodes, and those that differ: a difference is a failure.
++    uint64_t checked;
++    uint64_t differences;
++    // The tokens left, by class, and the times a full expression outgrew the front's arrays.
++    uint64_t left[BUSTER_CHECK_EXPRESSION_CODES];
++    // Of the tokens left, the sizeof and _Alignof ones.
++    uint64_t left_queries;
++    uint64_t resets;
++    // The values still waiting at the unit's end: none, where every value's consumer took it.
++    uint64_t waiting;
++    // The first records that differed: each one's token and field (BUSTER_NODE_FRONT_FIELD_*).
++    uint32_t difference_tokens[BUSTER_NODE_FRONT_LISTED];
++    uint32_t difference_fields[BUSTER_NODE_FRONT_LISTED];
++    // A bit a graph node: the nodes whose records agreed.
++    uint64_t* nodes;
++    uint32_t node_capacity;
++    // The operands of the records that are no full expression's root (a discard, a condition, a return's conversion, an
++    // initialization, whose operand is the expression's value, a body away for a loop's or a switch's condition), by their
++    // distance back: within BUSTER_NODE_FRONT_NEAR, further but in the byte, and BUSTER_NODE_FRONT_FAR or more. The
++    // roots' operands, and those of them further than BUSTER_NODE_FRONT_NEAR. And the operands whose distance isn't the
++    // difference of the walk's two nodes, which must be none where the front made every node between them.
++    uint64_t operands;
++    uint64_t operands_near;
++    uint64_t operands_byte;
++    uint64_t operands_far;
++    uint64_t root_operands;
++    uint64_t root_operands_past;
++    // The calls' arguments, and those further back than BUSTER_NODE_FRONT_NEAR from their call.
++    uint64_t arguments;
++    uint64_t arguments_past;
++    // A bit a graph node: the nodes with an operand further back than BUSTER_NODE_FRONT_NEAR, no root's.
++    uint64_t* past;
++    // A byte a graph node: the context the front gives the node's record, compared once the walk has acted at every
++    // token (a list gives its values theirs when the walk reaches it), or BUSTER_NODE_FRONT_CONTEXT_UNKNOWN for a record
++    // whose value a left token took.
++    uint8_t* contexts;
++};
++
++#define BUSTER_NODE_FRONT_CONTEXT_UNKNOWN 0xffu
++
++#define BUSTER_NODE_FRONT_FIELD_NODE 1u
++#define BUSTER_NODE_FRONT_FIELD_OPERATOR 2u
++#define BUSTER_NODE_FRONT_FIELD_OPERAND 3u
++#define BUSTER_NODE_FRONT_FIELD_LEAF 4u
++#define BUSTER_NODE_FRONT_FIELD_MEMBER 5u
++#define BUSTER_NODE_FRONT_FIELD_ARGUMENTS 6u
++#define BUSTER_NODE_FRONT_FIELD_TYPE 7u
++#define BUSTER_NODE_FRONT_FIELD_CONTEXT 8u
++#define BUSTER_NODE_FRONT_FIELD_DISTANCE 9u
++
++typedef struct NodeFront NodeFront;
++struct NodeFront
++{
++    NodeFrontShadow* shadow;
++    // The records made, the first of the chunk being read (the comparison's), the stack's entries, the calls' arguments
++    // and the wide leaves so far.
++    uint32_t count;
++    uint32_t pending;
++    uint32_t stack_count;
++    uint32_t argument_count;
++    uint32_t wide_count;
++    // The records made in the unit so far: a record's place in the unit's postorder (`ordinals`), which a chunk's
++    // renumbering of the kept records doesn't change.
++    uint32_t ordinal;
++    // A record's columns. `forms` is the walk's CheckInputNodeForm, which says where its requested type and its context
++    // come from; `types` the type its token's query asked for (a return's, the function's), `contexts` the graph's
++    // context bits; `wides` a leaf's place among the wide values plus one, or 0.
++    uint8_t ops[BUSTER_NODE_FRONT_RECORDS];
++    uint8_t forms[BUSTER_NODE_FRONT_RECORDS];
++    uint8_t contexts[BUSTER_NODE_FRONT_RECORDS];
++    // Whether a left token took the record's value: the walk's visit may then give its node a context (a constant
++    // expression's, an assertion's), which the front doesn't know.
++    uint8_t taken_by_left[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t tokens[BUSTER_NODE_FRONT_RECORDS];
++    // Its operands: as records, which the comparison follows, and as the machine would read them, each one's distance back
++    // in the postorder in a byte (0 for none, BUSTER_NODE_FRONT_FAR for that or more). `roots`: a full expression's root.
++    uint32_t operands[3][BUSTER_NODE_FRONT_RECORDS];
++    uint8_t distances[3][BUSTER_NODE_FRONT_RECORDS];
++    uint8_t roots[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t ordinals[BUSTER_NODE_FRONT_RECORDS];
++    // The token of the name a record is, or is the address of (a call's library mark reads its callee's), or
++    // BUSTER_CHECK_NONE.
++    uint32_t uses[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t members[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t argument_firsts[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t argument_counts[BUSTER_NODE_FRONT_RECORDS];
++    TypeId types[BUSTER_NODE_FRONT_RECORDS];
++    // A leaf's value as a graph leaf's record holds it.
++    TypeId leaf_types[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t leaf_flags[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t leaf_objects[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t leaf_heads[BUSTER_NODE_FRONT_RECORDS];
++    uint64_t leaf_integers[BUSTER_NODE_FRONT_RECORDS];
++    uint8_t leaf_categories[BUSTER_NODE_FRONT_RECORDS];
++    uint8_t leaf_constants[BUSTER_NODE_FRONT_RECORDS];
++    uint16_t wides[BUSTER_NODE_FRONT_RECORDS];
++    // The walk's node of a record, once compared (BUSTER_CHECK_NONE for one that differed).
++    uint32_t nodes[BUSTER_NODE_FRONT_RECORDS];
++    // The values not yet taken, each one's record (or BUSTER_NODE_FRONT_UNKNOWN), in groups of one consumer: a group's
++    // consumer's token and its first value's place. Two groups next to each other never share a consumer.
++    uint32_t stack[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t group_consumers[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t group_firsts[BUSTER_NODE_FRONT_RECORDS];
++    uint32_t group_count;
++    // Whether the stack is full and its entries forgotten already (node_front_give).
++    bool full;
++    uint32_t arguments[BUSTER_NODE_FRONT_RECORDS];
++    CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
++};
++
++// The front's counters while it reads a chunk (node_front_chunk), apart from its arrays so that they stay in registers:
++// a store to a column would otherwise have each of them read again. The front keeps them between chunks.
++typedef struct NodeFrontCursor NodeFrontCursor;
++struct NodeFrontCursor
++{
++    uint32_t count;
++    uint32_t stack_count;
++    uint32_t group_count;
++    uint32_t ordinal;
++    uint32_t argument_count;
++    uint32_t wide_count;
++    // The entries the last token took off the stack (node_front_values): their place and how many.
++    uint32_t taken_first;
++    uint32_t taken_count;
++    bool full;
++};
++
++// Whether the walk acts at `token` so as to read its children's values: a token it never acts at, or whose action is
++// nothing, takes none, and a value given to it is no entry.
++static inline bool node_front_consumes(const CheckInputReader* reader, uint32_t token)
++{
++    const uint8_t visit = token < reader->parser->tokens.count ? reader->visits[token] : 0;
++    return (visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && (visit & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT != CHECK_INPUT_CODE_DROP;
++}
++
++// The front no longer knows the record's node's context: a left token took its value, or the stack lost it.
++static inline void node_front_context_unknown(NodeFront* front, uint32_t record)
++{
++    NodeFrontShadow* shadow = front->shadow;
++    const uint32_t node = front->nodes[record];
++    front->taken_by_left[record] = 1;
++    if (node < shadow->node_capacity)
++    {
++        shadow->contexts[node] = BUSTER_NODE_FRONT_CONTEXT_UNKNOWN;
++    }
++}
++
++// Every waiting value made unknown: the stack has no room for one more (a static table's thousands of elements wait
++// for their list's end), or the arrays none for the records they name. Their consumers are left in turn.
++static __attribute__((noinline)) void node_front_forget(NodeFront* front, uint32_t stack_count)
++{
++    for (uint32_t i = 0; i < stack_count; i += 1)
++    {
++        const uint32_t record = front->stack[i];
++        if (record != BUSTER_NODE_FRONT_UNKNOWN)
++        {
++            node_front_context_unknown(front, record);
++        }
++        front->stack[i] = BUSTER_NODE_FRONT_UNKNOWN;
++    }
++    front->shadow->resets += 1;
++}
++
++// Gives a token's value, `record` (or BUSTER_NODE_FRONT_UNKNOWN), to its parent, `consumer`, where that takes values
++// (`consumed`): an entry of the top group where that is the parent's already, else of a new one. With no room for it,
++// the value is lost and every waiting one unknown.
++static inline __attribute__((always_inline)) void node_front_give(NodeFront* front, NodeFrontCursor* cursor, uint32_t consumer, bool consumed, uint32_t record)
++{
++    if (consumed && cursor->stack_count == BUSTER_NODE_FRONT_RECORDS)
++    {
++        // Once for a full stack: its entries stay unknown while it is full.
++        if (!cursor->full)
++        {
++            node_front_forget(front, cursor->stack_count);
++            cursor->full = true;
++        }
++        if (record != BUSTER_NODE_FRONT_UNKNOWN)
++        {
++            node_front_context_unknown(front, record);
++        }
++    }
++    else if (consumed)
++    {
++        if (cursor->group_count == 0 || front->group_consumers[cursor->group_count - 1] != consumer)
++        {
++            front->group_consumers[cursor->group_count] = consumer;
++            front->group_firsts[cursor->group_count] = cursor->stack_count;
++            cursor->group_count += 1;
++        }
++        front->stack[cursor->stack_count] = record;
++        cursor->stack_count += 1;
++        cursor->full = false;
++    }
++}
++
++// A token that passes its children's values on (a list, a separator, a group's closing, a braced initializer's
++// assignment): its group becomes its parent's (`consumer`), joined to the group below where that is the parent's too, or
++// is dropped where the parent takes no values (`!consumed`). A static braced initializer's list gives each value's record the value context, as
++// the walk's list does when it reaches the token.
++static inline __attribute__((always_inline)) void node_front_pass(NodeFront* front, NodeFrontCursor* cursor, CheckInputReader* reader, uint32_t token, uint32_t consumer,
++                                                                  bool consumed)
++{
++    if (cursor->group_count != 0 && front->group_consumers[cursor->group_count - 1] == token)
++    {
++        const uint32_t top = cursor->group_count - 1;
++        const uint32_t first = front->group_firsts[top];
++        if (BUSTER_CHECK_RARE(reader, static_initializers, token))
++        {
++            NodeFrontShadow* shadow = front->shadow;
++            for (uint32_t i = first; i < cursor->stack_count; i += 1)
++            {
++                const uint32_t record = front->stack[i];
++                if (record != BUSTER_NODE_FRONT_UNKNOWN)
++                {
++                    const uint32_t node = front->nodes[record];
++                    front->contexts[record] |= BUSTER_CHECK_CONTEXT_VALUE;
++                    if (node < shadow->node_capacity && shadow->contexts[node] != BUSTER_NODE_FRONT_CONTEXT_UNKNOWN)
++                    {
++                        shadow->contexts[node] |= BUSTER_CHECK_CONTEXT_VALUE;
++                    }
++                }
++            }
++        }
++        if (!consumed)
++        {
++            cursor->stack_count = first;
++            cursor->group_count = top;
++        }
++        else if (top != 0 && front->group_consumers[top - 1] == consumer)
++        {
++            cursor->group_count = top;
++        }
++        else
++        {
++            front->group_consumers[top] = consumer;
++        }
++    }
++}
++
++// `token`'s values, the top group's where the token is its consumer, taken off the stack into `values` in source order:
++// how many, or BUSTER_NODE_FRONT_UNKNOWN where one is unknown or they are more than BUSTER_NODE_FRONT_VALUES.
++static inline __attribute__((always_inline)) uint32_t node_front_values(NodeFront* front, NodeFrontCursor* cursor, uint32_t token, uint32_t* values)
++{
++    const bool grouped = cursor->group_count != 0 && front->group_consumers[cursor->group_count - 1] == token;
++    const uint32_t first = grouped ? front->group_firsts[cursor->group_count - 1] : cursor->stack_count;
++    const uint32_t count = cursor->stack_count - first;
++    bool known = count <= BUSTER_NODE_FRONT_VALUES;
++    for (uint32_t i = 0; known && i < count; i += 1)
++    {
++        values[i] = front->stack[first + i];
++        known = values[i] != BUSTER_NODE_FRONT_UNKNOWN;
++    }
++    cursor->taken_first = first;
++    cursor->taken_count = count;
++    cursor->stack_count = first;
++    cursor->group_count -= grouped;
++    return known ? count : BUSTER_NODE_FRONT_UNKNOWN;
++}
++
++// The values the last token took (node_front_values) are a left token's: their records' nodes may get a context from the
++// walk's visit, which the front doesn't know. A record compared already says so at its node.
++static inline void node_front_taken_by_left(NodeFront* front, NodeFrontCursor* cursor)
++{
++    for (uint32_t i = 0; i < cursor->taken_count; i += 1)
++    {
++        const uint32_t record = front->stack[cursor->taken_first + i];
++        if (record != BUSTER_NODE_FRONT_UNKNOWN)
++        {
++            node_front_context_unknown(front, record);
++        }
++    }
++    cursor->taken_count = 0;
++}
++
++// A record of `op` at `token` with operands a, b and c (records, or BUSTER_NODE_FRONT_UNKNOWN for none): its index, or
++// BUSTER_NODE_FRONT_UNKNOWN where the front's arrays are full.
++static inline __attribute__((always_inline)) uint32_t node_front_add(NodeFront* front, NodeFrontCursor* cursor, CheckOp op, uint32_t token, uint32_t a, uint32_t b, uint32_t c,
++                                                                     CheckInputNodeForm form, TypeId type)
++{
++    const uint32_t record = cursor->count;
++    uint32_t result = BUSTER_NODE_FRONT_UNKNOWN;
++    if (record < BUSTER_NODE_FRONT_RECORDS)
++    {
++        front->ops[record] = (uint8_t)op;
++        front->forms[record] = (uint8_t)form;
++        front->contexts[record] = 0;
++        front->taken_by_left[record] = 0;
++        front->tokens[record] = token;
++        const uint32_t ordinal = cursor->ordinal;
++        const uint32_t operands[3] = { a, b, c };
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            const uint32_t distance = operands[k] != BUSTER_NODE_FRONT_UNKNOWN ? ordinal - front->ordinals[operands[k]] : 0;
++            front->operands[k][record] = operands[k];
++            front->distances[k][record] = (uint8_t)(distance < BUSTER_NODE_FRONT_FAR ? distance : BUSTER_NODE_FRONT_FAR);
++        }
++        front->ordinals[record] = ordinal;
++        cursor->ordinal = ordinal + 1;
++        front->roots[record] = form == CHECK_INPUT_FORM_DISCARD || form == CHECK_INPUT_FORM_INITIALIZER;
++        front->uses[record] = op == CHECK_OP_VALUE ? token : op == CHECK_OP_ADDRESS && a != BUSTER_NODE_FRONT_UNKNOWN && front->ops[a] == CHECK_OP_VALUE ? front->tokens[a] :
++                                                             BUSTER_CHECK_NONE;
++        front->members[record] = 0;
++        front->argument_firsts[record] = 0;
++        front->argument_counts[record] = 0;
++        front->types[record] = type;
++        front->wides[record] = 0;
++        front->nodes[record] = BUSTER_CHECK_NONE;
++        cursor->count = record + 1;
++        result = record;
++    }
++    return result;
++}
++
++// A leaf's record of `value` at `token`, or BUSTER_NODE_FRONT_UNKNOWN where the arrays are full.
++static inline __attribute__((always_inline)) uint32_t node_front_leaf(NodeFront* front, NodeFrontCursor* cursor, uint32_t token, const CheckValue* value)
++{
++    const bool wide = check_graph_leaf_rest(value);
++    const bool room = !wide || cursor->wide_count < BUSTER_NODE_FRONT_WIDES;
++    const uint32_t record = room ? node_front_add(front, cursor, CHECK_OP_VALUE, token, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
++                                                  CHECK_INPUT_FORM_LEAF, 0) : BUSTER_NODE_FRONT_UNKNOWN;
++    if (record != BUSTER_NODE_FRONT_UNKNOWN)
++    {
++        front->leaf_types[record] = value->type;
++        front->leaf_flags[record] = value->flags;
++        front->leaf_objects[record] = value->object;
++        front->leaf_heads[record] = value->overload_head;
++        front->leaf_integers[record] = (uint64_t)value->integer;
++        front->leaf_categories[record] = (uint8_t)value->category;
++        front->leaf_constants[record] = (uint8_t)value->constant_kind;
++        if (wide)
++        {
++            front->wide_values[cursor->wide_count] = *value;
++            cursor->wide_count += 1;
++            front->wides[record] = (uint16_t)cursor->wide_count;
++        }
++    }
++    return record;
++}
++
++// The literal `token` decoded as check_input_literal decodes it, where that is all it does: false for a literal it reports,
++// warns of or makes a type for (an embedded resource, a bit-precise constant, a character constant with an escape or of
++// several characters, a literal with a warning's event), which is the reader's own.
++static bool node_front_literal(CheckInputReader* reader, uint32_t token, CheckLiteral* result)
++{
++    const Parser* parser = reader->parser;
++    const uint64_t mark = reader->scratch->length;
++    const uint8_t* bytes = 0;
++    uint32_t length = 0;
++    const uint32_t name = parser->tokens.names[token];
++    uint32_t embed_length = 0;
++    bool plain = false;
++    *result = (CheckLiteral){ 0 };
++    if (parse_embed_bytes(parser, token, &embed_length) != NULL)
++    {
++        plain = false;
++    }
++    else if (name == C_NAME_TRUE || name == C_NAME_FALSE)
++    {
++        result->type = BUSTER_TYPE_BOOL;
++        result->integer = name == C_NAME_TRUE;
++        result->valid = true;
++        plain = true;
++    }
++    else if (name == C_NAME_NULLPTR || name == C_NAME_GNU_NULLPTR)
++    {
++        result->type = BUSTER_TYPE_NULLPTR;
++        result->valid = true;
++        plain = true;
++    }
++    else if (name == 0 && check_input_spelling(reader, token, &bytes, &length))
++    {
++        if (parser->tokens.kinds[token] == PARSE_KIND_CHARACTER)
++        {
++            bool escaped = false;
++            for (uint32_t i = 0; i < length; i += 1)
++            {
++                escaped = escaped || bytes[i] == '\\';
++            }
++            *result = check_literal_character(bytes, length, reader->pp->options.language.standard >= 2023, reader->types->char_unsigned);
++            plain = result->valid && !escaped && result->characters <= 1;
++        }
++        else
++        {
++            check_literal_number(bytes, length, reader->scratch, result);
++            plain = result->valid;
++        }
++    }
++    CheckWarningEvent event;
++    plain = plain && result->valid && result->bit_width == 0 && !result->resource && !check_literal_warning_event(result, token, &event);
++    arena_pop_to(reader->scratch, mark);
++    return plain;
++}
++
++// A call's library mark, as the walk's call gives it (check_input_expression_call): the plain library builtin its callee's
++// declaration is, where the callee is a name or the address of one.
++static uint32_t node_front_library(NodeFront* front, CheckInputReader* reader, uint32_t callee)
++{
++    const uint32_t use = front->uses[callee];
++    uint32_t library = use != BUSTER_CHECK_NONE ? check_input_library_call(reader, use) : 0;
++    library = library != 0 && check_input_no_builtin(reader, reader->parser->tokens.names[use], use) ? 0 : library;
++    return library;
++}
++
++// Before a chunk: the records the waiting values still name kept, in their order, and every other one dropped. A
++// condition's value waits for its statement's body (the tree puts a control's closing after it). A kept record was
++// compared in its own chunk, so only what a later record reads of it stays: its place in the postorder (an operand's
++// distance), its node (the comparison of its consumer), and its operator, token and use (a callee's library mark).
++static void node_front_keep(NodeFront* front)
++{
++    uint32_t kept = 0;
++    for (uint32_t i = 0; i < front->stack_count; i += 1)
++    {
++        const uint32_t record = front->stack[i];
++        if (record != BUSTER_NODE_FRONT_UNKNOWN)
++        {
++            front->ops[kept] = front->ops[record];
++            front->tokens[kept] = front->tokens[record];
++            front->ordinals[kept] = front->ordinals[record];
++            front->uses[kept] = front->uses[record];
++            front->nodes[kept] = front->nodes[record];
++            front->stack[i] = kept;
++            kept += 1;
++        }
++    }
++    front->count = kept;
++    front->pending = kept;
++    front->argument_count = 0;
++    front->wide_count = 0;
++}
++
++// The front's pass over a chunk's `acting` tokens and classes, in the walk's order, with the chunk's identifiers' and
++// literals' entries (check_input_expression_identifiers, check_input_expression_literals): each token's record, or
++// none, by its class.
++static void node_front_chunk(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
++                             const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
++{
++    const Parser* parser = reader->parser;
++    const CheckInput* input = reader->output;
++    NodeFrontShadow* shadow = front->shadow;
++    const uint32_t token_count = parser->tokens.count;
++    const uint64_t start = __rdtsc();
++    node_front_keep(front);
++    if (front->count + BUSTER_CHECK_EXPRESSION_CHUNK > BUSTER_NODE_FRONT_RECORDS)
++    {
++        // More values wait than the arrays keep beside a chunk's records.
++        node_front_forget(front, front->stack_count);
++        front->count = 0;
++        front->pending = 0;
++    }
++    // Each acting token's parent, and whether the walk acts at it so as to take its children's values: read for the whole
++    // chunk first, where one token's loads don't wait for another's.
++    uint32_t consumers[BUSTER_CHECK_EXPRESSION_CHUNK];
++    uint8_t consumed[BUSTER_CHECK_EXPRESSION_CHUNK];
++    for (uint32_t i = 0; i < acting; i += 1)
++    {
++        const uint32_t consumer = parser->tree.parents[tokens[i]];
++        consumers[i] = consumer;
++        consumed[i] = node_front_consumes(reader, consumer);
++    }
++    NodeFrontCursor cursor =
++    {
++        .count = front->count,
++        .stack_count = front->stack_count,
++        .group_count = front->group_count,
++        .ordinal = front->ordinal,
++        .argument_count = front->argument_count,
++        .wide_count = front->wide_count,
++        .full = front->full,
++    };
++    uint32_t identifier = 0;
++    uint32_t literal = 0;
++    uint32_t values[BUSTER_NODE_FRONT_VALUES];
++    for (uint32_t i = 0; i < acting; i += 1)
++    {
++        const uint32_t token = tokens[i];
++        const uint32_t code = (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++        // Whether the front leaves the token, and whether the token has a value for its consumer: its record's, or an
++        // unknown one where it is left or the arrays are full.
++        uint32_t record = BUSTER_NODE_FRONT_UNKNOWN;
++        bool value = false;
++        bool left = false;
++        cursor.taken_count = 0;
++        switch (code)
++        {
++            case CHECK_INPUT_CODE_LIST:
++            case CHECK_INPUT_CODE_SEPARATOR:
++            case CHECK_INPUT_CODE_GROUP:
++                node_front_pass(front, &cursor, reader, token, consumers[i], consumed[i] != 0);
++                break;
++            case CHECK_INPUT_CODE_IDENTIFIER:
++            {
++                const uint32_t at = identifier;
++                const uint32_t status = identifiers->status[at];
++                identifier += 1;
++                left = (status & BUSTER_CHECK_IDENTIFIER_ACTED) == 0;
++                value = left || (status & BUSTER_CHECK_IDENTIFIER_NODE) != 0;
++                if (!left && value)
++                {
++                    const CheckValue leaf =
++                    {
++                        .type = (TypeId)identifiers->types[at],
++                        .category = (CheckCategory)(identifiers->types[at] >> 32),
++                        .flags = (uint32_t)identifiers->flags[at],
++                        .constant_kind = (CheckConstantKind)(identifiers->flags[at] >> 32),
++                        .integer = (status & BUSTER_CHECK_IDENTIFIER_ENUMERATOR) != 0 ? reader->enum_values[identifiers->declarations[at]] : 0,
++                        .object = (uint32_t)identifiers->objects[at],
++                        .overload_head = (uint32_t)(identifiers->objects[at] >> 32),
++                    };
++                    record = node_front_leaf(front, &cursor, token, &leaf);
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_LITERAL:
++            {
++                const uint32_t at = literal;
++                literal += 1;
++                CheckLiteral decoded = { .type = BUSTER_TYPE_INT, .integer = literals->values[at], .valid = true };
++                left = check_input_function_name_token(parser, token) || (literals->values[at] == BUSTER_CHECK_NONE && !node_front_literal(reader, token, &decoded));
++                value = true;
++                if (!left)
++                {
++                    const CheckValue leaf = check_input_literal_value(reader, token, decoded);
++                    record = node_front_leaf(front, &cursor, token, &leaf);
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_STRING:
++            {
++                const CheckInitString* string = check_input_string(reader, token);
++                value = string != 0;
++                if (value)
++                {
++                    const CheckValue leaf =
++                    {
++                        .type = string->type,
++                        .category = CHECK_LVALUE,
++                        .flags = BUSTER_CHECK_STATIC_OBJECT | (string->object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
++                        .constant_kind = CHECK_CONSTANT_ADDRESS,
++                        .object = string->object,
++                    };
++                    record = node_front_leaf(front, &cursor, token, &leaf);
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_PREFIX:
++            case CHECK_INPUT_CODE_POSTFIX:
++            case CHECK_INPUT_CODE_BINARY:
++            case CHECK_INPUT_CODE_CAST:
++            case CHECK_INPUT_CODE_SUBSCRIPT:
++            case CHECK_INPUT_CODE_TERNARY:
++            case CHECK_INPUT_CODE_MEMBER:
++            {
++                const uint32_t count = node_front_values(front, &cursor, token, values);
++                const uint8_t kind = parser->tokens.kinds[token];
++                CheckOp op = CHECK_OP_COUNT;
++                uint32_t wanted = 1;
++                uint32_t member = 0;
++                switch (code)
++                {
++                    case CHECK_INPUT_CODE_PREFIX:
++                        switch (kind)
++                        {
++                            case PARSE_KIND_PLUS: op = CHECK_OP_POSITIVE; break;
++                            case PARSE_KIND_EXTENSION: op = CHECK_OP_SELECT; break;
++                            case PARSE_KIND_MINUS: op = CHECK_OP_NEGATIVE; break;
++                            case PARSE_KIND_EXCLAIM: op = CHECK_OP_NOT; break;
++                            case PARSE_KIND_TILDE: op = CHECK_OP_BIT_NOT; break;
++                            case PARSE_KIND_AMP: op = CHECK_OP_ADDRESS; break;
++                            case PARSE_KIND_STAR: op = CHECK_OP_DEREFERENCE; break;
++                            case PARSE_KIND_PLUSPLUS: op = CHECK_OP_PRE_INCREMENT; break;
++                            case PARSE_KIND_MINUSMINUS: op = CHECK_OP_PRE_DECREMENT; break;
++                            default: break;
++                        }
++                        break;
++                    case CHECK_INPUT_CODE_POSTFIX:
++                        op = kind == PARSE_KIND_PLUSPLUS ? CHECK_OP_POST_INCREMENT : kind == PARSE_KIND_MINUSMINUS ? CHECK_OP_POST_DECREMENT : CHECK_OP_COUNT;
++                        break;
++                    case CHECK_INPUT_CODE_BINARY:
++                        op = check_input_binary(kind);
++                        wanted = 2;
++                        break;
++                    case CHECK_INPUT_CODE_CAST:
++                        op = reader->query_types[token] != 0 ? CHECK_OP_CAST : CHECK_OP_COUNT;
++                        break;
++                    case CHECK_INPUT_CODE_SUBSCRIPT:
++                        op = CHECK_OP_SUBSCRIPT;
++                        wanted = 2;
++                        break;
++                    case CHECK_INPUT_CODE_TERNARY:
++                        op = CHECK_OP_CONDITIONAL;
++                        wanted = count == 2 ? 2 : 3;
++                        break;
++                    default:
++                        if (token + 1 < token_count && parser->tree.roles[token + 1] == PARSE_ROLE_MEMBER)
++                        {
++                            op = kind == PARSE_KIND_ARROW ? CHECK_OP_ARROW : CHECK_OP_MEMBER;
++                            member = parser->tokens.names[token + 1];
++                        }
++                        break;
++                }
++                left = op == CHECK_OP_COUNT || count != wanted;
++                value = true;
++                if (!left)
++                {
++                    // A conditional with its middle omitted (x ?: y) takes its first value twice.
++                    const bool omitted = code == CHECK_INPUT_CODE_TERNARY && count == 2;
++                    const uint32_t b = omitted ? values[0] : count >= 2 ? values[1] : BUSTER_NODE_FRONT_UNKNOWN;
++                    const uint32_t c = omitted ? values[1] : count == 3 ? values[2] : BUSTER_NODE_FRONT_UNKNOWN;
++                    record = node_front_add(front, &cursor, op, token, values[0], b, c, CHECK_INPUT_FORM_OPERATOR, reader->query_types[token]);
++                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
++                    {
++                        front->members[record] = member;
++                    }
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_CALL:
++            {
++                const uint32_t count = node_front_values(front, &cursor, token, values);
++                left = count == BUSTER_NODE_FRONT_UNKNOWN || count == 0 || input->kr_parameter_count != 0 || input->no_builtin ||
++                       cursor.argument_count + count > BUSTER_NODE_FRONT_RECORDS;
++                value = true;
++                if (!left)
++                {
++                    record = node_front_add(front, &cursor, CHECK_OP_CALL, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR,
++                                            reader->query_types[token]);
++                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
++                    {
++                        front->members[record] = node_front_library(front, reader, values[0]);
++                        front->argument_firsts[record] = cursor.argument_count;
++                        front->argument_counts[record] = count - 1;
++                        for (uint32_t k = 1; k < count; k += 1)
++                        {
++                            front->arguments[cursor.argument_count] = values[k];
++                            cursor.argument_count += 1;
++                        }
++                    }
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_TERMINATOR:
++            {
++                // Each of its values discarded, a CAST to void, or tested in a condition's context, as the walk's
++                // terminator does; a statement expression's last statement gives the same nodes.
++                const uint32_t count = node_front_values(front, &cursor, token, values);
++                const bool condition = reader->conditions[token] != 0;
++                bool region = false;
++                if (input->region_count != 0)
++                {
++                    const uint32_t parent = parser->tree.parents[token];
++                    uint32_t selected = parent < token_count ? input->expression_regions[parent] : 0;
++                    if (selected == 0 && parent < token_count && parser->tree.roles[parent] == PARSE_ROLE_LABEL)
++                    {
++                        selected = check_input_labeled_region(reader, parent);
++                    }
++                    region = selected != 0 && input->regions[selected - 1].final_statement == token;
++                }
++                left = count == BUSTER_NODE_FRONT_UNKNOWN || (condition && count > 1) || (region && count != 1);
++                for (uint32_t k = 0; !left && k < count; k += 1)
++                {
++                    (void)node_front_add(front, &cursor, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, values[k], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
++                                         CHECK_INPUT_FORM_DISCARD, BUSTER_TYPE_VOID);
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_CONDITION:
++            {
++                const uint32_t count = node_front_values(front, &cursor, token, values);
++                left = count != 1;
++                if (!left)
++                {
++                    const uint32_t keyword = reader->first_child[token];
++                    const bool switched = keyword < token_count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
++                    record = node_front_add(front, &cursor, switched ? CHECK_OP_POSITIVE : CHECK_OP_CONDITION, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN,
++                                            CHECK_INPUT_FORM_OPERATOR, reader->query_types[token]);
++                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
++                    {
++                        front->roots[record] = 1;
++                    }
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_RETURN:
++            {
++                const uint32_t count = node_front_values(front, &cursor, token, values);
++                const TypeId type = reader->return_types[token];
++                left = type == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
++                if (!left && count == 1)
++                {
++                    record = node_front_add(front, &cursor, CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_OPERATOR, type);
++                    if (record != BUSTER_NODE_FRONT_UNKNOWN)
++                    {
++                        front->roots[record] = 1;
++                    }
++                }
++                break;
++            }
++            case CHECK_INPUT_CODE_INITIALIZE:
++            {
++                // A braced initializer's assignment passes its values on.
++                if (reader->initializers[token] == 2)
++                {
++                    node_front_pass(front, &cursor, reader, token, consumers[i], consumed[i] != 0);
++                }
++                else
++                {
++                    const uint32_t count = node_front_values(front, &cursor, token, values);
++                    left = count != 1;
++                    value = true;
++                    if (!left)
++                    {
++                        record = node_front_add(front, &cursor, CHECK_OP_INITIALIZE, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, CHECK_INPUT_FORM_INITIALIZER,
++                                                reader->query_types[token]);
++                    }
++                }
++                break;
++            }
++            default:
++            {
++                // The walk's own visit, whose values and nodes the front doesn't know.
++                (void)node_front_values(front, &cursor, token, values);
++                left = true;
++                value = true;
++                break;
++            }
++        }
++        shadow->left[code] += left;
++        if (left)
++        {
++            shadow->left_queries += parser->tokens.kinds[token] == PARSE_KIND_SIZEOF;
++            node_front_taken_by_left(front, &cursor);
++        }
++        if (value)
++        {
++            node_front_give(front, &cursor, consumers[i], consumed[i] != 0, left ? BUSTER_NODE_FRONT_UNKNOWN : record);
++        }
++    }
++    front->count = cursor.count;
++    front->stack_count = cursor.stack_count;
++    front->group_count = cursor.group_count;
++    front->ordinal = cursor.ordinal;
++    front->argument_count = cursor.argument_count;
++    front->wide_count = cursor.wide_count;
++    front->full = cursor.full;
++    shadow->tokens += acting;
++    shadow->records += front->count - front->pending;
++    shadow->ticks += __rdtsc() - start;
++}
++
++// The front's own records among the walk's nodes strictly between two of them, counted up to `limit`.
++static uint32_t node_front_made_between(const NodeFrontShadow* shadow, uint32_t low, uint32_t high, uint32_t limit)
++{
++    uint32_t made = 0;
++    for (uint32_t node = low + 1; node < high && node < shadow->node_capacity && made < limit; node += 1)
++    {
++        made += (uint32_t)(shadow->nodes[node >> 6] >> (node & 63) & 1);
++    }
++    return made;
++}
++
++// The records of the chunk just read compared with the walk's nodes, after the walk acted at the chunk's tokens: each
++// record's node is its token's (a discard's the one the walk numbered after the terminator's last value), with the
++// record's operator, its operands' nodes, its leaf's value, its member, its arguments, its requested type and its
++// context. A record that agrees marks its node (NodeFrontShadow.nodes).
++static void node_front_compare(NodeFront* front, const CheckInputReader* reader)
++{
++    const CheckInput* input = reader->output;
++    const CheckGraph* graph = &input->graph;
++    NodeFrontShadow* shadow = front->shadow;
++    for (uint32_t record = front->pending; record < front->count; record += 1)
++    {
++        const uint32_t token = front->tokens[record];
++        const CheckInputNodeForm form = (CheckInputNodeForm)front->forms[record];
++        const bool discard = form == CHECK_INPUT_FORM_DISCARD;
++        const uint32_t a = front->operands[0][record];
++        const uint32_t operand = a != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[a] : BUSTER_CHECK_NONE;
++        uint32_t node = BUSTER_CHECK_NONE;
++        if (discard)
++        {
++            // The walk numbers a discard when it acts at the terminator, as the front makes its record: after the node of
++            // the record before it, or else after its value's node (a for's step is discarded after the loop's body).
++            const uint32_t before = record != 0 ? front->nodes[record - 1] : BUSTER_CHECK_NONE;
++            node = before != BUSTER_CHECK_NONE ? before + 1 : operand != BUSTER_CHECK_NONE ? operand + 1 : BUSTER_CHECK_NONE;
++            while (node < graph->count && operand != BUSTER_CHECK_NONE && (graph->tokens[node] != token || graph->operand0[node] != operand))
++            {
++                node += 1;
++            }
++        }
++        else
++        {
++            node = input->token_nodes[token];
++        }
++        uint32_t field = 0;
++        if (node >= graph->count || graph->tokens[node] != token)
++        {
++            field = BUSTER_NODE_FRONT_FIELD_NODE;
++        }
++        else if (graph->ops[node] != (CheckOp)front->ops[record])
++        {
++            field = BUSTER_NODE_FRONT_FIELD_OPERATOR;
++        }
++        else if (form == CHECK_INPUT_FORM_LEAF)
++        {
++            const CheckValue theirs = check_graph_leaf_value(graph, node);
++            const uint16_t wide = front->wides[record];
++            bool same = false;
++            if (wide != 0)
++            {
++                const CheckValue* mine = front->wide_values + wide - 1;
++                same = mine->type == theirs.type && mine->category == theirs.category && mine->flags == theirs.flags && mine->constant_kind == theirs.constant_kind &&
++                       mine->integer == theirs.integer && mine->floating_storage[0] == theirs.floating_storage[0] &&
++                       (mine->floating_storage[1] & 0xffff) == (theirs.floating_storage[1] & 0xffff) && mine->imaginary_storage[0] == theirs.imaginary_storage[0] &&
++                       (mine->imaginary_storage[1] & 0xffff) == (theirs.imaginary_storage[1] & 0xffff) && mine->object == theirs.object &&
++                       mine->overload_head == theirs.overload_head && mine->offset == theirs.offset && mine->bit_width == theirs.bit_width && mine->fault == theirs.fault &&
++                       mine->fault_node == theirs.fault_node && mine->object_bit_offset == theirs.object_bit_offset;
++            }
++            else
++            {
++                same = !check_graph_leaf_rest(&theirs) && front->leaf_types[record] == theirs.type && front->leaf_categories[record] == (uint8_t)theirs.category &&
++                       front->leaf_flags[record] == theirs.flags && front->leaf_constants[record] == (uint8_t)theirs.constant_kind &&
++                       front->leaf_integers[record] == (uint64_t)theirs.integer && front->leaf_objects[record] == theirs.object &&
++                       front->leaf_heads[record] == theirs.overload_head;
++            }
++            field = same ? 0 : BUSTER_NODE_FRONT_FIELD_LEAF;
++        }
++        else
++        {
++            const uint32_t b = front->operands[1][record];
++            const uint32_t c = front->operands[2][record];
++            const uint32_t second = b != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[b] : BUSTER_CHECK_NONE;
++            const uint32_t third = c != BUSTER_NODE_FRONT_UNKNOWN ? front->nodes[c] : BUSTER_CHECK_NONE;
++            const bool operands = operand != BUSTER_CHECK_NONE && graph->operand0[node] == operand && graph->operand1[node] == second && graph->operand2[node] == third &&
++                                  (b == BUSTER_NODE_FRONT_UNKNOWN || second != BUSTER_CHECK_NONE) && (c == BUSTER_NODE_FRONT_UNKNOWN || third != BUSTER_CHECK_NONE);
++            bool arguments = graph->argument_counts[node] == front->argument_counts[record];
++            for (uint32_t k = 0; arguments && k < front->argument_counts[record]; k += 1)
++            {
++                const uint32_t argument = front->nodes[front->arguments[front->argument_firsts[record] + k]];
++                arguments = argument != BUSTER_CHECK_NONE && graph->argument_nodes[graph->argument_offsets[node] + k] == argument;
++            }
++            // An operand's distance against the walk's two nodes, which the walk numbers in the same postorder: one more
++            // than the front's own records between them (the walk also numbers the nodes of the tokens the front left).
++            const uint32_t nodes[3] = { operand, second, third };
++            bool distances = true;
++            bool past = false;
++            for (uint32_t k = 0; operands && k < 3; k += 1)
++            {
++                const uint32_t distance = front->distances[k][record];
++                const bool present = front->operands[k][record] != BUSTER_NODE_FRONT_UNKNOWN;
++                if (present && front->roots[record] == 0)
++                {
++                    shadow->operands += 1;
++                    shadow->operands_near += distance <= BUSTER_NODE_FRONT_NEAR;
++                    shadow->operands_byte += distance > BUSTER_NODE_FRONT_NEAR && distance < BUSTER_NODE_FRONT_FAR;
++                    shadow->operands_far += distance == BUSTER_NODE_FRONT_FAR;
++                    past = past || distance > BUSTER_NODE_FRONT_NEAR;
++                }
++                else if (present)
++                {
++                    shadow->root_operands += 1;
++                    shadow->root_operands_past += distance > BUSTER_NODE_FRONT_NEAR;
++                }
++                const uint32_t between = present ? node_front_made_between(shadow, nodes[k], node, BUSTER_NODE_FRONT_FAR) + 1 : 0;
++                distances = distances && (!present || (distance == BUSTER_NODE_FRONT_FAR ? between >= BUSTER_NODE_FRONT_FAR : between == distance));
++            }
++            // A call's arguments, which its record lists beside its operands: their distances are counted, not kept.
++            for (uint32_t k = 0; operands && arguments && k < front->argument_counts[record]; k += 1)
++            {
++                const uint32_t distance = front->ordinals[record] - front->ordinals[front->arguments[front->argument_firsts[record] + k]];
++                shadow->arguments += 1;
++                shadow->arguments_past += distance > BUSTER_NODE_FRONT_NEAR;
++                past = past || distance > BUSTER_NODE_FRONT_NEAR;
++            }
++            field = !operands ? BUSTER_NODE_FRONT_FIELD_OPERAND : graph->members[node] != front->members[record] ? BUSTER_NODE_FRONT_FIELD_MEMBER :
++                    !arguments ? BUSTER_NODE_FRONT_FIELD_ARGUMENTS : graph->types[node] != front->types[record] ? BUSTER_NODE_FRONT_FIELD_TYPE :
++                    !distances ? BUSTER_NODE_FRONT_FIELD_DISTANCE : 0;
++            if (field == 0 && past && node < shadow->node_capacity)
++            {
++                shadow->past[node >> 6] |= UINT64_C(1) << (node & 63);
++            }
++        }
++        shadow->checked += 1;
++        if (field == 0)
++        {
++            // Its context, as the flush gives a node its own and a list its values': compared at the walk's end
++            // (node_front_finish).
++            const bool statics = (form == CHECK_INPUT_FORM_OPERATOR || form == CHECK_INPUT_FORM_INITIALIZER) && reader->static_initializers[token];
++            const uint8_t context = (uint8_t)((statics && form == CHECK_INPUT_FORM_OPERATOR ? BUSTER_CHECK_CONTEXT_STATIC : 0) |
++                                              (statics && form == CHECK_INPUT_FORM_INITIALIZER ? BUSTER_CHECK_CONTEXT_VALUE : 0) | front->contexts[record]);
++            front->nodes[record] = node;
++            if (node < shadow->node_capacity)
++            {
++                shadow->nodes[node >> 6] |= UINT64_C(1) << (node & 63);
++                shadow->contexts[node] = front->taken_by_left[record] != 0 ? BUSTER_NODE_FRONT_CONTEXT_UNKNOWN : context;
++            }
++        }
++        else
++        {
++            if (shadow->differences < BUSTER_NODE_FRONT_LISTED)
++            {
++                shadow->difference_tokens[shadow->differences] = token;
++                shadow->difference_fields[shadow->differences] = field;
++            }
++            shadow->differences += 1;
++        }
++    }
++    front->pending = front->count;
++}
++
++// After the walk's last chunk: each agreed node's context compared with the graph's, final now. A node whose context
++// differs is a difference, and no longer the front's.
++static void node_front_finish(NodeFront* front, const CheckInputReader* reader, uint32_t base)
++{
++    const CheckGraph* graph = &reader->output->graph;
++    NodeFrontShadow* shadow = front->shadow;
++    shadow->waiting += front->stack_count;
++    for (uint32_t node = base; node < graph->count && node < shadow->node_capacity; node += 1)
++    {
++        const bool agreed = (shadow->nodes[node >> 6] >> (node & 63) & 1) != 0;
++        if (agreed && shadow->contexts[node] != BUSTER_NODE_FRONT_CONTEXT_UNKNOWN && graph->contexts[node] != shadow->contexts[node])
++        {
++            if (shadow->differences < BUSTER_NODE_FRONT_LISTED)
++            {
++                shadow->difference_tokens[shadow->differences] = graph->tokens[node];
++                shadow->difference_fields[shadow->differences] = BUSTER_NODE_FRONT_FIELD_CONTEXT;
++            }
++            shadow->differences += 1;
++            shadow->nodes[node >> 6] &= ~(UINT64_C(1) << (node & 63));
++        }
++    }
++}
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index a83208303..c1c8d2a74 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -366,6 +366,10 @@ struct PPOptions
+     // #1038's stages 2 and 4), timed and checked against the walk's graph. benchmark-checker-bindings sets it with
+     // expression_timing.
+     bool expression_numbering;
++    // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
++    // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
++    // the machine would run. Off in every compile; measure-node-machine --shadow sets it for --front.
++    uint8_t node_front;
+     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
+     // need to place them: the printer can't print markers for a run without them.
+     bool expansion_starts;
+diff --git a/tools/ci/build_regression.c b/tools/ci/build_regression.c
+index b32974954..5f250d66c 100644
+--- a/tools/ci/build_regression.c
++++ b/tools/ci/build_regression.c
+@@ -1539,6 +1539,8 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
+         { "src/buster/compiler/c_check_node_machine_contexts.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_node_machine_expand.c", "main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_node_machine_lower.c", "main_unit_checker.c", false },
++        // Its own front (step 1b) is the reader's, included by the coded walk beside whose chunks it runs.
++        { "src/buster/compiler/c_check_node_machine_front.c", source, false },
+         { "src/buster/compiler/c_check_clock.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/c_check_clock_rss.c", "main.c main_unit_checker.c", false },
+         { "src/buster/compiler/worker_budget.c", "main.c main_unit_checker.c", false },
