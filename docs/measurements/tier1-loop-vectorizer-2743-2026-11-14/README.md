@@ -9,8 +9,8 @@ The 9700X measurement of [buster#2743](https://github.com/buster14a/buster/issue
 **Status:** complete. With the option, Tier 1 vectorizes 12 of the 19 loops clang -O2 vectorizes at znver5 and 5 at
 x86-64; those loops run 12.6x and 4.8x faster than Tier 1 without it, at 1.53x and 1.36x clang -O2's time (from 19.32x
 and 6.50x). Nothing else changes: the other loops' and the controls' code is the same, and without the option the
-branch's objects are main's byte for byte. Compiling sqlite3.c with the option cost 2.30% more cycles at znver5 in the first build and 1.23% after
-the pass stopped building a CFG and dominators (0.63% at x86-64); see "Compile cost".
+branch's objects are main's byte for byte. Compiling sqlite3.c with the option cost 2.30% more cycles at znver5 in the first build and 1.04% at
+a5b52808d (0.44% at x86-64); see "Compile cost".
 
 ## Results
 
@@ -66,14 +66,21 @@ CPU 2, medians (`9700x/cost/`):
 | 6380781, with | znver5 | 3,381.5 M (+1.23%) | 8,298.18 M (+1.08%) | 0.6351 s (+1.20%) |
 | 6380781, without | x86-64 | 3,336.6 M | 8,208.89 M | 0.6266 s |
 | 6380781, with | x86-64 | 3,357.5 M (+0.63%) | 8,236.17 M (+0.33%) | 0.6304 s (+0.61%) |
+| a5b52808d, without | znver5 | 3,333.7 M | 8,209.24 M | 0.6258 s |
+| a5b52808d, with | znver5 | 3,368.5 M (+1.04%) | 8,289.85 M (+0.98%) | 0.6325 s (+1.07%) |
+| a5b52808d, without | x86-64 | 3,328.4 M | 8,208.77 M | 0.6246 s |
+| a5b52808d, with | x86-64 | 3,343.1 M (+0.44%) | 8,227.84 M (+0.23%) | 0.6277 s (+0.50%) |
 
 The pass vectorizes 2 of sqlite3.c's loops. In-process cycle counters in a local build put 84% of its time in the CFG
 (44%) and the dominator analysis (40%), built for the 890 of 2,602 functions with a phi on a back edge in block order;
-buster 6380781 finds its loops from the blocks' terminators instead (`scripts/cost2.sh`), which halves the cost. Both
-targets vectorize 2 loops (at znver5 `sqlite3_randomness` and `unixShmLock` grow and `sqlite3VdbeExec` shrinks by 394
-bytes), yet znver5's extra instructions are three times x86-64's: the rest of the cost is not only the pass's analysis.
-`scripts/cost3.sh` measures a5b52808d, which skips the per-row work in functions without a loop of the admitted shape,
-and profiles both variants (results pending).
+6380781 finds its loops from the blocks' terminators instead (`scripts/cost2.sh`), which halves the cost, and a5b52808d
+(`scripts/cost3.sh`) skips the per-row arrays and kinds in the 651 candidates without a loop of the admitted shape (the
+pass's own time by the same counters: 56.3, 16.2 and 11.3 million). The rest is not the pass's alone: at znver5 the
+option adds 80.6 M instructions against x86-64's 19.1 M for the same analysis, and its two loops are `unixShmLock`'s and
+the one unit inlining puts in `sqlite3VdbeExec` from `sqlite3_randomness` (`sqlite3VdbeExec` changes size and gains 8
+zmm and 5 ymm operands). Its profiles (`base-symbols.txt`, `vectorize-symbols.txt`, one run each, about 12 M
+instructions of sampling noise on the largest symbols) can't place 61 M instructions; `scripts/cost4.sh` times both
+sides without unit inlining (results pending).
 
 ## What is measured
 
