@@ -10,8 +10,10 @@ lookup costs 26.5, 17.2 and 15.8 cycles with a body a window, and 22.5, 15.0
 and 14.9 with the windows packed to 384 records. A leaf is about 5 cycles and
 meets the gate. A lookup is 18 to 63 cycles by its operator and doesn't: it
 is past the design's own line of 20 cycles a lookup. The code is buster's
-`c_check_node_machine_facts.c` (`measure-node-machine --shadow --facts`); the
-design's page is buster's `docs/one-core-path.md`.
+`c_check_node_machine_facts.c` (`measure-node-machine --shadow --facts`), in
+[buster#2863](https://github.com/buster14a/buster/pull/2863); the design's
+page is buster's `docs/one-core-path.md`; the result against the gate is
+[on the issue](https://github.com/buster14a/buster/issues/2850#issuecomment-6900508040).
 
 ## How it was measured
 
