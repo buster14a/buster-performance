@@ -88,7 +88,11 @@ size and gains 8 zmm and 5 ymm operands; without inlining, the option vectorizes
 cycles): the pass's own cost. With inlining it runs on more and larger bodies (19.1 M at x86-64), and at znver5 the
 64-byte loop that inlining copies into `sqlite3VdbeExec` costs about 61 M more in Tier 1's later stages. a5b52808d's
 first profiles (`base-symbols.txt`, `vectorize-symbols.txt`, one run each, about 12 M instructions of sampling noise on
-the largest symbols) can't place them; `scripts/profile5.sh` profiles three runs of each at a tenth of the period.
+the largest symbols) can't place them, and neither can `scripts/profile5.sh`'s three runs of each at a tenth of the
+period (`9700x/cost/a5b52808d-profile5/`): identical runs of the same build disagree by up to 1.7 percentage points on
+one symbol (`ssa_ir_promote_path`, 9.17% against 7.49% of a total that repeats to 0.01%), more than the effect. What the
+A/Bs do show: the same two loops in the same inlined bodies cost Tier 1's later stages about 61 M instructions more as
+64-byte vectors (znver5) than as 16-byte ones (x86-64).
 
 ## What is measured
 
