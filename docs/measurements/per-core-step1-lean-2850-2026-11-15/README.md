@@ -23,8 +23,10 @@ selects between registers: main's whole kernel on `sqlite3.c` went from 26.5
 and 22.4 cycles to 22.7 and 18.9.
 
 The code is buster's `c_check_node_machine_facts.c`
-(`measure-node-machine --shadow --facts-lean`, `--facts-loads`); the design's
-page is buster's `docs/one-core-path.md`.
+(`measure-node-machine --shadow --facts-lean`, `--facts-loads`), in
+[buster#2868](https://github.com/buster14a/buster/pull/2868); the design's
+page is buster's `docs/one-core-path.md`; the result against the gate is
+[on the issue](https://github.com/buster14a/buster/issues/2850#issuecomment-6902306531).
 
 ## The variants
 
