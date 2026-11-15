@@ -1,0 +1,574 @@
+From 605badcc80b273553a36cfe6ceb1458531736941 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 14 Nov 2026 23:26:23 +0000
+Subject: [PATCH] WIP Tier 1: splats as memory broadcasts of 4- and 8-byte
+ literals (#2744 step 3)
+
+---
+ docs/tier1-selection.md                       |  12 +-
+ src/buster/compiler/c_check_program_emit.c    |  18 ++-
+ src/buster/compiler/emitted_code.c            |   8 +-
+ .../compiler/tier1_certificate_emitted.c      |  31 ++--
+ .../compiler/tier1_code_certificate_test.c    |  51 +++++--
+ src/buster/compiler/tier1_emit.c              |   8 +-
+ src/buster/compiler/tier1_emit_cfg.c          | 141 +++++++++---------
+ src/buster/compiler/tier1_select.c            |   6 +-
+ src/buster/compiler/x86_zen5_rows.c           |   6 +
+ 9 files changed, 162 insertions(+), 119 deletions(-)
+
+diff --git a/docs/tier1-selection.md b/docs/tier1-selection.md
+index ddf9307..a737d2f 100644
+--- a/docs/tier1-selection.md
++++ b/docs/tier1-selection.md
+@@ -1199,8 +1199,8 @@ or 64 bytes, the xmm, ymm or zmm one (`tier1_select_vector_forms`):
+ | --- | --- | --- |
+ | `vconst` of zeros, `undef` | `ZERO` | `vpxord x, x, x` |
+ | `vconst` of every bit | `ONES` | `vpternlogd x, x, x, 0xff` |
+-| `vconst` of one lane in all | `SPLAT` | `mov r11d, imm32` and `vpbroadcastd x, r11d` |
+-| a `vconst` whose quadwords are one value, at an EVEX target | `CONSTANT` | the quadword into the scratch general register by the shortest `mov` that holds it and `vpbroadcastq` from it (`tier1_emit_cfg_vector_constant`, #2744's step 1: `_mm512_set1_epi64(63)`) |
++| `vconst` of one lane in all | `SPLAT` | at an EVEX target `vpbroadcastd x, [rip + literal]` of the lane's 4-byte literal (`tier1_emit_cfg_vector_constant`, #2744's step 3); below it, `mov r11d, imm32` and a broadcast from it |
++| a `vconst` whose quadwords are one value, at an EVEX target | `CONSTANT` | `vpbroadcastq x, [rip + literal]` of the quadword's 8-byte literal (`tier1_emit_cfg_vector_constant`, #2744: `_mm512_set1_epi64(63)`) |
+ | any other `vconst` | `CONSTANT` | its literal's load, `vmovdqu32` of `[rip + literal]` (`tier1_emit_cfg_vector_constant`, #2744's step 2; "The literal pool" below) |
+ | `copy` | `COPY` | `vmovdqa64` (`movaps` for 16 bytes), none where allocation gave both one register |
+ | `add`, `sub`, `mul`, `and`, `or`, `xor` | `BINARY` | `vpaddd`, `vpsubd`, `vpmulld`, `vpandq`, `vporq`, `vpxord`: three operands, the destination any register |
+@@ -1243,8 +1243,9 @@ store, so that none forwarded: on the compiler's own lexer by `--tier1`, 22
+ constants were built so per 64-byte chunk of `c_tokenize`.
+ 
+ - **In the function** (`tier1_emit_cfg_literal`): each constant at each width
+-  it is loaded at is one literal of the function's (`Tier1EmitResult.literals`,
+-  its bytes the constant's first 16, 32 or 64 and zero past them), and its load's
++  it is read at is one literal of the function's (`Tier1EmitResult.literals`,
++  its bytes the constant's first 16, 32 or 64, or a broadcast's 4 or 8, and zero
++  past them), and its load's
+   reference names it by a provisional target, `BUSTER_TIER1_EMIT_LITERAL` plus
+   its index, past every symbol a function's access column has: the function
+   compiles on a lane and numbers no unit symbol, as the lowering's jump tables
+@@ -1257,8 +1258,7 @@ constants were built so per 64-byte chunk of `c_tokenize`.
+   body to its entry's symbol, after the runtime functions' and the jump tables'
+   provisional symbols, which no symbol below the tag reaches. Each entry is an
+   atom of its own, aligned to its width so that no load splits a line, in the
+-  mergeable section of its width, `.rodata.cst16`, `.rodata.cst32` or
+-  `.rodata.cst64` (`SHF_MERGE`, the width the entry size, as GCC's constants
++  mergeable section of its width, `.rodata.cst4` to `.rodata.cst64` (`SHF_MERGE`, the width the entry size, as GCC's constants
+   are; clang puts its 64-byte ones in `.rodata`), with a local symbol
+   `.Lbuster_literal_N`, which `-c`'s object keeps as clang keeps `.LCPI` labels:
+   a PC-relative relocation into a merged section needs the symbol, not its
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 72e0f93..95d932b 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -3519,18 +3519,22 @@ struct CheckEmitLiterals
+ };
+ 
+ // The pool's sections (#2744), as GCC's mergeable constants have them: read-only data of entries of one width, which a
+-// linker merges across objects (SHF_MERGE, the width the entry size): a 16-byte literal's, a 32-byte one's, a 64-byte
+-// one's. clang puts its 64-byte constants in .rodata, unmerged.
+-static const ObjectAtomSection check_program_literal_sections[3] = {
++// linker merges across objects (SHF_MERGE, the width the entry size): a broadcast's 4- and 8-byte literals', and a 16-,
++// 32- and 64-byte vector's. clang puts its 64-byte constants in .rodata, unmerged.
++static const ObjectAtomSection check_program_literal_sections[5] = {
++    { .name = { .pointer = (char*)".rodata.cst4", .length = sizeof(".rodata.cst4") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 4 },
++    { .name = { .pointer = (char*)".rodata.cst8", .length = sizeof(".rodata.cst8") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 8 },
+     { .name = { .pointer = (char*)".rodata.cst16", .length = sizeof(".rodata.cst16") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 16 },
+     { .name = { .pointer = (char*)".rodata.cst32", .length = sizeof(".rodata.cst32") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 32 },
+     { .name = { .pointer = (char*)".rodata.cst64", .length = sizeof(".rodata.cst64") - 1 }, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_MERGE, .entry_size = 64 },
+ };
+ 
+-// A literal's width, 16, 32 or 64 bytes, as its pool's section's index (check_program_literal_sections); 3 for another.
++// A literal's width, 4, 8, 16, 32 or 64 bytes, as its pool's section's index (check_program_literal_sections), which is
++// its alignment's log2 less 2; 5 for another.
+ static uint32_t check_program_literal_class(const EmittedLiteral* literal)
+ {
+-    return literal->width == 16 ? 0u : literal->width == 32 ? 1u : literal->width == 64 ? 2u : 3u;
++    const uint32_t width = literal->width;
++    return width == 4 ? 0u : width == 8 ? 1u : width == 16 ? 2u : width == 32 ? 3u : width == 64 ? 4u : 5u;
+ }
+ 
+ // A literal's hash, of its width and its words up to it (those past it are zero): each word mixed in by a multiply, and
+@@ -3577,7 +3581,7 @@ static bool check_program_emit_literals(CheckEmitLiterals* literals, const Emitt
+         for (uint32_t k = 0; valid && k < own; k += 1)
+         {
+             const EmittedLiteral* literal = codes[b].literals + k;
+-            valid = check_program_literal_class(literal) < 3;
++            valid = check_program_literal_class(literal) < 5;
+             uint64_t slot = valid ? check_program_literal_hash(literal) & (capacity - 1) : 0;
+             uint32_t entry = valid ? UINT32_MAX : 0;
+             while (entry == UINT32_MAX)
+@@ -5511,7 +5515,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+         const uint32_t class = check_program_literal_class(literal);
+         const uint32_t width = literal->width;
+         uint8_t* data = arena_push(bytes, width, width);
+-        const AtomId atom = data != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, (uint8_t)(4 + class), width, memcpy(data, literal->words, width), 0) : 0;
++        const AtomId atom = data != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, (uint8_t)(2 + class), width, memcpy(data, literal->words, width), 0) : 0;
+         const SymbolId symbol = literals.symbol_base + u;
+         valid = atom != 0 && link_define_symbol(&result->link, symbol, atom, 0, width);
+         if (valid)
+diff --git a/src/buster/compiler/emitted_code.c b/src/buster/compiler/emitted_code.c
+index e88fe04..8768ebe 100644
+--- a/src/buster/compiler/emitted_code.c
++++ b/src/buster/compiler/emitted_code.c
+@@ -82,11 +82,11 @@ struct EmittedInline
+     uint32_t call;
+ };
+ 
+-// A literal of a body's code (#2744): read-only bytes its code loads rip-relative, a vector constant of `width` bytes (16,
+-// 32 or 64), its words little-endian, those past the width zero. A reference whose target is BUSTER_EMITTED_LITERAL + k
++// A literal of a body's code (#2744): read-only bytes its code loads rip-relative, a vector constant's of `width` bytes (16,
++// 32 or 64, or a broadcast's 4 or 8), its words little-endian, those past the width zero. A reference whose target is BUSTER_EMITTED_LITERAL + k
+ // is to the code's literal k while the body compiles on its lane, which numbers no unit symbol: the emission's merge
+-// gives each distinct literal of the unit an entry of its pool (.rodata.cst16, .rodata.cst32 or .rodata.cst64, aligned
+-// to its width) and its symbol, and renames the references to it (check_program_emit_literals). No symbol of a unit
++// gives each distinct literal of the unit an entry of its pool (.rodata.cst4 to .rodata.cst64, aligned to its width) and
++// its symbol, and renames the references to it (check_program_emit_literals). No symbol of a unit
+ // reaches the tag: the merge refuses a unit of as many.
+ typedef struct EmittedLiteral EmittedLiteral;
+ struct EmittedLiteral
+diff --git a/src/buster/compiler/tier1_certificate_emitted.c b/src/buster/compiler/tier1_certificate_emitted.c
+index 11c0752..07bb525 100644
+--- a/src/buster/compiler/tier1_certificate_emitted.c
++++ b/src/buster/compiler/tier1_certificate_emitted.c
+@@ -1409,32 +1409,31 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
+             kernel->count = tier1_select_fixed(&holes, kernel->records);
+             valid = kernel->count != 0;
+         }
+-        else if (valid && pattern->rule == TIER1_RULE_VECTOR && pattern->scale == BUSTER_TIER1_VECTOR_CONSTANT)
++        else if (valid && pattern->rule == TIER1_RULE_VECTOR && op == IR_VCONST && tier1_emit_cfg_vector_literal(&holes))
+         {
+-            // A vector constant of no simpler kind (#141, #1284): its quadword broadcast from the scratch register, or its
+-            // literal's load, rip-relative (#2744, tier1_emit_cfg_vector_constant). The literal is the one the emission's
+-            // index names for the constant at the node's width, and its bytes must be the constant's first `width` and
+-            // zero past them: the reference names the literal, so the literal's bytes, not its index, are what the load
+-            // reads. A literal whose width or bytes differ refuses the code.
+-            const bool uniform = tier1_emit_cfg_vector_uniform(function, &holes);
+-            const uint32_t index = (uint32_t)holes.immediate;
+-            const uint32_t width = holes.width;
+-            const uint32_t class = width == 16 ? 0 : width == 32 ? 1 : 2;
+-            const uint32_t claimed = !uniform && emitted->literal_of != 0 && index < function->vector_constant_count ? emitted->literal_of[3 * (uint64_t)index + class] : 0;
++            // A vector constant (#141, #1284) read rip-relative from its literal (#2744, tier1_emit_cfg_vector_constant): a
++            // splat's doubleword or a uniform constant's quadword broadcast, or its whole width loaded. The literal is the
++            // one the emission's index names for the constant at that width, and its bytes must be the constant's first
++            // and zero past them: the reference names the literal, so the literal's bytes, not its index, are what the
++            // load reads. A literal whose width or bytes differ refuses the code.
++            const uint32_t constant = function->a[node];
++            const bool known = constant < function->vector_constant_count && (holes.width == 16 || holes.width == 32 || holes.width == 64);
++            const uint32_t bytes = known ? tier1_emit_cfg_literal_width(function, &holes, constant) : 0;
++            const uint64_t slot = (uint64_t)constant * BUSTER_TIER1_EMIT_LITERAL_CLASSES + tier1_emit_literal_class(bytes);
++            const uint32_t claimed = known && emitted->literal_of != 0 ? emitted->literal_of[slot] : 0;
+             const uint32_t literal = claimed != 0 && claimed - 1 < emitted->literal_count ? claimed - 1 : UINT32_MAX;
+             IrSimdValue expected = { 0 };
+-            if (literal != UINT32_MAX && (width == 16 || width == 32 || width == 64))
++            if (literal != UINT32_MAX)
+             {
+-                memcpy(expected.words, function->vector_constants[index].words, width);
++                memcpy(expected.words, function->vector_constants[constant].words, bytes);
+             }
+-            valid = uniform || (literal != UINT32_MAX && emitted->literal_widths[literal] == width &&
+-                                memcmp(emitted->literals[literal].words, expected.words, sizeof(expected.words)) == 0);
++            valid = literal != UINT32_MAX && emitted->literal_widths[literal] == bytes && memcmp(emitted->literals[literal].words, expected.words, sizeof(expected.words)) == 0;
+             Tier1EmitBuffer buffer = {
+                 .records = kernel->records,
+                 .capacity = BUSTER_ARRAY_LENGTH(kernel->records),
+             };
+             bool referenced = false;
+-            valid = valid && tier1_emit_cfg_vector_constant(function, &holes, literal, &buffer, &kernel->reference, &referenced) == TIER1_EMIT_OK;
++            valid = valid && tier1_emit_cfg_vector_constant(function, &holes, constant, literal, &buffer, &kernel->reference, &referenced) == TIER1_EMIT_OK;
+             kernel->count = buffer.count;
+             kernel->referenced = valid && referenced ? kernel->reference.instruction : UINT32_MAX;
+         }
+diff --git a/src/buster/compiler/tier1_code_certificate_test.c b/src/buster/compiler/tier1_code_certificate_test.c
+index 47ba2fe..6b6df68 100644
+--- a/src/buster/compiler/tier1_code_certificate_test.c
++++ b/src/buster/compiler/tier1_code_certificate_test.c
+@@ -1287,8 +1287,10 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
+ // ({ 1, 2, 3, 4 } and { 16, 32, 48, 64 }), each its literal's rip-relative load. Its code is certified. Then each of
+ // these is refused, one at a time, everything put back after: a literal's bytes changed, its width, a load's reference's
+ // addend, its target the other literal (whose bytes aren't its constant's), and the emission's index naming the other
+-// literal for a constant. The literal's bytes, not its index, are what the certificate checks.
+-static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, uint32_t* refused)
++// literal for a constant. The literal's bytes, not its index, are what the certificate checks. With `broadcasts`, at
++// x86-64-v4, c0 is { 7, 7, 7, 7 }, a doubleword splat, and c1 { 2, 1, 2, 1 }, of one quadword: each its 4- or 8-byte
++// literal's memory broadcast (step 3), with the same mutations.
++static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, bool broadcasts, uint32_t* refused)
+ {
+     const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .parameter_count = 1, .vector_constant_count = 2 };
+     IrFunction function;
+@@ -1301,8 +1303,8 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
+         function.block_offsets[1] = 6;
+         for (uint32_t lane = 0; lane < 4; lane += 1)
+         {
+-            ir_simd_lane_write(&function.vector_constants[0], 32, lane, lane + 1);
+-            ir_simd_lane_write(&function.vector_constants[1], 32, lane, 16 * (lane + 1));
++            ir_simd_lane_write(&function.vector_constants[0], 32, lane, broadcasts ? 7 : lane + 1);
++            ir_simd_lane_write(&function.vector_constants[1], 32, lane, broadcasts ? 2 - (lane & 1) : 16 * (lane + 1));
+         }
+         tier1_select_test_node(&function, 0, IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+         tier1_select_test_node(&function, 1, IR_VCONST, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+@@ -1324,12 +1326,26 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
+     Tier1EmitDiagnostic diagnostic = {0};
+     const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true, .diagnostic = &diagnostic };
+     Tier1EmitResult emitted = {0};
+-    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
++    // The broadcasts' target, x86-64-v4: emitted and certified, never run.
++    uint8_t* v4 = broadcasts ? malloc(X86_FORM_COUNT) : NULL;
++    X86Target target = { 0 };
++    if (v4 != NULL && x86_target_parse("x86-64-v4", 9, &target))
++    {
++        x86_target_forms(&target, v4);
++    }
++    else if (v4 != NULL)
++    {
++        free(v4);
++        v4 = NULL;
++    }
++    const uint8_t* allowed = broadcasts ? v4 : test->allowed;
++    const Tier1EmitError error = planned && allowed != NULL ? tier1_emit_function(&plan, &options, allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+     if (!certified)
+     {
+-        fprintf(stderr, "tier1-emit: literal certificate: path=%s selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
+-                vector ? "vector" : "scalar", (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
++        fprintf(stderr, "tier1-emit: literal certificate: broadcasts=%u path=%s selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
++                (unsigned)broadcasts, vector ? "vector" : "scalar", (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked,
++                emitted.code_reason);
+     }
+     tier1_emit_test_expect(test, certified, "a function whose vector constants are its literals' loads passes the emitted-code certificate");
+     // Both constants are literals, each loaded once, rip-relative, by the reference that names it.
+@@ -1344,8 +1360,10 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
+         loads += literal;
+         first = literal && first == UINT32_MAX ? i : first;
+     }
+-    const bool shaped = certified && emitted.literal_count == 2 && loads == 2 && emitted.literal_widths[0] == 16 && emitted.literal_widths[1] == 16;
+-    tier1_emit_test_expect(test, shaped, "the literal fixture's two constants are two 16-byte literals, each one rip-relative load's");
++    const uint8_t first_width = broadcasts ? 4 : 16;
++    const uint8_t second_width = broadcasts ? 8 : 16;
++    const bool shaped = certified && emitted.literal_count == 2 && loads == 2 && emitted.literal_widths[0] == first_width && emitted.literal_widths[1] == second_width;
++    tier1_emit_test_expect(test, shaped, "the literal fixture's two constants are two literals (16 bytes each, or a broadcast's 4 and 8), each one rip-relative read's");
+     for (uint32_t mutation = 0; shaped && mutation < 5; mutation += 1)
+     {
+         LinkReference* reference = &emitted.references[first];
+@@ -1353,8 +1371,10 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
+         const uint32_t literal = reference->target - BUSTER_TIER1_EMIT_LITERAL;
+         const IrSimdValue kept_bytes = emitted.literals[literal];
+         const uint8_t kept_width = emitted.literal_widths[literal];
+-        // The constant's entry of the emission's index (16-byte literals: each constant's first of three).
+-        uint32_t* index = &emitted.literal_of[literal == emitted.literal_of[0] - 1 ? 0 : 3];
++        // The constant's entry of the emission's index, at its literal's width.
++        const uint32_t class = tier1_emit_literal_class(kept_width);
++        const uint32_t owner = emitted.literal_of[class] == literal + 1 ? 0 : 1;
++        uint32_t* index = &emitted.literal_of[owner * BUSTER_TIER1_EMIT_LITERAL_CLASSES + class];
+         const uint32_t kept_index = *index;
+         if (mutation == 0)
+         {
+@@ -1362,7 +1382,7 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
+         }
+         else if (mutation == 1)
+         {
+-            emitted.literal_widths[literal] = 32;
++            emitted.literal_widths[literal] = kept_width == 16 ? 32 : 16;
+         }
+         else if (mutation == 2)
+         {
+@@ -1385,6 +1405,7 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
+         *refused += rejected;
+     }
+     tier1_emit_test_expect(test, !shaped || !tier1_code_certificate_refused(test, &plan, &emitted), "the literal fixture's code is certified again once put back");
++    free(v4);
+     arena_pop_to(&test->output, 0);
+     arena_pop_to(&test->scratch, 0);
+     arena_pop_to(&test->input, 0);
+@@ -1741,11 +1762,11 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
+         tier1_code_certificate_realigned(test, variant != 0, &counts);
+     }
+     uint32_t literals_refused = 0;
+-    for (uint32_t variant = 0; variant < 2; variant += 1)
++    for (uint32_t variant = 0; variant < 4; variant += 1)
+     {
+-        tier1_code_certificate_literals(test, variant != 0, &literals_refused);
++        tier1_code_certificate_literals(test, (variant & 1) != 0, (variant & 2) != 0, &literals_refused);
+     }
+-    tier1_emit_test_expect(test, literals_refused == 10, "every corrupted literal of both paths' compiles is refused");
++    tier1_emit_test_expect(test, literals_refused == 20, "every corrupted literal of both paths' compiles, loaded and broadcast, is refused");
+     tier1_emit_test_expect(test, counts.realigned == 2 && counts.late == 2, "the realigned-frame fixture's compiles push a register past rbp, and their allocation moves before it");
+     tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
+     tier1_emit_test_expect(test, counts.exchange == 2 && counts.exchange_live == 2, "the compare-exchange fixture's compiles each restore rax around the exchange");
+diff --git a/src/buster/compiler/tier1_emit.c b/src/buster/compiler/tier1_emit.c
+index f5de1bd..1e27aa7 100644
+--- a/src/buster/compiler/tier1_emit.c
++++ b/src/buster/compiler/tier1_emit.c
+@@ -54,6 +54,9 @@ _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == BUSTER_TIER1_FRAME_MA
+ // BUSTER_TIER1_EMIT_LITERAL + k, past every symbol a function's access column has (Tier1EmitOptions.symbol_count), as the
+ // C driver's EmittedCode has them (BUSTER_EMITTED_LITERAL, which c_check_tier1.c checks is the same).
+ #define BUSTER_TIER1_EMIT_LITERAL 0x80000000u
++// A vector constant's literals at most, one a width (Tier1EmitResult.literal_of): 16, 32 and 64 bytes, and a broadcast's
++// 4 and 8 (tier1_emit_literal_class).
++#define BUSTER_TIER1_EMIT_LITERAL_CLASSES 5u
+ 
+ typedef enum Tier1EmitError
+ {
+@@ -290,8 +293,9 @@ struct Tier1EmitResult
+     // The literals its code loads (#2744, tier1_emit_cfg_literal): each one of the function's vector constants
+     // (IrFunction.vector_constants) at one width, `literal_count` of them, its bytes past the width zero; a reference whose
+     // target is BUSTER_TIER1_EMIT_LITERAL + k is to literal k (the emitted code's EmittedLiteral, which the C driver's
+-    // merge places in the unit's pool). And by constant, each width's literal (16, 32 and 64 bytes, three entries a
+-    // constant) plus one, 0 for none, which the code's certificate reads to find the literal it checks.
++    // merge places in the unit's pool). And by constant, each width's literal (16, 32, 64, 4 and 8 bytes,
++    // BUSTER_TIER1_EMIT_LITERAL_CLASSES entries a constant) plus one, 0 for none, which the code's certificate reads to
++    // find the literal it checks.
+     IrSimdValue* literals;
+     uint8_t* literal_widths;
+     uint32_t literal_count;
+diff --git a/src/buster/compiler/tier1_emit_cfg.c b/src/buster/compiler/tier1_emit_cfg.c
+index 415514b..01bc830 100644
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -2234,33 +2234,53 @@ static bool tier1_emit_cfg_x87_offset(const IrFunction* function, const Tier1Emi
+     return known && tier1_emit_cfg_object(function, emitted, tier1_emit_cfg_x87_object(function, &emitted->prepared, node), offset);
+ }
+ 
+-// Whether a vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT, whose constant's index is the
+-// pattern's `immediate`) is one whose quadwords are one value at EVEX's level (#2744's step 1; one whose doublewords are is
+-// BUSTER_TIER1_VECTOR_SPLAT's, so this is _mm512_set1_epi64(63)'s kind), which tier1_emit_cfg_vector_constant broadcasts
+-// from the scratch general register; every other is a literal the function's code loads (step 2).
+-static bool tier1_emit_cfg_vector_uniform(const IrFunction* function, const Tier1SelectHoles* holes)
++// Whether vector constant `constant` at `holes`' width is one whose quadwords are one value at EVEX's level (#2744's step 1;
++// one whose doublewords are is BUSTER_TIER1_VECTOR_SPLAT's, so this is _mm512_set1_epi64(63)'s kind), which
++// tier1_emit_cfg_vector_constant broadcasts from its quadword's literal; every other is its whole width's literal.
++static bool tier1_emit_cfg_vector_uniform(const IrFunction* function, const Tier1SelectHoles* holes, uint32_t constant)
+ {
+     const uint32_t width = holes->width;
+-    const uint64_t index = holes->immediate;
+-    bool uniform = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) &&
++    bool uniform = constant < function->vector_constant_count && (width == 16 || width == 32 || width == 64) &&
+                    tier1_select_holes_encoding(holes) == BUSTER_TIER1_ENCODING_EVEX;
+     for (uint32_t w = 1; uniform && w < width / 8; w += 1)
+     {
+-        uniform = function->vector_constants[index].words[w] == function->vector_constants[index].words[0];
++        uniform = function->vector_constants[constant].words[w] == function->vector_constants[constant].words[0];
+     }
+     return uniform;
+ }
+ 
+-// The literal of vector constant `index` at `width` bytes (16, 32 or 64; #2744's step 2, Tier1EmitResult.literals): the
+-// one the function's code already loads, or the next, its bytes the constant's first `width` and zero past them. UINT32_MAX
++// Whether a vector rule's node is one tier1_emit_cfg_vector_constant emits (#2744): a constant of no simpler kind
++// (BUSTER_TIER1_VECTOR_CONSTANT), and at EVEX's level a constant of one doubleword in every lane
++// (BUSTER_TIER1_VECTOR_SPLAT), which a memory broadcast reads from its doubleword's literal.
++static bool tier1_emit_cfg_vector_literal(const Tier1SelectHoles* holes)
++{
++    return holes->scale == BUSTER_TIER1_VECTOR_CONSTANT || (holes->scale == BUSTER_TIER1_VECTOR_SPLAT && tier1_select_holes_encoding(holes) == BUSTER_TIER1_ENCODING_EVEX);
++}
++
++// The bytes of vector constant `constant`'s literal at `holes` (#2744): a doubleword splat's 4 and a uniform quadword
++// constant's 8 (tier1_emit_cfg_vector_uniform), which a broadcast reads, or the vector's own width.
++static uint32_t tier1_emit_cfg_literal_width(const IrFunction* function, const Tier1SelectHoles* holes, uint32_t constant)
++{
++    return holes->scale == BUSTER_TIER1_VECTOR_SPLAT ? 4u : tier1_emit_cfg_vector_uniform(function, holes, constant) ? 8u : holes->width;
++}
++
++// A literal's width's place among a constant's literals (Tier1EmitResult.literal_of): 16, 32 and 64 bytes, then a
++// broadcast's 4 and 8.
++static uint32_t tier1_emit_literal_class(uint32_t width)
++{
++    return width == 16 ? 0u : width == 32 ? 1u : width == 64 ? 2u : width == 4 ? 3u : 4u;
++}
++
++// The literal of vector constant `index` at `width` bytes (4, 8, 16, 32 or 64; #2744, Tier1EmitResult.literals): the one
++// the function's code already loads, or the next, its bytes the constant's first `width` and zero past them. UINT32_MAX
+ // where the literals' room (a VCONST node's each) is spent, or where the function's symbols reach the literals' targets
+ // (BUSTER_TIER1_EMIT_LITERAL), which a unit of two billion symbols would.
+ static uint32_t tier1_emit_cfg_literal(Tier1EmitResult* emitted, const IrFunction* function, uint32_t index, uint32_t width)
+ {
+-    const uint32_t class = width == 16 ? 0 : width == 32 ? 1 : 2;
+-    const bool valid = emitted->literal_of != 0 && index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) &&
++    const uint64_t slot = (uint64_t)index * BUSTER_TIER1_EMIT_LITERAL_CLASSES + tier1_emit_literal_class(width);
++    const bool valid = emitted->literal_of != 0 && index < function->vector_constant_count && (width == 4 || width == 8 || width == 16 || width == 32 || width == 64) &&
+                        emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
+-    uint32_t literal = valid ? emitted->literal_of[3 * (uint64_t)index + class] : 0;
++    uint32_t literal = valid ? emitted->literal_of[slot] : 0;
+     if (valid && literal == 0 && emitted->literal_count < emitted->literal_capacity)
+     {
+         const uint32_t k = emitted->literal_count;
+@@ -2269,62 +2289,48 @@ static uint32_t tier1_emit_cfg_literal(Tier1EmitResult* emitted, const IrFunctio
+         emitted->literals[k] = bytes;
+         emitted->literal_widths[k] = (uint8_t)width;
+         emitted->literal_count = k + 1;
+-        emitted->literal_of[3 * (uint64_t)index + class] = k + 1;
++        emitted->literal_of[slot] = k + 1;
+         literal = k + 1;
+     }
+     return literal != 0 ? literal - 1 : UINT32_MAX;
+ }
+ 
+-// A vector constant of no simpler kind (#141, BUSTER_TIER1_VECTOR_CONSTANT): where its quadwords are one value at EVEX's
+-// level (tier1_emit_cfg_vector_uniform), the quadword into the scratch general register by the shortest mov that holds it
+-// (tier1_rematerialize's choice) and vpbroadcastq from it, two records and no memory; every other, its literal `literal`
+-// (tier1_emit_cfg_literal) loaded rip-relative by vmovdqu32 of its width (vmovdqu at a target without AVX512VL, #1281)
+-// into its register, the one record that names it, its reference in `reference` (its index among the records this call
+-// appends, `referenced`). Before #2744 that was its words as immediates into the red zone below rsp and a load no store
+-// forwarded to, 22 constants per 64-byte chunk of the compiler's own lexer by --tier1: a pool entry's load stalls on no
+-// store, and the uniform form takes 1,188 of the 3,157 c_tokenize built in 9,076 bytes. The emitted code's certificate
+-// replays this function for the node's records and its reference (tier1_certificate_emitted.c), and checks the literal's
+-// bytes against the constant's, so both change together.
+-static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, uint32_t literal, Tier1EmitBuffer* buffer, LinkReference* reference,
+-                                                     bool* referenced)
++// Vector constant `constant`'s records (#141; tier1_emit_cfg_vector_literal's nodes): its literal `literal`
++// (tier1_emit_cfg_literal, of tier1_emit_cfg_literal_width's bytes) read rip-relative into its register by the one
++// record that names it, its reference in `reference` (its index among the records this call appends, `referenced`): a
++// doubleword splat's by vpbroadcastd of the doubleword, a uniform quadword constant's by vpbroadcastq of the quadword,
++// any other by vmovdqu32 of its width (vmovdqu at a target without AVX512VL, #1281). Before #2744 a constant was its
++// words as immediates into the red zone below rsp and a load no store forwarded to, 22 constants per 64-byte chunk of the
++// compiler's own lexer by --tier1, and a splat `mov r11d, imm; vpbroadcastd x, r11d`, three ops where the memory
++// broadcast is one. The emitted code's certificate replays this function for the node's records and its reference
++// (tier1_certificate_emitted.c), and checks the literal's bytes against the constant's, so both change together.
++static Tier1EmitError tier1_emit_cfg_vector_constant(const IrFunction* function, const Tier1SelectHoles* holes, uint32_t constant, uint32_t literal, Tier1EmitBuffer* buffer,
++                                                     LinkReference* reference, bool* referenced)
+ {
+     const uint32_t width = holes->width;
+-    const uint64_t index = holes->immediate;
+-    Tier1EmitError error = index < function->vector_constant_count && (width == 16 || width == 32 || width == 64) ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
+-    const bool uniform = error == TIER1_EMIT_OK && tier1_emit_cfg_vector_uniform(function, holes);
+-    *referenced = false;
+-    if (uniform)
+-    {
+-        const uint64_t value = function->vector_constants[index].words[0];
+-        const bool zero_extended = value <= UINT32_MAX;
+-        const bool sign_extended = (int64_t)value == (int64_t)(int32_t)value;
+-        const X86Instruction move = {
+-            .form = zero_extended ? X86_FORM_MOV_R32_IMM32 : sign_extended ? X86_FORM_MOV_RM64_IMM32 : X86_FORM_MOV_R64_IMM64,
+-            .rm = BUSTER_TIER1_SELECT_SCRATCH,
+-            .immediate = (int32_t)value,
+-            .displacement = zero_extended || sign_extended ? 0 : (int32_t)(value >> 32),
+-        };
+-        const uint32_t broadcast = width == 16 ? X86_FORM_VPBROADCASTQ_X_R64 : width == 32 ? X86_FORM_VPBROADCASTQ_Y_R64 : X86_FORM_VPBROADCASTQ_Z_R64;
+-        error = tier1_emit_append(buffer, move) && tier1_emit_append(buffer, tier1_select_register_record(broadcast, (uint8_t)(holes->destination & 15), BUSTER_TIER1_SELECT_SCRATCH)) ? error : TIER1_EMIT_MEMORY;
+-    }
+-    else if (error == TIER1_EMIT_OK)
+-    {
+-        error = literal != UINT32_MAX ? error : TIER1_EMIT_UNSUPPORTED;
+-        const X86Instruction load = {
+-            .form = (uint16_t)(tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load | BUSTER_X86_FORM_FIXUP),
+-            .reg = (uint8_t)(holes->destination & 15),
+-            .mode = BUSTER_X86_MEMORY_RIP,
+-        };
+-        *reference = (LinkReference){
+-            .instruction = buffer->count,
+-            .field = X86_FIXUP_DISPLACEMENT,
+-            .kind = BUSTER_LINK_FIXUP_PC32,
+-            .target = BUSTER_TIER1_EMIT_LITERAL + literal,
+-            .addend = 0,
+-        };
+-        error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+-        *referenced = error == TIER1_EMIT_OK;
+-    }
++    Tier1EmitError error = constant < function->vector_constant_count && (width == 16 || width == 32 || width == 64) && tier1_emit_cfg_vector_literal(holes) ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
++    const uint32_t bytes = error == TIER1_EMIT_OK ? tier1_emit_cfg_literal_width(function, holes, constant) : 0;
++    error = error != TIER1_EMIT_OK || literal != UINT32_MAX ? error : TIER1_EMIT_UNSUPPORTED;
++    static const uint16_t broadcasts[2][3] = {
++        { X86_FORM_VPBROADCASTD_X_XM32, X86_FORM_VPBROADCASTD_Y_XM32, X86_FORM_VPBROADCASTD_Z_XM32 },
++        { X86_FORM_VPBROADCASTQ_X_XM64, X86_FORM_VPBROADCASTQ_Y_XM64, X86_FORM_VPBROADCASTQ_Z_XM64 },
++    };
++    const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
++    const uint32_t form = bytes == 4 ? broadcasts[0][at] : bytes == 8 ? broadcasts[1][at] : tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->load;
++    const X86Instruction load = {
++        .form = (uint16_t)(form | BUSTER_X86_FORM_FIXUP),
++        .reg = (uint8_t)(holes->destination & 15),
++        .mode = BUSTER_X86_MEMORY_RIP,
++    };
++    *reference = (LinkReference){
++        .instruction = buffer->count,
++        .field = X86_FIXUP_DISPLACEMENT,
++        .kind = BUSTER_LINK_FIXUP_PC32,
++        .target = BUSTER_TIER1_EMIT_LITERAL + literal,
++        .addend = 0,
++    };
++    error = error != TIER1_EMIT_OK || tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
++    *referenced = error == TIER1_EMIT_OK;
+     return error;
+ }
+ 
+@@ -3434,7 +3440,7 @@ static uint64_t tier1_emit_cfg_record_capacity(const IrFunction* function, bool
+         const bool recorded = call != 0 && call->abi != 0;
+         records += recorded ? function->abi_calls[call->abi - 1].call.stack_bytes / 4u + 4u * (uint64_t)call->argument_count + 5u * (BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS) + 16u : 0;
+         records += op == IR_RET && function->result_size != 0 ? function->result_size / 4u + 32u : 0;
+-        // A vector constant's broadcast or its literal's load (#141, #2744, tier1_emit_cfg_vector_constant).
++        // A vector constant's literal's load (#141, #2744, tier1_emit_cfg_vector_constant).
+         records += op == IR_VCONST ? 2u : 0;
+         // A machine row's records, its operands' moves and its result's (#141, tier1_emit_cfg_row).
+         records += call != 0 && call->row != 0 ? BUSTER_TIER1_EMIT_ROW_RECORDS : 0;
+@@ -3664,7 +3670,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const
+     code->targets = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
+     emitted->references = ok && emitted->reference_capacity != 0 ? ir_allocate(output, emitted->reference_capacity, sizeof(LinkReference), &ok) : 0;
+     // The literals (#2744, tier1_emit_cfg_literal): a VCONST node's each at most, and their index by constant and width.
+-    const uint64_t literal_index = vector_constants != 0 ? 3 * (uint64_t)function->vector_constant_count : 0;
++    const uint64_t literal_index = vector_constants != 0 ? BUSTER_TIER1_EMIT_LITERAL_CLASSES * (uint64_t)function->vector_constant_count : 0;
+     emitted->literal_capacity = vector_constants;
+     emitted->literal_count = 0;
+     emitted->literals = ok && vector_constants != 0 ? ir_allocate(output, vector_constants, sizeof(IrSimdValue), &ok) : 0;
+@@ -4188,13 +4194,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const
+                 asm_range_count += 1;
+                 tier1_emit_fixed_rows(&saves, tier1_select_node_fixed(function, &plan->patterns[node]));
+             }
+-            else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_VECTOR && plan->patterns[node].scale == BUSTER_TIER1_VECTOR_CONSTANT)
++            else if (error == TIER1_EMIT_OK && selected && plan->patterns[node].rule == TIER1_RULE_VECTOR && tier1_emit_cfg_vector_literal(&holes) && op == IR_VCONST)
+             {
+                 // A literal's load names it (#2744): its reference, by its index among the code's records.
+-                const uint32_t literal = tier1_emit_cfg_vector_uniform(function, &holes) ? UINT32_MAX : tier1_emit_cfg_literal(emitted, function, (uint32_t)holes.immediate, holes.width);
++                const uint32_t constant = function->a[node];
++                const uint32_t literal = tier1_emit_cfg_literal(emitted, function, constant, tier1_emit_cfg_literal_width(function, &holes, constant));
+                 LinkReference literal_reference = { 0 };
+                 bool referenced = false;
+-                error = tier1_emit_cfg_vector_constant(function, &holes, literal, &buffer, &literal_reference, &referenced);
++                error = tier1_emit_cfg_vector_constant(function, &holes, constant, literal, &buffer, &literal_reference, &referenced);
+                 error = error != TIER1_EMIT_OK || !referenced || emitted->reference_count < emitted->reference_capacity ? error : TIER1_EMIT_INVALID;
+                 if (error == TIER1_EMIT_OK && referenced)
+                 {
+diff --git a/src/buster/compiler/tier1_select.c b/src/buster/compiler/tier1_select.c
+index 158d19f..3db673d 100644
+--- a/src/buster/compiler/tier1_select.c
++++ b/src/buster/compiler/tier1_select.c
+@@ -246,10 +246,12 @@ typedef enum Tier1SelectRule
+ // TIER1_RULE_VECTOR's kinds, its pattern's `scale` (#141):
+ // - ZERO (a constant of zeros, or undef): vpxord of the destination with itself;
+ // - ONES (every bit): vpternlogd of the destination with itself, 0xff;
+-// - SPLAT (every lane `immediate`): the lane into the scratch general register and vpbroadcastd from it;
++// - SPLAT (every lane `immediate`): the lane into the scratch general register and a broadcast from it; at EVEX's
++//   level, vpbroadcastd of the lane's 4-byte literal, which the CFG consumer writes (tier1_emit_cfg_vector_constant,
++//   #2744's step 3);
+ // - CONSTANT (any other, its index in `immediate`): its literal's rip-relative load, which the CFG consumer writes
+ //   (tier1_emit_cfg_vector_constant, #2744's literal pool), having the constant's payload; or, where its quadwords are
+-//   one value and the target has EVEX's forms, the quadword into the scratch general register and vpbroadcastq (#2744);
++//   one value and the target has EVEX's forms, vpbroadcastq of the quadword's 8-byte literal (#2744);
+ // - COPY of values[0], vmovdqa64 at the width, none where the allocation gave both one register;
+ // - BINARY of values[0] and values[1], `operation` its index among add, sub, mul, and, or and xor (vpaddd, vpsubd,
+ //   vpmulld, vpandq, vporq, vpxord: unmasked, a quadword's and and or are the doublewords' bits): three operands, so the
+diff --git a/src/buster/compiler/x86_zen5_rows.c b/src/buster/compiler/x86_zen5_rows.c
+index 4fcc10a..3430b27 100644
+--- a/src/buster/compiler/x86_zen5_rows.c
++++ b/src/buster/compiler/x86_zen5_rows.c
+@@ -979,9 +979,13 @@
+     X(VPBROADCASTB_X_XM8, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTB_Y_XM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTD_X_XM32, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
++    X(VPBROADCASTD_X_XM32, MEMORY, 1152, 128, 256, U, 1152, 256, 0, 0x66, 0x11, 0x08) \
+     X(VPBROADCASTD_Y_XM32, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPBROADCASTD_Y_XM32, MEMORY, 1152, 128, 256, U, 1152, 256, 0, 0x66, 0x11, 0x08) \
+     X(VPBROADCASTQ_X_XM64, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
++    X(VPBROADCASTQ_X_XM64, MEMORY, 1152, 128, 256, U, 1152, 256, 0, 0x66, 0x11, 0x08) \
+     X(VPBROADCASTQ_Y_XM64, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPBROADCASTQ_Y_XM64, MEMORY, 1152, 128, 256, U, 1152, 256, 0, 0x66, 0x11, 0x08) \
+     X(VINSERTF128_Y_Y_XM128_IMM8, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VEXTRACTI32X4_XM128_Y_IMM8, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+     X(VEXTRACTI32X4_XM128_Z_IMM8, REGISTER, 512, 64, 256, U, U, 256, 128, 0x67, 0x00, 0x18) \
+@@ -1249,7 +1253,9 @@
+     X(VPBROADCASTW_X_XM16_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTW_Y_XM16_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTD_Z_XM32, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPBROADCASTD_Z_XM32, MEMORY, 1152, 128, 256, U, 1152, 256, 0, 0x66, 0x11, 0x08) \
+     X(VPBROADCASTQ_Z_XM64, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
++    X(VPBROADCASTQ_Z_XM64, MEMORY, 1152, 128, 256, U, 1152, 256, 0, 0x66, 0x11, 0x08) \
+     X(VPBROADCASTD_X_XM32_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTD_Y_XM32_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+     X(VPBROADCASTQ_X_XM64_EVEX, REGISTER, 512, 128, 256, U, U, 256, 256, 0x67, 0x00, 0x18) \
+-- 
+2.43.0
+
