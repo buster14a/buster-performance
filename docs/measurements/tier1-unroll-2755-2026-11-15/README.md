@@ -13,6 +13,23 @@ harness and method: `src/kernels.c` and `src/harness.c` there, unchanged
 (sha256 `deb5e9ce…` and `0fd0840e…`), `scripts/9700x/run-one.sh` (copied here,
 with its counters taken at every placement) and `scripts/loops.py`.
 
+## Summary
+
+- **Kernels.** #2743's 19 vectorizable loops run 1.41 times as fast with
+  `+unroll` at `-march=x86-64` (1.39 to 1.41 at four placements), clang's whole
+  unrolling component, and 1.40 times at znver5, where clang's is 1.65. The six
+  controls gain 1.05. Every digest matches, and no kernel is slower at x86-64.
+- **Two kernels and Tier 1's back end.** At znver5, `i32_to_f32` gains 1.02 and
+  `saxpy_f32` is 1.0 to 5.7% slower, both bounded by loads Tier 1 doesn't fold
+  into floating-point code (buster#2829). Its legacy SSE forms run 5.6 times
+  slower after a dirty upper state, which Tier 1 leaves (buster#2830).
+- **Programs.** Over four code placements and six link orders, speedtest1 runs
+  0.5% more cycles (0.17% fewer instructions) and Lua's five scripts 0.5% fewer
+  (0.28% more instructions): within the placements' spread.
+- **Compile cost.** `sqlite3.c` compiles 2.20% slower and the compiler's
+  `main.c` 4.54% slower with `+unroll`; their text grows 0.77% and 3.20%. The
+  default objects are the base's byte for byte.
+
 ## Revisions and toolchains
 
 | Role | Value |
@@ -53,6 +70,9 @@ with its counters taken at every placement) and `scripts/loops.py`.
   (statuses, `--tier1-report`, object sizes, and the base's default objects of
   both inputs against the head's), then `measure-compile --runs 11 --variant
   --tier1-passes=+unroll` of each.
+- **Programs** (`scripts/9700x/programs.sh`, `layout.sh`): speedtest1 and Lua's
+  five scripts by `measure-tier1-programs --variant`, then at four code
+  placements and six link orders (below).
 - **Local, deterministic** (`local/`): callgrind's instruction counts of
   speedtest1 and Lua's five scripts as `measure-tier1-programs` builds them
   (`--variant --tier1-passes=+unroll --keep`), with Lua's hash seed fixed
@@ -199,4 +219,39 @@ hash and every Lua script's output match clang -O0's. Medians of five runs,
 | Lua's five scripts | +0.35% | +0.28% |
 
 speedtest1's wall time varies by 20% from run to run (its database's I/O), so
-its cycles are the measure. LAYOUT PENDING
+its cycles are the measure.
+
+**Placement** (`9700x/layout/`, `scripts/9700x/layout.sh` run by
+`layout-pipeline.sh`, `scripts/layout-tables.py` making `tables.md`). speedtest1
+is one translation unit and Lua's objects link in one order, so a change that
+grows some functions moves every one after them; this test separates the
+placement's cycles from the pass's, as #2602's record did for speedtest1:
+
+- The head's `--tier1` objects by the default passes and with `+unroll`, the
+  options `measure-tier1-programs` gives them: speedtest1's unity object, cc-linked
+  after 0, 528, 1,568 or 2,608 bytes of `.text` (`pad-0.s` is the empty one), and
+  Lua's 33 objects cc-linked in six orders (`order-*.txt`: the canonical one, then
+  `shuf` with seeds 1 to 5).
+- `build.txt`: all eight speedtest1 executables give the verification hash
+  `1248168 a7fa3957…`, and all 60 Lua runs print what the first build's
+  canonical order prints; `executables.sha256`.
+- `runs.txt`: a warm-up round and seven rounds, one hold each, every executable
+  once per round (speedtest1 in a fresh `/tmp`, a tmpfs), the builds' order
+  alternating by round, CPU 2; round 0 is left out of the tables.
+
+| Program | Cycles, `+unroll` / default: mean (range) over the placements | Instructions |
+| --- | ---: | ---: |
+| speedtest1, four pads | 1.0051 (0.9988 to 1.0126) | 0.9983 |
+| Lua's five scripts, six orders | 0.9952 (0.9766 to 1.0095) | 1.0028 |
+| Lua arithmetic | 1.0032 (0.9866 to 1.0204) | 1.0000 |
+| Lua calls | 1.0053 (0.9971 to 1.0237) | 1.0073 |
+| Lua closures | 0.9826 (0.9319 to 1.0251) | about 1.006 |
+| Lua strings | 0.9973 (0.9864 to 1.0172) | 0.9993 |
+| Lua tables | 1.0002 (0.9894 to 1.0176) | 1.0005 |
+
+speedtest1's +1.40% at its one driver-linked placement is +1.0% and +1.3% at
+pads 0 and 528 and −0.1% and −0.05% at 1,568 and 2,608: +0.5% on average, with
+0.17% fewer instructions. closures' +2.0% was its placement: over six orders
+`+unroll` averages 1.7% fewer cycles. Lua's five scripts are within their
+placements' spread; calls' +0.5% follows its +0.73% instructions, the guard its
+short loops pay on every entry.
