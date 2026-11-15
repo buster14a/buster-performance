@@ -90,4 +90,60 @@ stores and loads, a new hot `rbp` spill), and `luaV_execute` 6.5 M without a lim
 
 ## 3. Run time and compile time on the 9700X
 
-Pending: `9700x/` will hold the run (#2768's method, main `b5099aa7` against head `e2412755`).
+The method is #2768's ([its record](../tier1-waiting-ranges-2768-2026-11-14/README.md), section 2) with this record's
+paths (`scripts/9700x/`, run by `chain.sh` under `systemd-run`, every build, compile, link, check and round one hold of
+the shared lock).
+
+- **Compilers.** Clean clones of main at `b5099aa7` (base) and of head at `e2412755`, each built by its own `build.sh
+  --config Release` with `BUSTER_HOST_ARCH=znver5` (`9700x/build.log`, `9700x/revisions.txt`).
+- **Objects.** Lua's 33 objects and speedtest1's unit by `--tier1 -fno-asynchronous-unwind-tables --tier1-report`
+  (`9700x/reports-*.txt`): speedtest1's unit 386,003 records instead of 386,388, 10,914 spill stores instead of 11,159,
+  26,575 edge moves instead of 26,674; `lstrlib.c` 472 edge moves instead of 485; `lvm.c` the same. The differences
+  equal the container's (section 1).
+- **Executables.** Lua linked in 33 orders, speedtest1 after 8 padding objects; all 82 passed their checks
+  (`9700x/checks.txt`).
+- **Runs.** 5 rounds of Lua and 7 of speedtest1, 1,762 timed runs, all exiting 0 with every count (`9700x/runs/`);
+  `9700x/analysis.txt` is `analyze.c`'s.
+
+| 9700X, CPU 2 | base | head | 100 ln(head / base), 95% interval | head slower at |
+| --- | ---: | ---: | ---: | ---: |
+| Lua's five scripts, user cycles (median over 33 orders) | 992.1 M | 989.3 M | −0.37 (−0.64 to −0.10) | 11 of 33 |
+| Lua's five scripts, user instructions | 4,767.3 M | 4,746.3 M | −0.46 (−0.47 to −0.44) | 0 of 33 |
+| speedtest1, user cycles (median over 8 shifts) | 730.8 M | 734.6 M | +0.41 (−0.03 to +0.85) | 7 of 8 |
+| speedtest1, user instructions | 2,525.4 M | 2,511.2 M | −0.56 | 0 of 8 |
+
+By script, Lua's user cycles change by −0.29 (`calls`), −0.38 (`tables`), −0.43 (`strings`, −0.81 to −0.04), −0.16
+(`arithmetic`) and −0.47 (`closures`).
+
+**speedtest1's parts.** `var.sh` built head again with two switches (`var2784.patch`): `X2784_NOHINTS` leaves out the
+body hints, so that only the slot stamps act (`nohints`), and `X2784_NOSTAMPS` the stamps (`nostamps`). Without either
+switch it builds head's object byte for byte. 7 rounds of speedtest1 over the 8 shifts and the four builds
+(`9700x/runs-var/`, `9700x/variants-analysis.txt`, `scripts/9700x/variants.py`), against base:
+
+| Build | user cycles, 100 ln, 95% interval | slower at | instructions |
+| --- | ---: | ---: | ---: |
+| head | +0.47 (+0.04 to +0.90) | 7 of 8 | −0.56 |
+| the slot stamps alone | +0.66 (+0.32 to +0.99) | 8 of 8 | −0.10 |
+| the body hints alone | +0.45 (−0.17 to +1.07) | 6 of 8 | −0.47 |
+
+The stamps alone remove stores in a few functions only (`sqlite3VdbeExec` −1.15 M instructions, `balance_nonroot`
+−0.50 M, the rest under 0.1 M each), yet cost 0.66% of the cycles. Sampled by function (`prof2.sh`: ten runs of each at
+shifts 0, 1,584 and 3,696, 25 kHz; `9700x/prof2/by-function.txt`), base takes 112,846 samples and the stamps 113,426
+(+0.51%). The differences are spread over functions whose code the stamps don't change: `pcache1FetchStage2` +14%,
+`sqlite3GetToken` +6%, `sqlite3VdbeMakeReady` +15%, against `releaseMemArray` −15%, `memsys5Size` −9% and
+`jsonTranslateBlobToText` −9%; `sqlite3VdbeExec` −0.6% and `balance_nonroot` +10.5%. The shifts move the whole unit and
+leave the distances between its functions as they are, which a change of size in one function moves for every function
+after it; buster refuses `-ffunction-sections`, so no link could reorder them. The run doesn't separate that layout
+from the change's own effect: speedtest1's cycles don't follow its 0.56% fewer instructions on the 9700X.
+`9700x/prof3/` annotates `balance_nonroot` at shift 0 (315 and 334 samples, too few to place).
+
+**Compile time** (`compile.sh`: head's `measure-compile` with base as the reference, pinned to CPU 2,
+`9700x/compile/`):
+
+| `--tier1 --lanes 1 -c`, medians | base | head | change |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c` (21 runs), user cycles | 3,276.8 M | 3,282.6 M | +0.18% |
+| `sqlite3.c`, user instructions | 8,051.1 M | 8,057.9 M | +0.08% |
+| `sqlite3.c`, wall | 609.8 ms | 610.9 ms | +0.18% |
+| `lvm.c` (41 runs), user cycles | 128.5 M | 128.4 M | −0.08% |
+| `lvm.c`, user instructions | 368.0 M | 368.3 M | +0.08% |
