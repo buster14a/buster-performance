@@ -13,7 +13,8 @@ benchmarks ran more user cycles than the whole units' Release outside their floo
 runs as many in other code: interprocedural decisions the whole unit makes after inlining, which a part can't see
 (section 1's last paragraph). The other six are layout, a 1 ms process's counters, or noise. Release in parts rebuilds
 the checker's unit after an edit in 33.1 s against 63.6 s with debug information, 18.2 s against 50.6 s without, and
-builds clean in 68.1 s against 73.7 s (53.4 against 57.3).
+builds clean in 68.1 s against 73.7 s (53.4 against 57.3). Release stays whole: the owner made the parts an option,
+`BUSTER_RELEASE_PARTS=1` ("After the gate").
 
 ## 1. What the splitter does now
 
@@ -119,6 +120,31 @@ Builds (`timed.sh`, the host's clang as the design's records, eight jobs; `resul
 A no-op build takes 0.04 s either way, and undoing the edit gives the clean build's executable byte for byte (SHA-256 in
 `timed.txt`). The executable's code is 37.38 MB in parts against 36.92 MB whole (with read-only data, 49.13 against
 48.54).
+
+## After the gate
+
+The owner asked whether the parts could be optimized further. Each probe below is local, on the checker's unit (which
+holds the Tier 1 code the slower benchmarks run) with clang 23.1.4 at `-march=znver5`, counting the (callee, caller)
+pairs the whole unit inlines and no part does (`scripts/local/inline_diff_fresh.sh`, `attr_pairs.sh`;
+`raw/local/after-gate/`):
+
+| Probe | Missing pairs |
+| --- | ---: |
+| `0d32b96`'s splitter | 425 (222 `always_inline` intrinsics inlined in another order, 110 in tests; of the rest 23 last calls to a static function, 15 call sites at LLVM's threshold of 525 for a call in a loop, 53 others) |
+| The whole unit's attributes, inferred before the split with `noreturn` and `cold`, on every part's imports | 424 |
+| `--import 450` | 410 (hot call sites 15 → 9, `ir_gvn_compare` among them; last calls 23 → 22), for 16% more bitcode |
+
+The Tier 1 last calls depend on context only the whole unit has after inlining: `dominators_scalar`'s one call is cold
+in its part (LLVM gives a cold call site no last-call bonus) and not in the whole checker unit (in the whole backend
+unit it is cold too); `tier1_cfg_edge_stage` costs 525 in its part against 520 in the whole unit, at a threshold of
+525; `ssa_check_input`'s other caller, `ssa_verify`, dies only after inlining. IPSCCP's argument and return
+attributes (`range`, `nonnull`) on 4,046 of the backend unit's definitions before the split made
+`tier1_certificate_check` the whole unit's size and left the other hot functions as they were. Loop depth in the
+unoptimized IR doesn't predict LLVM's hot call sites (`scripts/local/loop_depth.py`).
+
+So the owner chose to keep Release whole and make the parts an option, `BUSTER_RELEASE_PARTS=1` (buster#2715): a
+tree of its own (`-parts`) whose Release splits its `main.c` units before the optimizer with this splitter; the
+default Release is main's, byte for byte, and Develop keeps its parts.
 
 ## 3. Layout, and the placements
 
