@@ -18,6 +18,7 @@ The pull request adds `ir_optimize_memory.c`, the optimizer's `BUSTER_IR_OPTIMIZ
 | final code | `a694d362b29bad11401698fc899d5d0f0745e78e` | `71990abefccea4697e0caae97850297af5c0c710` | the measured head with a comment and a usage line changed: `local/final/` |
 | x86-64 host fix | `8c042b7c0eea7a00fed5db64e4eb6fbfd4732cee` | `ab2f9e28f3f1badeee34c8211fefdf6f3d453b91` | an unused variable under `BUSTER_HOST_ARCH=x86-64` |
 | default off | `c58e7e3a6fae2a934b595173ec4dd4d5466bfc66` | `c5d35a31d9dea046d02648afeb56aeb1ae408e34` | the default without the pass: what the measured head's `--tier1-passes=-memory` runs |
+| merged | `dcecce41e018bc724a37c284ad9948b70e6718f6` | | #2821 into main, 2026-11-15 15:02 UTC, after merges of main that moved the driver's `memory` bit to 2048 (main's `vectorize`, `unroll` and `vectors` took 64 to 256); the code measured is unchanged |
 
 The default's change only clears the pass's bit in `BUSTER_CHECK_TIER1_PASSES_DEFAULT`, so the measured head's `-memory` variant is the final default, and its `+memory` default the final `+memory`. Locally, the final build's `--tier1` and `--tier1-passes=-memory` give the same objects for speedtest1's unit and `lvm.c`.
 
