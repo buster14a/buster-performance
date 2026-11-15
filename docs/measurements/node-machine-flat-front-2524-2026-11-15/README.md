@@ -189,7 +189,8 @@ the census's part of `test-checker` and the comparison on `sqlite3.c` and Lua (`
   `perf-events5.sh`, `perf-events5-all.sh`, `annotate-flat.sh`; the jobs `job16.sh` (`v1`), `job17.sh` (`v2`),
   `job18.sh` (`v2b`, `v3`), `job19.sh` (`v3b`, `v3c`), `job20.sh` (`v4`, and the compile); `ab-copies.sh`,
   `ab-copies-n.sh`, `symdiff.py`; the faults' `mutate_flat.py` and `run_flat.sh`.
-- `patches/`: `v1.patch` to `v4.patch`, each against buster `55ad392b4`.
+- `patches/`: `v1.patch` to `v4.patch`, each against buster `55ad392b4` (sources only), and `pull-request.patch`: the
+  commit that is to be the pull request (`v4`'s sources with the docs), `git format-patch`'s, on the same base.
 - `results/9700x/LABEL/`: each build's revision and checksum; `front-TAG-CORPUS-SUFFIX-N.txt` (tags `flat`: the flat
   front after the walk beside the lean one; `flatfirst`: the flat front before the walk; `leanfirst`: the lean front
   before the walk; suffixes `p` to `w` by job); `events5-*.txt`; `annflat-*.txt` and `.chains.txt`.
