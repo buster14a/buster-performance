@@ -7,4 +7,14 @@
 | x86-64 | 475.060 | 400.219 | 140.257 | 64.423 |
 | znver5 | 123.299 | 124.111 | 23.133 | 23.296 |
 
-This does not measure the single-backward-lookup case. These comparisons use the PR's original base, not a current-main merge candidate.
+## One backward lookup
+
+The temporary `line-bench-snippet.c` was inserted in both revisions' `c_preprocessor_test.c`, gated by `BUSTER_LINE_BENCH` at the start of `run_preprocessor_fixture_tests`, and the scalar Release executables rebuilt. The harness sets the cursor to the file end, clears the line index and times one `pp_line_of` call on the same frozen SQLite bytes. Each offset has one warmup and 21 repetitions, with index arena storage reused and reset between calls; the reported line is verified against `pp_count_lines`. Base was measured before the candidate. The 20 ns result is at timer resolution; the candidate does a full index build on each call.
+
+| Offset in 9,507,037-byte file | Base median | PR median |
+| --- | ---: | ---: |
+| 0 | 20 ns | 4.020 ms |
+| 4,753,518 | 1.768 ms | 4.100 ms |
+| 9,507,036 | 3.585 ms | 4.087 ms |
+
+These comparisons use the PR's original base, not a current-main merge candidate.
