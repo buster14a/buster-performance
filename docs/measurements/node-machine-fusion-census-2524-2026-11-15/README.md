@@ -13,9 +13,10 @@ counts; it doesn't time. Whether a fused T's code and predictions cost less than
 
 ## What it counts
 
-`measure-node-machine --shadow` at buster `92fdf308` (main `d356f725`, buster#2836's two commits and this census),
-whose report's `node-shadow: fusion` line is `node_shadow_fusion`'s, over each taken expression after the machine's
-three sweeps:
+`measure-node-machine --shadow` at buster `92fdf308` (main `d356f725`, buster#2836's two commits and this census;
+the census is buster#2848's first commit, `14d57678`, with what followed it in
+[`node-machine-step1-designs-2524-2026-11-15`](../node-machine-step1-designs-2524-2026-11-15)), whose report's
+`node-shadow: fusion` line is `node_shadow_fusion`'s, over each taken expression after the machine's three sweeps:
 
 - **Inherited contexts:** an evaluated record whose context and target its consumer's own context gives:
   a `SELECT`'s operand, or a comma's second operand (check_lower_template_classify's two cases). Its consumer's
