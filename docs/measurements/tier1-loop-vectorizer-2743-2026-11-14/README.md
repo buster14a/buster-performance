@@ -77,10 +77,11 @@ The pass vectorizes 2 of sqlite3.c's loops. In-process cycle counters in a local
 (`scripts/cost3.sh`) skips the per-row arrays and kinds in the 651 candidates without a loop of the admitted shape (the
 pass's own time by the same counters: 56.3, 16.2 and 11.3 million). The rest is not the pass's alone: at znver5 the
 option adds 80.6 M instructions against x86-64's 19.1 M for the same analysis, and its two loops are `unixShmLock`'s and
-the one unit inlining puts in `sqlite3VdbeExec` from `sqlite3_randomness` (`sqlite3VdbeExec` changes size and gains 8
-zmm and 5 ymm operands). Its profiles (`base-symbols.txt`, `vectorize-symbols.txt`, one run each, about 12 M
-instructions of sampling noise on the largest symbols) can't place 61 M instructions; `scripts/cost4.sh` times both
-sides without unit inlining (results pending).
+`chacha_block`'s, which unit inlining puts in `sqlite3_randomness` and from there in `sqlite3VdbeExec` (which changes
+size and gains 8 zmm and 5 ymm operands; without inlining, the option vectorizes 4 loops in `chacha_block`,
+`unixShmLock` and `vdbeSorterAddToTree` and `sqlite3VdbeExec` has no zmm operand). Its profiles (`base-symbols.txt`,
+`vectorize-symbols.txt`, one run each, about 12 M instructions of sampling noise on the largest symbols) can't place the
+61 million; `scripts/cost4.sh` times both sides without unit inlining (results pending).
 
 ## What is measured
 
