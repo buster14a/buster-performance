@@ -118,3 +118,33 @@ them, are in `raw/local/comparisons.txt`.
   sources.
 - `scripts/`: every script as run.
 - `SHA256SUMS`: every file's hash.
+
+## Round 3: the rest, by instructions (added at the hand-off, buster#2866)
+
+**What was run.** After the merge, `main.c` was profiled by `instructions:u` on the head build (`9a032317`, whose code
+main `28e4e41e` has). `scripts/iprof.sh` is `prof.sh` with a period of 400009 + 2i, 8 runs of each mode, and its sums are
+in `raw/9700x-round3/`.
+
+**The checker's functions don't grow.** The cycle samples above made `check_constant_evaluate`, `check_action_scalar`
+and `check_init_walk` grow. Those run before `check_program`, the same in both modes, and by instructions their
+differences cancel: the cycle samples' alignment, not work. `scripts/callers.sh` (one run each with DWARF call graphs)
+gave no callers, and its shares even went the other way.
+
+**What the windowed compile adds.** About 81 M instructions a run, about 50 M of them the selection's:
+
+| symbol | extra samples |
+| --- | ---: |
+| `check_program_select_shared` (the second selection) | +512, ≈ 26 M instructions |
+| `check_program_census_scan` (the pass) | +302 |
+| `c_bindings_sort` | +273 |
+| `c_lowering_prepare` | +224 |
+| `memmove` | +163 |
+
+**Where the selection's cost is.** It has no single hot spot left. By line, it is spread over:
+
+- the definitions' order and declared-object lookups;
+- the label owners;
+- the data's references;
+- the edges.
+
+The next cut, a cheaper exact selection, is buster#2866's decision.
