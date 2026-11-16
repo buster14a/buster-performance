@@ -9,13 +9,16 @@ was a decision on this commit: [to take it, as a third pull
 request](https://github.com/buster14a/buster/issues/2524#issuecomment-6926573730), unless the owner says otherwise.
 [Its own record](../node-machine-flat-front-2524-2026-11-15) has how it was built and what its parts cost.
 
-**State: measured ahead.** The pull request can't open before the two in front of it merge (the session has one
-branch). The sanitizer rows (`scripts/sanitizers.sh`) were running when this was pushed.
+**State: measured ahead, with one more commit found to be needed (section 3).** The pull request can't open before
+the two in front of it merge (the session has one branch). The sanitizer rows are to be run again on the tree with
+that commit.
 
 **Result.** On today's main it is what its record says: exact against the lean front on `sqlite3.c`, Lua and musl, and
 1.46, 1.14 and 1.14 times faster than the lean front before the walk, each with its compaction (the record read 1.46,
 1.13 and 1.18). The census's reports and the shadow's sweeps are unchanged. A compile's time is unchanged; it retires
 343,637 more instructions of 1,364.6 M, as its record found (the build's parts fall elsewhere with the new file).
+**On the compiler's own source, which nobody had run it on, the command exited 1:** two records read as differences
+that are the comparison's, not the front's. `patches/flat-compare.patch` is the fix, with its test.
 
 ## 1. The re-pick
 
@@ -64,9 +67,49 @@ walk's nodes: no difference in any.
   one call at a unit's start has a new name), and that record's `symdiff.py` shows the Release build's parts falling
   elsewhere with the new file.
 
+## 3. The compiler's own source
+
+Before buster#2882's fix the shadow exited 1 on `main.c` whatever was asked, so the flat front was never run there.
+The sanitizer rows' shadow runs did (`results/cloud/sanitizers-before-the-fix.txt`: no sanitizer reported anything;
+the status 1 of the two native rows' `main` runs is the command's own).
+
+| `--front-flat-first` | `main.c` | `sqlite3.c` |
+| --- | ---: | ---: |
+| records both fronts make; that differ | 879,739; 2 | 315,962; 0 |
+| records only the lean front makes | 18 | 4 |
+| records only the flat front makes | 35,340 | 0 |
+
+- **The two** (`results/cloud/main-flatfirst-before.txt`; `main-differences-detail.txt` is a build that prints both
+  fronts' records at a difference, and each record only the lean front makes):
+  - `c_unicode_names.inc`'s `static const uint8_t unicode_name_stream[] = "..." "..." ...;`, 808 KB of adjacent
+    strings: 8,958 tokens from the first string to the `;`;
+  - `branch_sizing.c`'s `branch_sizing_form_words`, a braced initializer of sixteen constant expressions of 288
+    records each.
+- **What happens:** a declaration's `;` takes every value of its initializer and discards each. The first value is
+  past the flat front's rings' reach (8,192 positions), so the flat front leaves the `;`, as its record says it
+  does for such a token. The lean front's stack keeps a value however far its consumer is, and makes the discards:
+  17 of the 18 records only it makes. The last value is near the `;` (1 and 16 records before its discard), so the
+  lean front has written that value's consumer's bytes, and the flat front has none to write.
+- **Why the three corpora don't show it:** their tokens past the reach (four on `sqlite3.c`, a condition before a
+  very long body) have no other value near them.
+- **The comparison's rule was one-sided.** A value whose consumer the lean front lacks is no difference where that
+  consumer is a record only the flat front made (the lean front's stack was full). The mirror was missing.
+- **The fix** (`patches/flat-compare.patch`, on the re-picked `0004`): a value whose consumer the flat front lacks
+  is no difference where that consumer is a record only the lean front made, by its place where the byte holds the
+  distance and by count where it doesn't. `main.c` then reads 0 differences and the command exits 0
+  (`main-flatfirst-after.txt`); `sqlite3.c` and Lua read as before.
+- **The test:** `node_flat_test_reach`'s text gained two declarations whose `;` is left for reach: a braced
+  initializer of four values (the third's consumer over 255 records after it, the fourth's four after it) and
+  9,000 adjacent strings. With the rule's near half switched off the test fails with 2 differences, with its far
+  half off 1, and as the hand-off had it 3 (`reach-test-without-1.txt`, `-2`, `-3`).
+- **The 35,340** are discards of tables with more values than the lean front's stack holds: it leaves their `;` and
+  the flat front makes them. The comparison allowed that already.
+
 ## Files
 
-- `patches/flat.patch`: the 9700X's build's sources.
+- `patches/flat.patch`: the 9700X's build's sources. `patches/flat-compare.patch`: section 3's fix, its test and its
+  docs, on top of them.
 - `scripts`: `job4.sh`, `tables.py`, and the cloud container's `sanitizers.sh` (with its paths as they were).
 - `results/flat`, `results/own`: the runs (`flatfirst`, `leanfirst`, `flat`: the fronts; `shadow`, `shadow4`: the
   shadow alone; `census`, `census-wall`; `compile`). `results/tables.txt` is their summary.
+- `results/cloud`: section 3's runs in the cloud container.
