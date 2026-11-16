@@ -1,12 +1,12 @@
 #!/bin/bash
 # campaign.sh FIRST LAST: the fault campaign of the tests' own form after the sorting, on the build with every fault
-# behind BUSTER_NODE_TESTS_FAULT (knobs2.py): for each fault N, the census's part of test-checker (the seven fixtures in
+# behind BUSTER_NODE_TESTS_FAULT (knobs2.py): for each fault N, the census's part of test-checker (the seven fixtures, on the final sources in
 # both forms, the own form beside the census's code). A line a fault in out-FIRST.txt: the tests' failures and the
 # fixtures that failed.
 set -u
 sort=/tmp/claude-0/-home-user/743aa3e7-1556-5d1b-ba6c-46b8ead1bd58/scratchpad/own/sort
-dir=$sort/campaign
-cd /home/user/buster-0003
+dir=$sort/campaign-final
+cd /home/user/buster-knobs
 names=$(python3 -I $sort/knobs2.py . list)
 for n in $(seq $1 $2); do
     name=$(echo "$names" | sed -n "${n}p" | cut -f2)

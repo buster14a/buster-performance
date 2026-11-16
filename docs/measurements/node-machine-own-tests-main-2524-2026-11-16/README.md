@@ -8,9 +8,8 @@ hand-off said it owed before it could be a pull request: the fixture lines its f
 unsorted faults sorted. It is all the node machine's shadow (`measure-node-machine --shadow`): no compile takes any
 of it.
 
-**State: this record is being filled.** The sorting, the fixtures, the campaign and the 9700X's runs are here. The
-sanitizer rows (`scripts/sanitizers.sh`) were running when this was pushed; the pull request waits for buster#2887 to
-merge, since the session has one branch.
+**State: ready.** The pull request waits for buster#2887 to merge, since the session has one branch;
+`patches/sorted.patch` is what its second commit will be, on the hand-off's `0003` as re-picked.
 
 **Result.** With the lines owed in the fixtures and the 11 sorted, each of the 91 faults that can still be put into
 the own form fails `test-checker`. On today's main the form reads what the hand-off read: 86.7, 114.6 and 161.1
@@ -64,7 +63,8 @@ fixture line either. They have one now.
 
 `scripts/faults/knobs.py` (the hand-off's, with the 7 taken out kept as numbered placeholders and 37 and 38 written
 for the new leaf loop) puts the faults behind `BUSTER_NODE_TESTS_FAULT=N` in one build; `scripts/faults/campaign.sh`
-runs `test-checker --seed 133 --part 5/8` with each. `results/cloud/faults/campaign.txt`:
+runs `test-checker --seed 133 --part 5/8` with each, on a copy of the final sources with the knobs put in.
+`results/cloud/faults/campaign.txt`:
 
 | | faults |
 | --- | ---: |
@@ -140,6 +140,26 @@ These are the hand-off's shares, to the last digit it gave: the conditions taken
 - **T, C and X read 2 to 4 ticks more in `own`** than in `head2` in the same turns: the reader-time loop has the
   tests' two places around C and X there (`--front-tests-last`). The hand-off's builds differed the same way.
 
+## 7. The sanitizer rows
+
+A pull request's checks don't run them. In the cloud container (4 CPUs), Release builds as CI's rows build them
+(`-O3`), on the candidate tree (`scripts/sanitizers.sh`; `results/cloud/sanitizers`): the part of `test-checker`
+with the census's tests, and for the memory and address rows the shadow with the own form beside the census's code
+(`--verify --front-own-tests`) on `sqlite3.c`, Lua and the compiler's own source. The address row is CI's
+`-fsanitize=address,undefined,bounds`.
+
+| row | `test-checker --seed 133 --part 5/8` | the shadow's exit status: `sqlite3.c`; Lua; the compiler's own source | reports |
+| --- | --- | --- | --- |
+| native, memory | 210,307 checks, 0 failures | 0; 0; 0 | none |
+| native, address | 210,307 checks, 0 failures | 0; 0; 0 | none |
+| native, thread | 210,307 checks, 0 failures | not run | none |
+| `x86-64`, memory | 210,271 checks, 0 failures | 0; 0; 0 | none |
+| `x86-64`, address | 210,271 checks, 0 failures | 0; 0; 0 | none |
+| `x86-64`, thread | 210,271 checks, 0 failures | not run | none |
+
+The own form runs beside the reader's coded walk, the vector paths', so the native rows are the ones that reach it:
+an `x86-64` row's shadow run reads no front.
+
 ## Files
 
 - `results/own`, `results/head2`: the 9700X's runs (`sweeps`, `tests`, `own`, `own-last`, `own-verify`,
@@ -153,4 +173,5 @@ These are the hand-off's shares, to the last digit it gave: the conditions taken
 - `scripts`: `job3.sh` and `lock.sh` (the 9700X's; the other scripts are
   [the first pull request's record](../node-machine-handoff-main-2524-2026-11-16/scripts)'s), `local-checks.sh` and
   `sanitizers.sh` (the cloud container's, with its paths as they were).
-- `results/cloud`: the campaign's lines and the local checks' results.
+- `results/cloud`: the campaign's lines, the local checks' results, and `sanitizers`: the rows' progress, each row's
+  build log, `test-checker` output and shadow outputs. No row wrote a report.
