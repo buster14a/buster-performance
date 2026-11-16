@@ -7,9 +7,10 @@ compiler=$1; tree=$2; out=$3
 mkdir -p "$out"; : > "$out/summary.txt"
 export CORPUS_ROOT=/home/user/buster/build/corpus LUA_SRC=$S/inputs/lua-5.4.8/src
 cd $S/scripts && . ./corpora.sh
-for mode in plain verify g fused facts reads front-types front-sweeps front-tests front-tests-wall; do
+for mode in ${MODES:-plain verify g fused facts reads front-types front-sweeps front-tests front-tests-wall front-own-tests front-own-tests-wall}; do
     case $mode in plain) flags=();; verify) flags=(--verify);; g) flags=(-g);; fused) flags=(--fused);; facts) flags=(--facts --facts-operators);; reads) flags=(--facts-reads);;
-        front-types) flags=(--front-types);; front-sweeps) flags=(--front-sweeps);; front-tests) flags=(--front-tests);; front-tests-wall) flags=(--front-tests -Wall -Wextra);; esac
+        front-types) flags=(--front-types);; front-sweeps) flags=(--front-sweeps);; front-tests) flags=(--front-tests);; front-tests-wall) flags=(--front-tests -Wall -Wextra);;
+        front-own-tests) flags=(--front-own-tests);; front-own-tests-wall) flags=(--front-own-tests -Wall -Wextra);; esac
     for name in sqlite3 lua musl main; do
         if [ $name = main ]; then
             inputs=(-march=native -I"$tree/src" -fwrapv -funsigned-char --predefines "$tree/build/predefines.h" "$tree/src/buster/compiler/main.c")

@@ -146,6 +146,23 @@ compares two inputs.)
   takes both (a probe of the two lines: 5 of 5 expressions taken by main's,
   3 of 5 by the head's, the two refused by `template`).
 
+### After main `7910ff7b` (buster#2892, the holder's) merged first
+
+The branch merged main `7910ff7b` (`fbc3ab37`), which adds
+`--front-own-tests`. On the merged head (`results/cloud/merged-head.txt`,
+`shadow-merged-summary.txt`; `scripts/cloud/chain-c.sh`):
+
+- `test-checker` whole: 842,759 checks, 0 failures.
+- **Twelve modes** (the ten above, and `--front-own-tests` with the default
+  warnings and with `-Wall -Wextra`) on the four inputs: 48 runs, each exit
+  status 0, no difference in values, entries or the twin; the own tests'
+  differences 0 on each input with either set of warnings, as on main
+  `7910ff7b` (`shadow-main-7910ff7b-summary.txt`).
+- The machine's counts on main `7910ff7b` are those of main `cc1c47d6` above,
+  and the head's are the same as before the merge.
+- The merged head writes the measured head's objects (`sqlite3.c`'s and Lua's
+  34, compared byte for byte), so the 9700X's numbers stand.
+
 ## Correctness
 
 In the cloud container (4 CPUs), the branch on main `cc1c47d6`
