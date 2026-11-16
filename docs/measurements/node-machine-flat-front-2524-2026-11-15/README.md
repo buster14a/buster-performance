@@ -1,5 +1,9 @@
 # The node machine's front by passes (buster#2524), 2026-11-15
 
+**Hand-off, 2026-11-16.** This record's commit was never pushed: the session handed buster#2524 off with it unmerged.
+It is patch `0004` of [the hand-off series](../node-machine-own-tests-2524-2026-11-16/patches/handoff), re-picked on
+main `3d0d56ed7`; `patches/pull-request.patch` here is its form on an older head of buster#2867.
+
 The front's walk, [claimed on buster#2524](https://github.com/buster14a/buster/issues/2524#issuecomment-6901949510):
 the lean front's records made without its stack, then by passes over a chunk instead of a token at a time. The code is
 buster's `c_check_node_machine_flat.c` (`measure-node-machine --shadow --front-flat`); the design's section is "The

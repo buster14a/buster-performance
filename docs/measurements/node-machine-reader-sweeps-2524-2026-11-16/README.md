@@ -1,5 +1,9 @@
 # C and X where they sit: the node machine's other two sweeps at reader time (buster#2524), 2026-11-16
 
+**Hand-off, 2026-11-16.** This record's commit was never pushed: the session handed buster#2524 off with it unmerged.
+It is patch `0001` of [the hand-off series](../node-machine-own-tests-2524-2026-11-16/patches/handoff), re-picked on
+main `3d0d56ed7`; `patches/pull-request.patch` here is its form on buster#2867's head.
+
 [buster#2524](https://github.com/buster14a/buster/issues/2524)'s step 2 puts the node machine in the reader.
 [T where it sits](../node-machine-reader-types-2524-2026-11-15) ran the first of its sweeps there, in the shadow, and
 left the other two after the pipeline. This record runs them at reader time too, under

@@ -1,5 +1,9 @@
 # The tests where they sit: the census's set and silence tests at reader time (buster#2524), 2026-11-16
 
+**Hand-off, 2026-11-16.** This record's commit was never pushed: the session handed buster#2524 off with it unmerged.
+It is patch `0002` of [the hand-off series](../node-machine-own-tests-2524-2026-11-16/patches/handoff), re-picked on
+main `3d0d56ed7`; `patches/pull-request.patch` here is its form on buster#2867's head, on "C and X where they sit".
+
 [buster#2524](https://github.com/buster14a/buster/issues/2524)'s step 2 puts the node machine in the reader. "T where it
 sits" and "C and X where they sit" ran its three sweeps there, in the shadow. What decided which expressions the machine
 may take stayed after the pipeline: the census's set and its silence tests, which read the stream. This record runs
