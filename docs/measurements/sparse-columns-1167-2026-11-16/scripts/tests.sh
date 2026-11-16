@@ -1,7 +1,9 @@
 #!/bin/bash
 # tests.sh TREE LOG: the reader's and the checker's tests on TREE's build (from the tree's root, as CI's correctness
 # list runs them), each command in one hold of the lock with a timeout of its own; a line a command in LOG: its status
-# and seconds, its output in LOG.d/N.txt.
+# and seconds, its output in LOG.d/N.txt. The oracle clang is CI's (the build's toolchain, 23.1.4), first on PATH; the
+# host's own clang is another release, which the driver's tests refuse as a reference. PARTS (default all) limits the
+# driver's parts, as "2 3 4 5".
 set -u
 cd "$(dirname "$0")"
 here=$PWD
@@ -9,10 +11,14 @@ tree=$1
 log=$2
 mkdir -p "$log.d"
 : > "$log"
+clang_bin=$(dirname "$(ls -d ~/.cache/buster/benchpress-clang/*/bin/clang-23 | head -1)")
+export PATH="$clang_bin:$PATH"
 commands=()
-for k in 1 2 3 4 5 6 7 8; do commands+=("./build/compiler test-checker --seed 133 --part $k/8"); done
-commands+=("./build/compiler test-checker-deferred" "./build/compiler test-check-units")
-for k in 1 2 3 4 5 6 7 8; do commands+=("./build/compiler test-checker-driver --executable ./build/compiler --part $k/8 --in-process"); done
+if [ -z "${PARTS:-}" ]; then
+    for k in 1 2 3 4 5 6 7 8; do commands+=("./build/compiler test-checker --seed 133 --part $k/8"); done
+    commands+=("./build/compiler test-checker-deferred" "./build/compiler test-check-units")
+fi
+for k in ${PARTS:-1 2 3 4 5 6 7 8}; do commands+=("./build/compiler test-checker-driver --executable ./build/compiler --part $k/8 --in-process"); done
 n=0
 for c in "${commands[@]}"; do
     start=$(date +%s)
