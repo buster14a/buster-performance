@@ -323,7 +323,7 @@ least of five passes a run:
 | `z3t`: the same main, `z3`'s patch and the line | 20.03, 19.92, 19.93 | 12.04, 12.06, 12.04 | 11.56, 11.46, 11.44 | 15.71, 15.70, 15.74 |
 | `two`: main `3d0d56ed7` and the line | 20.31, 20.32, 20.29 | 12.37, 12.31, 12.29 | 11.43, 11.43, 11.43 | 16.46, 16.48, 16.44 |
 | `final`: the same main, the pull request | 20.44, 20.69, 20.58 | 12.41, 12.59, 12.50 | 11.45, 11.46, 11.46 | 16.67, 17.11, 16.92 |
-| `fixed`: the same main, the pull request with its fix, three hours later | 20.28, 20.25, 20.26 | 12.35, 12.27, 12.28 | 11.46, 11.45, 11.45 | 16.36, 16.32, 16.35 |
+| `fixed`: the same main, the pull request with its fix, two hours after `final` | 20.28, 20.25, 20.26 | 12.35, 12.27, 12.28 | 11.46, 11.45, 11.45 | 16.36, 16.32, 16.35 |
 | `two` again, after `fixed`'s runs | 20.49, 20.48, 20.43 | 12.45, 12.44, 12.41 | 11.43, 11.43, 11.43 | 16.81, 16.80, 16.70 |
 
 - **The first pass's figure is within 2% in two builds of one kernel:**
@@ -331,8 +331,9 @@ least of five passes a run:
   `final` (1.3%). With the operators' kernel `two` and `final` read 39.30 and
   39.32.
 - **One build moves as much between two sets of runs:** `two` reads 20.31
-  in its first three runs and 20.48 in three more, three hours later
-  (0.8%). `fixed`, the pull request after its fix, reads 20.26 between them.
+  in its first three runs and 20.48 in three more, three and a half hours
+  later (0.8%). `fixed`, the pull request after its fix, reads 20.26 in runs
+  taken beside the second set.
 - **The nine added lines moved the constant again.** The issue's `z3` read
   12.57 cycles a record in the second pass against `w2`'s 11.41; rebuilt
   with the line, `z3t` reads 11.46. So these four builds don't show the
@@ -365,7 +366,7 @@ the fact words is 38.26 and 33.13 cycles an evaluated node on `sqlite3.c`
 and musl (medians of three; 38.18 and 33.13 in `two`), where the first
 piece's record has 37.7 to 38.6 and 32.6 to 33.8.
 
-The pull request after its fix (`fixed`) was measured the same way, three
+The pull request after its fix (`fixed`) was measured the same way, two
 hours later: "The merge queue's MemorySanitizer report, and the fix" has
 its figures.
 
