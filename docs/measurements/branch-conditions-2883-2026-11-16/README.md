@@ -6,7 +6,8 @@ with the node machine's side agreed with the holder of its files
 ([the revision](https://github.com/buster14a/buster/issues/2883#issuecomment-6923333995),
 [the holder's answer](https://github.com/buster14a/buster/issues/2883#issuecomment-6923501702)).
 The pull request is buster#2889 (`d8b672d0`, the lowering; `ee1bcd80`, the
-node machine's refusal), on main `ccbc303d`.
+node machine's refusal), on main `ccbc303d`; the node machine's follow-up is
+buster#2890.
 
 The lowering made `&&` and `||` a value even as a condition: `if (a < b && b < c)`
 was the first compare and its branch, the second compare's value made 0 or 1,
@@ -258,7 +259,10 @@ tree fetched by `tools/ci/fetch-*.sh`), the branch on main `ccbc303d`:
   each; its part 5 (the census and the shadow) 210,262 checks with the same 3
   failures of the node machine's fixture line, status 1, not a report; and
   `-c sqlite3.c`, whose object is the native build's to the byte. No sanitizer
-  reported anything.
+  reported anything. On the pull request's final tree (`ee1bcd80`), under
+  MemorySanitizer and AddressSanitizer, parts 4 and 5 pass with 0 failures
+  (60,883 and 210,262 checks) and `measure-node-machine --shadow --verify` on
+  `sqlite3.c` exits 0, with no report (`results/cloud/sanitizers-final-summary.txt`).
 - **Six mutants** (`scripts/cloud/mutants-build.sh`, `mutants-test.sh`: each a
   copy of the tree with one change, built, `test-checker` whole), each failing
   the new tests:
