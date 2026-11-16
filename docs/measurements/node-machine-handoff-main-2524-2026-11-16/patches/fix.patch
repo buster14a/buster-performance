@@ -1,0 +1,168 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index d0823523e..44c06ea3b 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -498,6 +498,9 @@ struct NodeCensusScratch
+     // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
+     const uint32_t* labels;
+     uint64_t label_count;
++    // The body's named result's local and its hidden pointer's (CheckLowerOwners.named), or BUSTER_CHECK_NONE twice.
++    uint32_t named_local;
++    uint32_t hidden_local;
+     uint32_t* object_locals;
+     uint32_t* object_stamps;
+     uint32_t* local_objects;
+@@ -2164,8 +2167,16 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+             // A row of the tape's calls (so that the rows the tape names, distinct as the stream's are, are all its own).
+             const bool call = kind == BUSTER_TYPED_CALL && t < machine->entry_count && machine->tape[t] < machine->call_count && function->values[e] >= machine->tape[t];
+             base = call && base == UINT64_MAX ? function->values[e] - machine->tape[t] : base;
+-            same = same && t < machine->entry_count && machine->kinds[t] == kind && machine->classes[t] == function->classes[e] &&
+-                   (node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
++            // A named result's address (#1375, #2882): the body builds that local where its hidden pointer points, and
++            // check_lower_named_rewrite made each LOCAL_ADDRESS of it a LOCAL of the hidden pointer after the tasks wrote
++            // them. The tape has the address, as the tasks had: the two are the same entry where the tape's object is
++            // the named local's, the body's one object there.
++            const bool named = s->named_local != BUSTER_CHECK_NONE && kind == BUSTER_TYPED_LOCAL && function->values[e] == s->hidden_local &&
++                               t < machine->entry_count && machine->kinds[t] == BUSTER_TYPED_LOCAL_ADDRESS;
++            same = same && t < machine->entry_count && machine->classes[t] == function->classes[e] &&
++                   (named                        ? node_shadow_same_local(s, machine->tape[t], s->named_local) :
++                    machine->kinds[t] != kind    ? false :
++                    node_shadow_local_kind(kind) ? node_shadow_same_local(s, machine->tape[t], function->values[e]) :
+                     branch                       ? node_shadow_same_label(s, machine, pop, machine->tape[t], function->values[e]) :
+                     kind == BUSTER_TYPED_CALL    ? call && machine->tape[t] + base == function->values[e] :
+                                                    machine->tape[t] == function->values[e]);
+@@ -3445,12 +3456,19 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+     const uint64_t log_capacity = prepared ? 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
+     // Each body's labels: its controls' and the ones its tasks number (the shadow's branches are read there).
+     const uint64_t label_capacity = prepared ? 2 * (uint64_t)selected.program.control_count + selected.program.body_count + 4 * (uint64_t)selected.program.stream->count + 65536 : 0;
+-    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + label_capacity * sizeof(uint32_t) + 8192);
++    // Each body's named result, two words a body (CheckLowerOwners.named): none until its body is lowered.
++    const uint64_t named_capacity = prepared ? 2 * ((uint64_t)selected.program.body_count + 1) : 0;
++    Arena log_arena = arena_reserve(log_capacity * sizeof(CheckLowerOwnerPop) + (label_capacity + named_capacity) * sizeof(uint32_t) + 8192);
+     CheckLowerOwners owners = { .capacity = log_capacity, .label_capacity = label_capacity };
+     owners.pops = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, CheckLowerOwnerPop, owners.capacity) : 0;
+     owners.labels = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, owners.label_capacity) : 0;
++    owners.named = prepared ? BUSTER_ARENA_PUSH_ARRAY(&log_arena, uint32_t, named_capacity) : 0;
++    if (owners.named != 0)
++    {
++        memset(owners.named, 0xff, named_capacity * sizeof(uint32_t));
++    }
+     CheckProgramLowered lowered = { 0 };
+-    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 &&
++    const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 && owners.named != 0 &&
+                           check_program_lower_owners(&lowered, &selected.program, &owners, &path->output_arena, &path->scratch);
+     const bool complete = lowering && !owners.overflow;
+     if (complete)
+@@ -3551,6 +3569,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                     s.owners = lowered.entry_tokens[b];
+                     s.labels = owners.labels;
+                     s.label_count = owners.label_count;
++                    s.named_local = owners.named[2 * (uint64_t)b];
++                    s.hidden_local = owners.named[2 * (uint64_t)b + 1];
+                     s.body_stamp = b + 1;
+                     node_census_body(census, &s, b, owners.pops + first, (uint32_t)(end - first));
+                 }
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index 63676f16c..d55615b99 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -187,7 +187,10 @@ static const char node_census_test_atomic[] =
+ // record's with a nested list (their lists' values dropped where nothing takes them, none left waiting), an enumerator's
+ // value, a library function called by its name and through its
+ // address (the call's library mark), and a switch (its condition's operator, and a case label's constant, whose context
+-// the walk's visit gives: unknown to the front).
++// the walk's visit gives: unknown to the front). And a named result (#1375, #2882): `named` returns its one local
++// through its hidden pointer, so the lowering builds it where that pointer points and each of the local's addresses
++// in the stream is the pointer's value, where the tape has the local's address (a store to its member, a member's
++// value in an initializer and a condition, its address as an argument); `either` returns two locals and keeps both.
+ static const char node_shadow_test_text[] =
+     "struct S { long m; long n; int a[4]; unsigned char c; int (*cb)(int); };\n"
+     "struct __jmp_buf_tag { long b[8]; };\n"
+@@ -343,6 +346,33 @@ static const char node_shadow_test_text[] =
+     "        default: break;\n"
+     "    }\n"
+     "    return y + x + (long)z; // machine: taken\n"
++    "}\n"
++    "struct W { long a; long b; long c; };\n"
++    "long total(const struct W* w);\n"
++    "struct W named(long x)\n"
++    "{\n"
++    "    struct W w;\n"
++    "    w.a = x; // machine: taken\n"
++    "    w.b = x + 1; // machine: taken\n"
++    "    long y = w.a - x; // machine: taken\n"
++    "    long n = total(&w); // machine: taken\n"
++    "    if (w.a > 3) // machine: taken\n"
++    "    {\n"
++    "        w.c = y + n; // machine: taken\n"
++    "    }\n"
++    "    return w;\n"
++    "}\n"
++    "struct W either(long x)\n"
++    "{\n"
++    "    struct W first;\n"
++    "    struct W second;\n"
++    "    first.a = x; // machine: taken\n"
++    "    second.a = x + 1; // machine: taken\n"
++    "    if (x > 3) // machine: taken\n"
++    "    {\n"
++    "        return first;\n"
++    "    }\n"
++    "    return second;\n"
+     "}\n";
+ 
+ // The refusal whose name `name` (`length` bytes) is, or NODE_MACHINE_REFUSALS.
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 343cf1060..a5a9af4c5 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -677,6 +677,12 @@ struct CheckLowerOwners
+     uint32_t* labels;
+     uint64_t label_count;
+     uint64_t label_capacity;
++    // Optional (null for none): each body's named result (#1375), two words a body, set once the body is lowered
++    // (check_lower_owner_named): the local the body builds where its hidden pointer points and that pointer's local, or
++    // BUSTER_CHECK_NONE twice. check_lower_named_rewrite makes each LOCAL_ADDRESS of that local a LOCAL of the hidden
++    // pointer after the tasks wrote them, so #2524's shadow, whose tape has the object's address, reads here what those
++    // entries became (#2882).
++    uint32_t* named;
+     // Whether the tasks' loop runs (check_lower_drain_sources), and whether a pop found the log full (or the body's labels
+     // the labels' column).
+     bool draining;
+@@ -16272,6 +16278,19 @@ static __attribute__((noinline)) void check_lower_owner_labels(CheckLowerWriter*
+     }
+ }
+ 
++// The body's named result for #2524's shadow (CheckLowerOwners.named): with `rewritten`, the local whose LOCAL_ADDRESS
++// entries check_lower_named_rewrite made LOCALs of the hidden pointer, and that pointer's local.
++static __attribute__((noinline)) void check_lower_owner_named(CheckLowerWriter* writer, bool rewritten)
++{
++    CheckLowerOwners* owners = writer->owners;
++    if (owners->named != NULL)
++    {
++        const uint64_t body = (uint64_t)(writer->body - writer->program->bodies);
++        owners->named[2 * body] = rewritten ? writer->named_result : BUSTER_CHECK_NONE;
++        owners->named[2 * body + 1] = rewritten ? writer->hidden : BUSTER_CHECK_NONE;
++    }
++}
++
+ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask task)
+ {
+     const CheckProgram* program = writer->program;
+@@ -20568,13 +20587,15 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+                 check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+             }
+         }
+-        if (writer->named_result != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK)
++        const bool rewritten = writer->named_result != BUSTER_CHECK_NONE && status->status == CHECK_PROGRAM_OK;
++        if (rewritten)
+         {
+             check_lower_named_rewrite(writer);
+         }
+         if (writer->owners != NULL)
+         {
+             check_lower_owner_labels(writer);
++            check_lower_owner_named(writer, rewritten);
+         }
+         // The labels whose addresses the program takes, from their control entries to their entries, as the targets.
+         for (uint32_t k = 0; k < writer->label_entry_count && status->status == CHECK_PROGRAM_OK; k += 1)
