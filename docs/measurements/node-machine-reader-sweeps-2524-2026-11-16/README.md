@@ -77,8 +77,14 @@ first run of each; every run of the seven (musl's three) reads the same:
 | with the lean front: compared, differences | 50,370, 0 | 10,524, 0 | 22,258, 0 |
 
 - **Compared** are the expressions of the census's taken set that T took both times; reader time's other expressions
-  are in bodies the lowering never popped (`sqlite3.c`: 3,941 of the 55,063; Lua 1,722; musl 26,597) or ones the
-  census refuses.
+  are ones the lowering never popped (`sqlite3.c`: 3,941 of the 55,063; Lua 1,722; musl 26,597) or ones the census
+  refuses. **Corrected 2026-11-16:** this first said "in bodies the lowering never popped". Most of the never-popped
+  on `sqlite3.c` and Lua are a declaration's discard (the walk's cast to void of an initializer's value at the
+  declaration's `;`: 3,828 and 1,708), and 22 and 9 are in bodies the selection drops; on musl 5,557 and 20,745
+  ([the correction](https://github.com/buster14a/buster/issues/2524#issuecomment-6908043343)). C and X ran on those
+  discards too, and the ticks a typed record include them. The pull request's description and patch kept in
+  `patches/` still have the first reading in one bullet ("The reader runs them for nothing too"); it is corrected where
+  the commit is carried to its pull request.
 - **The comparison:** the root's conversion's target and its object against the lowering's pop's; the refusal; each
   entry's kind, class and value, a global's value (`GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL`, `SET_GLOBAL`) after
   `program->object_symbols[object]`; and a digest of the labels' entries, the calls' records and the temporaries.

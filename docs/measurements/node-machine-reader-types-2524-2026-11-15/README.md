@@ -13,6 +13,14 @@ Host: the Ryzen 7 9700X (`benchpress`), under its lock, a hold a run or a short 
 TSC ticks at 3,792.9 MHz. The pull request's sources are build `t4` (checked: `t4.patch` is the diff of `src` and
 `tools` between main `639e730ed` and the branch's commit `ccd5c5463`).
 
+**Correction, 2026-11-16.** Finding 4 and the table's "in none" rows first read every expression T takes that the
+lowering never pops as one in a body the selection drops. Classified later, with the build of the record
+`node-machine-reader-tests-2524-2026-11-16`, most of them on `sqlite3.c` and Lua are a declaration's discard: the
+reader's walk casts each initializer's value to void at the declaration's `;`, the front makes that cast a root, and
+nothing evaluates it. The counts and the timings below are as measured (the timings are per record T typed, and include
+each scalar initialization's second typing under its cast); finding 4 and the rows' labels are corrected in place.
+[The correction on the issue](https://github.com/buster14a/buster/issues/2524#issuecomment-6908043343) has the count.
+
 ## Findings
 
 1. **T has what it needs at reader time, and it is exact there.** On `sqlite3.c`, Lua and musl, 50,555, 10,545 and
@@ -27,9 +35,11 @@ TSC ticks at 3,792.9 MHz. The pull request's sources are build `t4` (checked: `t
 3. **Sparse expressions cost much more.** Lua has an expression every 21 acting tokens and musl one every 49
    (`sqlite3.c`: one every 8). T at reader time is 84.3 and 134.5 ticks a record there, 1.4 and 2.2 times the tight
    loop's first pass. Step 2's gate has a line for those corpora (no unit slower by more than 1%).
-4. **A reader types much that is never lowered.** Of the expressions T runs on at reader time, 7.0% on `sqlite3.c`,
-   13.1% on Lua and 45.9% on musl are ones it takes in bodies that no lowering pops: the selection drops them. The
-   pipeline reads and types them today and stops there; a machine in the reader would run C and X on them too.
+4. **A reader types much that the lowering never pops.** Of the expressions T runs on at reader time, 7.0% on
+   `sqlite3.c`, 13.1% on Lua and 45.9% on musl are ones it takes whose root no lowering pops. On `sqlite3.c` 3,828 of
+   the 3,941 are a declaration's discard and 22 are in bodies the selection drops; on Lua 1,708 of 1,722 and 9; on musl
+   5,557 of 26,597 are discards and 20,745 are in dropped bodies. The pipeline reads and types all of them today and
+   stops there; a machine in the reader must leave the discards alone, and would run C and X on a dropped body's.
 5. **The machine's state is a scan a unit as the shadow makes it:** 0.96 ms on `sqlite3.c`, 3.39 ms for Lua's 34 units
    and 35.1 ms for musl's 1,336, where T's own time is 8.8 ms. Step 2 would make it as the declarations are read.
 6. **A compile is unchanged** (+0.07% and -0.18%; 26,000 instructions of 1,363 M). The shadow's own sweeps retire 1.6
@@ -95,9 +105,10 @@ The shadow's reading by `t4` (`results/tables.txt`, sections 3 and 4); the same 
 | T refused: a context (a static object's initializer) | 1,480 | 556 | 8,577 |
 | T refused: a callee | 138 | 60 | 155 |
 | T refused: a leaf | 0 | 0 | 41 |
-| in a lowered body (the lowering popped its root) | 51,255 (90.4%) | 10,896 (82.6%) | 22,914 (39.6%) |
-| in none, and taken | 3,941 (7.0%) | 1,722 (13.1%) | 26,597 (45.9%) |
-| in none, and refused for its context | 1,480 | 556 | 8,346 |
+| the lowering popped its root | 51,255 (90.4%) | 10,896 (82.6%) | 22,914 (39.6%) |
+| never popped, and taken | 3,941 (7.0%) | 1,722 (13.1%) | 26,597 (45.9%) |
+| of those: a declaration's discard; in a body that is never lowered (counted 2026-11-16) | 3,828; 22 | 1,708; 9 | 5,557; 20,745 |
+| never popped, and refused for its context | 1,480 | 556 | 8,346 |
 | compared with the shadow's T (the census's taken set) | 50,555 | 10,545 | 22,363 |
 | their records | 285,934 | 74,207 | 132,443 |
 | differences: range, refusal, records | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 |
