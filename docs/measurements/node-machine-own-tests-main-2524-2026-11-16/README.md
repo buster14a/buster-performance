@@ -8,9 +8,14 @@ hand-off said it owed before it could be a pull request: the fixture lines its f
 unsorted faults sorted. It is all the node machine's shadow (`measure-node-machine --shadow`): no compile takes any
 of it.
 
-**State: this record is being filled.** The sorting, the fixtures and the campaign are here. The 9700X's runs
-(`scripts/job3.sh`) and the sanitizer rows (`scripts/sanitizers.sh`) were running when this was first pushed; the
-pull request waits for buster#2887 to merge, since the session has one branch.
+**State: this record is being filled.** The sorting, the fixtures, the campaign and the 9700X's runs are here. The
+sanitizer rows (`scripts/sanitizers.sh`) were running when this was pushed; the pull request waits for buster#2887 to
+merge, since the session has one branch.
+
+**Result.** With the lines owed in the fixtures and the 11 sorted, each of the 91 faults that can still be put into
+the own form fails `test-checker`. On today's main the form reads what the hand-off read: 86.7, 114.6 and 161.1
+ticks a record T typed on `sqlite3.c`, Lua and musl where the census's code is 165.3, 177.4 and 266.7, and no
+expression's bits differ from that code's, with the default warnings and with every warning. A compile is unchanged.
 
 ## 1. What the hand-off owed
 
@@ -81,7 +86,66 @@ runs `test-checker --seed 133 --part 5/8` with each. `results/cloud/faults/campa
   conditions were taken out.
 - **The tests after C and X** (`--front-tests-last`) and the census's code alone (`--front-tests`): the same.
 
+## 6. The 9700X
+
+Release builds, CPU 2, under the lock, a hold a run (`scripts/job3.sh`; `results/tables.txt` by `scripts/tables.py`).
+`head2` is main `1c6cc8ab5` with buster#2887's `src`, `tools` and `tests` (that record's build); `own` is the same
+main with `patches/own.patch`.
+
+TSC ticks a record T typed at reader time (medians of seven readings in turn, musl's of three; the ranges are in
+`results/tables.txt`):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| T, C and X, by `head2` in the same turns | 134.2 | 159.1 | 258.5 |
+| T, C and X (`--front-sweeps`) | 137.8 | 162.8 | 260.6 |
+| with the census's code between T and C (`--front-tests`) | 303.1 | 340.3 | 527.4 |
+| with the own form (`--front-own-tests`) | 224.5 | 277.5 | 421.7 |
+| the census's code alone (the difference) | 165.3 | 177.4 | 266.7 |
+| the own form alone | 86.7 | 114.6 | 161.1 |
+| the own form after C and X (`--front-tests-last`), one reading, the whole | 220.3 | 279.3 | 421.1 |
+| the hand-off's, at main `be6515fba`: the census's code alone; the own form alone | 173.5; 90.0 | 186.1; 118.8 | 248.0; 157.3 |
+
+The own form beside the census's code (`--front-own-tests --verify`), one reading a corpus and a set of warnings:
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| expressions the tests ran on | 51,185 | 10,859 | 43,481 |
+| records the loop lists: leaves | 45.56% | 44.51% | 48.65% |
+| at a comparison's token, a `!` or an `=` | 9.60% | 6.35% | 7.98% |
+| operators with tests of their own | 16.79% | 21.65% | 16.17% |
+| records sent to the census's code | 913 (0.31%) | 906 (1.18%) | 1,817 (0.81%) |
+| expressions walked for it | 2.09% | 4.13% | 3.01% |
+| with `-Wall -Wextra`: records sent | 5.18% | 3.91% | 4.71% |
+| expressions whose bits are not the census's code's; walks of another count (either set) | 0; 0 | 0; 0 | 0; 0 |
+| taken at reader time and refused by the census; tests that differ (either set) | 0; 0 | 0; 0 | 0; 0 |
+
+These are the hand-off's shares, to the last digit it gave: the conditions taken out sent or listed no record.
+
+`head2` against `own`:
+
+| | `head2` | `own` |
+| --- | ---: | ---: |
+| `-c sqlite3.c`, instructions | 1,364,582,339 | 1,364,580,484 |
+| its wall time, 21 runs a build from three fresh copies, twice | 122.469 ms; 122.425 ms | +0.02%; -0.06% |
+| `head2` against itself in the same runs | | -0.13%; -0.21% |
+| its user cycles; `head2` against itself | | +0.12%; -0.02%; and -0.03%; -0.14% |
+| the shadow's T, C and X after the pipeline, cycles an evaluated node: `sqlite3.c`; Lua; musl | 178.0; 150.9; 135.9 | 178.0; 152.5; 137.1 |
+| their instructions | 594.3; 683.7; 645.6 | the same |
+| buster#2850's fact words with the operators, the first pass's cycles a record: `sqlite3.c`; musl | 43.34; 39.13 | 43.02; 39.01 |
+| their instructions a record | 149.38; 169.89 | the same |
+
+- **A compile is unchanged.**
+- **The census's own reports** are `head2`'s line for line on the three corpora, with both sets of warnings.
+- **T, C and X read 2 to 4 ticks more in `own`** than in `head2` in the same turns: the reader-time loop has the
+  tests' two places around C and X there (`--front-tests-last`). The hand-off's builds differed the same way.
+
 ## Files
+
+- `results/own`, `results/head2`: the 9700X's runs (`sweeps`, `tests`, `own`, `own-last`, `own-verify`,
+  `own-verify-wall`: the shadow at reader time; `shadow`: the shadow alone; `facts-operators`: buster#2850's kernel;
+  `census`, `census-wall`: the census alone; `compile`: the whole compile's comparison; `head2`'s files of this job
+  end in `3`). `results/tables.txt` is their summary, `results/job3.log` the job's.
 
 - `patches`: `sorted.patch` (this work on top of the hand-off's `0003` as re-picked on buster#2887's head) and
   `own.patch` (the 9700X's build).
