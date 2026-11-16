@@ -39,7 +39,9 @@ apart) in main with the line and this piece's branch.
 The code is buster's `c_check_node_machine_reads.c`
 (`measure-node-machine --shadow --facts-reads`), in
 [buster#2875](https://github.com/buster14a/buster/pull/2875) (commits
-`9dfe7c391` and `b64fbdd7b` on main `3d0d56ed7`); the design's page is
+`9dfe7c391` and `b64fbdd7b` on main `3d0d56ed7`, and `ab6a1cb46`, the fix the
+merge queue's MemorySanitizer row asked for: "The merge queue's
+MemorySanitizer report, and the fix" below); the design's page is
 buster's `docs/one-core-path.md` ("Step 2's second piece: what reads T's
 record" and "The figures are a difference of two passes"). The results
 against the gates are on the issues:
@@ -321,11 +323,16 @@ least of five passes a run:
 | `z3t`: the same main, `z3`'s patch and the line | 20.03, 19.92, 19.93 | 12.04, 12.06, 12.04 | 11.56, 11.46, 11.44 | 15.71, 15.70, 15.74 |
 | `two`: main `3d0d56ed7` and the line | 20.31, 20.32, 20.29 | 12.37, 12.31, 12.29 | 11.43, 11.43, 11.43 | 16.46, 16.48, 16.44 |
 | `final`: the same main, the pull request | 20.44, 20.69, 20.58 | 12.41, 12.59, 12.50 | 11.45, 11.46, 11.46 | 16.67, 17.11, 16.92 |
+| `fixed`: the same main, the pull request with its fix, three hours later | 20.28, 20.25, 20.26 | 12.35, 12.27, 12.28 | 11.46, 11.45, 11.45 | 16.36, 16.32, 16.35 |
+| `two` again, after `fixed`'s runs | 20.49, 20.48, 20.43 | 12.45, 12.44, 12.41 | 11.43, 11.43, 11.43 | 16.81, 16.80, 16.70 |
 
 - **The first pass's figure is within 2% in two builds of one kernel:**
   20.11 and 19.93 in `w2t` and `z3t` (0.9%), 20.31 and 20.58 in `two` and
   `final` (1.3%). With the operators' kernel `two` and `final` read 39.30 and
   39.32.
+- **One build moves as much between two sets of runs:** `two` reads 20.31
+  in its first three runs and 20.48 in three more, three hours later
+  (0.8%). `fixed`, the pull request after its fix, reads 20.26 between them.
 - **The nine added lines moved the constant again.** The issue's `z3` read
   12.57 cycles a record in the second pass against `w2`'s 11.41; rebuilt
   with the line, `z3t` reads 11.46. So these four builds don't show the
@@ -358,6 +365,10 @@ the fact words is 38.26 and 33.13 cycles an evaluated node on `sqlite3.c`
 and musl (medians of three; 38.18 and 33.13 in `two`), where the first
 piece's record has 37.7 to 38.6 and 32.6 to 33.8.
 
+The pull request after its fix (`fixed`) was measured the same way, three
+hours later: "The merge queue's MemorySanitizer report, and the fix" has
+its figures.
+
 ## The versions the 9700X ran
 
 The census changed three times after its first run there. Each build's
@@ -368,6 +379,8 @@ census is kept, since the differences are the record of what was wrong:
 | `reads` | `patches/reads.patch` | a payload's source by what its rule does, a change counted as computed where it decided; payloads changed to any value. It read 7.75%, 26.02% and 8.70% of the operators as new: a conversion of an `int` constant counted as computed, because the rule takes an `int` operand's 2^40 + 5 as an `int`. |
 | `reads3` | `patches/reads3.patch` | payloads changed to values their type holds; the changes that decide left out of the copy's test; a conversion that copies where the value fits told from a fold; a type's other self the one of its word that differs most; `&x` of a volatile object's type found in the pointer type's own row. 5.41%, 24.24%, 6.12%. |
 | `final` | `patches/final.patch` | `reads3`'s census with the list's lines extended (the presumed file, the consumer's operator, the types' indexes) and the tests' fixture's last lines. The same counts as `reads3` (`scripts/summary.py`'s tables are the same line for line). It is the pull request's `src` and `tools` but for two pinned counts of the tests' fixture and their comment, added after it: test data. |
+
+| `fixed` | `patches/fixed.patch` | the pull request's `src` and `tools` after its fix: `final`'s census, the tests' two pinned counts, and the pointer rule's and the cast's operands zeroed (`patches/operands-zeroed.patch`). The same census as `final`, line for line. |
 
 Before the 9700X, in the cloud container on `sqlite3.c`, the first form read
 4.4% of the operators as new: it took a payload that equals an operand's for
@@ -426,25 +439,118 @@ and by the tests (`scripts/mutate5.py`, `scripts/reads_mutations.py`;
 - The runner leaves the last mutant's build as `build/compiler`: every run
   above was followed by a rebuild.
 
+## The merge queue's MemorySanitizer report, and the fix
+
+The pull request's own checks passed: they don't run the sanitizer rows. The
+merge queue's first candidate (run 43867094346, 2026-11-16 12:29 UTC) failed
+in its `x86-64` MemorySanitizer row, shard 3 of 7, in the part of
+`test-checker` that has the census's tests, and the queue dropped it:
+
+```text
+WARNING: MemorySanitizer: use-of-uninitialized-value
+    #0 node_facts_pointer c_check_node_machine_facts.c:1392:28
+    #1 node_facts_slow c_check_node_machine_facts.c:2900:36
+    #2 node_reads_consumers c_check_node_machine_reads.c:793:25
+```
+
+- **What it was.** The fact words' pointer rule (the first piece's,
+  buster#2871) reads its two operands with `&&`. Where the first isn't
+  taken, the second is never read into its place, and the rule's next lines
+  read both operands' types and constants before `taken` decides. The
+  answer never depended on it (`taken` is false by then), and no compile
+  runs the rule. The census is what gives a rule such operands: it changes
+  one operand's type or flags alone and runs the consumer's rule again. The
+  cast's rule has the same shape: its source is unread where the node's
+  type isn't taken.
+- **The fix** (`patches/operands-zeroed.patch`, buster `ab6a1cb46`): both
+  rules' operands are zeroed, as the update's rule already had its pointer.
+  The other rules of the file test `taken` before they read an operand.
+- **Why main's own rows never showed it** was not looked for. The first
+  piece's tests run before the census's in the same process and pass in the
+  build that reports. The report's origin is "invalid (0)", which I take
+  for a value the optimizer left undefined on that path, not one read from
+  memory: a guess, not checked.
+- **The census's counts didn't depend on it.** On the 9700X the pull
+  request after its fix (`fixed`) prints `final`'s census line for line on
+  the three corpora (`results/fixed/reads-*.txt`; `summary.txt` differs in
+  the wall times' line alone).
+
+**The sanitizer rows, in the cloud container** (4 CPUs; Release builds as
+CI's rows build them, `-O3`; `sanitizers/tests.txt`):
+
+| host, sanitizer | the tests' part (`test-checker --seed 133 --part 5/8`) |
+| --- | --- |
+| `x86-64`, memory, before the change | exit 86, the queue's report (`sanitizers/memory-before-report.txt`) |
+| `x86-64`, memory, after it | 210,262 checks, 0 failures, no report |
+| `x86-64`, address with undefined and bounds | 210,262 checks, 0 failures, no report |
+| `x86-64`, thread | 210,262 checks, 0 failures, no report |
+| native (the vector paths), memory | 210,298 checks, 0 failures, no report |
+
+The queue had cancelled the address, thread and vector rows before they
+finished. The census itself was also run on the compiler's own source,
+`sqlite3.c` and Lua by the `x86-64` memory and address builds
+(`scripts/sanitizer-corpora.sh`, `sanitizers/census.txt`): no report, and
+its lines are the plain native build's, line for line (741, 885 and 759
+lines).
+
+**The kernels after the fix, on the 9700X** (`scripts/fixed.sh`; `fixed`
+is main `3d0d56ed7` with the pull request's `src` and `tools` after the
+fix; `two` was run again after it). Both changed rules are in the timed
+loops. Cycles a record of the windows in the first pass, medians of three
+runs:
+
+| | `two` | `two` again | `final` | `fixed` |
+| --- | ---: | ---: | ---: | ---: |
+| musl, the kernel whole | 20.31 | 20.48 | 20.58 | 20.26 |
+| musl, with the operators | 39.30 | 39.34 | 39.32 | 39.25 |
+| `sqlite3.c`, the kernel whole | 24.36 | 23.86 | 23.94 | 24.23 |
+| `sqlite3.c`, with the operators | 43.43 | 43.45 | 43.32 | 43.51 |
+| T whole from the fact words, an evaluated node: `sqlite3.c` | 38.18 | 38.54 | 38.26 | 38.69 |
+| the same on musl | 33.13 | 33.16 | 33.13 | 33.02 |
+
+No figure moves by more than the same build does between its two sets of
+runs. Instructions a record of the windows in the first pass: 89.17, 89.27
+and 89.26 on musl in `two`, `final` and `fixed`, and 169.90, 170.00 and
+169.89 with the operators.
+
+**The whole compile after the fix** (`results/fixed/compile-1.txt`,
+`compile-2.txt`; `-c sqlite3.c`, `main` against `fixed`, 21 runs a build in
+a Williams order, twice): the same instructions but for 862 of 1,363.6 M
+fewer in `fixed` (medians 1,363,597,473 and 1,363,596,611), as in `final`;
+wall time -0.06% and +0.21%, where `main` against itself reads -0.00% and
+-0.06%; user cycles +0.12% and +0.31%, against +0.11% and +0.11%. No path of
+a compile differs between the two but by where its code sits.
+
+What I hadn't done is run the sanitizer rows before the queue: the pull
+request's text said its checks would run them. buster's lowering guide now
+says they don't, and what to run.
+
 ## Files
 
 - `results/final`: the pull request's build (`build.log`, `revision.txt`,
   `compiler.sha256`), the census on the three corpora (`reads-*.txt`,
   `summary.txt`), the two passes' runs (`passes-*.txt`) and the whole
   compile's comparison (`compile-*.txt`).
+- `results/fixed`: the pull request after its fix, built the same way: its
+  census, its two passes' runs and its whole compile's comparison.
 - `results/main`: main `3d0d56ed7` as it is, the whole compile's base.
-- `results/two`: main with the two passes' line alone, and its runs.
+- `results/two`: main with the two passes' line alone, and its runs
+  (`passes-*-b-*.txt`: the three more beside `fixed`'s).
+- `sanitizers`: the queue's report as the cloud container's build gave it,
+  and the tests' and the census's runs under the sanitizers.
 - `results/w2t`, `results/z3t`: the two builds buster#2872 names, with the
   line, and their runs on musl.
 - `results/reads`, `results/reads3`: the earlier censuses, with their
   patches.
-- `patches`: each build's patch, and `pull-request.patch`, the pull
-  request's `src` and `tools` against main `3d0d56ed7` (`final.patch` and
-  two pinned counts of the tests' fixture).
+- `patches`: each build's patch; `pull-request.patch`, the pull request's
+  `src` and `tools` against main `3d0d56ed7` before its fix (`final.patch`
+  and two pinned counts of the tests' fixture); and `fixed.patch`, the same
+  after it (`pull-request.patch` and `operands-zeroed.patch`).
 - `scripts`: the 9700X's scripts (`setup.sh`, `lock.sh`, `corpora.sh`,
   `build-label.sh`, `reads.sh`, `passes.sh`, `two-run.sh`, `named.sh`,
-  `branch.sh`, `compile.sh`, `final.sh`), `summary.py`, the cloud
-  container's `local-checks.sh`, and the mutants' runner and list.
+  `branch.sh`, `compile.sh`, `final.sh`, `fixed.sh`), `summary.py`, the cloud
+  container's `local-checks.sh` and `sanitizer-corpora.sh`, and the mutants'
+  runner and list.
 - `results/local`: the cloud container's checks of the pull request's
   build (the kernels' variants and the census on the compiler's own source,
   `sqlite3.c` and Lua; its copies of the corpora are not the 9700X's, and
