@@ -167,8 +167,9 @@ an `x86-64` row's shadow run reads no front.
   `census`, `census-wall`: the census alone; `compile`: the whole compile's comparison; `head2`'s files of this job
   end in `3`). `results/tables.txt` is their summary, `results/job3.log` the job's.
 
-- `patches`: `sorted.patch` (this work on top of the hand-off's `0003` as re-picked on buster#2887's head) and
-  `own.patch` (the 9700X's build).
+- `patches`: `sorted.patch` (this work on top of the hand-off's `0003` as re-picked on buster#2887's head),
+  `own.patch` (the 9700X's build), and the pull request's description and its second commit's message as prepared
+  (`pull-request-body.md`, `commit-message.txt`).
 - `scripts/faults`: the knobs, the campaign, the probes and their lines.
 - `scripts`: `job3.sh` and `lock.sh` (the 9700X's; the other scripts are
   [the first pull request's record](../node-machine-handoff-main-2524-2026-11-16/scripts)'s), `local-checks.sh` and
