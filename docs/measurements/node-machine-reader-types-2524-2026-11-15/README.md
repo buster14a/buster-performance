@@ -76,6 +76,13 @@ After main gained #2850's fact words (buster#2863, main `fdf0de745`), for sectio
 | `m13` | `m12` with `patches/align.patch` | `m12` with the fact words' eight kernel functions aligned to 64 bytes |
 | `u2` | `m12` with `patches/u2.patch` | `u1` with the same alignment |
 
+After main gained the follow-up's lean record and the load alone (buster#2868, main `be6515fba`), for section 6:
+
+| label | sources | what |
+| --- | --- | --- |
+| `m14` | main `be6515fba` | the baseline with the kernel's three variants |
+| `u3` | `m14` with `patches/u3.patch` | the pull request's branch with that main merged in (`084b3facb`) |
+
 ## 1. Exact
 
 The shadow's reading by `t4` (`results/tables.txt`, sections 3 and 4); the same counts in every run of a corpus:
@@ -270,11 +277,104 @@ The same pair with those eight functions aligned to 64 bytes, `m13` against `u2`
 | first | 123.344 | 122.934 | -0.33% (-0.71% to -0.11%) | 1,363.438, 1,363.464 |
 | second | 123.799 | 123.071 | -0.59% (-1.76% to -0.16%) | 1,363.438, 1,363.464 |
 
+## 6. After main gained the lean record and the load alone (buster#2868)
+
+#2868 merged next, and main `be6515fba` is merged into the branch (`084b3facb`): one conflict, the shadow's failure
+test, both sides' terms kept. The same question as section 5, of the kernel's three variants now: the whole record
+(`--facts`), the lean one (`--facts-lean`) and a lookup's load alone (`--facts-loads`), each with a body a window and
+with the windows packed to 384 records (that follow-up's record's settings, `per-core-step1-lean-2850-2026-11-15`), and
+the whole kernel packed to 4,096. `scripts/facts.sh` as in section 5, `--passes 5`, the labels in turn, CPU 2, each run
+its own hold of the lock (`scripts/job21.sh`, `job22.sh`); medians by that record's `tables.py`
+(`scripts/facts-tables2.py`).
+
+Cycles a taken leaf or lookup, `m14` against `u3`, six runs each (`results/9700x/facts-m14-u3-six.txt`):
+
+| | whole | lean | loads |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, a body a window | 22.88, 23.16 (+1.2%) | 20.56, 20.86 (+1.5%) | 15.18, 15.31 (+0.9%) |
+| Lua | 17.68, 17.64 (-0.2%) | 16.07, 15.76 (-1.9%) | 10.94, 10.73 (-1.9%) |
+| musl | 15.82, 15.76 (-0.4%) | 14.00, 13.94 (-0.4%) | 8.91, 8.84 (-0.8%) |
+| `sqlite3.c`, packed to 384 | 18.96, 19.03 (+0.4%) | 16.66, 16.59 (-0.4%) | 11.07, 11.79 (+6.5%) |
+| Lua | 14.95, 14.92 (-0.2%) | 13.48, 13.41 (-0.5%) | 8.43, 8.41 (-0.2%) |
+| musl | 14.67, 14.64 (-0.2%) | 12.96, 12.87 (-0.7%) | 7.79, 7.82 (+0.4%) |
+| `sqlite3.c`, packed to 4,096 | 19.11, 19.11 (0.0%) | | |
+| Lua | 16.00, 15.94 (-0.4%) | | |
+| musl | 14.88, 14.83 (-0.3%) | | |
+
+- **The kernel does the same work.** Its instructions a taken leaf or lookup are the same to the hundredth on the 21
+  rows, its mispredicted branches the same (on `sqlite3.c` 0.252 and 0.248, 0.216 and 0.208, 0.205 and 0.202 in
+  bodies; 0.117, 0.091, 0.088 and 0.089, and 0.031 packed), and every record is T's in all 364 runs of this section.
+  Its functions have the same sizes, and the kernel's 24 (from `node_facts_given` on) are each 0x1c40 bytes further
+  on in `u3`: 113 lines of 64 bytes, so at the same place in its line this time
+  (`results/9700x/facts-addresses-m14-u3.txt`).
+- **Lua and musl read the same or faster with this branch** on their 14 rows (-1.9% to +0.4%), and `sqlite3.c`
+  with its windows packed is within 0.4% either way, but for one row.
+- **That row is its runs' spread.** The load alone, packed, on `sqlite3.c`: `m14`'s six runs are 10.93 to 11.13 and
+  `u3`'s 11.11 to 13.19. Twelve more runs each (`scripts/job24.sh`, `results/9700x/facts-one-m14-u3.txt`) make the
+  medians of eighteen 11.04 and 11.19 (+1.3%), with `m14` from 10.76 to 11.29 and `u3` from 10.40 to 13.19; and twelve
+  each without address-space randomization read 10.88 and 11.00 (+1.1%; 10.82 to 11.20, and 10.82 to 11.90). By
+  profile over 160 passes, three processes each, that kernel's functions take 690 M and 693 M cycles
+  (`results/9700x/facts-events-loadspacked-m14-u3.txt`).
+
+### `sqlite3.c` with a body a window: the leaves' loop
+
+The three `sqlite3.c` rows in bodies read 0.9% to 1.5% slower. What moved is one loop, `node_facts_leaves` (198 bytes,
+the same code in both builds: a leaf's line loaded, its 64-byte record stored):
+
+| `node_facts_leaves`, whole kernel, a body a window | `m14` | `u3` |
+| --- | ---: | ---: |
+| cycles a leaf (the split pass's ticks), six runs | 6.40 (6.04 to 6.53) | 7.56 (7.47 to 7.70) |
+| cycles a lookup, the same runs | 39.80 | 39.57 |
+| its cycles over 160 passes, three processes, M | 197, 206, 197 | 244, 221, 232 |
+| the kernel's functions together, the same, M | 1,875, 1,881, 1,885 | 1,928, 1,913, 1,917 |
+| in it over 160 passes, one process, M: instruction cache misses | 1.08 | 2.22 |
+| op cache misses | 3.44 | 4.10 |
+| ops dispatched from the op cache | 251 | 295 |
+| mispredicted branches | 1.34 | 1.54 |
+| store-to-load interference | 3.22 | 4.71 |
+| demand fills of the data cache | 6.69 | 7.15 |
+
+(`scripts/job23.sh`, `job25.sh`, `job28.sh`; `results/9700x/facts-events-body-m14-u3.txt`,
+`facts-annotate-body-m14-u3.txt`, `facts-annotate-front-m14-u3.txt`, and each build's `fe-body-*` and `fa-*` files.)
+
+- **It is not the kernel's data.** Its arrays are at the same addresses in both builds: `rows`, `lines`, `numbers`,
+  `inputs`, `records`, the lists (`results/9700x/{m14,u3}/where.txt`: gdb at the first window's leaves).
+- **It is not where the stack falls.** Without randomization and with the stack moved down by 0 to 3,840 bytes in
+  steps of 256 (`scripts/job26.sh`, `results/9700x/facts-pad-m14-u3.txt`), `m14`'s leaf is 6.10 to 6.40 cycles at 14 of
+  the 16 positions (6.59 and 7.21 at the two others) and `u3`'s 7.31 to 7.81 at 15 (8.68 at the other). The kernel's own
+  figure over those 16 runs has medians of 22.87 and 22.91 cycles a taken leaf or lookup: the loop's cost is in the sum
+  only in part.
+- **It is the loop's code's place.** The same four lines of code are at page offset 0xee0 in `m14` and 0xb20 in
+  `u3`, so in other sets of the instruction cache and the op cache, and they miss twice as often there: 2,918 windows
+  a pass start the loop cold. More of its branches mispredict, more ops are dispatched for the same instructions
+  retired, and more of its loads meet a store in flight.
+
+The lean leaves' loop (`node_facts_leaves_lean`, in the lean and the loads' rows) also moves with the stack, in both
+builds. Without randomization, by the same 16 positions: 5.29 to 5.38 cycles a leaf at nine of `m14`'s and 5.64 to
+7.00 at the others; 5.19 to 5.38 at five of `u3`'s and 5.76 to 7.48 at the others. With randomization on a run's
+stack falls anywhere: the six runs of the loads' row in bodies read 5.33 to 7.71 cycles a leaf by `m14` and 6.02 to
+7.21 by `u3`. Both loops reload the records' base from the stack each leaf, between their 64-byte stores
+(`mov 0x10(%rsp),%rax`: 12% to 14% of the whole loop's cycles): that is a reading of why the stack matters, not a
+measurement of it.
+
+`-c sqlite3.c`, `m14` against `u3`, as section 3's (`results/9700x/ab-copies-m14-u3-1`, `-2`):
+
+| | wall ms, `m14` | `u3` | against `m14` (over copies) | instructions, M |
+| --- | ---: | ---: | --- | --- |
+| first | 122.939 | 123.429 | +0.40% (-0.48% to +0.65%) | 1,363.438, 1,363.464 |
+| second | 123.120 | 123.089 | -0.02% (-0.06% to +0.02%) | 1,363.438, 1,363.464 |
+
+The same instructions as section 5's pair: #2868 changes the shadow alone. A whole shadow process at 160 passes
+retires 0.27% more instructions with the branch (the sweeps' helpers of section 3) in 0.9% to 1.6% fewer cycles.
+
 ## Checks
 
 - `test-checker --seed 133` in its eight parts on the final sources (cloud, Develop): 842,216 checks, 0 failures on
   the native host, and 844,961 checks, 0 failures on a `BUSTER_HOST_ARCH=x86-64` build (where the walk is the scalar
   one, the front does not run, and T at reader time types nothing).
+- On the two merged heads (cloud, Develop): `55ad392b4`, the eight parts, 842,444 checks, 0 failures natively and
+  the census's part on the `x86-64` build, 210,251 checks, 0 failures; `084b3facb`, 842,448 and 210,255, 0 failures,
+  with `--facts`, `--facts-lean`, `--facts-loads` and `--front-types` on the three corpora: no difference.
 - `./build.sh check-call-graph --config Release`: 0 cycles (cloud).
 - The self-check (`-fsyntax-only -Wall -Werror` of `main.c`) and the self-parse pass.
 
@@ -291,6 +391,13 @@ The same pair with those eight functions aligned to 64 bytes, `m13` against `u2`
   mispredicted branches, 16 bytes further into the line, and 3.7% more cycles on one setting. Compare a kernel's
   builds at one main, and read a cross-main difference of a few percent as its place until an aligned pair says
   otherwise.
+- **A loop's place is also its cache sets.** Section 6: at the same place in its line, a 198-byte loop that 2,918
+  windows a pass enter reads 18% slower 0x1c40 bytes further on, with twice the instruction cache misses. Its data's
+  addresses and the stack's position were ruled out first (gdb; randomization off and the stack moved by an
+  environment variable); misses by symbol said it.
+- **A median of six can be three bad runs.** Section 6's +6.5% is +1.3% over eighteen runs. Read each run before a
+  median that stands alone.
+- **`perf stat` takes the counters a run reads itself**: under it the kernel's own cycles print as 0.
 
 ## Files
 
@@ -308,4 +415,13 @@ The same pair with those eight functions aligned to 64 bytes, `m13` against `u2`
   and `tables.py`), `lock-merge.sh` (the lock's title for these runs); `results/9700x/{m12,u1,m13,u2}/facts-CORPUS[-SETTING]-N.txt`
   (runs 1 to 3: job14; 4 to 6: job15), `facts-m12-u1-six.txt`, `facts-m13-u2.txt`, `facts-addresses.txt`,
   `symbols-m12-u1.txt`, `ab-copies-m12-u1-*/`, `job14.log`, `job15.log`.
+- Section 6's: `patches/u3.patch` (against main `be6515fba`); `scripts/job21.sh` to `job26.sh` and `job28.sh`,
+  `facts-tables2.py` (the follow-up's record's `tables.py`), `facts-events.sh` and `facts-events.py` (counters of a
+  whole process and its cycles by symbol), `facts-one.sh` (runs with or without randomization), `facts-annotate.sh`
+  (events by symbol and by a function's instructions), `facts-pad.sh` (the stack moved by an environment variable),
+  `facts-where.sh` (the arrays' addresses), `lock-merge2.sh`; `results/9700x/{m14,u3}/`: `facts-CORPUS[-SETTING]-N.txt`
+  (runs 1 to 3: job21; 4 to 6: job22), `fe-*` (job23), `one-{aslr,fixed}-N.txt` (job24), `fa-body-*` (job25),
+  `pad-{body,loads}-PAD.txt` (job26), `fa-front-*` (job28), `where.txt`; and `facts-m14-u3-six.txt`, `-three.txt`,
+  `facts-addresses-m14-u3.txt`, `symbols-m14-u3.txt`, `facts-events-*.txt`, `facts-one-m14-u3.txt`,
+  `facts-annotate-*.txt`, `facts-pad-m14-u3.txt`, `ab-copies-m14-u3-*/`, the jobs' logs and the holds.
 - `results/cloud/mutations.txt`: the faults' runs. `results/tables.txt`: `tables.py`'s output.
