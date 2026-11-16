@@ -198,6 +198,7 @@ trap.
   `summary.sh`; `t1.sh`, `t2.sh` and `aligned.patch`, the two experiments before the change (a collapse of main's own
   file by hand, and a prototype of the aligned link).
 - `raw/`: `results/` (each run's counts, a CSV a side and round; `host.txt`; `pagecache.txt`; the tests' outputs),
-  `build-*.out`, the series' logs, `holds.txt` (the lock's holds), `start-order-inputs.tar.xz`, and `v1.tar.xz` (the
-  first version's `results/`, logs and holds).
+  `build-*.out`, the series' logs, `holds.txt` (the lock's holds), `start-order-inputs.tar.xz`, `v1.tar.xz` (the
+  first version's `results/`, logs and holds) and `experiments.tar.xz` (`t1.sh`'s and `t2.sh`'s results and logs, on
+  main `56c2c294`: buster#2873's comment 6919328837 has their table).
 - `tables/`: `abstat`'s table of each A/B, the residual faults, the first runs and the peaks.
