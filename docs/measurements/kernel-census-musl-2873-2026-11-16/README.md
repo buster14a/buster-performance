@@ -192,6 +192,38 @@ the exit's. A unit a process, per unit:
   discards cost 70 cycles a token besides. The one command's reservations come in another order and keep their numbers
   (`tables/musl-command-owners.tsv`).
 
+## 4. The system calls, counted
+
+Two more runs, for the allocation on #2873, count calls and time nothing:
+
+- `scripts/musl-syscalls.sh` runs the three ways under `strace -f -c` (`raw/results/musl/syscalls-*.txt`).
+- `scripts/musl-trace3.sh` traces musl's first three units as one command, by path (`trace3.txt`).
+
+The compiles' own calls a unit (a unit a process less `true`'s; the one command as counted):
+
+| call | a unit a process | as one command |
+| --- | ---: | ---: |
+| `openat` (failed) | 53.9 (37.3) | 2.6 (0.34) |
+| `newfstatat` | 8.3 | 11.4 |
+| `mprotect` | 51.8 | 0.15 |
+| `mmap` | 27.7 | 0.12 |
+| `madvise` | 12.6 | 21.4 |
+| `munmap` | 6.0 | |
+| `pread64` | 14.9 | 1.2 |
+| `pwrite64` | 1.0 | 1.0 |
+
+- **The include search, a unit a process:** 37 of a unit's 54 opens are probes that fail. The include directories are
+  small, and none reaches the 32 misses at which the file cache lists a directory (#653's listings,
+  `BUSTER_FILE_CACHE_LISTING_MISSES`), so the trace has no `getdents64`.
+- **As one command, the file cache keeps the headers' answers:** the first of the three traced units opens 49 headers
+  and fails 114 probes, the second 4 and 3, the third 3 and none. Of the command's 3,454 opens, 1,336 are the sources,
+  1,336 the objects and 782 the headers and their probes.
+- **As one command, each unit still stats the search directories again.** The trace shows each unit's 7 `-I`
+  directories stat'd at its start (`pp_dedupe_directories`), and each source stat'd twice before the first unit and
+  once more before its open: 10 of the 11.4 `newfstatat` a unit. The census's `newfstatat` rows (46.8 M kernel cycles
+  in the recorded command) are 3.07 K cycles a call; the directories' 7 and the second early stat of a source are
+  6.6 cycles a token.
+
 ## Limits
 
 - **One host, one day, one revision, one input,** as the census. musl's units are small (3,772 tokens on average) and
@@ -210,6 +242,7 @@ the exit's. A unit a process, per unit:
 - `raw/results/musl/`:
   - the totals (`totals-*`) and the passes (`faults-*`);
   - the per-unit counts (`taskfaults.csv`) and the tokens (`tokens.tsv`);
+  - the system calls counted (`syscalls-*.txt`) and three units' file calls traced (`trace3.txt`);
   - the recordings' text (`script-0.txt.gz`, `script-command-1.txt.gz`), with their errors and the host's state.
 - `raw/holds.txt`, `raw/build.log`, `raw/raw-sha256.txt`.
 - `scripts/`:
