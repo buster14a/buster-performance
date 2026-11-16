@@ -286,7 +286,9 @@ The tests show all 13:
   a run), `types-musl-o.sh`; `job29.sh` (`w1`) and `job30.sh` (`w2`); `ab-copies.sh`, `ab-copies-n.sh`; `facts.sh` and
   `facts-tables2.py` (the fact words' records' own); `symdiff.py`; `tables.py`; `trim.sh`; `job31.sh` to `job35.sh` with `sweeps-events.sh` and `sweeps-events.py` (the sweeps' events by symbol), `sweeps-annotate.sh` (by a function's instructions), `phase-o.sh` and `phase.py` (the stack's place), `facts-annotate-lua.sh`; the cloud's `shapes-local.sh`,
   `mutate_sweeps.py`, `mutations.sh`.
-- `patches/`: `w1.patch`, `w2.patch` (each against main `be6515fba`).
+- `patches/`: `w1.patch`, `w2.patch` (each against main `be6515fba`); `pull-request.patch`, the commit as it waits
+  for its branch (`git format-patch`, on #2867's head `084b3facb`: `w2`'s sources with the docs), and
+  `pull-request-body.md`, its description.
 - `results/9700x/LABEL/`: each build's log, revision and checksum, and its runs
   `types-TAG-{sqlite3,lua,musl}-SUFFIX-N.txt` (suffix `s`: job29; `t`: job30; tags `types1` and `leantypes1`: T alone at
   reader time with the whole front and the lean one; `sweeps1` and `leansweeps1`: T, C and X there; `plain7`, `plain1`:
