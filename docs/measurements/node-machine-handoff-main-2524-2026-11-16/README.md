@@ -5,9 +5,8 @@ The first two commits of [the hand-off series](../node-machine-own-tests-2524-20
 [the claim on buster#2524](https://github.com/buster14a/buster/issues/2524#issuecomment-6919991971), with two
 fixes that the compiler's own source asked for: buster#2882
 ([claimed there](https://github.com/buster14a/buster/issues/2882#issuecomment-6919987408)) before them, and one
-after them. The pull request is opened from buster's branch `claude/exciting-archimedes-agaary` once this record is
-on main; its number is added here then. It is all the node machine's shadow (`measure-node-machine --shadow`): no
-compile takes any of it.
+after them. The pull request is [buster#2887](https://github.com/buster14a/buster/pull/2887). It is all the node
+machine's shadow (`measure-node-machine --shadow`): no compile takes any of it.
 
 **Result.** On today's main the series is what its records say: at reader time C and X give the shadow's tape on
 every expression compared (50,555, 10,544 and 22,324 on `sqlite3.c`, Lua and musl, 0 differences), and the tests
