@@ -5,6 +5,8 @@
 with the node machine's side agreed with the holder of its files
 ([the revision](https://github.com/buster14a/buster/issues/2883#issuecomment-6923333995),
 [the holder's answer](https://github.com/buster14a/buster/issues/2883#issuecomment-6923501702)).
+The pull request is buster#2889 (`d8b672d0`, the lowering; `ee1bcd80`, the
+node machine's refusal), on main `ccbc303d`.
 
 The lowering made `&&` and `||` a value even as a condition: `if (a < b && b < c)`
 was the first compare and its branch, the second compare's value made 0 or 1,
@@ -186,7 +188,12 @@ change with that refusal on top of buster#2887 (`5eb316fb`), `--list 3`
 | machine-taken evaluated nodes: main, this change | 98.85%, 89.80% | 94.32%, 86.39% | 91.13%, 82.89% | , 61.99% |
 | refused by `template`: main, this change | 291, 2,454 | 395, 697 | 1,414, 2,339 | |
 
-- **`test-checker` on that tree passes whole:** 842,723 checks, 0 failures
+- **On the pull request's final tree** (`ee1bcd80`, on main): `test-checker`
+  passes whole, 842,718 checks, 0 failures (`results/cloud/checker-final.txt`),
+  and the shadow's six modes that exist on main exit 0 with no difference on
+  the three corpora, with the counts above
+  (`results/cloud/shadow-final-summary.txt`).
+- **`test-checker` on the tree on top of #2887 passes whole:** 842,723 checks, 0 failures
   (`results/cloud/checker-on-2887-with-refusal.txt`; the refusal's diff is
   `results/cloud/node-machine-on-2887.patch`).
 - **Exit status 0 and no difference in values, entries or the twin** in each
