@@ -1,0 +1,1333 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b28f3d4a9..bb9cbcece 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -71,13 +71,19 @@ buster_settings_tools("${CMAKE_C_COMPILER}")
+ buster_settings_linker()
+ # The start's code order (#1444, cmake/BusterStartOrder.cmake): in a static link, whatever the linker, so that switching
+ # it relinks alone, every unit's functions in sections of their own, and the units in parts' and the parallel split's
+-# with the functions small compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the
++# with the functions compiles run (cmake/BusterStartOrder.txt) first in .text.buster_checker, which is the
+ # object's own order; and with lld, those functions placed together before .text.
++#
++# The executable's pages in huge pages (#2873, docs/commands/build.md): a static link places each segment as far from
++# its bytes in the file as a multiple of 2 MB (-z max-page-size), which is what lets the kernel map a 2 MB range of the
++# file that the page cache holds as one huge page by one fault, where main's text was a page off. The segments' sizes
++# and contents are the same; the addresses between them skip to the next 2 MB.
+ set(buster_start_order FALSE)
+ set(buster_split_order FALSE)
+ if(buster_static)
+     list(APPEND buster_host_flags -ffunction-sections)
+     list(APPEND buster_flags -ffunction-sections)
++    list(APPEND buster_linker_flags -Wl,-z,max-page-size=0x200000)
+     set(buster_split_order TRUE)
+     include(cmake/BusterStartOrder.cmake)
+     set(start_order_list "${CMAKE_SOURCE_DIR}/cmake/BusterStartOrder.txt")
+diff --git a/cmake/BusterStartOrder.cmake b/cmake/BusterStartOrder.cmake
+index 759e2aa18..ca7ba780c 100644
+--- a/cmake/BusterStartOrder.cmake
++++ b/cmake/BusterStartOrder.cmake
+@@ -1,9 +1,16 @@
+ # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+ # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+ #
+-# The start's code order (#1444, docs/commands/build.md): the functions that small compiles run, from LIST
++# The start's code order (#1444, #2873, docs/commands/build.md): the functions that compiles run, from LIST
+ # (cmake/BusterStartOrder.txt, which `compiler start-order` writes), placed together before .text, where the kernel's
+-# fault-around maps them in fewer 64 KB windows than where their units' objects have them.
++# fault-around maps them in fewer 64 KB windows than where their units' objects have them. They start on a 2 MB
++# boundary (ALIGN), in memory as in the file (CMakeLists.txt's -z max-page-size), so that the kernel can map them by
++# huge pages from their first byte: three of them hold what every compile measured runs. The first 128 KB there, two
++# windows of the kernel's fault-around (lane.c's BUSTER_LANE_EXIT_WINDOW_BYTES), hold no code (buster_start_probe): no
++# fault of a process's own maps them, so a page of them is mapped only where a huge page maps the range, which a
++# process reads of the first as it exits and, where that read faulted, asks the kernel of the second (lane.c's
++# lane_exit_probe); buster_start_end, the checker's section's end, is how far its exit helper then asks for huge pages
++# whatever the process ran.
+ #
+ #   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE)
+ #
+@@ -68,9 +75,9 @@ function(buster_start_order_files list script symbols shift_source)
+     endif()
+     string(CONCAT text
+         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
+-        "SECTIONS\n{\n    .text.buster_start :\n    {\n${sections}    }\n"
+-        "    ASSERT(SIZEOF(.text.buster_start) > 0, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
+-        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n    }\n"
++        "SECTIONS\n{\n    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
++        "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
++        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n        buster_start_end = .;\n    }\n"
+         "}\nINSERT BEFORE .text;\n")
+     buster_start_order_write("${script}" "${text}")
+     # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index efb7acdf5..f496f0eb8 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -81,8 +81,10 @@
+ #include <sys/mman.h>
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
++#include <sys/auxv.h>
+ #include <sys/syscall.h>
+ #include <sys/utsname.h>
++#include <elf.h>
+ #include <linux/futex.h>
+ 
+ // CPU architecture dependent includes: x86intrin.h has AMD's monitorx and mwaitx besides immintrin.h (lane_wait uses
+@@ -138,7 +140,8 @@ struct Arena
+     uint64_t peak;
+     // The bytes at its start that are base pages (arena_reserve_small's `small`, with the floor).
+     uint64_t small;
+-    // Whether its pages past `small` have been advised huge (arena_commit, as the first commit reaches them).
++    // Whether its pages past `small` have been advised huge: by arena_commit, as the first commit reaches them, or from
++    // its reservation, by the advice of the region it was taken from (arena_reservation_map).
+     bool huge;
+     // Owned mapping size and writable end, measured from base - mapping_offset. Zero mapping_bytes denotes borrowed
+     // storage (including arena_measure); its owner has already made the bytes writable. Neither follows logical
+@@ -263,6 +266,18 @@ bool arena_pages_busy;
+ #else
+ static bool arena_pages_busy;
+ #endif
++// Whether the exit helper may ask the kernel for huge pages of the executable's own pages (#2873, lane_exit_probe):
++// transparent huge pages are on for the whole process (not PR_SET_THP_DISABLE: a virtual machine, BUSTER_HUGE_PAGES=0,
++// or the process that started this one), and the kernel says how a process mapped a range in one call (PAGEMAP_SCAN,
++// Linux 6.7, which collapses a file's pages when asked too). arena_page_policy sets it once, before the process starts
++// any thread; main.c's units share it.
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern bool arena_executable_huge_pages;
++#elif defined(BUSTER_UNIT)
++bool arena_executable_huge_pages;
++#else
++static bool arena_executable_huge_pages;
++#endif
+ // Whether a mapping made with MAP_STACK is VM_NOHUGEPAGE from the start, as Linux's are since 6.7 (#1444): then a
+ // reservation that its layout doesn't keep in base pages (arena_reserve_policy's base pages of 2 MB or more, a busy
+ // host's arenas, an arena of tables of 2 MB or more) is mapped so, rather than advised MADV_NOHUGEPAGE by a call of its
+@@ -383,6 +398,9 @@ struct ArenaLimits
+ {
+     bool fixed;
+     uint64_t address_share;
++    // Whether the kernel charges no commit against a limit (arena_commit_unbounded), read with the share (#2873): then
++    // an arena commits more at a time (arena_commit), and a pool reads neither again.
++    bool commit_unbounded;
+ };
+ #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+ extern ArenaLimits arena_limits;
+@@ -436,6 +454,45 @@ ArenaSlots arena_slots;
+ static ArenaSlots arena_slots;
+ #endif
+ 
++// Reservations taken together (#2873). A compile reserves about 33 arenas, each by an mmap of its own: on the 9700X a
++// third of a small unit's 98 system calls for its arenas. Where the address space is unlimited (arena_limits, fixed by
++// the command), a reservation instead takes its mapping from one stretch of the address space mapped once,
++// inaccessible: 2 * BUSTER_ARENA_REGION_BYTES, whose upper half gives the mappings that take huge pages past their base
++// pages (advised MADV_HUGEPAGE whole, once, for every arena's: arena_reservation_map) and whose lower half those mapped
++// base pages throughout (MAP_STACK: arena_reservation_flags) and the tables' (arena_reserve_tables). The halves are
++// carved from the middle, upwards and downwards, so that what a process reserves is one span around it, as its own
++// mappings, which the kernel places one below the other, were: four regions of their own flags, each carved from its
++// start, put a small unit's arenas under seven of the kernel's third-level tables where they had been under three, and
++// every exit and unmap, which scan those, took about 24,000 cycles more. Both halves are MAP_NORESERVE, which changes
++// nothing where commit is charged (strict overcommit ignores it, and RLIMIT_DATA counts writable pages whatever their
++// flags), and elsewhere only spares a commit the kernel's refusal of one larger than its memory, as #1521 spared the
++// tables'. What a reservation gets is what its own mmap would have given it: inaccessible bytes, which its commits
++// make writable and its release unmaps (a hole, which the kernel may give to any later mapping) or its pool keeps. A
++// stretch the kernel refuses, or a half that is full, leaves each reservation to map its own, as do a finite RLIMIT_AS
++// (whose reservations take shares or grow in slots, #1118), a thread switched to compact reservations, a sanitizer's
++// build, which lays the address space out itself, and a pool that makes its arenas inaccessible again as it takes them
++// (bounded commit charge: an inaccessible part that was once written would join its neighbours, and a core dump walk
++// all of them).
++#define BUSTER_ARENA_REGIONS (!BUSTER_SANITIZER_RESOURCES)
++#define BUSTER_ARENA_REGION_BYTES (8ull << 40)
++// The stretch: its middle, 0 before the first reservation and BUSTER_ARENA_REGION_REFUSED once the kernel refused it,
++// and the bytes carved from each half, upwards (0) and downwards (1). Reservations on every thread carve, so all are
++// read and written atomically; main.c's units share them.
++typedef struct ArenaRegions ArenaRegions;
++struct ArenaRegions
++{
++    uintptr_t middle;
++    uint64_t carved[2];
++};
++#define BUSTER_ARENA_REGION_REFUSED ((uintptr_t)1)
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern ArenaRegions arena_regions;
++#elif defined(BUSTER_UNIT)
++ArenaRegions arena_regions;
++#else
++static ArenaRegions arena_regions;
++#endif
++
+ // The share of a finite RLIMIT_AS that one arena admits, or BUSTER_ARENA_MAX_CAPACITY.
+ static uint64_t arena_address_share(void)
+ {
+@@ -473,7 +530,7 @@ static void arena_pool_limits(ArenaPool* pool)
+     if (!pool->limits)
+     {
+         pool->address_share = arena_limits.fixed ? arena_limits.address_share : arena_address_share();
+-        pool->keeps_commits = arena_commit_unbounded();
++        pool->keeps_commits = arena_limits.fixed ? arena_limits.commit_unbounded : arena_commit_unbounded();
+         pool->limits = true;
+     }
+ }
+@@ -483,6 +540,7 @@ static __attribute__((unused)) void arena_limits_fix(void)
+     arena_limits = (ArenaLimits){
+         .fixed = true,
+         .address_share = arena_address_share(),
++        .commit_unbounded = arena_commit_unbounded(),
+     };
+ }
+ 
+@@ -574,6 +632,67 @@ static int arena_reservation_flags(uint64_t capacity, uint64_t small, uint64_t m
+     return MAP_PRIVATE | MAP_ANONYMOUS | (advised && arena_stack_base_pages ? MAP_STACK : 0);
+ }
+ 
++// `bytes` of inaccessible address space for a reservation that would map them with `flags`: from the stretch above,
++// mapped at its first reservation (its lower half for MAP_STACK's and MAP_NORESERVE's mappings, its upper half for the
++// others), or else by an mmap of the reservation's own, whose failure is the result (MAP_FAILED, with errno). `pool`
++// is the reserving thread's, or null: its limits are read here if they haven't been, as its releases read them. *huge
++// is whether the bytes are advised huge pages already, as the upper half's are: an arena's base pages stay base pages
++// there as anywhere, by where they are (the 2 MB that hold them start in bytes that are never writable).
++static uint8_t* arena_reservation_map(uint64_t bytes, int flags, ArenaPool* pool, bool* huge)
++{
++    uint8_t* result = MAP_FAILED;
++    *huge = false;
++    if (pool != 0)
++    {
++        arena_pool_limits(pool);
++    }
++    const bool together = BUSTER_ARENA_REGIONS && arena_limits.fixed && arena_limits.address_share == BUSTER_ARENA_MAX_CAPACITY && !arena_compact &&
++                          (pool == 0 || pool->keeps_commits) && bytes <= BUSTER_ARENA_REGION_BYTES;
++    if (together)
++    {
++        const uint32_t down = (flags & (MAP_STACK | MAP_NORESERVE)) != 0 ? 1 : 0;
++        uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
++        if (middle == 0)
++        {
++            // The first reservation maps the stretch and its lower half over it; of two threads' at once, one keeps
++            // its own.
++            const int plain = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
++            uint8_t* mapped = mmap(0, 2 * BUSTER_ARENA_REGION_BYTES, PROT_NONE, plain, -1, 0);
++            const bool halved = mapped != MAP_FAILED && mmap(mapped, BUSTER_ARENA_REGION_BYTES, PROT_NONE, plain | MAP_STACK | MAP_FIXED, -1, 0) == mapped;
++            if (halved)
++            {
++                madvise(mapped + BUSTER_ARENA_REGION_BYTES, BUSTER_ARENA_REGION_BYTES, MADV_HUGEPAGE);
++            }
++            const uintptr_t made = halved ? (uintptr_t)mapped + BUSTER_ARENA_REGION_BYTES : BUSTER_ARENA_REGION_REFUSED;
++            if (__atomic_compare_exchange_n(&arena_regions.middle, &middle, made, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
++            {
++                middle = made;
++            }
++            if (mapped != MAP_FAILED && middle != (uintptr_t)mapped + BUSTER_ARENA_REGION_BYTES)
++            {
++                munmap(mapped, 2 * BUSTER_ARENA_REGION_BYTES);
++            }
++        }
++        uint64_t carved = __atomic_load_n(&arena_regions.carved[down], __ATOMIC_RELAXED);
++        bool taken = false;
++        while (middle != BUSTER_ARENA_REGION_REFUSED && !taken && bytes <= BUSTER_ARENA_REGION_BYTES - carved)
++        {
++            taken = __atomic_compare_exchange_n(&arena_regions.carved[down], &carved, carved + bytes, true, __ATOMIC_RELAXED, __ATOMIC_RELAXED);
++        }
++        if (taken)
++        {
++            result = down != 0 ? (uint8_t*)middle - carved - bytes : (uint8_t*)middle + carved;
++            *huge = down == 0;
++        }
++    }
++    if (result == MAP_FAILED)
++    {
++        errno = ENOMEM;
++        result = mmap(0, bytes, PROT_NONE, flags, -1, 0);
++    }
++    return result;
++}
++
+ // A free slot of the growing arenas', claimed (1), or BUSTER_ARENA_SLOT_COUNT for none.
+ static uint32_t arena_slot_claim(void)
+ {
+@@ -793,7 +912,8 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+         allowed = allowed && arena_test_reservation_allowed(arena_mapping_bytes(requested));
+ #endif
+         errno = ENOMEM;
+-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0) : MAP_FAILED;
++        bool advised_huge = false;
++        uint8_t* mapping = allowed ? arena_reservation_map(mapping_bytes, arena_reservation_flags(capacity, small, mapping_bytes), pool, &advised_huge) : MAP_FAILED;
+         // Do not evade an injected failure. Valgrind may reject a valid oversized mapping with EINVAL rather than
+         // ENOMEM. Both layout refusals get a bounded retry, never a greedy half-limit map.
+         if (bounded && allowed && mapping == MAP_FAILED && (errno == ENOMEM || errno == EINVAL) && capacity > BUSTER_ARENA_COMPACT_BYTES)
+@@ -801,7 +921,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+             arena_compact = true;
+             capacity = BUSTER_ARENA_COMPACT_BYTES;
+             mapping_bytes = arena_mapping_bytes(capacity);
+-            mapping = mmap(0, mapping_bytes, PROT_NONE, arena_reservation_flags(capacity, small, mapping_bytes), -1, 0);
++            mapping = arena_reservation_map(mapping_bytes, arena_reservation_flags(capacity, small, mapping_bytes), pool, &advised_huge);
+         }
+         if (mapping != MAP_FAILED)
+         {
+@@ -829,6 +949,8 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+             result.capacity = capacity;
+             result.mapping_offset = offset;
+             result.small = small;
++            // Its region's advice is its own already, but a busy host's arena, advised base pages above.
++            result.huge = advised_huge && !arena_pages_busy;
+             result.mapping_bytes = mapping_bytes;
+             result.committed = offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+             result.requested_capacity = requested;
+@@ -948,7 +1070,8 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+         // (arena_stack_base_pages: MAP_STACK) or else by advice.
+         const bool advised = bytes >= BUSTER_ARENA_HUGE_PAGE_BYTES;
+         const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (advised && arena_stack_base_pages ? MAP_STACK : 0);
+-        uint8_t* mapping = allowed ? mmap(0, mapping_bytes, PROT_NONE, flags, -1, 0) : MAP_FAILED;
++        bool advised_huge = false;
++        uint8_t* mapping = allowed ? arena_reservation_map(mapping_bytes, flags, pool, &advised_huge) : MAP_FAILED;
+         if (mapping != MAP_FAILED)
+         {
+             // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
+@@ -1097,7 +1220,9 @@ static bool arena_kernel_maps_stack_base_pages(const char* release)
+ static void arena_page_policy(const char* setting)
+ {
+     struct utsname kernel;
+-    arena_stack_base_pages = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
++    // Linux 6.7 or later: MAP_STACK's base pages, and PAGEMAP_SCAN, which the exit helper's look at the executable needs.
++    const bool recent = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
++    arena_stack_base_pages = recent;
+     uint32_t eax = 0;
+     uint32_t ebx = 0;
+     uint32_t ecx = 0;
+@@ -1105,7 +1230,10 @@ static void arena_page_policy(const char* setting)
+     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
+     const bool off = setting != 0 && strcmp(setting, "0") == 0;
+     const bool on = setting != 0 && strcmp(setting, "1") == 0;
+-    arena_pages_busy = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 0 && arena_host_busy();
++    // Asked only where neither the setting nor the machine decides: off as the process was started.
++    const bool inherited = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) != 0;
++    arena_pages_busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
++    arena_executable_huge_pages = recent && !off && !(virtual_machine && !on) && !inherited;
+     if (off || (virtual_machine && !on))
+     {
+         prctl(PR_SET_THP_DISABLE, 1, 0, 0, 0);
+@@ -1185,7 +1313,7 @@ static void arena_release(Arena* arena)
+                 .layout = arena->layout,
+             };
+         }
+-        else
++        else if (getenv("BUSTER_EXPERIMENT_KEEP_RELEASED") == 0)
+         {
+             munmap(mapping, bytes);
+         }
+@@ -1237,8 +1365,25 @@ static void arena_unaccounted(Arena* arena, uint64_t at)
+     arena->capacity = room < arena->capacity ? room : arena->capacity;
+ }
+ 
++// The most of an arena's base pages that its first commit makes writable at once where commit charge is unbounded, and
++// the factor its later commits grow by there (arena_commit).
++#define BUSTER_ARENA_COMMIT_BYTES (16ull << 20)
++#define BUSTER_ARENA_COMMIT_GROWTH 4
++
+ // Cold path: amortize protection changes geometrically, keeping tiny arenas in base pages and the huge-page region
+ // aligned. The descriptor is published only after mprotect succeeds: a failed push changes neither length nor peak.
++//
++// How much a commit takes past what its push needs is a matter of system calls alone where the kernel charges no
++// commit (arena_limits.commit_unbounded, #2873): writable pages that are never written cost nothing, and each
++// mprotect about 6,000 kernel cycles on the 9700X. There the first commit takes all of the arena's base pages, up to
++// BUSTER_ARENA_COMMIT_BYTES (an arena of a few megabytes of base pages committed 64 KB, then a page, then doubled: six
++// calls for 800 KB), and later ones BUSTER_ARENA_COMMIT_GROWTH times what is committed. A core dump walks a written
++// mapping whole, so what is committed stays a small multiple of what is used. Where commit is charged (strict
++// overcommit, a finite RLIMIT_DATA) or the limits aren't fixed, a commit takes 64 KB at first and then doubles, as
++// before, so that the charge stays within twice the use (#1521). So it does on a thread with a pool: the pool keeps
++// what its arenas committed, so their commits are few already (0.15 a unit of musl's as one command), and its
++// releases discard each arena's pages, which frees the page tables of every whole 2 MB they cover: with larger commits
++// each unit built them again, 37,000 kernel cycles a unit.
+ static bool arena_commit(Arena* arena, uint64_t end)
+ {
+     const uint64_t offset = arena->mapping_offset;
+@@ -1252,7 +1397,11 @@ static bool arena_commit(Arena* arena, uint64_t end)
+     else if (arena->mapping_bytes != 0 && needed > committed)
+     {
+         const uint64_t used = committed > offset ? committed - offset : 0;
+-        uint64_t grown = used > BUSTER_ARENA_SMALL_BYTES ? used * 2 : BUSTER_ARENA_SMALL_BYTES;
++        const bool unbounded = arena_limits.fixed && arena_limits.commit_unbounded && arena_pool == 0;
++        const uint64_t base_pages = arena->small < BUSTER_ARENA_COMMIT_BYTES ? arena->small : BUSTER_ARENA_COMMIT_BYTES;
++        const uint64_t charged = used > BUSTER_ARENA_SMALL_BYTES ? used * 2 : BUSTER_ARENA_SMALL_BYTES;
++        const uint64_t free = used < base_pages ? base_pages : used * BUSTER_ARENA_COMMIT_GROWTH;
++        uint64_t grown = unbounded ? free : charged;
+         grown = grown > end ? grown : end;
+         grown = grown < arena->capacity ? grown : arena->capacity;
+         uint64_t target = (offset + grown + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+@@ -2473,7 +2622,10 @@ static __attribute__((unused)) LaneSession* lane_session_current(void);
+ // process that shares the address space and holds nothing else, which ends as soon as the caller has, so that the
+ // caller's exit leaves the address space's teardown to it rather than run it before its parent's wait returns. By
+ // default only where orphans are reaped (lane_exit_reaped); BUSTER_EXIT_HELPER=1 starts it wherever it can, =0 never.
+-// Never in a sanitizer build. What the caller writes after it reaches no descriptor it had.
++// Never in a sanitizer build. What the caller writes after it reaches no descriptor it had. Where the caller finds that
++// no huge page maps the executable's code (#2873, lane_exit_probe), the helper, before it ends, looks at how the process
++// mapped the executable's own pages and asks the kernel for huge pages of the ranges it used, unless huge pages are off
++// for the process or BUSTER_EXECUTABLE_HUGE_PAGES is 0.
+ static __attribute__((unused)) void lane_exit_helper_start(void);
+ // Whether this process's PID namespace reaps orphans, by its PID 1, which takes them where no subreaper does first:
+ // whether it blocks, ignores or catches SIGCHLD (/proc/1/stat), as an init that waits does (systemd's signalfd, tini's
+@@ -3423,16 +3575,398 @@ static __attribute__((unused)) long lane_exit_syscall(long number, long first, l
+     return result;
+ }
+ 
++// The executable's own pages in huge pages (#2873)
++//
++// A process maps its executable's code and read-only data from the page cache as it first runs or reads them, 16 pages
++// of 4 KB a fault (the kernel's fault-around), and its exit unmaps each page again. On the 9700X that was 0.67 M of the
++// 3.86 M kernel cycles of a unit of musl's compiled by a process of its own, and 3.4% of its user cycles for the
++// instruction TLB's misses. Where the page cache holds a 2 MB range of the file as one huge page, and the link placed
++// the segment so that the range starts on a 2 MB boundary in memory as in the file (CMakeLists.txt's -z max-page-size,
++// cmake/BusterStartOrder.cmake), one fault maps all of it and the exit unmaps it at once.
++//
++// The kernel makes such a page of a file's own accord only for a process that lives long enough for khugepaged to reach
++// it, which a compile doesn't, or when asked (MADV_COLLAPSE, Linux 6.1, of a kernel with CONFIG_READ_ONLY_THP_FOR_FS).
++// So the exit helper asks, after its command has gone, which no compile waits for. The huge pages stay in the page
++// cache, for every later process of the executable, until the kernel reclaims them or the file is written: an
++// executable's first run asks, and the later ones find them.
++//
++// - The probe, the caller's as it exits (lane_exit_probe): the start order's link script leaves the first 128 KB of the
++//   code it places empty (buster_start_probe), two windows of the kernel's fault-around that no fault of the process's
++//   own maps. So a page of them is mapped only where a huge page maps the whole 2 MB range. The caller reads a byte of
++//   the first window between two readings of the time-stamp counter (lane_exit_touch): a read that returns in fewer
++//   ticks than a page fault can (BUSTER_LANE_EXIT_FAULT_TICKS) found its page mapped, and that read is all that a
++//   process of an executable in huge pages adds: no system call, and the helper it would have had without this. A
++//   slower read was a fault, which mapped that window, or was interrupted; then the kernel says whether a page of the
++//   second window, which nothing reads, is mapped (lane_exit_mapped: move_pages, as a query).
++// - The look, the helper's once the caller has gone (lane_exit_look): where the probe's page isn't mapped (a new
++//   executable, or one the kernel reclaimed), the helper first asks the kernel to collapse the code the start order
++//   places past the probe's range (to buster_start_end), whatever this process ran of it: the next command may be a
++//   larger one, and a kernel that makes no huge page of a file's pages refuses here, at one call's cost. Then it reads
++//   how the process mapped each read-only segment of the executable (PAGEMAP_SCAN of /proc/self/pagemap, Linux 6.7)
++//   and asks for each whole 2 MB range with BUSTER_LANE_EXIT_HOT_PAGES or more mapped by 4 KB pages. A range the
++//   process touched little stays as it is: a huge page would hold 2 MB of the file in memory for a few pages' use. The
++//   probe's range is asked for last, so that its huge page says the others were made.
++// - Now and then: one process in 64 (lane_exit_sampled) looks whatever its probe says, by the pages it mapped alone,
++//   for the ranges another kind of command uses and those the kernel reclaimed apart from the probe's. An executable
++//   another linker placed has no probe (its segments are as far from their bytes in the file, but its code starts
++//   wherever .text does): those processes of it look, and no other.
++//
++// A refusal ends the helper's asking, so that a kernel that can't make a huge page now isn't asked for each range in
++// turn; the next process's probe has it asked again. But a segment other than the code's that the kernel refuses
++// outright (EINVAL: one it makes no huge page of) is passed over, and the code's ranges, the probe's last, are still
++// asked for: otherwise every process would look. A process with transparent huge pages off or on a kernel before 6.7
++// (arena_executable_huge_pages) neither probes nor looks, nor does one started with BUSTER_EXECUTABLE_HUGE_PAGES=0.
++
++// MADV_COLLAPSE and PAGEMAP_SCAN, which the C library's headers may not name: the ioctl of /proc/PID/pagemap, its
++// argument (struct pm_scan_arg) and its answer's regions (struct page_region), and the categories asked of it: a page
++// that is mapped, and one mapped by a huge page.
++#define BUSTER_LANE_EXIT_MADV_COLLAPSE 25
++#define BUSTER_LANE_EXIT_PAGEMAP_SCAN UINT64_C(0xc0606610)
++#define BUSTER_LANE_EXIT_PAGE_PRESENT (UINT64_C(1) << 3)
++#define BUSTER_LANE_EXIT_PAGE_HUGE (UINT64_C(1) << 6)
++typedef struct LaneExitScan LaneExitScan;
++struct LaneExitScan
++{
++    uint64_t size;
++    uint64_t flags;
++    uint64_t start;
++    uint64_t end;
++    uint64_t walk_end;
++    uint64_t vector;
++    uint64_t vector_length;
++    uint64_t max_pages;
++    uint64_t category_inverted;
++    uint64_t category_mask;
++    uint64_t category_anyof_mask;
++    uint64_t return_mask;
++};
++typedef struct LaneExitRegion LaneExitRegion;
++struct LaneExitRegion
++{
++    uint64_t start;
++    uint64_t end;
++    uint64_t categories;
++};
++_Static_assert(sizeof(LaneExitScan) == 96 && sizeof(LaneExitRegion) == 24, "PAGEMAP_SCAN's argument and region are the kernel's");
++
++// The whole 2 MB ranges of a read-only segment of the executable, from `begin` to `end`.
++typedef struct LaneExitSegment LaneExitSegment;
++struct LaneExitSegment
++{
++    uint64_t begin;
++    uint64_t end;
++};
++// The segments the helper looks at (an executable has two, its read-only data and its code), the ranges of each it
++// counts (128 MB, a bit a range in a word), the regions a scan answers at once (they and the ranges' counts are on the
++// helper's stack, a page), the pages of 4 KB mapped in a range from which it is worth a huge page (four of the kernel's
++// fault-around windows, three faults saved a process), and how many processes go by for one that looks whatever its
++// probe says, as a power of two.
++#define BUSTER_LANE_EXIT_SEGMENTS 4
++#define BUSTER_LANE_EXIT_RANGES 64
++#define BUSTER_LANE_EXIT_REGIONS 64
++#define BUSTER_LANE_EXIT_HOT_PAGES 64
++#define BUSTER_LANE_EXIT_SAMPLE_BITS 6
++// A window of the kernel's fault-around (fault_around_bytes, 64 KB), the most a fault on a file's page maps: the size of
++// each of the probe's two, which cmake/BusterStartOrder.cmake leaves empty.
++#define BUSTER_LANE_EXIT_WINDOW_BYTES UINT64_C(0x10000)
++// Ticks of the time-stamp counter that no page fault returns in. A fault on a file's page takes the kernel's entry, its
++// mapping of the page and its return: about 3,000 ticks on the 9700X for one page (test-lanes says). The counter ticks
++// at a processor's base rate, no less than a quarter of its fastest cycles'. A read of a mapped page takes the two
++// readings' own time, 1 tick on the 9700X: the second reading doesn't wait for the read.
++#define BUSTER_LANE_EXIT_FAULT_TICKS 128
++// The signal that tells a helper with segments to look at that its caller has gone: blocked, and waited for.
++#define BUSTER_LANE_EXIT_GONE SIGUSR1
++
++// The start order's link script's marks (cmake/BusterStartOrder.cmake), absent from any other link: the first byte of
++// the code it places, 128 KB of padding no code is in (two of BUSTER_LANE_EXIT_WINDOW_BYTES), and the end of that code.
++extern const char buster_start_probe[] __attribute__((weak));
++extern const char buster_start_end[] __attribute__((weak));
++
++// The executable for the helper, which the caller writes before it starts it (lane_exit_probe): its segments, 0 of them
++// for a helper that only tears the address space down; and, where the probe's page wasn't mapped, the probe's first
++// byte and the end of the code placed after it, which the helper then asks for whole (0 otherwise).
++typedef struct LaneExitExecutable LaneExitExecutable;
++struct LaneExitExecutable
++{
++    LaneExitSegment segments[BUSTER_LANE_EXIT_SEGMENTS];
++    uint32_t count;
++    uint64_t probe;
++    uint64_t placed_end;
++};
++static LaneExitExecutable lane_exit_executable;
++
++// The segments of the program headers `headers`, loaded `bias` bytes from their addresses, that the kernel can map by
++// huge pages: each that is loaded read-only (code, read-only data) as far from its place in the file as a multiple of
++// 2 MB, by its whole 2 MB ranges, where it has any. Returns how many, at most BUSTER_LANE_EXIT_SEGMENTS.
++static __attribute__((unused)) uint32_t lane_exit_segments(const Elf64_Phdr* headers, uint64_t count, uint64_t bias, LaneExitSegment* segments)
++{
++    uint32_t result = 0;
++    for (uint64_t i = 0; i < count && result < BUSTER_LANE_EXIT_SEGMENTS; i += 1)
++    {
++        const Elf64_Phdr* header = &headers[i];
++        const bool aligned = ((bias + header->p_vaddr - header->p_offset) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) == 0;
++        const uint64_t first = bias + header->p_vaddr;
++        const uint64_t last = (first + header->p_filesz + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++        const uint64_t begin = (first + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++        const uint64_t end = last & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++        if (header->p_type == PT_LOAD && (header->p_flags & PF_W) == 0 && aligned && begin < end)
++        {
++            segments[result] = (LaneExitSegment){
++                .begin = begin,
++                .end = end,
++            };
++            result += 1;
++        }
++    }
++    return result;
++}
++
++// This process's own executable's segments (lane_exit_segments), from the program headers the kernel gave it.
++static __attribute__((unused)) uint32_t lane_exit_executable_segments(LaneExitSegment* segments)
++{
++    const Elf64_Phdr* headers = (const Elf64_Phdr*)(uintptr_t)getauxval(AT_PHDR);
++    const uint64_t count = headers != 0 && getauxval(AT_PHENT) == sizeof(Elf64_Phdr) ? getauxval(AT_PHNUM) : 0;
++    // The headers' own address, which a program header gives, says how far the image is from its file's addresses.
++    uint64_t bias = 0;
++    for (uint64_t i = 0; i < count; i += 1)
++    {
++        bias = headers[i].p_type == PT_PHDR ? (uint64_t)(uintptr_t)headers - headers[i].p_vaddr : bias;
++    }
++    return lane_exit_segments(headers, count, bias, segments);
++}
++
++// The ticks of the time-stamp counter between a reading before a read of `page`'s first byte and one after it. Where
++// the page isn't mapped the read faults, and retires only once the kernel has returned from the fault, so the second
++// reading, which follows it, is taken after the fault. Where it is mapped, the second reading may be taken while the
++// read still waits for its byte: the ticks are the readings' own.
++static __attribute__((unused)) uint64_t lane_exit_touch(const char* page)
++{
++    const uint64_t before = __rdtsc();
++    const char byte = *(const volatile char*)page;
++    const uint64_t after = __rdtsc();
++    (void)byte;
++    return after - before;
++}
++
++// Whether the kernel has `page` mapped in this process: move_pages as a query, which maps nothing and answers the
++// page's node, or an error where no page is mapped there.
++static __attribute__((unused)) bool lane_exit_mapped(const char* page)
++{
++    const void* pages[1] = { page };
++    int node = -1;
++    return syscall(SYS_move_pages, 0, sizeof(pages) / sizeof(pages[0]), pages, (const int*)0, &node, 0) == 0 && node >= 0;
++}
++
++// Whether process `process` is one that looks whatever its probe says, one in 2^BUSTER_LANE_EXIT_SAMPLE_BITS: by a hash
++// of its ID, since a build's compiles may have every other ID, or every fourth.
++static __attribute__((unused)) bool lane_exit_sampled(uint64_t process)
++{
++    return (process * UINT64_C(0x9e3779b97f4a7c15)) >> (64 - BUSTER_LANE_EXIT_SAMPLE_BITS) == 0;
++}
++
++// The caller's probe, as it exits: what its helper has to look at, written to `executable`. Nothing, for a process that
++// may not ask (arena_executable_huge_pages, BUSTER_EXECUTABLE_HUGE_PAGES=0), and for one whose probe's page a huge page
++// maps, unless it is one that looks all the same (lane_exit_sampled). Where the link has the probe and its page isn't
++// mapped, the helper asks for the placed code whole.
++static __attribute__((unused)) void lane_exit_probe(LaneExitExecutable* executable, pid_t process)
++{
++    const char* setting = getenv("BUSTER_EXECUTABLE_HUGE_PAGES");
++    const bool allowed = arena_executable_huge_pages && !(setting != 0 && strcmp(setting, "0") == 0);
++    const char* probe = buster_start_probe;
++    const bool marked = allowed && probe != 0;
++    const bool mapped = marked && (lane_exit_touch(probe) < BUSTER_LANE_EXIT_FAULT_TICKS || lane_exit_mapped(probe + BUSTER_LANE_EXIT_WINDOW_BYTES));
++    const bool placing = marked && !mapped;
++    const bool looking = allowed && (placing || lane_exit_sampled((uint64_t)process));
++    executable->count = looking ? lane_exit_executable_segments(executable->segments) : 0;
++    executable->probe = placing ? (uint64_t)(uintptr_t)probe : 0;
++    executable->placed_end = placing ? (uint64_t)(uintptr_t)buster_start_end : 0;
++}
++
++// Adds to `pages`, a count for each 2 MB range of `segment` (BUSTER_LANE_EXIT_RANGES of them at most), the pages of
++// `regions`, a scan's answer, that are mapped by 4 KB pages, and sets in *huge the bit of each range a region mapped by
++// a huge page starts in or covers.
++static __attribute__((unused)) void lane_exit_count(const LaneExitRegion* regions, uint64_t count, LaneExitSegment segment, uint16_t* pages, uint64_t* huge)
++{
++    for (uint64_t r = 0; r < count; r += 1)
++    {
++        const bool by_huge = (regions[r].categories & BUSTER_LANE_EXIT_PAGE_HUGE) != 0;
++        uint64_t at = regions[r].start > segment.begin ? regions[r].start : segment.begin;
++        const uint64_t end = regions[r].end < segment.end ? regions[r].end : segment.end;
++        while (at < end)
++        {
++            const uint64_t range = (at - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES;
++            const uint64_t range_end = segment.begin + (range + 1) * BUSTER_ARENA_HUGE_PAGE_BYTES;
++            const uint64_t part_end = end < range_end ? end : range_end;
++            if (range < BUSTER_LANE_EXIT_RANGES && by_huge)
++            {
++                *huge |= UINT64_C(1) << range;
++            }
++            else if (range < BUSTER_LANE_EXIT_RANGES)
++            {
++                pages[range] += (uint16_t)((part_end - at) / BUSTER_ARENA_PAGE_BYTES);
++            }
++            at = part_end;
++        }
++    }
++}
++
++// The ranges to ask huge pages for by what the process mapped of them, a bit each: those of the first `ranges` with
++// BUSTER_LANE_EXIT_HOT_PAGES or more of `pages`, the pages mapped by 4 KB pages (lane_exit_count).
++static __attribute__((unused)) uint64_t lane_exit_asked(const uint16_t* pages, uint64_t ranges)
++{
++    uint64_t result = 0;
++    for (uint64_t i = 0; i < ranges; i += 1)
++    {
++        result |= (uint64_t)(pages[i] >= BUSTER_LANE_EXIT_HOT_PAGES) << i;
++    }
++    return result;
++}
++
++// The code the start order places past its probe's range: the whole 2 MB ranges of `segment` after the one `probe` is
++// in that hold any of the code, which ends at `placed_end`. Empty (0 to 0) where the probe isn't in the segment or the
++// code ends in the probe's range.
++static __attribute__((unused)) LaneExitSegment lane_exit_placed(LaneExitSegment segment, uint64_t probe, uint64_t placed_end)
++{
++    const bool inside = probe >= segment.begin && probe < segment.end;
++    const uint64_t begin = (probe & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) + BUSTER_ARENA_HUGE_PAGE_BYTES;
++    const uint64_t rounded = (placed_end + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uint64_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++    const uint64_t end = rounded < segment.end ? rounded : segment.end;
++    const bool any = inside && begin < end;
++    return (LaneExitSegment){
++        .begin = any ? begin : 0,
++        .end = any ? end : 0,
++    };
++}
++
++// The helper's first asking where the probe's page wasn't mapped: the placed code past the probe's range
++// (lane_exit_placed), in one call, before anything is read of what the process mapped. 0, also where there is none to
++// ask for, or the kernel's refusal, a negative error.
++static __attribute__((unused)) long lane_exit_collapse_placed(const LaneExitExecutable* executable)
++{
++    long result = 0;
++    for (uint32_t s = 0; s < executable->count; s += 1)
++    {
++        const LaneExitSegment placed = lane_exit_placed(executable->segments[s], executable->probe, executable->placed_end);
++        if (placed.begin < placed.end)
++        {
++            result = lane_exit_syscall(SYS_madvise, (long)placed.begin, (long)(placed.end - placed.begin), BUSTER_LANE_EXIT_MADV_COLLAPSE, 0);
++        }
++    }
++    return result;
++}
++
++// The helper's look at one segment through `file`, /proc/self/pagemap: its ranges' pages counted (lane_exit_count), then
++// each run of the ranges to ask for (lane_exit_asked) collapsed in one call, but the range `probe` is in, where it is in
++// the segment: that one is asked for last, alone and whatever was mapped of it, so that its huge page says the others
++// were made. 0, or the first refusal, of a scan or of a collapse, a negative error, which ends the segment's asking.
++static __attribute__((unused)) long lane_exit_collapse_segment(long file, LaneExitSegment segment, uint64_t probe)
++{
++    // On the stack, under half of the helper's page: statics of their own would be two more pages of .bss to fault in.
++    // Zeroed, so that a sanitizer, which doesn't see the kernel fill them, takes what is read of them for written.
++    _Static_assert(sizeof(LaneExitRegion) * BUSTER_LANE_EXIT_REGIONS + sizeof(uint16_t) * BUSTER_LANE_EXIT_RANGES + sizeof(LaneExitScan) <= sizeof(lane_exit_stack) / 2,
++                   "the exit helper's scan fits half of its stack");
++    LaneExitRegion regions[BUSTER_LANE_EXIT_REGIONS] = { 0 };
++    uint16_t pages[BUSTER_LANE_EXIT_RANGES] = { 0 };
++    uint64_t huge = 0;
++    const uint64_t ranges = (segment.end - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES < BUSTER_LANE_EXIT_RANGES ?
++                                (segment.end - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES : BUSTER_LANE_EXIT_RANGES;
++    const uint64_t end = segment.begin + ranges * BUSTER_ARENA_HUGE_PAGE_BYTES;
++    long result = 0;
++    uint64_t at = segment.begin;
++    while (result == 0 && at < end)
++    {
++        LaneExitScan scan = {
++            .size = sizeof(scan),
++            .start = at,
++            .end = end,
++            .vector = (uint64_t)(uintptr_t)regions,
++            .vector_length = BUSTER_LANE_EXIT_REGIONS,
++            .category_mask = BUSTER_LANE_EXIT_PAGE_PRESENT,
++            .return_mask = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE,
++        };
++        const long found = lane_exit_syscall(SYS_ioctl, file, (long)BUSTER_LANE_EXIT_PAGEMAP_SCAN, (long)&scan, 0);
++        // A scan that filled its regions stopped short of the end, and the next goes on from there.
++        result = found < 0 ? found : scan.walk_end > at ? 0 : -EIO;
++        if (result == 0)
++        {
++            lane_exit_count(regions, (uint64_t)found, segment, pages, &huge);
++            at = scan.walk_end;
++        }
++    }
++    const uint64_t asked = result == 0 ? lane_exit_asked(pages, ranges) : 0;
++    const uint64_t last = probe >= segment.begin && probe < end ? (probe - segment.begin) / BUSTER_ARENA_HUGE_PAGE_BYTES : ranges;
++    uint64_t first = 0;
++    while (result == 0 && first < ranges)
++    {
++        uint64_t run = first;
++        while (run < ranges && run != last && ((asked >> run) & 1) != 0)
++        {
++            run += 1;
++        }
++        if (run > first)
++        {
++            result = lane_exit_syscall(SYS_madvise, (long)(segment.begin + first * BUSTER_ARENA_HUGE_PAGE_BYTES), (long)((run - first) * BUSTER_ARENA_HUGE_PAGE_BYTES),
++                                       BUSTER_LANE_EXIT_MADV_COLLAPSE, 0);
++        }
++        first = run + 1;
++    }
++    if (result == 0 && last < ranges)
++    {
++        result = lane_exit_syscall(SYS_madvise, (long)(segment.begin + last * BUSTER_ARENA_HUGE_PAGE_BYTES), BUSTER_ARENA_HUGE_PAGE_BYTES, BUSTER_LANE_EXIT_MADV_COLLAPSE, 0);
++    }
++    return result;
++}
++
++// The helper's look at the executable (lane_exit_executable), raw system calls alone: the placed code first, where the
++// caller's probe asked for it (lane_exit_collapse_placed), then each segment in the file's order
++// (lane_exit_collapse_segment), which has the code's last and the probe's range last of it. A refusal ends it, but one
++// outright (EINVAL) of a segment the probe isn't in, which is passed over. Out of line: a helper that doesn't look runs
++// none of it, on the stack it had before.
++static __attribute__((noinline, unused)) void lane_exit_look(void)
++{
++    static const char path[] = "/proc/self/pagemap";
++    const LaneExitExecutable* executable = &lane_exit_executable;
++    const long file = lane_exit_collapse_placed(executable) == 0 ? lane_exit_syscall(SYS_open, (long)path, O_RDONLY | O_CLOEXEC, 0, 0) : -1;
++    bool asking = file >= 0;
++    for (uint32_t s = 0; asking && s < executable->count; s += 1)
++    {
++        const LaneExitSegment segment = executable->segments[s];
++        const bool coded = executable->probe >= segment.begin && executable->probe < segment.end;
++        const long refused = lane_exit_collapse_segment(file, segment, executable->probe);
++        asking = refused == 0 || (refused == -EINVAL && !coded);
++    }
++    if (file >= 0)
++    {
++        lane_exit_syscall(SYS_close, file, 0, 0, 0);
++    }
++}
++
+ // The helper: every signal blocked, it ends with its caller, by the SIGKILL PR_SET_PDEATHSIG sends as the caller exits,
+-// or at once where the caller had gone before the request took (its parent no longer the caller).
++// or at once where the caller had gone before the request took (its parent no longer the caller). With segments of the
++// executable to look at (lane_exit_probe), it outlives the caller by that look (lane_exit_look): the caller's end is
++// then a signal it waits for, blocked as the others are, so that no compile waits for the look and it sees all the
++// compile mapped.
+ static __attribute__((noreturn, unused)) void lane_exit_helper_main(void)
+ {
+     const uint64_t blocked = UINT64_MAX;
++    const uint64_t gone = UINT64_C(1) << (BUSTER_LANE_EXIT_GONE - 1);
++    const bool looking = lane_exit_executable.count != 0;
+     lane_exit_syscall(SYS_rt_sigprocmask, SIG_SETMASK, (long)&blocked, 0, sizeof(blocked));
+-    lane_exit_syscall(SYS_prctl, PR_SET_PDEATHSIG, SIGKILL, 0, 0);
++    lane_exit_syscall(SYS_prctl, PR_SET_PDEATHSIG, looking ? BUSTER_LANE_EXIT_GONE : SIGKILL, 0, 0);
+     while (lane_exit_syscall(SYS_getppid, 0, 0, 0, 0) == lane_exit_caller)
+     {
+-        lane_exit_syscall(SYS_pause, 0, 0, 0, 0);
++        if (looking)
++        {
++            lane_exit_syscall(SYS_rt_sigtimedwait, (long)&gone, 0, 0, sizeof(gone));
++        }
++        else
++        {
++            lane_exit_syscall(SYS_pause, 0, 0, 0, 0);
++        }
++    }
++    if (looking)
++    {
++        lane_exit_look();
+     }
+     while (true)
+     {
+@@ -3499,6 +4033,8 @@ static void lane_exit_helper_start(void)
+         fflush(0);
+         const bool closed = syscall(BUSTER_LANE_EXIT_SYS_CLOSE_RANGE, 0u, ~0u, 0u) == 0;
+         lane_exit_caller = getpid();
++        // What the helper looks at of the executable once this process has gone: nothing, where a huge page maps its code.
++        lane_exit_probe(&lane_exit_executable, lane_exit_caller);
+         const LaneExitCloneArguments arguments = {
+             .flags = BUSTER_LANE_EXIT_CLONE_VM | BUSTER_LANE_EXIT_CLONE_CLEAR_SIGHAND,
+             .stack = (uint64_t)(uintptr_t)lane_exit_stack,
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index fa164e6e3..36d453a15 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -57,6 +57,11 @@
+ //     CPU, which this thread's mask is cut to, read their group as sharing it, and the lane that waited for lane 0's
+ //     stall must have slept; two lanes on the process's own CPUs, where it has more than one, read theirs as not sharing
+ //     them.
++//   - The exit helper's look at the executable's pages (#2873) and the probe that decides it: the segments it takes
++//     from program headers, the pages it counts of a scan's regions by 2 MB range, the placed code past a probe's range,
++//     the processes that look whatever their probe says, and the look on a mapped file of the test's, whose hot range
++//     the kernel collapses or refuses, with the probe's read and query of a page no read touched
++//     (lane_test_exit_executable).
+ //   - Thread counts, which the teams and sessions checks compare: a thread is counted from /proc/self/task unless its
+ //     stat's flags say it has begun to exit, as a thread just joined may still be listed (lane_test_task_exiting). The
+ //     flags read from stat texts of a command with spaces and parentheses, and none from texts that stop short of them;
+@@ -590,10 +595,208 @@ static void lane_test_stack_base_pages(LaneTestTally* tally)
+     arena_stack_base_pages = was_stack;
+ }
+ 
++// Whether [mapping, mapping + bytes) is in the stretch that reservations are taken from together (arena_regions), in
++// its lower half (`down` 1) or its upper one (0). A mapping of a reservation's own can be there too, in the hole a
++// released arena left: lane_test_carved says which.
++static bool lane_test_in_region(uint32_t down, uintptr_t mapping, uint64_t bytes)
++{
++    const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
++    const bool mapped = middle > BUSTER_ARENA_REGION_REFUSED;
++    return mapped && (down != 0 ? mapping >= middle - BUSTER_ARENA_REGION_BYTES && mapping + bytes <= middle : mapping >= middle && mapping + bytes <= middle + BUSTER_ARENA_REGION_BYTES);
++}
++
++// The bytes carved so far from the stretch's lower half (`down` 1) or upper half (0).
++static uint64_t lane_test_carved(uint32_t down)
++{
++    return __atomic_load_n(&arena_regions.carved[down], __ATOMIC_RELAXED);
++}
++
++// Reservations taken together (#2873: arena_reservation_map). With the limits fixed and the address space unlimited,
++// as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
++// upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
++// past its base pages from its reservation; the first's release unmaps it and leaves the second as it was; an arena
++// of base pages and an arena of tables come from the lower half, each right below the one before, with their
++// mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
++// once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
++// (arena_commit); and a region with no room left, a thread
++// switched to compact reservations and limits that aren't fixed each leave a reservation a mapping of its own, in no
++// region. Where the build has no regions (a sanitizer's) or the kernel refused one, every reservation has its own. In
++// a process of its own (lane_test_arena_regions), since a region's bytes count against the address-space limit that
++// the checks after this one lower.
++static void lane_test_arena_regions_child(LaneTestTally* tally)
++{
++    static ArenaPool pool;
++    const ArenaLimits was_limits = arena_limits;
++    const bool was_compact = arena_compact;
++    ArenaPool* was_pool = arena_pool;
++    arena_pool = 0;
++    arena_compact = false;
++    arena_limits = (ArenaLimits){
++        .fixed = true,
++        .address_share = BUSTER_ARENA_MAX_CAPACITY,
++        .commit_unbounded = true,
++    };
++    Arena first = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    Arena second = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uintptr_t first_mapping = (uintptr_t)first.base - first.mapping_offset;
++    const uintptr_t second_mapping = (uintptr_t)second.base - second.mapping_offset;
++    const bool regions = BUSTER_ARENA_REGIONS && lane_test_in_region(0, first_mapping, first.mapping_bytes);
++    const bool together = lane_test_in_region(0, second_mapping, second.mapping_bytes) && second_mapping == first_mapping + first.mapping_bytes;
++    lane_test_expect(tally, first.base != 0 && second.base != 0 && (!regions || together), "two reservations weren't next to each other in a region");
++    lane_test_expect(tally, BUSTER_ARENA_REGIONS || !lane_test_in_region(0, first_mapping, first.mapping_bytes), "a build without regions took a reservation from one");
++    uint8_t* first_bytes = first.base != 0 ? arena_push(&first, 3 * BUSTER_ARENA_PAGE_BYTES, 1) : 0;
++    uint8_t* second_bytes = second.base != 0 ? arena_push(&second, BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES, 1) : 0;
++    bool zero = first_bytes != 0 && second_bytes != 0;
++    for (uint64_t i = 0; zero && i < 3 * BUSTER_ARENA_PAGE_BYTES; i += 1)
++    {
++        zero = first_bytes[i] == 0 && second_bytes[i] == 0;
++    }
++    if (first_bytes != 0 && second_bytes != 0)
++    {
++        memset(first_bytes, 0x5a, 3 * BUSTER_ARENA_PAGE_BYTES);
++        memset(second_bytes, 0xa5, BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES);
++    }
++    lane_test_expect(tally, zero, "a reservation from a region wasn't zero-filled where it pushed");
++    // The region of mappings without flags is advised huge pages whole, so its arena needs no advice of its own: its
++    // pages past its base pages are advised, and those could be mapped by a huge page.
++    bool flagged = false;
++    const bool advised = second_bytes != 0 && second.huge && lane_test_vm_flag((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, "hg", &flagged) && flagged &&
++                         lane_test_huge_capable((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, &flagged) && flagged;
++    const bool base_pages = second_bytes != 0 && !(lane_test_huge_capable((uintptr_t)second.base, &flagged) || !flagged);
++    lane_test_expect(tally, !regions || (advised && base_pages), "a region's arena wasn't advised huge pages past its base pages, or its base pages could be huge");
++    // The first's release unmaps its part of the region: the kernel has no page there, and the second keeps its bytes.
++    const uint8_t* first_page = first.base;
++    arena_release(&first);
++    unsigned char vector = 0;
++    const bool unmapped = first_page != 0 && mincore((void*)((uintptr_t)first_page & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)), BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
++    const bool kept = second_bytes != 0 && second_bytes[0] == 0xa5 && second_bytes[BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == 0xa5;
++    lane_test_expect(tally, unmapped && kept, "a released reservation of a region stayed mapped, or its neighbour lost its bytes");
++    arena_release(&second);
++    // The other flags' regions: base pages of 2 MB or more (MAP_STACK where the kernel maps them so), and tables.
++    Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 4 * BUSTER_ARENA_HUGE_PAGE_BYTES);
++    ArenaTable tables[] = {
++        { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES },
++        { .bytes = BUSTER_ARENA_SMALL_BYTES, .small = BUSTER_ARENA_SMALL_BYTES },
++    };
++    Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
++    const uint32_t wide_down = arena_stack_base_pages ? 1 : 0;
++    const uintptr_t wide_mapping = (uintptr_t)wide.base - wide.mapping_offset;
++    const uintptr_t held_mapping = (uintptr_t)held.base - held.mapping_offset;
++    const bool wide_placed = wide.base != 0 && (!regions || lane_test_in_region(wide_down, wide_mapping, wide.mapping_bytes));
++    const bool held_placed = held.base != 0 && (!regions || (lane_test_in_region(1, held_mapping, held.mapping_bytes) && (wide_down == 0 || held_mapping + held.mapping_bytes == wide_mapping)));
++    bool found = false;
++    const bool uncharged = held.base != 0 && lane_test_vm_flag((uintptr_t)tables[0].base, "nr", &found) && found;
++    const bool tabled = held.base != 0 && ((uint8_t*)tables[0].base)[0] == 0 && ((uint8_t*)tables[1].base)[BUSTER_ARENA_SMALL_BYTES - 1] == 0;
++    lane_test_expect(tally, wide_placed && held_placed && uncharged && tabled, "an arena of base pages or of tables wasn't in the half of its mapping's flags");
++    arena_release(&wide);
++    arena_release(&held);
++    // A pool takes a released arena of a region and gives the same one back.
++    arena_pool = &pool;
++    Arena pooled = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uint8_t* pooled_base = pooled.base;
++    uint8_t* pooled_bytes = pooled.base != 0 ? arena_push(&pooled, BUSTER_ARENA_SMALL_BYTES, 1) : 0;
++    const bool pooled_pushed = pooled_bytes != 0;
++    if (pooled_pushed)
++    {
++        memset(pooled_bytes, 0x77, BUSTER_ARENA_SMALL_BYTES);
++    }
++    arena_release(&pooled);
++    Arena again = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uint8_t* again_bytes = again.base != 0 ? arena_push(&again, BUSTER_ARENA_PAGE_BYTES, 1) : 0;
++    lane_test_expect(tally, pooled_pushed && again.base == pooled_base && again_bytes != 0 && again_bytes[0] == 0, "a pool didn't give a region's arena back, emptied");
++    arena_release(&again);
++    arena_pool_release(&pool);
++    arena_pool = 0;
++    // Commits where the kernel charges none (arena_commit): an arena's base pages at once, up to
++    // BUSTER_ARENA_COMMIT_BYTES of them, then BUSTER_ARENA_COMMIT_GROWTH times what is committed; and where it charges,
++    // 64 KB first, whatever the arena's base pages.
++    for (uint32_t charged = 0; charged < 2; charged += 1)
++    {
++        arena_limits.commit_unbounded = charged == 0;
++        Arena based = arena_reserve_small(8 * BUSTER_ARENA_HUGE_PAGE_BYTES, BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_SMALL_BYTES);
++        Arena widest = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 2 * BUSTER_ARENA_COMMIT_BYTES);
++        Arena plain = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++        const bool pushed = based.base != 0 && widest.base != 0 && plain.base != 0 && arena_push(&based, 1, 1) != 0 && arena_push(&widest, 1, 1) != 0 && arena_push(&plain, 1, 1) != 0;
++        const uint64_t based_first = pushed ? based.committed - based.mapping_offset : 0;
++        const uint64_t widest_first = pushed ? widest.committed - widest.mapping_offset : 0;
++        const uint64_t plain_first = pushed ? plain.committed - plain.mapping_offset : 0;
++        const bool first_commits = charged == 0 ? based_first == BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_SMALL_BYTES && widest_first == BUSTER_ARENA_COMMIT_BYTES && plain_first == BUSTER_ARENA_SMALL_BYTES :
++                                                  based_first == BUSTER_ARENA_SMALL_BYTES && widest_first == BUSTER_ARENA_SMALL_BYTES && plain_first == BUSTER_ARENA_SMALL_BYTES;
++        // Past what is committed: four times it where nothing is charged, twice where it is (the plain arena's to its
++        // next huge page boundary, at least).
++        const bool more = pushed && arena_push(&widest, widest_first, 1) != 0 && arena_push(&plain, plain_first, 1) != 0;
++        const uint64_t widest_second = more ? widest.committed - widest.mapping_offset : 0;
++        const uint64_t plain_second = more ? plain.committed - plain.mapping_offset : 0;
++        // Where commit is charged, a commit past the first 64 KB takes what its push needs, within twice what was
++        // committed.
++        const bool widest_grew = charged == 0 ? widest_second == BUSTER_ARENA_COMMIT_GROWTH * widest_first : widest_second > widest_first && widest_second <= 2 * widest_first + BUSTER_ARENA_PAGE_BYTES;
++        const uint64_t factor = charged == 0 ? BUSTER_ARENA_COMMIT_GROWTH : 2;
++        const bool second_commits = widest_grew && plain_second >= factor * plain_first && plain_second < factor * plain_first + BUSTER_ARENA_HUGE_PAGE_BYTES;
++        if (!pushed || !first_commits || !more || !second_commits)
++        {
++            printf("  arenas: with commit %s, first commits of %llu, %llu and %llu bytes, then %llu and %llu\n", charged == 0 ? "uncharged" : "charged", (unsigned long long)based_first,
++                   (unsigned long long)widest_first, (unsigned long long)plain_first, (unsigned long long)widest_second, (unsigned long long)plain_second);
++        }
++        lane_test_expect(tally, pushed && first_commits && more && second_commits, "an arena's commits weren't its base pages and then a multiple of what it had committed");
++        arena_release(&based);
++        arena_release(&widest);
++        arena_release(&plain);
++    }
++    // No room left in the region, compact reservations, and limits that aren't fixed: a mapping of the reservation's own,
++    // which carves nothing.
++    arena_limits.commit_unbounded = true;
++    const uint64_t carved = lane_test_carved(0);
++    __atomic_store_n(&arena_regions.carved[0], BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES, __ATOMIC_RELAXED);
++    Arena full = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const bool full_own = lane_test_carved(0) == BUSTER_ARENA_REGION_BYTES - BUSTER_ARENA_PAGE_BYTES;
++    __atomic_store_n(&arena_regions.carved[0], carved, __ATOMIC_RELAXED);
++    arena_compact = true;
++    Arena compact = arena_reserve(BUSTER_ARENA_SMALL_BYTES);
++    arena_compact = false;
++    arena_limits = (ArenaLimits){ 0 };
++    Arena unfixed = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const bool own = full.base != 0 && compact.base != 0 && unfixed.base != 0 && arena_push(&full, 1, 1) != 0 && arena_push(&compact, 1, 1) != 0 && arena_push(&unfixed, 1, 1) != 0 &&
++                     full_own && lane_test_carved(0) == carved;
++    lane_test_expect(tally, own, "a reservation that a region can't take didn't map its own");
++    // With the limits fixed again, the next one is carved where the last one ended.
++    arena_limits = (ArenaLimits){
++        .fixed = true,
++        .address_share = BUSTER_ARENA_MAX_CAPACITY,
++        .commit_unbounded = true,
++    };
++    Arena next = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    lane_test_expect(tally, next.base != 0 && (!regions || lane_test_carved(0) == carved + next.mapping_bytes), "a reservation after those wasn't carved from the region");
++    arena_release(&next);
++    arena_release(&full);
++    arena_release(&compact);
++    arena_release(&unfixed);
++    arena_limits = was_limits;
++    arena_compact = was_compact;
++    arena_pool = was_pool;
++}
++
++// lane_test_arena_regions_child in a process of its own: one check here, that every check of its passed.
++static void lane_test_arena_regions(LaneTestTally* tally)
++{
++    fflush(stdout);
++    const pid_t child = fork();
++    if (child == 0)
++    {
++        LaneTestTally own = { 0 };
++        lane_test_arena_regions_child(&own);
++        fflush(stdout);
++        _exit(own.failures == 0 && own.checks != 0 ? 0 : 1);
++    }
++    int status = 0;
++    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
++    lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of reservations taken together failed in their process");
++}
++
+ static bool lane_test_arenas(void)
+ {
+     LaneTestTally tally = { 0 };
+     lane_test_stack_base_pages(&tally);
++    lane_test_arena_regions(&tally);
+ 
+     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+     static const struct
+@@ -2436,6 +2639,321 @@ static void* lane_test_nothing(void* argument)
+     return argument;
+ }
+ 
++// The exit helper's look at the executable's pages (#2873, lane_exit_look) and the probe that decides it
++// (lane_exit_probe): the segments it takes from program headers (read-only ones as far from their place in the file as
++// a multiple of 2 MB, by their whole 2 MB ranges; none that is writable, apart by another distance, or shorter than a
++// range; and none where the image is loaded a page off); the pages it counts of a scan's regions, by range, a region
++// across two ranges, one past the segment's end, and a region mapped by a huge page as its range's bit; the ranges it
++// asks for by their pages; the placed code past a probe's range; the processes that look whatever their probe says,
++// about one in 64 of consecutive IDs, of every other and of every fourth; and the look itself, on a file of this
++// test's mapped at a 2 MB boundary: 80 pages read in its first range and one in its second. Whatever the kernel
++// answers, a range with fewer pages mapped than are worth a huge page stays as it was mapped; where the kernel
++// collapsed the first, a huge page must map it when read again; the second range, asked for as placed code past a
++// probe in the first, likewise; and a look with its probe in a range a huge page maps already is granted. Then the
++// probe's two questions of a page of the second range that no read touched: the kernel's answer says it is mapped where
++// a huge page maps the range and only there, and a read of it takes fewer ticks than BUSTER_LANE_EXIT_FAULT_TICKS where
++// it is mapped (the least of eight pages' reads, as an interrupt can land in one) and no fewer where the read faults,
++// as the read of the file's last page, past its ranges, always does. A kernel without the scan (before 6.7) or without
++// huge pages for a file's pages refuses, which the test passes over: it says which happened, and the ticks its reads
++// took.
++static uint64_t lane_test_exit_executable(void)
++{
++    uint64_t failures = 0;
++    const Elf64_Phdr headers[] = {
++        {
++            .p_type = PT_PHDR,
++            .p_offset = 0x40,
++            .p_vaddr = 0x200040,
++            .p_filesz = 0x230,
++        },
++        {
++            .p_type = PT_LOAD,
++            .p_flags = PF_R,
++            .p_vaddr = 0x200000,
++            .p_filesz = 0xb517c4,
++        },
++        {
++            .p_type = PT_LOAD,
++            .p_flags = PF_R | PF_X,
++            .p_offset = 0xc00000,
++            .p_vaddr = 0x1000000,
++            .p_filesz = 0x24a3c40,
++        },
++        {
++            .p_type = PT_LOAD,
++            .p_flags = PF_R | PF_W,
++            .p_offset = 0x30a3c40,
++            .p_vaddr = 0x36a3c40,
++            .p_filesz = 0xc66f98,
++        },
++        {
++            .p_type = PT_LOAD,
++            .p_flags = PF_R,
++            .p_offset = 0x4000000,
++            .p_vaddr = 0x5001000,
++            .p_filesz = 0x800000,
++        },
++        {
++            .p_type = PT_LOAD,
++            .p_flags = PF_R,
++            .p_offset = 0x5000000,
++            .p_vaddr = 0x6000000,
++            .p_filesz = 0x1ff000,
++        },
++        {
++            .p_type = PT_LOAD,
++            .p_flags = PF_R,
++            .p_offset = 0x6100000,
++            .p_vaddr = 0x7100000,
++            .p_filesz = 0x500000,
++        },
++        {
++            .p_type = PT_GNU_STACK,
++            .p_flags = PF_R | PF_W,
++        },
++    };
++    LaneExitSegment segments[BUSTER_LANE_EXIT_SEGMENTS];
++    const uint32_t found = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0, segments);
++    const bool taken = found == 3 && segments[0].begin == 0x200000 && segments[0].end == 0xc00000 && segments[1].begin == 0x1000000 && segments[1].end == 0x3400000 &&
++                       segments[2].begin == 0x7200000 && segments[2].end == 0x7600000;
++    const bool moved = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x400000, segments) == 3 && segments[0].begin == 0x600000 && segments[0].end == 0x1000000;
++    // Loaded 0x1ff000 further, only the segment that is a page more from its place in the file is a multiple of 2 MB from it.
++    const bool off = lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x1ff000, segments) == 1 && segments[0].begin == 0x5200000 && segments[0].end == 0x5a00000 &&
++                     lane_exit_segments(headers, BUSTER_ARRAY_LENGTH(headers), 0x1000, segments) == 0;
++    // More read-only segments than the helper looks at: the first of them.
++    Elf64_Phdr many[BUSTER_LANE_EXIT_SEGMENTS + 2];
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(many); i += 1)
++    {
++        many[i] = (Elf64_Phdr){
++            .p_type = PT_LOAD,
++            .p_flags = PF_R,
++            .p_offset = (uint64_t)i << 24,
++            .p_vaddr = (uint64_t)i << 24,
++            .p_filesz = 0x400000,
++        };
++    }
++    const bool bounded = lane_exit_segments(many, BUSTER_ARRAY_LENGTH(many), 0, segments) == BUSTER_LANE_EXIT_SEGMENTS && segments[BUSTER_LANE_EXIT_SEGMENTS - 1].begin == (BUSTER_LANE_EXIT_SEGMENTS - 1) << 24;
++    if (!taken || !moved || !off || !bounded)
++    {
++        failures += 1;
++        printf("  exit helper: the executable's segments weren't the read-only ones' whole 2 MB ranges (%d %d %d %d)\n", taken, moved, off, bounded);
++    }
++    const LaneExitSegment counted = {
++        .begin = 0x200000,
++        .end = 0xa00000,
++    };
++    const LaneExitRegion regions[] = {
++        { .start = 0x100000, .end = 0x200000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
++        { .start = 0x200000, .end = 0x210000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
++        { .start = 0x3f0000, .end = 0x410000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
++        { .start = 0x600000, .end = 0x800000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE },
++        { .start = 0x7ff000, .end = 0xa10000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
++        { .start = 0xb00000, .end = 0xb10000, .categories = BUSTER_LANE_EXIT_PAGE_PRESENT },
++    };
++    uint16_t pages[BUSTER_LANE_EXIT_RANGES] = { 0 };
++    uint64_t huge = 0;
++    lane_exit_count(regions, BUSTER_ARRAY_LENGTH(regions), counted, pages, &huge);
++    if (pages[0] != 32 || pages[1] != 16 || pages[2] != 1 || pages[3] != 512 || pages[4] != 0 || huge != 4)
++    {
++        failures += 1;
++        printf("  exit helper: a scan's regions counted %u, %u, %u, %u and %u pages by range, not 32, 16, 1, 512 and 0, or the ranges by huge pages are %llx, not 4\n", pages[0],
++               pages[1], pages[2], pages[3], pages[4], (unsigned long long)huge);
++    }
++    // The ranges asked for by their pages: the fourth, with 512 of 4 KB, and a fifth with 70, not the first, with 32, nor
++    // the third, which a huge page maps; and of the first four ranges alone, the fourth.
++    pages[4] = 70;
++    const uint64_t used = lane_exit_asked(pages, 5);
++    const uint64_t used_four = lane_exit_asked(pages, 4);
++    if (used != 0x18 || used_four != 0x8)
++    {
++        failures += 1;
++        printf("  exit helper: the ranges asked for were %llx and %llx, not 18 and 8\n", (unsigned long long)used, (unsigned long long)used_four);
++    }
++    // The placed code past a probe's range: to the end of the range its end is in; none where it ends in the probe's
++    // range, or the probe is in another segment; and no further than the segment.
++    const LaneExitSegment code = {
++        .begin = 0x1000000,
++        .end = 0x3400000,
++    };
++    const LaneExitSegment past = lane_exit_placed(code, 0x1000000, 0x1701b35);
++    const LaneExitSegment within = lane_exit_placed(code, 0x1000000, 0x1100000);
++    const LaneExitSegment elsewhere = lane_exit_placed(code, 0x800000, 0x1701b35);
++    const LaneExitSegment beyond = lane_exit_placed(code, 0x3000000, 0x3900000);
++    const LaneExitSegment whole = lane_exit_placed(code, 0x1200000, 0x1600000);
++    if (past.begin != 0x1200000 || past.end != 0x1800000 || within.begin != within.end || elsewhere.begin != elsewhere.end || beyond.begin != 0x3200000 || beyond.end != 0x3400000 ||
++        whole.begin != 0x1400000 || whole.end != 0x1600000)
++    {
++        failures += 1;
++        printf("  exit helper: the placed code past a probe's range was %llx to %llx, %llx to %llx, %llx to %llx, %llx to %llx and %llx to %llx\n", (unsigned long long)past.begin,
++               (unsigned long long)past.end, (unsigned long long)within.begin, (unsigned long long)within.end, (unsigned long long)elsewhere.begin, (unsigned long long)elsewhere.end,
++               (unsigned long long)beyond.begin, (unsigned long long)beyond.end, (unsigned long long)whole.begin, (unsigned long long)whole.end);
++    }
++    // The processes that look whatever their probe says: about one in 64 of 65,536 IDs in a row (1,024), of every
++    // other ID and of every fourth, which a count by the ID's remainder would give all or none of.
++    for (uint64_t step = 1; step <= 4; step *= 2)
++    {
++        uint64_t sampled = 0;
++        for (uint64_t process = 1; process <= 65536 * step; process += step)
++        {
++            sampled += lane_exit_sampled(process) ? 1 : 0;
++        }
++        if (sampled < 896 || sampled > 1152)
++        {
++            failures += 1;
++            printf("  exit helper: %llu of 65536 process IDs %llu apart look whatever their probe says, not about 1024\n", (unsigned long long)sampled, (unsigned long long)step);
++        }
++    }
++    // The look itself: a file of two ranges and a page, mapped read-only at a 2 MB boundary as an executable's segment is.
++    const uint64_t bytes = 2 * BUSTER_ARENA_HUGE_PAGE_BYTES + BUSTER_ARENA_PAGE_BYTES;
++    char path[PATH_MAX];
++    snprintf(path, sizeof(path), "%s/buster-test-lanes-exit-XXXXXX", oracle_temporary_directory());
++    const int file = mkstemp(path);
++    uint8_t* reserved = mmap(0, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    bool written = file != -1 && reserved != MAP_FAILED;
++    uint8_t block[BUSTER_ARENA_PAGE_BYTES];
++    for (uint64_t at = 0; written && at < bytes; at += sizeof(block))
++    {
++        memset(block, (int)(at / sizeof(block) % 251) + 1, sizeof(block));
++        written = write(file, block, sizeof(block)) == (ssize_t)sizeof(block);
++    }
++    // Clean pages of a file no one has open for writing: the kernel collapses none that still wait to be written, and
++    // none of a file that may be.
++    written = written && fsync(file) == 0;
++    if (file != -1)
++    {
++        close(file);
++    }
++    const int reading = written ? open(path, O_RDONLY | O_CLOEXEC) : -1;
++    uint8_t* aligned = (uint8_t*)(((uintptr_t)reserved + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1));
++    const uint8_t* mapping = reading != -1 ? mmap(aligned, bytes, PROT_READ, MAP_PRIVATE | MAP_FIXED, reading, 0) : MAP_FAILED;
++    if (reading != -1)
++    {
++        close(reading);
++    }
++    const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
++    if (mapping != MAP_FAILED && pagemap != -1)
++    {
++        // 80 pages of the first range read, each a few pages on from the last, and one of the second: what the kernel maps
++        // around each is its own choice, so the test reads what the look will find before it looks.
++        uint64_t sum = 0;
++        for (uint64_t page = 0; page < 80; page += 1)
++        {
++            sum += mapping[page * 6 * BUSTER_ARENA_PAGE_BYTES];
++        }
++        sum += mapping[BUSTER_ARENA_HUGE_PAGE_BYTES + 3 * 16 * BUSTER_ARENA_PAGE_BYTES];
++        const LaneExitSegment segment = {
++            .begin = (uint64_t)(uintptr_t)mapping,
++            .end = (uint64_t)(uintptr_t)mapping + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES,
++        };
++        // Zeroed: the kernel fills them through a raw system call, which a sanitizer doesn't see write them.
++        LaneExitRegion found_regions[BUSTER_LANE_EXIT_REGIONS] = { 0 };
++        // What three scans find: the ranges as read, after a look that asks by the pages mapped, and after the asking for
++        // the second range as placed code past a probe in the first.
++        uint16_t found_pages[3][BUSTER_LANE_EXIT_RANGES] = { 0 };
++        uint64_t found_huge[3] = { 0, 0, 0 };
++        long scanned[3] = { 0, 0, 0 };
++        bool asked[2] = { false, false };
++        const LaneExitExecutable placing = {
++            .segments = { segment },
++            .count = 1,
++            .probe = segment.begin,
++            .placed_end = segment.end,
++        };
++        for (uint32_t pass = 0; pass < 3; pass += 1)
++        {
++            LaneExitScan scan = {
++                .size = sizeof(scan),
++                .start = segment.begin,
++                .end = segment.end,
++                .vector = (uint64_t)(uintptr_t)found_regions,
++                .vector_length = BUSTER_LANE_EXIT_REGIONS,
++                .category_mask = BUSTER_LANE_EXIT_PAGE_PRESENT,
++                .return_mask = BUSTER_LANE_EXIT_PAGE_PRESENT | BUSTER_LANE_EXIT_PAGE_HUGE,
++            };
++            scanned[pass] = syscall(SYS_ioctl, pagemap, BUSTER_LANE_EXIT_PAGEMAP_SCAN, &scan);
++            if (scanned[pass] >= 0)
++            {
++                lane_exit_count(found_regions, (uint64_t)scanned[pass], segment, found_pages[pass], &found_huge[pass]);
++            }
++            if (pass == 0)
++            {
++                asked[0] = lane_exit_collapse_segment(pagemap, segment, 0) == 0;
++            }
++            else if (pass == 1)
++            {
++                asked[1] = lane_exit_collapse_placed(&placing) == 0;
++            }
++            // Read again: a range the kernel collapsed is mapped by the next fault.
++            sum += mapping[0];
++            sum += mapping[BUSTER_ARENA_HUGE_PAGE_BYTES + 3 * 16 * BUSTER_ARENA_PAGE_BYTES];
++        }
++        const bool scans = scanned[0] >= 0 && scanned[1] >= 0 && scanned[2] >= 0;
++        const bool hot = scans && found_pages[0][0] >= BUSTER_LANE_EXIT_HOT_PAGES;
++        const bool cold = scans && found_pages[0][1] < BUSTER_LANE_EXIT_HOT_PAGES;
++        // Read back as written, whatever the pages are mapped by.
++        const bool same = mapping[0] == 1 && mapping[BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == (BUSTER_ARENA_HUGE_PAGE_BYTES / BUSTER_ARENA_PAGE_BYTES - 1) % 251 + 1 && sum != 0;
++        // The first look leaves the second range as it was mapped, and where the kernel collapsed the first, a huge page
++        // maps it since; the second range, asked for as placed code, likewise.
++        const bool kept = !cold || (found_pages[1][1] == found_pages[0][1] && (found_huge[1] & 2) == 0);
++        const bool mapped = !(asked[0] && hot) || (found_huge[1] & 1) != 0;
++        const bool placed = !(asked[1] && cold) || (found_huge[2] & 2) != 0;
++        // A look whose probe is in the first range asks for that range last, whatever is mapped of it: granted where a
++        // huge page maps it already.
++        const bool last = !(asked[0] && hot && (found_huge[2] & 1) != 0) || lane_exit_collapse_segment(pagemap, segment, segment.begin) == 0;
++        // The probe's two questions, of pages of the second range that no read touched, while the kernel maps no more
++        // around a read than its window: the kernel's answer, and the ticks of a read, the least of eight pages'.
++        const char* untouched = (const char*)mapping + BUSTER_ARENA_HUGE_PAGE_BYTES + 300 * BUSTER_ARENA_PAGE_BYTES;
++        const bool windowed = scans && cold && found_pages[0][1] <= 64;
++        const bool huge_second = (found_huge[2] & 2) != 0;
++        const bool answered = lane_exit_mapped(untouched);
++        uint64_t ticks = UINT64_MAX;
++        uint64_t first_ticks = 0;
++        for (uint64_t read = 0; read < 8; read += 1)
++        {
++            const uint64_t took = lane_exit_touch(untouched + read * BUSTER_LANE_EXIT_WINDOW_BYTES);
++            first_ticks = read == 0 ? took : first_ticks;
++            ticks = took < ticks ? took : ticks;
++        }
++        // Where a huge page maps the range, no read faults; where none does, each read is of a window of its own, and
++        // faults.
++        const bool probed = !windowed || (answered == huge_second && (huge_second ? ticks < BUSTER_LANE_EXIT_FAULT_TICKS : ticks >= BUSTER_LANE_EXIT_FAULT_TICKS));
++        // The file's last page, past its two ranges, which no huge page can map and nothing has read: its read faults,
++        // whatever the kernel did with the ranges.
++        const uint64_t fault_ticks = lane_exit_touch((const char*)mapping + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES);
++        const bool faulted = fault_ticks >= BUSTER_LANE_EXIT_FAULT_TICKS;
++        if (!same || !kept || !mapped || !placed || !last || !probed || !faulted)
++        {
++            failures += 1;
++            printf("  exit helper: the looks at a mapped file found %u and %u pages of 4 KB in its ranges, then %u and %u, then %u and %u (asked: %d %d, by huge pages: %llx %llx, "
++                   "the last range granted: %d, an untouched page mapped: %d, its reads' least ticks %llu, a faulting read's %llu, bytes the same: %d)\n",
++                   found_pages[0][0], found_pages[0][1], found_pages[1][0], found_pages[1][1], found_pages[2][0], found_pages[2][1], asked[0], asked[1],
++                   (unsigned long long)found_huge[1], (unsigned long long)found_huge[2], last, answered, (unsigned long long)ticks, (unsigned long long)fault_ticks, same);
++        }
++        printf("  exit helper: a file's range of %u pages in %s: %s; an untouched page: %s, read in %llu ticks at first and %llu at least; a read that faults: %llu ticks\n",
++               found_pages[0][0], oracle_temporary_directory(),
++               !scans ? "the kernel has no PAGEMAP_SCAN" : !hot ? "too few to ask for" : asked[0] ? "collapsed, and mapped by a huge page since" : "the kernel refused to collapse it",
++               answered ? "mapped" : "not mapped", (unsigned long long)first_ticks, (unsigned long long)ticks, (unsigned long long)fault_ticks);
++    }
++    else
++    {
++        failures += 1;
++        printf("  exit helper: a file couldn't be written and mapped in %s, or /proc/self/pagemap opened\n", oracle_temporary_directory());
++    }
++    if (pagemap != -1)
++    {
++        close(pagemap);
++    }
++    if (reserved != MAP_FAILED)
++    {
++        munmap(reserved, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES);
++    }
++    if (file != -1)
++    {
++        unlink(path);
++    }
++    return failures;
++}
++
+ // Thread counts (lane_test_thread_count): stat texts' flags, read past commands with spaces and parentheses, and refused
+ // where a text stops short of them; this thread, read as live; and BUSTER_LANE_TEST_JOINS threads started and joined,
+ // each followed by a count that must be the one before them all. On a 4-CPU cloud VM, a count that listed every thread
+@@ -4060,6 +4578,7 @@ static int run_lane_tests(int argc, char** argv)
+     {
+         bool passed = lane_test_watchdog();
+         passed = lane_test_arenas() && passed;
++        passed = lane_test_exit_executable() == 0 && passed;
+         passed = lane_test_thread_counts() == 0 && passed;
+         passed = lane_test_teams() == 0 && passed;
+         passed = lane_test_cpuinfo_controls() == 0 && passed;
