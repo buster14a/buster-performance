@@ -7,11 +7,14 @@ the same tests in its own form, with this code as their oracle". This record is 
 `measure-node-machine --shadow --front-own-tests` makes the same bits from T's records in their order, with no walk of
 the graph and no step from a node to its record, and with `--verify` the census's code runs beside it on every
 expression. The design's section is "The tests in the machine's own form" in `docs/node-machine.md`;
-[the claim](https://github.com/buster14a/buster/issues/2524#issuecomment-6909545335) is on the issue.
+[the claim](https://github.com/buster14a/buster/issues/2524#issuecomment-6909545335) and
+[the result](https://github.com/buster14a/buster/issues/2524#issuecomment-6912794445) are on the issue.
 
 **This record is also the hand-off of the session's unmerged work on buster#2524** (section 9 and
 [`patches/handoff`](patches/handoff)): four commits that exist in no branch of buster, as a series that applies in
-order on main `3d0d56ed7`.
+order on main `3d0d56ed7`. [The hand-off](https://github.com/buster14a/buster/issues/2524#issuecomment-6912807608) is
+on the issue, and [a note for buster#2850's session](https://github.com/buster14a/buster/issues/2850#issuecomment-6912816238)
+on what its kernels can take from this.
 
 Host: the Ryzen 7 9700X (`benchpress`), under its lock, a hold a run; Release builds; `taskset -c 2`; TSC ticks at
 3,792.9 MHz. A build `oN` is main `be6515fba` with `patches/oN.patch` (the working tree's `src` and `tools` at that
