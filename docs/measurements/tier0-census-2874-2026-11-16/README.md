@@ -28,10 +28,11 @@ second and third are **met**, and neither of its two conditions refutes step
 4's allocation. What the census adds to them is under "Reading it" below.
 
 The command is buster's `measure-tier0-entries`
-(`src/buster/compiler/tier0_entries_measure.c`), in the pull request of
-buster's branch `claude/amazing-davinci-yehx28`; the page is buster's
-`docs/one-core-path.md`, "Step 4's first piece"; the result against the gate
-is on the issue.
+(`src/buster/compiler/tier0_entries_measure.c`), in
+[buster#2878](https://github.com/buster14a/buster/pull/2878); the page is
+buster's `docs/one-core-path.md`, "Step 4's first piece"; the result against
+the gate is
+[on the issue](https://github.com/buster14a/buster/issues/2874#issuecomment-6916911094).
 
 ## What was built
 
@@ -562,7 +563,7 @@ value is made first. `if (a < b)` is `cmp; setl; movzx; test; je`.
 
 Each site is also two entries of the stream (17,830 of `sqlite3.c`'s 395,061,
 4.5%). It changes objects' bytes, so it is no part of this census: it is
-filed as an issue of its own, linked from #2874's result.
+filed as [buster#2877](https://github.com/buster14a/buster/issues/2877).
 
 ## Limits
 
