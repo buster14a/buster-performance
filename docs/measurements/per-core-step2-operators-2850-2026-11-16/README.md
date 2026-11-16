@@ -22,8 +22,10 @@ of 38, above it in two of the three builds. Lua is 40.6 to 41.5 and 36.2
 (T's 81), musl 32.6 to 33.8 and 28.9 to 29.4 (T's 72).
 
 The code is buster's `c_check_node_machine_facts.c`
-(`measure-node-machine --shadow --facts-operators`); the design's page is
-buster's `docs/one-core-path.md`.
+(`measure-node-machine --shadow --facts-operators`), in
+[buster#2871](https://github.com/buster14a/buster/pull/2871); the design's
+page is buster's `docs/one-core-path.md`; the result against the gate is
+[on the issue](https://github.com/buster14a/buster/issues/2850#issuecomment-6907043156).
 
 ## What was built
 
