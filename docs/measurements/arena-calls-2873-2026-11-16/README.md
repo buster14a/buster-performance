@@ -133,6 +133,7 @@ off what `true` itself costs a process (its own start, its dynamic linking, its 
   symbol, flat and inclusive), `rows.sh`, `rows-all.sh` and `rows.py` (section 4), `events.sh` (the compile's own
   counters). The rest are the first record's (`ab.sh`, `build-tree.sh`, `regen.sh`, `order.sh`, `tests.sh`,
   `peak.sh`, `lock.sh`, `tools/`).
+- `patches/`: the second piece itself, six commits on #2885's head `4231222194f3` (`git am`), until it has a branch.
 - `raw/results.tar.xz`: every run's counts (`results` the final build's, `results-b` before the kept releases with
   the experiment's, `results-a` the four stretches'), the profiles and the tests' outputs; `raw/*.out`, `raw/*.log`:
   the builds' and the series' logs.
