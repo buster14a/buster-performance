@@ -37,11 +37,15 @@ issue names, rebuilt with the line (0.9% apart), and 20.31 and 20.58 (1.3%
 apart) in main with the line and this piece's branch.
 
 The code is buster's `c_check_node_machine_reads.c`
-(`measure-node-machine --shadow --facts-reads`), in buster's branch
-`claude/exciting-archimedes-agaary` (commits `9dfe7c391` and `b64fbdd7b` on
-main `3d0d56ed7`); the design's page is buster's `docs/one-core-path.md`
-("Step 2's second piece: what reads T's record" and "The figures are a
-difference of two passes").
+(`measure-node-machine --shadow --facts-reads`), in
+[buster#2875](https://github.com/buster14a/buster/pull/2875) (commits
+`9dfe7c391` and `b64fbdd7b` on main `3d0d56ed7`); the design's page is
+buster's `docs/one-core-path.md` ("Step 2's second piece: what reads T's
+record" and "The figures are a difference of two passes"). The results
+against the gates are on the issues:
+[buster#2850's](https://github.com/buster14a/buster/issues/2850#issuecomment-6915223401)
+and
+[buster#2872's](https://github.com/buster14a/buster/issues/2872#issuecomment-6915227560).
 
 ## What was built
 
