@@ -160,7 +160,8 @@ The interference is spread over T, its rule and C; in C its largest place is the
 sweep's own clearing of the states (`scripts/job33.sh`, `results/9700x/{u3,w2}/sa-plain-*`), the same instruction in
 both builds.
 
-**It follows where the sweeps' frames fall on the stack.** The machine's structure is a local of the census's
+**The sweeps' cycles follow where their frames fall on the stack** (the interference was not counted by place: that
+it is the event there is a reading). The machine's structure is a local of the census's
 function, and the sweeps' frames are below it, at a distance the build fixes. `u4` and `w4` are `u3` and `w2` with
 `patches/phase.patch`: `BUSTER_STACK_PHASE=N` moves the sweeps' frames down by N bytes at run time (an `alloca` in
 the timing function; not the pull request's). The three sweeps' cycles a taken node on `sqlite3.c`, seven passes, at
