@@ -1,0 +1,95 @@
+From cd7ce4a6e0c5f889e51a00b59601a532b5d52d9f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 16 Nov 2026 19:54:50 +0000
+Subject: [PATCH 7/7] Releases stay mapped only where the kernel charges no
+ commit (#2873)
+
+An arena left mapped keeps what it committed until the exit. Where
+commit is charged (strict overcommit, a finite RLIMIT_DATA) that is
+charge another reservation may need, so there every release unmaps and
+returns it, as before (#1521's bound).
+
+Part of #2873.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQsSoUunkrTyxkuSxop
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/arena-memory.md            |  3 ++-
+ src/buster/compiler/lane.c      |  6 ++++--
+ src/buster/compiler/lane_test.c | 14 +++++++++++++-
+ 3 files changed, 19 insertions(+), 4 deletions(-)
+
+diff --git a/docs/arena-memory.md b/docs/arena-memory.md
+index b09c19a66..e5a063f7f 100644
+--- a/docs/arena-memory.md
++++ b/docs/arena-memory.md
+@@ -281,7 +281,8 @@ address space now makes about half of them (5, 35, 7 and 2 for `hello.c`):
+   taken from the stretch and pushed no more than 1 MiB leave it mapped
+   instead, 32 MiB at the very most, which the exit frees with everything
+   else. A larger arena's release gives its pages back at once, as before, and
+-  so does every release after those. With one executable on the 9700X,
++  so does every release after those, and every release where commit is
++  charged, which returns its charge. With one executable on the 9700X,
+   leaving every such arena mapped took 2.25% of the kernel cycles off
+   musl's units compiled a process each (9 rounds of 9) and nothing off
+   `sqlite3.c`, whose releases are its large arenas' pages.
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 205925252..4e89a5815 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -493,7 +493,8 @@ struct ArenaRegions
+ // pushed no more than BUSTER_ARENA_KEPT_BYTES leave it mapped: the address space is not taken again either way, and
+ // the pages, 32 MiB of them at the very most, are the exit's to free, with everything else. A larger arena's release
+ // gives its pages back at once, as before, and so does every release after those: a process that reserves and
+-// releases without end keeps no more.
++// releases without end keeps no more. Where commit is charged (strict overcommit, a finite RLIMIT_DATA) every release
++// unmaps, as before, and returns its charge.
+ #define BUSTER_ARENA_KEPT_BYTES (1ull << 20)
+ #define BUSTER_ARENA_KEPT_COUNT 32
+ #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+@@ -1269,7 +1270,8 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+     const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
+     const bool taken = BUSTER_ARENA_REGIONS && middle > BUSTER_ARENA_REGION_REFUSED && (uintptr_t)mapping >= middle - BUSTER_ARENA_REGION_BYTES &&
+                        (uintptr_t)mapping < middle + BUSTER_ARENA_REGION_BYTES;
+-    const bool small = taken && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
++    // Not where commit is charged: an arena left mapped would keep its charge until the exit (#1521).
++    const bool small = taken && arena_limits.fixed && arena_limits.commit_unbounded && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
+     return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+ }
+ 
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index 44fff2341..e2a70ab84 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -615,7 +615,8 @@ static uint64_t lane_test_carved(uint32_t down)
+ // as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
+ // upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
+ // past its base pages from its reservation; a release without a pool leaves a small arena mapped and unmaps a large
+-// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept (arena_release_keeps); an arena
++// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept, or where commit is charged
++// (arena_release_keeps); an arena
+ // of base pages and an arena of tables come from the lower half, each right below the one before, with their
+ // mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
+ // once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
+@@ -691,6 +692,17 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
+     arena_release(&past);
+     const bool past_unmapped = past_page != 0 && mincore((void*)past_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+     lane_test_expect(tally, every_kept && past_unmapped, "a process's releases kept more small arenas mapped than they may, or fewer");
++    // Where commit is charged, a small arena's release unmaps it, whatever has been kept: with the count as it was
++    // before any release.
++    const uint32_t kept_count = __atomic_exchange_n(&arena_regions.kept, 0, __ATOMIC_RELAXED);
++    arena_limits.commit_unbounded = false;
++    Arena charged_small = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uint8_t* charged_page = charged_small.base != 0 && arena_push(&charged_small, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)charged_small.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
++    arena_release(&charged_small);
++    const bool charged_unmapped = charged_page != 0 && mincore((void*)charged_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
++    lane_test_expect(tally, charged_unmapped && __atomic_load_n(&arena_regions.kept, __ATOMIC_RELAXED) == 0, "a small arena's release stayed mapped where commit is charged");
++    arena_limits.commit_unbounded = true;
++    __atomic_store_n(&arena_regions.kept, kept_count, __ATOMIC_RELAXED);
+     // The other flags' regions: base pages of 2 MB or more (MAP_STACK where the kernel maps them so), and tables.
+     Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 4 * BUSTER_ARENA_HUGE_PAGE_BYTES);
+     ArenaTable tables[] = {
+-- 
+2.43.0
+
