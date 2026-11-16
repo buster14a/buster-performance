@@ -24,9 +24,10 @@ corpus, the rest by reason: **met**. Correct: **met** ("Correctness"
 below). Measured on the 9700X, main against head: **done**. A compile of
 `sqlite3.c` no slower than main beyond main's repeat: **met**.
 
-The change is buster's pull request for #2877, from the branch
-`claude/amazing-davinci-yehx28`; the result against the gate is on the
-issue.
+The change is [buster#2884](https://github.com/buster14a/buster/pull/2884),
+from the branch `claude/amazing-davinci-yehx28`;
+[the result against the gate](https://github.com/buster14a/buster/issues/2877#issuecomment-6922788076)
+is on the issue.
 
 ## What was built
 
@@ -266,6 +267,13 @@ the same corpora:
 | Lua 5.4.8 | 1,549 | 86 | 5.55% |
 | musl | 4,768 | 112 | 2.35% |
 
+`results/first` has that build's runs: main `56c2c294` with
+`scripts/first.patch`, built again on the 9700X after the second design was
+measured (`scripts/queue-first.txt`), with its objects, shapes, sites,
+census and one hold of each corpus's compiles. Its objects' `.text` is
+1,147,272, 299,021 and 720,564 bytes, 944, 544 and 272 more than the second
+design's.
+
 Lua was over the gate. 106, 69 and 36 of those sites were a test of a test:
 `!(a < b)`, or a macro's `(x) != 0` around a condition, as Lua's `l_likely`
 is, where the lowering writes two tests before the branch. A template
@@ -341,6 +349,9 @@ is the lowering's to write as branches.
     front ends).
   - `x86-64`: the same, and 2 more that are the run's own (a report file
     left again, and the ownership check asking for the build's own path).
+  - After the branch's merge of main `1c6cc8a` (its last commit), the native
+    inventory again, in a tree without the earlier runs' report files: 143
+    pass, 2 are skipped, and the same 5 fail as on main.
   - Under the sanitizers (`x86-64` with MemorySanitizer, AddressSanitizer
     and ThreadSanitizer, and the native build with AddressSanitizer for the
     vector path), `test-tier0`, the checker's parts 1 and 4 of 8 (the
@@ -358,6 +369,8 @@ is the lowering's to write as branches.
   `backend-table.sh`, `faults.sh`; `selfbuild.sh`, `qualify.sh`,
   `tests-time.sh`; `tables.sh`; `head.patch`, the pull request's change to
   main's `src` and `tests`, and `first.patch`, the first design's.
+- `results/first`: the first design's build, objects, shapes, sites, census
+  and compiles' counters.
 - `results/main`, `results/head`: each build's log and executable's hash,
   the compiles' counters (`stat-*.txt`), the objects' totals, shapes, sites
   and joins, a small compile's faults, the backend benchmark's runs, and for
