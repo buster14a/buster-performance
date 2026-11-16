@@ -1,4 +1,4 @@
-Part of #2524, under [the claim](https://github.com/buster14a/buster/issues/2524#issuecomment-6919991971): the third commit of [the hand-off series](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-2524-2026-11-16/patches/handoff), on today's main, with what the hand-off said it owed before it could be a pull request. #2887 had the first two.
+Part of #2524, under [the claim](https://github.com/buster14a/buster/issues/2524#issuecomment-6919991971): the third commit of [the hand-off series](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-2524-2026-11-16/patches/handoff), on today's main, with what the hand-off said it owed before it could be a pull request. #2887, merged, had the first two.
 
 It is all the node machine's shadow: no compile takes any of it.
 
@@ -47,17 +47,17 @@ The own form runs where it sits: on an expression the front made whole and T too
 
 ## Results on the 9700X
 
-Release, CPU 2, under the lock, a hold a run. The base is main `1c6cc8ab5` with #2887's sources; the branch adds these two commits' `src`.
+Release, CPU 2, under the lock, a hold a run. `main` is `cc1c47d62`, which has #2887 and #2889; the branch is these two commits on it.
 
 TSC ticks a record T typed at reader time (medians of seven readings in turn, musl's of three):
 
 | | `sqlite3.c` | Lua | musl |
 | --- | ---: | ---: | ---: |
-| T, C and X | 137.8 | 162.8 | 260.6 |
-| with the census's code between T and C | 303.1 | 340.3 | 527.4 |
-| with the own form | 224.5 | 277.5 | 421.7 |
-| the census's code alone (the difference) | 165.3 | 177.4 | 266.7 |
-| **the own form alone** | **86.7** | **114.6** | **161.1** |
+| T, C and X | 129.8 | 154.8 | 259.2 |
+| with the census's code between T and C | 308.0 | 346.4 | 521.6 |
+| with the own form | 216.1 | 270.8 | 411.6 |
+| the census's code alone (the difference) | 178.2 | 191.5 | 262.5 |
+| **the own form alone** | **86.3** | **115.9** | **152.4** |
 
 | | `sqlite3.c` | Lua | musl |
 | --- | ---: | ---: | ---: |
@@ -73,34 +73,39 @@ TSC ticks a record T typed at reader time (medians of seven readings in turn, mu
 
 - **Half the census's code's cost, as the hand-off found:** it read 90.0, 118.8 and 157.3 ticks for the own form alone at its older base. The aim was 30, and its record says where the rest is.
 - **Taking the seven conditions out changed no count** of the second table and a few ticks.
-- **T, C and X read 2 to 4 ticks more in this build** than in #2887's (134.2, 159.1 and 258.5 there, in the same turns): the reader-time loop now has the tests' two places around C and X. The hand-off saw the same between its builds.
+- **T, C and X read 1 to 3 ticks more in this build** than in main's (127.0, 152.6 and 258.5 there, in the same turns): the reader-time loop now has the tests' two places around C and X. The hand-off saw the same between its builds.
 
-The base against the branch:
+Main against the branch:
 
-| | #2887's head | the branch |
+| | main | the branch |
 | --- | ---: | ---: |
-| `-c sqlite3.c`, instructions, M | 1,364.582 | 1,364.580 |
-| its wall time, 21 runs a build from three fresh copies, twice | 122.469 ms; 122.425 ms | +0.02%; -0.06% |
-| the base against itself in the same runs | | -0.13%; -0.21% |
-| the shadow's T, C and X after the pipeline, cycles an evaluated node: `sqlite3.c`; Lua; musl | 178.0; 150.9; 135.9 | 178.0; 152.5; 137.1 |
-| their instructions | 594.3; 683.7; 645.6 | the same |
-| #2850's fact words with the operators, the first pass's cycles a record: `sqlite3.c`; musl | 43.34; 39.13 | 43.02; 39.01 |
-| their instructions | 149.38; 169.89 | the same |
+| `-c sqlite3.c`, instructions | 1,361,787,984 | 1,361,787,865 |
+| its wall time, 21 runs a build from three fresh copies, twice | 122.188 ms; 121.537 ms | -0.08%; +0.03% |
+| main against itself in the same runs | | -0.10%; +0.02% |
+| the shadow's T, C and X after the pipeline, cycles an evaluated node: `sqlite3.c`; Lua; musl | 172.2; 147.1; 134.0 | 174.8; 148.9; 135.4 |
+| their instructions | 603.6; 688.2; 655.9 | the same |
+| #2850's fact words with the operators, the first pass's cycles a record: `sqlite3.c`; musl | 43.41; 39.83 | 43.84; 39.33 |
+| their instructions | 148.53; 170.69 | the same |
 
 - **A compile is unchanged.**
 - **The census's own reports are the same** on the three corpora, with both sets of warnings.
+- **The shadow's own sweeps retire the same instructions and read 1.0% to 1.5% more cycles in this build.** Nothing of theirs changed; I have not traced it. It is the shadow's timing, not a compile's.
+
+These were first taken before main moved (at `1c6cc8ab5` with #2887's sources): the own form alone read 86.7, 114.6 and 161.1 there, with the same counts. Both sets are in the record.
 
 ## Tests
 
-- **`test-checker --seed 133`** in its eight parts, on a native Release build: 842,489 checks, 0 failures.
+- **`test-checker --seed 133`** in its eight parts, on a native Release build of this head: 842,722 checks, 0 failures.
 - **The seven fixtures run in both forms** (`node_tests_test_fixture`), the own form with the census's code beside it.
 - **The own form beside the census's code on the compiler's own source too,** with both sets of warnings: no difference, exit status 0.
 - **The sanitizer rows,** which a pull request's checks don't run, on Release builds as CI builds them (`-O3`), in the cloud container:
-  - native memory, address and thread, the rows that reach the own form: `test-checker`'s part with the census's tests (5 of 8), 210,307 checks, 0 failures in each;
-  - `x86-64` memory, address and thread: the same part, 210,271 checks, 0 failures in each;
-  - the memory and address rows, on both hosts: the shadow with the own form beside the census's code (`--verify --front-own-tests`) on `sqlite3.c`, Lua and the compiler's own source, exit status 0;
-  - no sanitizer reported anything.
-- The compiler checks its own source; `check-call-graph` and `test-call-graph` pass; `build/dco audit` finds the commits signed.
+  - **on these two commits before main moved** (main `1c6cc8ab5` with #2887's sources), all six rows:
+    - native memory, address and thread, the rows that reach the own form: `test-checker`'s part with the census's tests (5 of 8), 210,307 checks, 0 failures in each;
+    - `x86-64` memory, address and thread: the same part, 210,271 checks, 0 failures in each;
+    - the memory and address rows, on both hosts: the shadow with the own form beside the census's code (`--verify --front-own-tests`) on `sqlite3.c`, Lua and the compiler's own source, exit status 0;
+    - no sanitizer reported anything;
+  - **on this head:** SANITIZERS_HEAD
+- The compiler checks its own source; `check-call-graph` and `test-call-graph` pass; `build/dco audit` finds the two commits signed.
 
 ## Docs
 
@@ -109,7 +114,7 @@ The base against the branch:
 
 ## Record
 
-[buster-performance `docs/measurements/node-machine-own-tests-main-2524-2026-11-16`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-main-2524-2026-11-16) (`63bb17237`): the 11 faults sorted with their probes, the knobs and the campaign, the 9700X's runs and tables, the patches, and the sanitizer rows' outputs.
+[buster-performance `docs/measurements/node-machine-own-tests-main-2524-2026-11-16`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/node-machine-own-tests-main-2524-2026-11-16) (`RECORD_SHA`): the 11 faults sorted with their probes, the knobs and the campaign, the 9700X's runs and tables on both mains, the patches, and the sanitizer rows' outputs.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 

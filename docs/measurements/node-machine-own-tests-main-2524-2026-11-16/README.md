@@ -8,13 +8,16 @@ hand-off said it owed before it could be a pull request: the fixture lines its f
 unsorted faults sorted. It is all the node machine's shadow (`measure-node-machine --shadow`): no compile takes any
 of it.
 
-**State: ready.** The pull request waits for buster#2887 to merge, since the session has one branch;
-`patches/sorted.patch` is what its second commit will be, on the hand-off's `0003` as re-picked.
+**State: the pull request is opened from buster's branch `claude/exciting-archimedes-agaary` on main `cc1c47d62`**
+(buster#2887 merged at 20:19 UTC; that main has buster#2884, buster#2889, buster#2888 and buster#2885 too); its
+number is added here when it has one. `patches/sorted.patch` is its second commit, on the hand-off's `0003` as
+re-picked.
 
 **Result.** With the lines owed in the fixtures and the 11 sorted, each of the 91 faults that can still be put into
-the own form fails `test-checker`. On today's main the form reads what the hand-off read: 86.7, 114.6 and 161.1
-ticks a record T typed on `sqlite3.c`, Lua and musl where the census's code is 165.3, 177.4 and 266.7, and no
-expression's bits differ from that code's, with the default warnings and with every warning. A compile is unchanged.
+the own form fails `test-checker`. On today's main the form reads what the hand-off read: 86.3, 115.9 and 152.4
+ticks a record T typed on `sqlite3.c`, Lua and musl where the census's code is 178.2, 191.5 and 262.5 (section 8;
+86.7, 114.6 and 161.1 against 165.3, 177.4 and 266.7 on the main before, section 6), and no expression's bits
+differ from that code's, with the default warnings and with every warning. A compile is unchanged.
 
 ## 1. What the hand-off owed
 
@@ -86,7 +89,7 @@ runs `test-checker --seed 133 --part 5/8` with each, on a copy of the final sour
   conditions were taken out.
 - **The tests after C and X** (`--front-tests-last`) and the census's code alone (`--front-tests`): the same.
 
-## 6. The 9700X
+## 6. The 9700X, before main moved
 
 Release builds, CPU 2, under the lock, a hold a run (`scripts/job3.sh`; `results/tables.txt` by `scripts/tables.py`).
 `head2` is main `1c6cc8ab5` with buster#2887's `src`, `tools` and `tests` (that record's build); `own` is the same
@@ -160,16 +163,65 @@ with the census's tests, and for the memory and address rows the shadow with the
 The own form runs beside the reader's coded walk, the vector paths', so the native rows are the ones that reach it:
 an `x86-64` row's shadow run reads no front.
 
+## 8. The 9700X again, on the main the pull request opened on
+
+Main moved while buster#2887 waited and merged: buster#2884 (Tier 0's fused compare), buster#2889 (a condition's `&&`
+and `||` lowered as branches, which the machine leaves to the tasks), buster#2888 and buster#2885 (the executable's
+start order and huge pages) came in. So everything was taken again on main `cc1c47d62` (`scripts/job6.sh`;
+`results/tables-main-cc1c47d62.txt` by `scripts/tables6.py`). `base6` is that main; `own6` is it with
+`patches/own6.patch`, the pull request's two commits' `src`, `tools` and `tests`.
+
+TSC ticks a record T typed at reader time (medians of seven readings in turn, musl's of three):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| T, C and X, by `base6` in the same turns | 127.0 | 152.6 | 258.5 |
+| T, C and X (`--front-sweeps`) | 129.8 | 154.8 | 259.2 |
+| with the census's code between T and C (`--front-tests`) | 308.0 | 346.4 | 521.6 |
+| with the own form (`--front-own-tests`) | 216.1 | 270.8 | 411.6 |
+| the census's code alone (the difference) | 178.2 | 191.5 | 262.5 |
+| the own form alone | 86.3 | 115.9 | 152.4 |
+| the own form after C and X (`--front-tests-last`), one reading, the whole | 206.3 | 259.2 | 395.0 |
+
+The own form beside the census's code (`--front-own-tests --verify`): every count of section 6's second table is the
+same (51,185, 10,859 and 43,481 expressions; 913, 906 and 1,817 records sent; 0 differences with either set of
+warnings). What C and X take after the tests is fewer, as buster#2889 says: 48,218, 9,893 and 39,976 expressions
+taken there.
+
+`base6` against `own6`:
+
+| | `base6` | `own6` |
+| --- | ---: | ---: |
+| `-c sqlite3.c`, instructions | 1,361,787,984 | 1,361,787,865 |
+| its wall time, 21 runs a build from three fresh copies, twice | 122.188 ms; 121.537 ms | -0.08%; +0.03% |
+| `base6` against itself in the same runs | | -0.10%; +0.02% |
+| its user cycles; `base6` against itself | | -0.11%; +0.05%; and -0.10%; +0.13% |
+| the shadow's T, C and X after the pipeline, cycles an evaluated node: `sqlite3.c`; Lua; musl | 172.2; 147.1; 134.0 | 174.8; 148.9; 135.4 |
+| their instructions | 603.6; 688.2; 655.9 | the same |
+| buster#2850's fact words with the operators, the first pass's cycles a record: `sqlite3.c`; musl | 43.41; 39.83 | 43.84; 39.33 |
+| their instructions a record | 148.53; 170.69 | the same |
+
+- **A compile is unchanged.** The census's own reports are `base6`'s line for line, with both sets of warnings.
+- **The shadow's own sweeps retire the same instructions and read 1.0% to 1.5% more cycles in `own6`.** Nothing of
+  theirs changed; not traced. Section 6's builds read 0.0%, 1.1% and 0.9% apart the same way.
+
+In the cloud container on the pull request's head (`scripts/local-checks-main-cc1c47d62.sh`,
+`results/cloud/local-checks-main-cc1c47d62.txt`): `test-checker --seed 133`, the eight parts, 842,722 checks, 0
+failures; the own form beside the census's code on `sqlite3.c`, Lua and the compiler's own source with both sets of
+warnings, 0 differences, exit status 0; `check-call-graph` 0 cycles. The sanitizer rows on that head were running
+when this was pushed (section 7's are of the tree before main moved).
+
 ## Files
 
-- `results/own`, `results/head2`: the 9700X's runs (`sweeps`, `tests`, `own`, `own-last`, `own-verify`,
+- `results/base6`, `results/own6`: section 8's runs, with the same names.
+- `results/own`, `results/head2`: section 6's, the 9700X's runs (`sweeps`, `tests`, `own`, `own-last`, `own-verify`,
   `own-verify-wall`: the shadow at reader time; `shadow`: the shadow alone; `facts-operators`: buster#2850's kernel;
   `census`, `census-wall`: the census alone; `compile`: the whole compile's comparison; `head2`'s files of this job
   end in `3`). `results/tables.txt` is their summary, `results/job3.log` the job's.
 
-- `patches`: `sorted.patch` (this work on top of the hand-off's `0003` as re-picked on buster#2887's head),
-  `own.patch` (the 9700X's build), and the pull request's description and its second commit's message as prepared
-  (`pull-request-body.md`, `commit-message.txt`).
+- `patches`: `sorted.patch` (the pull request's second commit, on the hand-off's `0003` as re-picked on main
+  `cc1c47d62`), `own6.patch` and `own.patch` (the 9700X's builds of sections 8 and 6), and the pull request's
+  description and its second commit's message (`pull-request-body.md`, `commit-message.txt`).
 - `scripts/faults`: the knobs, the campaign, the probes and their lines.
 - `scripts`: `job3.sh` and `lock.sh` (the 9700X's; the other scripts are
   [the first pull request's record](../node-machine-handoff-main-2524-2026-11-16/scripts)'s), `local-checks.sh` and
