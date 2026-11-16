@@ -8,10 +8,9 @@ hand-off said it owed before it could be a pull request: the fixture lines its f
 unsorted faults sorted. It is all the node machine's shadow (`measure-node-machine --shadow`): no compile takes any
 of it.
 
-**State: the pull request is opened from buster's branch `claude/exciting-archimedes-agaary` on main `cc1c47d62`**
-(buster#2887 merged at 20:19 UTC; that main has buster#2884, buster#2889, buster#2888 and buster#2885 too); its
-number is added here when it has one. `patches/sorted.patch` is its second commit, on the hand-off's `0003` as
-re-picked.
+**State: the pull request is [buster#2892](https://github.com/buster14a/buster/pull/2892),** opened on main
+`cc1c47d62` (buster#2887 merged at 20:19 UTC; that main has buster#2884, buster#2889, buster#2888 and buster#2885
+too). `patches/sorted.patch` is its second commit, on the hand-off's `0003` as re-picked.
 
 **Result.** With the lines owed in the fixtures and the 11 sorted, each of the 91 faults that can still be put into
 the own form fails `test-checker`. On today's main the form reads what the hand-off read: 86.3, 115.9 and 152.4
