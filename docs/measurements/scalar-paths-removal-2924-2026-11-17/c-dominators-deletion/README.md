@@ -109,7 +109,7 @@ The final verdicts:
 | s2, each immediate dominator is the semidominator | `test-dominators`, both seeds |
 | s3, a link's initial least is its DFS parent | equivalent (below) |
 | s4, path compression doesn't carry the least semidominator | `test-dominators`, both seeds, after the second SEMI-NCA fixture (before it, nothing) |
-| o1, `rpo_index` reversed | all three, after the columns' check (before it, the default seed's digests and `test-ir-source`) |
+| o1, `rpo_index` reversed | all three, after the columns' check (before it, the default seed's digests alone) |
 | o2, the RPO half reversed | `test-dominators`, both seeds |
 | t1, each block's children in reverse order | all three, after the columns' check (before it, the default seed's digests alone) |
 | t2, a subtree's interval one short | all three |
