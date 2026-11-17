@@ -350,3 +350,17 @@ plain run). Six fail it. b7 (the targets' load unmasked) survives as an equivale
 folds the load into the masked compare (`vpcmpltud (%rcx,%rsi,4),%zmm0,%k1{%k1}`), whose masked-off
 elements don't fault, and the column check compiles to the same instructions
 (mutation/head-validate-branches.s, b7-validate-branches.s, built from mutation/wrap.c).
+
+**Afterwards** (the review of the first push):
+- **Emission's objects** (9700x/objects.sh, logs3/objects.txt): main against head2, default and
+  `--scalar`, byte for byte: `-c sqlite3.c` the same, and 200 of musl's units the same in both modes.
+- **The unexplained functions** (logs3/function-diffs.txt): `check_mangle_name` differs in constant-pool
+  labels alone, `check_input_count_tokens.specialized.2` in 48 `int3` of padding after it; the 7 of the
+  same length are callers of `branch_sizing_run`, now with one argument fewer (main pushed `true` for
+  `vector`, `push $0x1`).
+- **The counts** (mutation/worklist/): the twin comparison was their only check. Two worklist mutants on the
+  PR's first head, main's tree and the follow-up's: w1 (marks long branches too: evaluations alone change)
+  survived the first head and failed main's twin test; w2 (misses a rank equal to k: the verification round
+  repairs it) failed both. The follow-up commit checks a chain's evaluations (one a link past the round
+  limit, links − 4; chains.c printed them) and freezes the default seed's rounds histogram and 85,984
+  evaluations, which main's run gives too (a probe in main's test): both mutants fail it.
