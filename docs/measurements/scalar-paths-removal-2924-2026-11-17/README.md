@@ -59,3 +59,46 @@ gates, module by module (#2924's phases C and D).
 - logs/time.log: the 3 rounds, every process's line and the medians.
 - logs/time-trial.log: the 1-round trial.
 - logs/inputs.txt, logs/compilers.sha256, logs/commit.txt: what was timed.
+
+# B2's pull request: main against the head (b2-main-vs-head/)
+
+Phase B2 removes the scalar host (the `#error` in `host_isa.h`, the scalar headers, every
+`BUSTER_HOST_VECTOR` use resolved to the vector side). On an AVX-512 host it should change
+nothing, and these two checks say it doesn't.
+
+## Disassembly (disassembly/)
+
+Main `2cb0a6779` (#2939's head, the same `src/` as main `05c5d95d7`) and B2's tree, both
+`BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0 ./build.sh --config Release`, built in a cloud
+container with the same toolchain, then `objdump -d --no-show-raw-insn` per function
+(`split.py`: addresses and symbol offsets masked; `compare.py`; `classify.py` without
+objdump's annotations, which name whichever rodata symbol precedes an address and move with
+the data's layout).
+
+- 9,797 functions in main's executable, 9,787 in B2's. The 10 missing are command runners
+  (`run_x86_zen5_tests`, `run_gnu_tests`, ...) that `main_command` now inlines: its dispatch
+  lost the baseline build's benchmark refusal.
+- Every other function is the same, instruction for instruction, but 12 (`classified.txt`):
+  6 whose only difference is an immediate (`__LINE__` in asserts and tests whose files lost
+  comment lines), and 6 test or command functions whose resolved conditions changed
+  (`main_command`, `run_c_lexer_tests`, `run_checker_deferred_tests`, `run_node_census`,
+  `check_test_transition_limit`, `ir_source_tests_command`). No compile path changed.
+
+## Timing (scripts/, logs/)
+
+Main `05c5d95d7` and the head `4348c3a18` (from a bundle; logs/commits.txt), each built on
+benchpress under `exclusive.sh` with `./build.sh --config Release` (native, the 9700X), then
+timed as the gate was: `ab --rounds 3 --cpu 2` around `time-runs --runs 3 --copies 3` with
+`main`, `head` and `main-again`, one lane, objects to `/dev/shm`, on sqlite3.c (`-c` and
+`-fsyntax-only`), Lua 5.4.8's 34 sources and musl's 1,336 units (logs/time.log).
+
+| list | head vs main, wall (rounds 1/2/3) | main-again vs main, wall | head vs main, user cycles | main-again vs main, user cycles |
+| --- | --- | --- | --- | --- |
+| sqlite3.c `-c` | −0.12% / −0.24% / +0.51% | −0.20% / −0.15% / +0.28% | −0.17% / −0.31% / −0.03% | −0.08% / −0.15% / −0.16% |
+| sqlite3.c `-fsyntax-only` | +0.22% / −0.48% / −0.57% | +0.13% / −0.53% / −0.60% | +0.18% / −0.08% / −0.60% | +0.11% / +0.11% / −0.39% |
+| Lua, 34 units `-c` | −0.16% / −0.01% / −0.22% | −0.22% / +0.08% / −0.08% | −0.11% / −0.09% / −0.31% | −0.11% / +0.04% / −0.09% |
+| musl, 1,336 units `-c` | −0.05% / −0.01% / −0.11% | +0.03% / +0.04% / −0.14% | +0.08% / +0.16% / −0.08% | +0.03% / +0.12% / −0.10% |
+
+Main's medians: 122.2 to 122.6 ms for sqlite3.c `-c`, 99.6 to 100.1 ms `-fsyntax-only`,
+73.3 to 73.4 ms for Lua, 668.6 to 669.6 ms for musl. The head is within main-again's floor
+on every list and round: unchanged, as the identical disassembly says.
