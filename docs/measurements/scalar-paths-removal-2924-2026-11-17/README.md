@@ -226,17 +226,16 @@ cleanly first. The trees:
 
 | mutant | main's twin test (t0) | first head (t2) | PR's tree (t2b) |
 | --- | --- | --- | --- |
-| m01 to m02, m05 to m12 | killed | killed | (killed by t2's subset) |
+| m01 to m02, m05 to m12 | killed | killed | killed |
 | m03 index, ambiguous cells | **survived** | survived | killed (the index test) |
 | m04 the `end == size` mask | killed | survived | killed (truncation status) |
-| m13 index PEXT | killed | killed | killed (m13b) |
+| m13 index PEXT (m13b in the PR's tree) | killed | killed | killed |
 
-So the PR's test kills all 13, and main's twin test kills 12. The two that t2 missed showed
-what the twin comparison had covered: the bucket scan against the index (m13's kind; m03,
-the twins missed too), and truncated keys (m04). Two checks replace that coverage:
-- `x86_decode_test_index`: `x86_decode_index_row` against a scan of the bucket's
-  signatures, 31,168 keys in 817 buckets;
-- `x86_decode_test_truncations`: each generated instruction cut short is TRUNCATED.
+The PR's tree ran all 13 (results.txt, its last block): it kills every one, and main's twin
+test kills 12. The first head missed m03 and m04. m04 was coverage the twin comparison had:
+truncated keys, which `x86_decode_test_truncations` now covers (each generated instruction
+cut short is TRUNCATED). m03 the twins missed too; `x86_decode_test_index` now checks
+`x86_decode_index_row` against a scan of the bucket's signatures (31,168 keys in 817 buckets).
 
 `logs/` keeps each run's failing lines.
 
