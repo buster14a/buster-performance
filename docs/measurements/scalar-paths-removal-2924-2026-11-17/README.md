@@ -99,6 +99,6 @@ timed as the gate was: `ab --rounds 3 --cpu 2` around `time-runs --runs 3 --copi
 | Lua, 34 units `-c` | −0.16% / −0.01% / −0.22% | −0.22% / +0.08% / −0.08% | −0.11% / −0.09% / −0.31% | −0.11% / +0.04% / −0.09% |
 | musl, 1,336 units `-c` | −0.05% / −0.01% / −0.11% | +0.03% / +0.04% / −0.14% | +0.08% / +0.16% / −0.08% | +0.03% / +0.12% / −0.10% |
 
-Main's medians: 122.2 to 122.6 ms for sqlite3.c `-c`, 99.6 to 100.1 ms `-fsyntax-only`,
-73.3 to 73.4 ms for Lua, 668.6 to 669.6 ms for musl. The head is within main-again's floor
+Main's medians over the three rounds: 122.2 to 122.8 ms for sqlite3.c `-c`, 99.5 to 100.1 ms
+`-fsyntax-only`, 73.3 to 73.4 ms for Lua, 669.0 to 669.6 ms for musl. The head is within main-again's floor
 on every list and round: unchanged, as the identical disassembly says.
