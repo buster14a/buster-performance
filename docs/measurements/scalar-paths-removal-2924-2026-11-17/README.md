@@ -267,7 +267,7 @@ Medians of the three processes' medians:
 difference is the lengths phase: `x86_measure` against `x86_measure_scalar`, which encodes one
 record at a time (36 against 724 cycles per branch on tier0-40).
 
-**Two of the vector path's phases lose to the scalar ones.** In cycles per branch, the vector
+**Two of the vector path's phase timings lose to the scalar path's.** In cycles per branch, the vector
 path against the scalar one (logs/bench-*.log, the `vector` and `scalar` phase lines):
 
 | Row | ranks | write |
@@ -280,6 +280,9 @@ path against the scalar one (logs/bench-*.log, the `vector` and `scalar` phase l
 | optimized-2000 | (vector faster) | 1.98 against 1.87 |
 | optimized-10000 | (vector faster) | 2.68 against 2.52 |
 
-On 40-record functions the two scalar phases would save about 0.95 of the vector path's 7.94
-cycles per record (12%). Deleting the scalar path keeps the vector phases. The numbers to beat
-are filed as their own issue (buster#2924's comment on this gate links it).
+Ranks is different code on the two paths (`branch_sizing_ranks_vector` against
+`branch_sizing_ranks_scalar`). Write is the same function on both, `branch_sizing_write`: the
+benchmark times a phase as a run through it less a run that stops before it, so its gap is what
+the vector path's earlier phases leave for it, not different code. On 40-record functions the two
+gaps add up to about 0.95 of the vector path's 7.94 cycles per record (12%). Deleting the scalar
+path keeps the vector phases; the numbers to beat are buster#2946.
