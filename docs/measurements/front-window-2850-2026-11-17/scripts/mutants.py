@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+# mutants.py: the faults of "the front writes the window" (buster#2850, --front-window), one at a time, in a COPY of the
+# tree (/home/user/mut3/tree): each is a text of the new code replaced by a faulty one, the Debug compiler built, and
+# the node machine's tests run (test-checker part 5 of 8). A fault the tests don't fail is a survivor. Every text is
+# checked to be unique before any build, and the file is restored after each fault.
+#   mutants.py check        : every fault's texts are unique, applies and reverts
+#   mutants.py run [NAME..] : the campaign (all the faults, or those named); results in /home/user/mut3/results.txt
+import subprocess, sys, os, shutil, time
+
+ROOT = '/home/user/mut3'
+# MUT_SHARD=i/n runs the faults whose place in the list is i modulo n, in the tree's copy tree<i> (two campaigns side by side).
+SHARD, SHARDS = [int(x) for x in os.environ.get('MUT_SHARD', '0/1').split('/')]
+TREE = ROOT + ('/tree' if SHARDS == 1 else '/tree%d' % SHARD)
+SRC = TREE + '/src/buster/compiler/'
+F = 'c_check_node_machine_facts.c'
+N = 'c_check_node_machine_front.c'
+E = 'c_check_expression_input.c'
+
+MUTANTS = [
+    # a chunk's end: the waiting values' rows
+    ('k-no-room-for-rows', N,
+     '        uint32_t spare = known <= most ? most - known : 0;',
+     '        uint32_t spare = known <= most ? 0 : 0;'),
+    ('k-rows-past-the-room', N,
+     '                const bool whole = size - 1 <= spare && passed + size <= record + 1;',
+     '                const bool whole = size - 1 <= spare + BUSTER_NODE_FRONT_RECORDS && passed + size <= record + 1;'),
+    ('k-row-not-there', N,
+     '                const bool whole = size - 1 <= spare && passed + size <= record + 1;',
+     '                const bool whole = size - 1 <= spare && (passed | 1u) != 0;'),
+    ('k-row-over-the-kept', N,
+     '                const bool whole = size - 1 <= spare && passed + size <= record + 1;',
+     '                const bool whole = size - 1 <= spare && passed * 0 + size <= record + 1;'),
+    ('k-passed-stays', N,
+     '                kept += count;\n                passed = record + 1;',
+     '                kept += count;\n                passed = passed + 0;'),
+    ('k-row-start', N,
+     '                const uint32_t first = record + 1 - count;',
+     '                const uint32_t first = record - count;'),
+    ('k-moved-where-it-is', N,
+     '                    if (kept != first)\n                    {\n                        node_front_keep_record(front, kept + k, first + k);',
+     '                    if (kept == first)\n                    {\n                        node_front_keep_record(front, kept + k, first + k);'),
+    ('k-value-at-row-start', N,
+     '                front->stack[i] = last;\n                kept_values += whole;',
+     '                front->stack[i] = kept;\n                kept_values += whole;'),
+    ('k-not-cut', N,
+     '                if (!whole)\n                {\n                    front->window_classes[last] = BUSTER_NODE_FACTS_CLASS_CUT;',
+     '                if (whole)\n                {\n                    front->window_classes[last] = BUSTER_NODE_FACTS_CLASS_CUT;'),
+    ('k-spare-not-taken', N,
+     '                spare -= count - 1;',
+     '                spare -= 0;'),
+    ('k-kept-count', N,
+     '                kept += count;\n                passed = record + 1;',
+     '                kept += 1;\n                passed = record + 1;'),
+    ('k-arguments-forgotten', N,
+     '        front->window_argument_count = arguments;\n    }',
+     '        front->window_argument_count = 0;\n    }'),
+    ('k-hook-only-moved', N,
+     '                    if (whole)\n                    {\n                        node_facts_window_kept(front, kept + k, first + k, &arguments);',
+     '                    if (whole && kept != first)\n                    {\n                        node_facts_window_kept(front, kept + k, first + k, &arguments);'),
+    ('k-hook-for-cut', N,
+     '                    if (whole)\n                    {\n                        node_facts_window_kept(front, kept + k, first + k, &arguments);',
+     '                    if (whole || count != 0)\n                    {\n                        node_facts_window_kept(front, kept + k, first + k, &arguments);'),
+    ('k-record-kind', N,
+     '    front->window_kinds[to] = front->window_kinds[from];',
+     '    front->window_kinds[to] = front->window_kinds[to];'),
+    ('k-record-class', N,
+     '    front->window_classes[to] = front->window_classes[from];',
+     '    front->window_classes[to] = front->window_classes[to];'),
+    ('k-record-left', N,
+     '    front->window_left[to] = front->window_left[from];',
+     '    front->window_left[to] = front->window_left[to];'),
+    ('k-record-right', N,
+     '    front->window_right[to] = front->window_right[from];',
+     '    front->window_right[to] = front->window_right[to];'),
+    ('k-record-count', N,
+     '    front->window_counts[to] = front->window_counts[from];',
+     '    front->window_counts[to] = front->window_counts[to];'),
+    ('k-record-entry', N,
+     '    front->window_entries[to] = front->window_entries[from];',
+     '    front->window_entries[to] = front->window_entries[to];'),
+    ('k-record-position', N,
+     '    front->window_positions[to] = front->window_positions[from];',
+     '    front->window_positions[to] = front->window_positions[to];'),
+    ('k-record-leaf-type', N,
+     '    front->leaf_types[to] = front->leaf_types[from];',
+     '    front->leaf_types[to] = front->leaf_types[to];'),
+    ('k-record-leaf-integer', N,
+     '    front->leaf_integers[to] = front->leaf_integers[from];',
+     '    front->leaf_integers[to] = front->leaf_integers[to];'),
+    ('k-record-distance', N,
+     '    front->distances[0][to] = front->distances[0][from];',
+     '    front->distances[0][to] = front->distances[0][to];'),
+    # a kept record's literal's line and call's arguments
+    ('h-line-not-moved', F,
+     '        memcpy(facts->lines + 4 * ((uint64_t)to + 1), facts->lines + 4 * ((uint64_t)from + 1), 4 * sizeof(uint64_t));\n        front->window_entries[to] = to + 1;',
+     '        (void)facts;\n        front->window_entries[to] = to + 1;'),
+    ('h-line-number-old', F,
+     '        memcpy(facts->lines + 4 * ((uint64_t)to + 1), facts->lines + 4 * ((uint64_t)from + 1), 4 * sizeof(uint64_t));\n        front->window_entries[to] = to + 1;',
+     '        memcpy(facts->lines + 4 * ((uint64_t)to + 1), facts->lines + 4 * ((uint64_t)from + 1), 4 * sizeof(uint64_t));\n        front->window_entries[to] = from + 1;'),
+    ('h-arguments-not-moved', F,
+     '        memmove(front->window_arguments + *arguments, front->window_arguments + front->window_entries[to], (uint64_t)count * sizeof(uint16_t));\n        front->window_entries[to] = *arguments;',
+     '        front->window_entries[to] = *arguments;'),
+    ('h-arguments-place-old', F,
+     '        front->window_entries[to] = *arguments;\n        *arguments += count;',
+     '        *arguments += count;'),
+    ('h-arguments-not-counted', F,
+     '        front->window_entries[to] = *arguments;\n        *arguments += count;',
+     '        front->window_entries[to] = *arguments;\n        *arguments += 0;'),
+    # a leaf's record
+    ('w-leaf-class', F,
+     '    front->window_kinds[record] = kind;\n    front->window_classes[record] = BUSTER_NODE_FACTS_NO_CLASS;',
+     '    front->window_kinds[record] = kind;\n    front->window_classes[record] = 0;'),
+    ('w-leaf-left', F,
+     '    front->window_left[record] = 0;\n    front->window_right[record] = 0;\n    front->window_entries[record] = entry;',
+     '    front->window_right[record] = 0;\n    front->window_entries[record] = entry;'),
+    ('w-leaf-right', F,
+     '    front->window_left[record] = 0;\n    front->window_right[record] = 0;\n    front->window_entries[record] = entry;',
+     '    front->window_left[record] = 0;\n    front->window_entries[record] = entry;'),
+    ('w-leaf-position', F,
+     '    front->window_entries[record] = entry;\n    front->window_positions[record] = check_input_expression_end(reader, token);\n}\n\n// An operator',
+     '    front->window_entries[record] = entry;\n    front->window_positions[record] = check_input_expression_end(reader, token) + 1;\n}\n\n// An operator'),
+    ('w-literal-line-number', F,
+     '        const uint32_t number = record + 1;\n        const TypeId type = front->leaf_types[record];',
+     '        const uint32_t number = record + 2;\n        const TypeId type = front->leaf_types[record];'),
+    ('w-literal-not-integer', F,
+     '        if ((facts->rows[index].flags & BUSTER_NODE_FACTS_INTEGER) != 0)\n        {\n            // check_input_literal_value',
+     '        if ((facts->rows[index].flags & BUSTER_NODE_FACTS_INTEGER) == 0)\n        {\n            // check_input_literal_value'),
+    ('w-literal-word', F,
+     '            line[0] = (uint64_t)type | (uint64_t)facts->rows[index].word << 32;',
+     '            line[0] = (uint64_t)type;'),
+    ('w-literal-zero-any', F,
+     "            const bool zero = integer == 0 && parser->tokens.kinds[token] == PARSE_KIND_NUMBER && parser->tokens.names[token] == 0;\n            uint64_t* const line",
+     "            const bool zero = parser->tokens.kinds[token] == PARSE_KIND_NUMBER && parser->tokens.names[token] == 0;\n            uint64_t* const line"),
+    ('w-literal-zero-never', F,
+     '            line[1] = BUSTER_CHECK_ICE | (zero ? BUSTER_CHECK_LITERAL_ZERO : 0);',
+     '            line[1] = BUSTER_CHECK_ICE | (zero ? 0 : 0);'),
+    ('w-literal-not-ice', F,
+     '            line[1] = BUSTER_CHECK_ICE | (zero ? BUSTER_CHECK_LITERAL_ZERO : 0);',
+     '            line[1] = (zero ? BUSTER_CHECK_LITERAL_ZERO : 0);'),
+    ('w-literal-payload', F,
+     '            line[2] = integer;',
+     '            line[2] = integer + 1;'),
+    ('w-literal-standing', F,
+     '            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8;',
+     '            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8;'),
+    ('w-literal-taken', F,
+     '            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) | UINT64_C(1) << 8;',
+     '            line[3] = (uint64_t)BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER);'),
+    ('w-literal-kind', F,
+     '        kind = whole ? BUSTER_NODE_FACTS_LITERAL_LINE : BUSTER_NODE_FACTS_LITERAL;\n        entry = whole ? number : 0;',
+     '        kind = whole ? BUSTER_NODE_FACTS_LITERAL : BUSTER_NODE_FACTS_LITERAL;\n        entry = whole ? number : 0;'),
+    ('w-literal-not-whole-a-line', F,
+     '        kind = whole ? BUSTER_NODE_FACTS_LITERAL_LINE : BUSTER_NODE_FACTS_LITERAL;\n        entry = whole ? number : 0;',
+     '        (void)whole;\n        kind = BUSTER_NODE_FACTS_LITERAL_LINE;\n        entry = number;'),
+    ('w-rare-string-nullable', F,
+     '            .flags = BUSTER_CHECK_STATIC_OBJECT | (object != 0 ? BUSTER_CHECK_NONNULL_ADDRESS : 0),\n            .constant_kind = CHECK_CONSTANT_ADDRESS,\n            .object = object,\n        };\n    }\n    // Its type\'s word',
+     '            .flags = BUSTER_CHECK_STATIC_OBJECT,\n            .constant_kind = CHECK_CONSTANT_ADDRESS,\n            .object = object,\n        };\n    }\n    // Its type\'s word'),
+    ('w-rare-string-object', F,
+     '            .constant_kind = CHECK_CONSTANT_ADDRESS,\n            .object = object,\n        };\n    }\n    // Its type\'s word',
+     '            .constant_kind = CHECK_CONSTANT_ADDRESS,\n        };\n    }\n    // Its type\'s word'),
+    ('w-rare-line-not-written', F,
+     '    if (whole)\n    {\n        memcpy(facts->lines + 4 * (uint64_t)number, &line, 4 * sizeof(uint64_t));\n    }\n    return whole;',
+     '    return whole;'),
+    # an operator's record
+    ('w-discard-an-operator', F,
+     '    const bool discard = op == CHECK_OP_CAST && entry == BUSTER_TYPE_VOID;\n    const uint8_t kind = discard ? BUSTER_NODE_FACTS_LOOKUP : front->window_op_kinds[op];',
+     '    const bool discard = false;\n    const uint8_t kind = discard ? BUSTER_NODE_FACTS_LOOKUP : front->window_op_kinds[op];'),
+    ('w-discard-code', F,
+     '    const uint32_t code = discard ? BUSTER_NODE_FACTS_CODE_DISCARD : front->window_op_codes[op];',
+     '    const uint32_t code = front->window_op_codes[op];'),
+    ('w-round-of-carry', F,
+     '    return ((operand + 15u - code) >> 4) & 15u;',
+     '    return ((operand + 14u - code) >> 4) & 15u;'),
+    ('w-round-of-no-class', F,
+     '    return ((operand + 15u - code) >> 4) & 15u;',
+     '    return (operand + 15u - code) >> 4;'),
+    ('w-round-second', F,
+     '    const uint32_t round_ab = round_a > round_b ? round_a : round_b;',
+     '    const uint32_t round_ab = round_a + round_b * 0;'),
+    ('w-round-first', F,
+     '    const uint32_t round_ab = round_a > round_b ? round_a : round_b;',
+     '    const uint32_t round_ab = round_b + round_a * 0;'),
+    ('w-round-third', F,
+     '    const uint32_t round = round_ab > round_c ? round_ab : round_c;',
+     '    const uint32_t round = round_ab + round_c * 0;'),
+    ('w-cut-first', F,
+     '    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_b == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;',
+     '    const bool cut = class_b == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;'),
+    ('w-cut-second', F,
+     '    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_b == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;',
+     '    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;'),
+    ('w-cut-third', F,
+     '    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_b == BUSTER_NODE_FACTS_CLASS_CUT || class_c == BUSTER_NODE_FACTS_CLASS_CUT;',
+     '    const bool cut = class_a == BUSTER_NODE_FACTS_CLASS_CUT || class_b == BUSTER_NODE_FACTS_CLASS_CUT;'),
+    ('w-not-made-a-class', F,
+     '    front->window_classes[record] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : made ? node_facts_class(round, code) : BUSTER_NODE_FACTS_NO_CLASS);',
+     '    (void)made;\n    front->window_classes[record] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : node_facts_class(round, code));'),
+    ('w-operator-left', F,
+     '    front->window_left[record] = (uint16_t)(record - a);',
+     '    front->window_left[record] = (uint16_t)(record - a + 1);'),
+    ('w-operator-right', F,
+     '    front->window_right[record] = (uint16_t)(second ? record - b : 0);',
+     '    front->window_right[record] = (uint16_t)(second ? record - a : 0);'),
+    ('w-operator-right-always', F,
+     '    front->window_right[record] = (uint16_t)(second ? record - b : 0);',
+     '    front->window_right[record] = (uint16_t)(record - b);'),
+    ('w-conditional-third', F,
+     '    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - c : 0) : entry;',
+     '    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - b : 0) : entry;'),
+    ('w-conditional-entry', F,
+     '    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - c : 0) : entry;',
+     '    front->window_entries[record] = entry;'),
+    ('w-operator-position', F,
+     '    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - c : 0) : entry;\n    front->window_positions[record] = check_input_expression_end(reader, token);',
+     '    front->window_entries[record] = op == CHECK_OP_CONDITIONAL ? (third ? record - c : 0) : entry;\n    front->window_positions[record] = check_input_expression_end(reader, token) + 1;'),
+    # a call's record
+    ('w-call-cut', F,
+     '        cut = cut || class == BUSTER_NODE_FACTS_CLASS_CUT;',
+     '        cut = cut || false;'),
+    ('w-call-round', F,
+     '        round = asked > round ? asked : round;',
+     '        round = asked;'),
+    ('w-call-argument-distance', F,
+     '        front->window_arguments[arguments + k - (k != 0 ? 1u : 0u)] = (uint16_t)(record - operand);',
+     '        front->window_arguments[arguments + k - (k != 0 ? 1u : 0u)] = (uint16_t)(record - operand + 1);'),
+    ('w-call-argument-place', F,
+     '        front->window_arguments[arguments + k - (k != 0 ? 1u : 0u)] = (uint16_t)(record - operand);',
+     '        front->window_arguments[arguments + k] = (uint16_t)(record - operand);'),
+    ('w-call-left', F,
+     '    front->window_left[record] = (uint16_t)(record - values[0]);',
+     '    front->window_left[record] = (uint16_t)(record - values[count - 1]);'),
+    ('w-call-entry', F,
+     '    front->window_entries[record] = arguments;\n    front->window_counts[record] = (uint16_t)(count - 1);',
+     '    front->window_entries[record] = arguments + 1;\n    front->window_counts[record] = (uint16_t)(count - 1);'),
+    ('w-call-count', F,
+     '    front->window_entries[record] = arguments;\n    front->window_counts[record] = (uint16_t)(count - 1);',
+     '    front->window_entries[record] = arguments;\n    front->window_counts[record] = (uint16_t)count;'),
+    ('w-call-list-not-grown', F,
+     '    front->window_argument_count = arguments + count - 1;',
+     '    front->window_argument_count = arguments;'),
+    ('w-call-right', F,
+     '    front->window_left[record] = (uint16_t)(record - values[0]);\n    front->window_right[record] = 0;',
+     '    front->window_left[record] = (uint16_t)(record - values[0]);'),
+    # the front's calls of the writers
+    ('s-cast-type', N,
+     'values[0], b, c, code == CHECK_INPUT_CODE_CAST ? reader->query_types[token] : member);',
+     'values[0], b, c, member);'),
+    ('s-member-name', N,
+     'values[0], b, c, code == CHECK_INPUT_CODE_CAST ? reader->query_types[token] : member);',
+     'values[0], b, c, code == CHECK_INPUT_CODE_CAST ? reader->query_types[token] : 0);'),
+    ('s-terminator-condition-entry', N,
+     '                                                           condition ? 0 : BUSTER_TYPE_VOID);',
+     '                                                           BUSTER_TYPE_VOID);'),
+    ('s-terminator-discard-entry', N,
+     '                                                           condition ? 0 : BUSTER_TYPE_VOID);',
+     '                                                           0);'),
+    ('s-return-type', N,
+     'CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, type);',
+     'CHECK_OP_CONVERT, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, 0);'),
+    ('s-switch-operator', N,
+     '                                node_facts_window_operator(front, reader, record, op, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, 0);',
+     '                                node_facts_window_operator(front, reader, record, CHECK_OP_CONDITION, token, values[0], BUSTER_NODE_FRONT_UNKNOWN, BUSTER_NODE_FRONT_UNKNOWN, 0);'),
+    ('s-string-as-name', N,
+     '                                node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_STRING, 0, NULL);',
+     '                                node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_IDENTIFIER, 0, NULL);'),
+    ('s-literal-as-string', N,
+     '                                node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_LITERAL, 0, &decoded);',
+     '                                node_facts_window_leaf(front, reader, record, token, BUSTER_NODE_FRONT_LEAF_STRING, 0, &decoded);'),
+    # the names' pass
+    ('n-high-named', F,
+     '    const bool named = number != 0 && !high;\n    kinds[r] = named ? BUSTER_NODE_FACTS_IDENTIFIER : BUSTER_NODE_FACTS_LITERAL;',
+     '    (void)high;\n    const bool named = number != 0;\n    kinds[r] = named ? BUSTER_NODE_FACTS_IDENTIFIER : BUSTER_NODE_FACTS_LITERAL;'),
+    ('n-entry', F,
+     '    entries[r] = named ? number : 0;\n}',
+     '    entries[r] = named ? number + 1 : 0;\n}'),
+    ('n-kept-names-again', F,
+     '    const uint32_t first = front->made;\n    const uint32_t count = front->count - first;\n    memcpy(state->name_kinds',
+     '    const uint32_t first = 0;\n    const uint32_t count = front->count - first;\n    memcpy(state->name_kinds'),
+    ('n-vector-token', F,
+     '            const uint32_t r = list[k];\n            node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);',
+     '            const uint32_t r = list[k];\n            node_facts_window_name(facts, kinds, entries, r, front->tokens[r]);'),
+    ('n-vector-first-name', F,
+     '            const uint32_t r = list[k];\n            node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);',
+     '            const uint32_t r = list[0];\n            node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);'),
+    ('n-vector-places', F,
+     '            places = _mm512_add_epi32(places, step);\n        }\n        const uint32_t* numbers = facts->numbers;',
+     '            places = _mm512_add_epi32(places, _mm512_sub_epi32(step, step));\n        }\n        const uint32_t* numbers = facts->numbers;'),
+    ('n-vector-live', F,
+     '            const __mmask16 found = _mm_mask_cmpeq_epi8_mask(mask, _mm_maskz_loadu_epi8(mask, kinds + i), _mm_set1_epi8(BUSTER_NODE_FACTS_IDENTIFIER));\n            _mm512_storeu_si512(list + names',
+     '            const __mmask16 found = _mm_mask_cmpeq_epi8_mask((__mmask16)(mask | 0xffffu), _mm_loadu_si128((const __m128i*)(const void*)(kinds + i)), _mm_set1_epi8(BUSTER_NODE_FACTS_IDENTIFIER));\n            _mm512_storeu_si512(list + names'),
+    ('n-scalar-token', F,
+     '                node_facts_window_name(facts, kinds, entries, r, front->tokens[first + r]);\n                names += 1;',
+     '                node_facts_window_name(facts, kinds, entries, r, front->tokens[r]);\n                names += 1;'),
+    # the kernel's run in place
+    ('p-root-place', F,
+     '        const uint32_t x = r < size ? start + r : record;\n        const uint64_t w = (uint64_t)base + r;',
+     '        const uint32_t x = start + r;\n        const uint64_t w = (uint64_t)base + r;'),
+    ('p-not-taken', F,
+     '        state->place_taken[x] = 1;',
+     '        state->place_taken[x] = r == 0;'),
+    ('p-expected-type', F,
+     '        state->place_types[x] = facts->expected_types[w];',
+     '        state->place_types[x] = facts->expected_types[base];'),
+    ('p-expected-flags', F,
+     '        state->place_flags[x] = facts->expected_flags[w];',
+     '        state->place_flags[x] = facts->expected_flags[base];'),
+    ('p-expected-object', F,
+     '        state->place_objects[x] = facts->expected_objects[w];',
+     '        state->place_objects[x] = facts->expected_objects[base];'),
+    ('p-expected-payload', F,
+     '        state->place_payloads[x] = facts->expected_payloads[w];',
+     '        state->place_payloads[x] = facts->expected_payloads[base];'),
+    ('p-expected-standing', F,
+     '        state->place_standings[x] = facts->expected_standings[w];',
+     '        state->place_standings[x] = facts->expected_standings[base];'),
+    ('p-expected-exponent', F,
+     '        state->place_exponents[x] = facts->expected_exponents[w];',
+     '        state->place_exponents[x] = facts->expected_exponents[base];'),
+    ('p-expected-word', F,
+     '        state->place_words[x] = facts->expected_words[w];',
+     '        state->place_words[x] = facts->expected_words[base];'),
+    ('p-expected-converted', F,
+     '        state->place_converted[2 * (uint64_t)x + 1] = facts->expected_converted[2 * w + 1];',
+     '        state->place_converted[2 * (uint64_t)x + 1] = facts->expected_converted[2 * w];'),
+    ('p-expected-conversion-flags', F,
+     '        state->place_conversion_flags[2 * (uint64_t)x] = facts->expected_conversion_flags[2 * w];',
+     '        state->place_conversion_flags[2 * (uint64_t)x] = facts->expected_conversion_flags[2 * w + 1];'),
+    ('p-expected-member-offset', F,
+     '        state->place_member_offsets[x] = facts->expected_member_offsets[w];',
+     '        state->place_member_offsets[x] = facts->expected_member_offsets[base];'),
+    ('p-every-record-made', F,
+     '        state->place_kinds[x] = state->place_taken[x] != 0 ? front->window_kinds[x] : BUSTER_NODE_FACTS_GIVEN;',
+     '        state->place_kinds[x] = front->window_kinds[x];'),
+    ('p-window-short', F,
+     '    state->place_windows[1] = count;',
+     '    state->place_windows[1] = count - 1;'),
+    ('p-window-arguments', F,
+     '        .arguments = (uint16_t*)(uintptr_t)front->window_arguments,',
+     '        .arguments = state->front.arguments,'),
+    ('p-window-counts', F,
+     '        .counts = (uint16_t*)(uintptr_t)front->window_counts,',
+     '        .counts = state->front.counts,'),
+    ('p-window-entries', F,
+     '        .inputs = (uint32_t*)(uintptr_t)front->window_entries,',
+     '        .inputs = state->front.inputs,'),
+    ('p-window-classes', F,
+     '        .classes = (uint8_t*)(uintptr_t)front->window_classes,',
+     '        .classes = state->front.classes,'),
+    ('p-window-left', F,
+     '        .left = (uint16_t*)(uintptr_t)front->window_left,',
+     '        .left = state->front.left,'),
+    ('p-window-right', F,
+     '        .right = (uint16_t*)(uintptr_t)front->window_right,',
+     '        .right = state->front.right,'),
+    ('p-window-positions', F,
+     '        .positions = (uint32_t*)(uintptr_t)front->window_positions,',
+     '        .positions = state->front.positions,'),
+    ('p-window-ops', F,
+     '        .ops = (uint8_t*)(uintptr_t)front->ops,',
+     '        .ops = state->front.ops,'),
+    ('p-taken-kept', F,
+     '    node_facts_inputs_exchange(facts, &place);\n    memset(state->place_taken, 0, count);',
+     '    node_facts_inputs_exchange(facts, &place);'),
+    ('p-cut-taken', F,
+     '        const bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 &&\n                           front->window_classes[operand] != BUSTER_NODE_FACTS_CLASS_CUT;',
+     '        const bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1;'),
+    ('p-initialization-root', F,
+     '        const bool whole = size != 0 && count == (initialization ? size : size + 1) && size <= operand + 1 &&\n                           front->window_classes[operand] != BUSTER_NODE_FACTS_CLASS_CUT;',
+     '        (void)initialization;\n        const bool whole = size != 0 && count == size + 1 && size <= operand + 1 &&\n                           front->window_classes[operand] != BUSTER_NODE_FACTS_CLASS_CUT;'),
+    ('p-row-start', F,
+     '            node_facts_window_expression(state, front, base, count, record, operand + 1 - size, size, kept);',
+     '            node_facts_window_expression(state, front, base, count, record, operand - size, size, kept);'),
+    # the copy's row, where the front keeps rows
+    ('c-copy-row-by-chunk', F,
+     '    const bool row = front->window ? front->window_classes[operand < record ? operand : record] != BUSTER_NODE_FACTS_CLASS_CUT : operand + 1 - size >= front->made;',
+     '    const bool row = operand + 1 - size >= front->made;'),
+    # the lines' numbers
+    ('b-lines-from-the-first', F,
+     '        state->facts.literal_count = BUSTER_NODE_FRONT_RECORDS;',
+     '        state->facts.literal_count = 0;'),
+    ('b-lines-from-the-first-again', F,
+     '    facts->literal_count = state->windowed ? BUSTER_NODE_FRONT_RECORDS : 0;',
+     '    facts->literal_count = 0;'),
+    ('b-kinds-table', F,
+     '        memcpy(front->window_op_kinds, state->op_kinds, CHECK_OP_COUNT);',
+     '        memcpy(front->window_op_kinds, state->op_codes, CHECK_OP_COUNT);'),
+    ('b-codes-table', F,
+     '        memcpy(front->window_op_codes, state->op_codes, CHECK_OP_COUNT);',
+     '        memcpy(front->window_op_codes, state->op_kinds, CHECK_OP_COUNT);'),
+    # the driver
+    ('d-names-pass-skipped', N,
+     '    node_front_chunk_window(front, reader, tokens, classes, acting, identifiers, literals);\n    // The names\' pass, the window\'s too: each name\'s leaf of the chunk\'s gets its declaration\'s line.\n    node_facts_window_names(front);',
+     '    node_front_chunk_window(front, reader, tokens, classes, acting, identifiers, literals);\n    if (front == NULL)\n    {\n        node_facts_window_names(front);\n    }'),
+    ('d-window-not-written', N,
+     '    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, true, true);',
+     '    node_front_chunk_by(front, reader, tokens, classes, acting, identifiers, literals, true, false);'),
+]
+
+def read(path):
+    return open(path).read()
+
+def check():
+    ok = True
+    names = set()
+    for name, f, old, new in MUTANTS:
+        s = read(SRC + f)
+        if name in names:
+            print('DUPLICATE NAME', name); ok = False
+        names.add(name)
+        if s.count(old) != 1:
+            print(name, 'old text occurs', s.count(old)); ok = False
+        if old == new or s.replace(old, new) == s:
+            print(name, 'changes nothing'); ok = False
+    print(len(MUTANTS), 'faults;', 'all unique' if ok else 'PROBLEMS')
+    return ok
+
+def run(only):
+    if not check():
+        sys.exit(1)
+    results = open(ROOT + '/results3%s.txt' % ('' if SHARDS == 1 else '-%d' % SHARD), 'a')
+    for place, (name, f, old, new) in enumerate(MUTANTS):
+        if (only and name not in only) or place % SHARDS != SHARD:
+            continue
+        path = SRC + f
+        saved = ROOT + '/saved%d.c' % SHARD
+        shutil.copyfile(path, saved)
+        s = read(path)
+        open(path, 'w').write(s.replace(old, new))
+        start = time.time()
+        build = subprocess.run(['./build.sh', '--config', 'Debug'], cwd=TREE, capture_output=True, text=True)
+        built = build.returncode == 0
+        verdict = 'NOT BUILT'
+        detail = ''
+        if built:
+            try:
+                test = subprocess.run(['./build/compiler', 'test-checker', '--seed', '133', '--part', '5/8'], cwd=TREE, capture_output=True, text=True, timeout=900)
+                failed = test.returncode != 0
+                lines = [l for l in (test.stderr + test.stdout).splitlines() if 'test-checker' in l and 'retained' not in l]
+                detail = ' | '.join(l[:150] for l in lines[:2])
+                verdict = 'caught' if failed else 'SURVIVED'
+            except subprocess.TimeoutExpired:
+                verdict = 'caught (timeout)'
+        else:
+            detail = (build.stderr + build.stdout)[-300:].replace('\n', ' ')
+        shutil.copyfile(saved, path)
+        line = f'{name}: {verdict} ({time.time() - start:.0f} s) {detail}'
+        print(line, flush=True)
+        results.write(line + '\n'); results.flush()
+    subprocess.run(['./build.sh', '--config', 'Debug'], cwd=TREE, capture_output=True, text=True)
+    print('campaign done', flush=True)
+    results.write('campaign done\n'); results.flush()
+
+if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == 'check':
+        sys.exit(0 if check() else 1)
+    run(sys.argv[2:] if len(sys.argv) > 2 else [])
