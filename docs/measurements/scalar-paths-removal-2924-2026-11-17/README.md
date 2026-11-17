@@ -239,3 +239,47 @@ the twins missed too), and truncated keys (m04). Two checks replace that coverag
 - `x86_decode_test_truncations`: each generated instruction cut short is TRUNCATED.
 
 `logs/` keeps each run's failing lines.
+
+# Phase C, branch sizing's gate (c-branch-sizing-gate/)
+
+Main `0e8342dd7`'s Release build (the same `compilers/main` as c-disassembler-pr's; SHA-256 in
+logs/compiler.sha256), `benchmark-branch-sizing` with every row, three processes, each under
+`exclusive.sh` pinned to CPU 2 (gate.sh). Each row sizes a pool of about 262,000 records of
+generated functions: clang -O0-like (`tier0-`) and -O2-like (`optimized-`) functions of the
+row's record count, sqlite3's -O0 function sizes (`tier0-mix`), and chains of 1,000 links.
+Medians of the three processes' medians:
+
+| Row | `size_branches`, ns/record | `size_branches_scalar` | Scalar ÷ vector |
+| --- | ---: | ---: | ---: |
+| tier0-40 | 1.409 | 15.271 | 10.84 |
+| tier0-250 | 0.893 | 15.418 | 17.27 |
+| tier0-2000 | 0.765 | 15.349 | 20.06 |
+| tier0-10000 | 0.805 | 15.375 | 19.10 |
+| tier0-mix | 1.207 | 15.587 | 12.91 |
+| optimized-40 | 1.525 | 15.512 | 10.17 |
+| optimized-250 | 0.981 | 15.771 | 16.08 |
+| optimized-2000 | 0.853 | 15.736 | 18.45 |
+| optimized-10000 | 0.906 | 15.804 | 17.44 |
+| chain-forward | 2.324 | 15.072 | 6.49 |
+| chain-backward | 2.342 | 15.033 | 6.42 |
+
+**The gate holds for the whole path in every row, at every function size.** Most of the
+difference is the lengths phase: `x86_measure` against `x86_measure_scalar`, which encodes one
+record at a time (36 against 724 cycles per branch on tier0-40).
+
+**Two of the vector path's phases lose to the scalar ones.** In cycles per branch, the vector
+path against the scalar one (logs/bench-*.log, the `vector` and `scalar` phase lines):
+
+| Row | ranks | write |
+| --- | --- | --- |
+| tier0-40 | 6.12 against 2.39 | 7.96 against 3.13 |
+| optimized-40 | 6.78 against 3.38 | 6.63 against 3.01 |
+| tier0-mix | (vector faster) | 4.73 against 3.75 |
+| tier0-2000 | (vector faster) | 1.99 against 1.66 |
+| tier0-10000 | (vector faster) | 2.63 against 2.61 |
+| optimized-2000 | (vector faster) | 1.98 against 1.87 |
+| optimized-10000 | (vector faster) | 2.68 against 2.52 |
+
+On 40-record functions the two scalar phases would save about 0.95 of the vector path's 7.94
+cycles per record (12%). Deleting the scalar path keeps the vector phases. The numbers to beat
+are filed as their own issue (buster#2924's comment on this gate links it).
