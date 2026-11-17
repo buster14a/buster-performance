@@ -120,7 +120,11 @@ three fused shapes (`patterns_float_equal`, `_unequal`, `_equal_sum`).
 
 Mutants (`scripts/mutants/`, each in a copy of the tree, rebuilt, then `test-tier1-select`, `test-tier1-emit` and the
 pattern test): round 1 on the first head, 12 of 13 killed (`mutants-round1.log`); the survivor made the fused
-candidate's cost 3 where its pattern's is 4, which the grammar's twin fixtures now check for every candidate.
+candidate's cost 3 where its pattern's is 4. Round 2 caught it by a check in the grammar's twin fixtures that every
+candidate costs its pattern; that check changed a struct the checker unit shares (CI's ownership check refused it) and
+isn't general (`benchmark-tier1-select-source` finds 11 such candidates on `sqlite3.c`, in additions, shifts and
+subtractions this change doesn't touch), so the final commits check the fused select's cost in its own plan test
+instead, which kills the mutant too (`mutants-cost-final.log`).
 Round 2 on the final walk (`scripts/mutants/mutants.py`, `mutants-round2.log`): 10 of 10 killed, among them a walk
 that revisits no row, one that takes a copy or every row for an operation, one that walks through the select, and the
 cost mutant again.
