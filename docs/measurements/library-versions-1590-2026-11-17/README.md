@@ -54,7 +54,7 @@ Both lists write the same bytes from base and head, at both heads.
 Each mutant is a copy of the tree with one change, built Develop and run through `test-foreign` and `test-checker-driver --part 26/64`, the part that holds `check_test_driver_versions`. `scripts/mutants-run.sh` runs them.
 
 - **`scripts/mutants-c1e2ea12.py`:** all 10 fail one check or both (`results/mutants-c1e2ea12.txt`).
-- **`scripts/mutants-11e898ba.py`:** the index probe, the default export's version, the version name's compare and the recorded reference. Results in `results/mutants-11e898ba.txt`.
+- **`scripts/mutants-11e898ba.py`:** the index probe, the default export's version, the version name's compare and the recorded reference. All 4 fail both checks (`results/mutants-11e898ba.txt`).
 
 ## Tests, cloud container
 
@@ -62,4 +62,4 @@ Each mutant is a copy of the tree with one change, built Develop and run through
 - **`test-checker-driver`:** all 8 parts with `--in-process`, 0 failures in 206,175 checks. With the flag off, exactly the 15 mixed cases fail.
 - **Direct-path suites:** `test-bind`, `test-dynamic`, `test-static` and `test-import` with `--cross-check`, and `test-snapshot`, `test-executable` and `test-link`: 0 failures.
 - **`x86-64` baseline Release, `c1e2ea12`:** `test-foreign --cross-check`, driver part 2/8, `test-dynamic`, `test-bind` and `test-import`: 0 failures.
-- **`x86-64` rows on the final tree,** plain and AddressSanitizer, MemorySanitizer and ThreadSanitizer, with CI's fatal options (`scripts/sanitizer-rows.sh`): `results/sanitizer-rows.txt`.
+- **`x86-64` rows on the final tree (`11e898ba`),** Release: plain, AddressSanitizer, MemorySanitizer and ThreadSanitizer, with CI's fatal options (`scripts/sanitizer-rows.sh`). In each, `test-foreign --cross-check` and the driver's part 2/8 with `--in-process` have 0 failures and no sanitizer report (`results/sanitizer-rows.txt`).
