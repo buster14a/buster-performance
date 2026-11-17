@@ -1,0 +1,413 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 50ad59e6e..6643df10d 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -485,6 +485,7 @@ struct NodeCensusScratch
+     uint8_t own_copies[128];
+     uint8_t own_always[128];
+     uint8_t own_sends[128];
++    uint8_t own_quiets[128];
+     // The declared type of the object whose initializer the current expression is, where the caller gives it (0
+     // otherwise): at reader time, and after the pipeline for a root the lowering never popped, which no control names.
+     TypeId given_declared;
+@@ -2247,9 +2248,31 @@ static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s,
+ #define BUSTER_NODE_TESTS_OPERAND_TRUTH 0x80u
+ _Static_assert(CHECK_OP_COUNT <= 128, "the own form's tables have an entry an operator");
+ 
++// An operator's class for the loop's quiet rule (NodeCensusScratch.own_quiets): an operator listed for a constant
++// operand alone has no test to make where each operand's type is a plain integer of 8 to 64 bits (no enumeration, no
++// bit-field) and its class's condition holds of the constants (node_tests_window_loop). None for an operator the rule
++// doesn't take.
++#define BUSTER_NODE_TESTS_QUIET_NONE 0u
++// `+`, `-`, `*`, `&`, `|`, `^` and their assignments: the usual conversions narrow no integer.
++#define BUSTER_NODE_TESTS_QUIET_BINARY 1u
++// Unary `+`, `-`, `~`: the promotions narrow none.
++#define BUSTER_NODE_TESTS_QUIET_UNARY 2u
++// `==`, `!=`: a constant against no constant is zero or 1 to 126; or a pointer against a constant zero.
++#define BUSTER_NODE_TESTS_QUIET_EQUALITY 3u
++// `<`, `<=`, `>`, `>=`: 1 to 126, or zero against a signed operand.
++#define BUSTER_NODE_TESTS_QUIET_RELATIONAL 4u
++// `<<`, `>>`, but under -Wshift-sign-overflow: a constant count under 32, a constant shifted zero or 1 to 126.
++#define BUSTER_NODE_TESTS_QUIET_SHIFT 5u
++// `/`, `%`: a constant divisor 1 to 126.
++#define BUSTER_NODE_TESTS_QUIET_DIVISION 6u
++// `=`: its own type a plain integer too, and the constant zero or 1 to 126.
++#define BUSTER_NODE_TESTS_QUIET_ASSIGN 7u
++// An initialization and a return's conversion: as `=`, of its one operand.
++#define BUSTER_NODE_TESTS_QUIET_CONVERT 8u
++
+ // The own form's tables for a unit, by its enabled warnings: each operator's classes, what it is as an operand, the
+-// mask of its type's byte where it copies its value (an aggregate's), whether it always has tests of its own, and the
+-// operand properties that give it some.
++// mask of its type's byte where it copies its value (an aggregate's), whether it always has tests of its own, the
++// operand properties that give it some, and its class for the quiet rule.
+ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
+ {
+     const NodeCensusPolicy* policy = &s->policy;
+@@ -2287,6 +2310,17 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
+                                        (shift && policy->shift_parentheses ? BUSTER_NODE_TESTS_OPERAND_SUM : 0) |
+                                        (comparison && policy->chained ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0) |
+                                        (truth_parent && truths ? BUSTER_NODE_TESTS_OPERAND_TRUTH : 0));
++        const bool sums = op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY || op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR ||
++                          op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN || op == CHECK_OP_MULTIPLY_ASSIGN || op == CHECK_OP_BIT_AND_ASSIGN ||
++                          op == CHECK_OP_BIT_OR_ASSIGN || op == CHECK_OP_BIT_XOR_ASSIGN;
++        const bool equality = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL;
++        s->own_quiets[code] = (uint8_t)(sums ? BUSTER_NODE_TESTS_QUIET_BINARY :
++                                        op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT ? BUSTER_NODE_TESTS_QUIET_UNARY :
++                                        equality ? BUSTER_NODE_TESTS_QUIET_EQUALITY : comparison ? BUSTER_NODE_TESTS_QUIET_RELATIONAL :
++                                        shift && !policy->shift_sign_overflow ? BUSTER_NODE_TESTS_QUIET_SHIFT :
++                                        op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER ? BUSTER_NODE_TESTS_QUIET_DIVISION :
++                                        op == CHECK_OP_ASSIGN ? BUSTER_NODE_TESTS_QUIET_ASSIGN :
++                                        op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT ? BUSTER_NODE_TESTS_QUIET_CONVERT : BUSTER_NODE_TESTS_QUIET_NONE);
+     }
+ }
+ 
+@@ -2536,6 +2570,8 @@ struct NodeTestsLoop
+     // whose token's parent the tree's tests read, and the operators with tests of their own.
+     const uint64_t* tree_bits;
+     const uint64_t* operator_bits;
++    // With the reader's verify, the operators the loop left out for their constants, as the lists are; else null.
++    const uint64_t* quiet_bits;
+     uint32_t words;
+     // By a record's number among the expression's: its type's byte, what it is as an operand, and its operands' such
+     // bytes together. The window's columns from the expression's first record.
+@@ -2616,6 +2652,36 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
+             operators += 1;
+         }
+     }
++    if (loop->quiet_bits != NULL)
++    {
++        // The reader's verify: an operator the loop left out for its constants has its tests run here all the same,
++        // and they find nothing and send nothing. What they count is put back.
++        uint64_t unsent[BUSTER_NODE_MACHINE_MOST / 64 + 1];
++        for (uint32_t word = 0; word < words; word += 1)
++        {
++            unsent[word] = 0;
++        }
++        const uint64_t calls = counts->own_calls;
++        const uint64_t constants = counts->own_constants;
++        const uint64_t thirds = counts->own_thirds;
++        uint64_t triggers[BUSTER_ARRAY_LENGTH(counts->own_triggers)];
++        memcpy(triggers, counts->own_triggers, sizeof(triggers));
++        for (uint32_t word = 0; word < words; word += 1)
++        {
++            for (uint64_t pending = loop->quiet_bits[word]; pending != 0; pending &= pending - 1)
++            {
++                const uint32_t r = word * 64 + (uint32_t)__builtin_ctzll(pending);
++                uint32_t sends = 0;
++                const uint64_t found = node_tests_operator(s, r, r + 1 == count ? root : first + r, loop->operands[r], unsent, &sends, counts);
++                counts->own_quiet_checked += 1;
++                counts->own_quiet_wrong += found != 0 || sends != 0;
++            }
++        }
++        counts->own_calls = calls;
++        counts->own_constants = constants;
++        counts->own_thirds = thirds;
++        memcpy(counts->own_triggers, triggers, sizeof(triggers));
++    }
+     // The unsequenced test needs two writes, or one below the expression's top: a lone write that is the root, or the
+     // root's operand, has every other node but the root in its subtree.
+     const uint32_t top = count >= 2 ? node_tests_record(machine, graph->operand0[root]) : UINT32_MAX;
+@@ -2868,6 +2934,8 @@ struct NodeCensusReader
+     // parent the tree's tests read, the operators with tests of their own, and the writes.
+     uint8_t* window_types;
+     uint8_t* window_values;
++    // What it is to a constant's tests (BUSTER_NODE_TESTS_PLAIN_*), for the loop's quiet rule.
++    uint8_t* window_plains;
+     uint8_t* window_roles;
+     uint8_t* window_properties;
+     uint8_t* window_operands;
+@@ -2886,12 +2954,27 @@ struct NodeCensusReader
+     NodeTestsLoop* loops;
+     uint64_t* tree_bits;
+     uint64_t* operator_bits;
++    uint64_t* quiet_bits;
++    // Whether an operator the loop leaves out for its constants has its tests run all the same, to have none (the
++    // reader's verify).
++    bool verify_quiet;
+ };
+ 
+ // A window's record's value's byte: a constant a test may read, a bit-field, a declaration the tests refuse.
+ #define BUSTER_NODE_TESTS_VALUE_CONSTANT 0x01u
+ #define BUSTER_NODE_TESTS_VALUE_BIT_FIELD 0x02u
+ #define BUSTER_NODE_TESTS_VALUE_DECLARATION 0x04u
++// What a window's record is to a constant operand's tests, as an operand or as the operator: its type a plain integer of
++// 8 to 64 bits (no bool, enumeration, _BitInt or atomic one, its value no bit-field's, and no constant but an integer or
++// an address); then, an integer constant of such a type that the record holds whole: that it is one, zero, 1 to 126, 0
++// to 31; its type signed; and its type a pointer to no void, its value no constant but an address.
++#define BUSTER_NODE_TESTS_PLAIN_INTEGER 0x01u
++#define BUSTER_NODE_TESTS_PLAIN_CONSTANT 0x02u
++#define BUSTER_NODE_TESTS_PLAIN_ZERO 0x04u
++#define BUSTER_NODE_TESTS_PLAIN_SMALL 0x08u
++#define BUSTER_NODE_TESTS_PLAIN_TINY 0x10u
++#define BUSTER_NODE_TESTS_PLAIN_SIGNED 0x20u
++#define BUSTER_NODE_TESTS_PLAIN_POINTER 0x40u
+ // A declaration's line's byte.
+ #define BUSTER_NODE_TESTS_LINE_KNOWN 0x01u
+ #define BUSTER_NODE_TESTS_LINE_FLAGGED 0x02u
+@@ -2905,6 +2988,7 @@ struct NodeCensusReader
+ #define BUSTER_NODE_TESTS_SET_ARRAY 0x20u
+ #define BUSTER_NODE_TESTS_SET_DECLARATION 0x40u
+ // The masks a block.
++#define BUSTER_NODE_TESTS_MASK_QUIET 0u
+ #define BUSTER_NODE_TESTS_MASK_TREE 1u
+ #define BUSTER_NODE_TESTS_MASK_OPERATORS 2u
+ #define BUSTER_NODE_TESTS_MASK_WRITES 3u
+@@ -2971,8 +3055,8 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
+         {
+             // The window's columns: a chunk's records, 64 zero bytes before them (a block's operands in the block before
+             // the first, and no operand's byte) and a block's after.
+-            uint8_t** columns[] = { &tests->window_types, &tests->window_values, &tests->window_roles, &tests->window_properties, &tests->window_operands,
+-                                    &tests->window_sets };
++            uint8_t** columns[] = { &tests->window_types, &tests->window_values, &tests->window_plains, &tests->window_roles, &tests->window_properties,
++                                    &tests->window_operands, &tests->window_sets };
+             for (uint32_t c = 0; room && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+             {
+                 uint8_t* column = arena_push_array(arena, (uint64_t)BUSTER_NODE_FRONT_RECORDS + 192, 1, 64);
+@@ -2993,8 +3077,10 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
+             tests->loops = arena_push_array(arena, BUSTER_NODE_FACTS_READER_EXPRESSIONS, sizeof(NodeTestsLoop), _Alignof(NodeTestsLoop));
+             tests->tree_bits = arena_push_array(arena, words, sizeof(uint64_t), 64);
+             tests->operator_bits = arena_push_array(arena, words, sizeof(uint64_t), 64);
++            tests->quiet_bits = arena_push_array(arena, words, sizeof(uint64_t), 64);
++            tests->verify_quiet = (reader->pp->options.node_reader & BUSTER_NODE_READER_VERIFY) != 0;
+             room = room && tests->window_masks != NULL && tests->span_lows != NULL && tests->span_highs != NULL && tests->loops != NULL && tests->tree_bits != NULL &&
+-                   tests->operator_bits != NULL;
++                   tests->operator_bits != NULL && tests->quiet_bits != NULL;
+             if (room)
+             {
+                 // A block's word is read with the next block's: the last has zeros after it.
+@@ -3181,6 +3267,7 @@ static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFa
+     {
+         __m128i own_bytes = _mm_setzero_si128();
+         __m128i value_bytes = _mm_setzero_si128();
++        __m128i plain_bytes = _mm_setzero_si128();
+         __m128i role_bytes = _mm_setzero_si128();
+         if (x < count)
+         {
+@@ -3240,6 +3327,32 @@ static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFa
+             const __m128i bit_field_byte = _mm_maskz_set1_epi8(bit_field, BUSTER_NODE_TESTS_VALUE_BIT_FIELD);
+             const __m128i declaration_byte = _mm_maskz_set1_epi8(declaration, BUSTER_NODE_TESTS_VALUE_DECLARATION);
+             value_bytes = _mm_or_si128(_mm_or_si128(constant_byte, bit_field_byte), declaration_byte);
++            // What it is to a constant's tests. Its type by its word: an integer's kind, a class of 8 to 64 bits, no fact
++            // (bool, _BitInt, atomic) and none of the six bits. Its value where it is an integer constant the record
++            // holds whole, of a type of 32 bits at most, whose value is its payload's low half: one gather, of those
++            // lanes. A constant of a wider type reads as no small value, and its operator stays listed.
++            const __m512i type_classes = _mm512_sub_epi32(_mm512_and_si512(words, _mm512_set1_epi32(0xff)), _mm512_set1_epi32(BUSTER_TYPED_CLASS_I8));
++            const __mmask16 integer_kind = _mm512_cmpeq_epi32_mask(_mm512_and_si512(_mm512_srli_epi32(words, 16), _mm512_set1_epi32(0xff)), _mm512_set1_epi32(BUSTER_TYPE_KIND_INTEGER));
++            const __mmask16 integer_class = _mm512_cmple_epu32_mask(type_classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_U64 - BUSTER_TYPED_CLASS_I8));
++            const __mmask16 bare = _mm512_testn_epi32_mask(words, _mm512_set1_epi32((int32_t)(0xff00u | 0x3fu << BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT)));
++            const uint32_t integer_constant = _mm512_cmpeq_epi32_mask(constant_kinds, _mm512_set1_epi32(CHECK_CONSTANT_INTEGER));
++            const __mmask16 integer = (__mmask16)(placed & integer_kind & integer_class & bare & ~bit_field & (~some | integer_constant | address));
++            const __mmask16 signed_type = _mm512_mask_testn_epi32_mask(integer, type_classes, _mm512_set1_epi32(1));
++            const __mmask16 valued = (__mmask16)(integer & integer_constant) &
++                                     _mm512_cmple_epu32_mask(type_classes, _mm512_set1_epi32(BUSTER_TYPED_CLASS_U32 - BUSTER_TYPED_CLASS_I8)) &
++                                     _mm512_testn_epi32_mask(standings, _mm512_set1_epi32(BUSTER_NODE_MACHINE_WIDE | BUSTER_NODE_MACHINE_FIELD));
++            const __m512i low = _mm512_mask_i32gather_epi32(_mm512_set1_epi32(-1), valued, lines, base + offsetof(NodeFactsRecord, payload), 1);
++            const __mmask16 zero_value = _mm512_mask_testn_epi32_mask(valued, low, low);
++            const __mmask16 small_value = (__mmask16)(_mm512_mask_cmple_epu32_mask(valued, low, _mm512_set1_epi32(126)) & ~zero_value);
++            const __mmask16 tiny_value = _mm512_mask_cmple_epu32_mask(valued, low, _mm512_set1_epi32(31));
++            const __mmask16 pointer = (__mmask16)(placed & (~some | address)) & _mm512_cmpeq_epi32_mask(six, _mm512_set1_epi32(0x08));
++            plain_bytes = _mm_or_si128(_mm_or_si128(_mm_or_si128(_mm_maskz_set1_epi8(integer, BUSTER_NODE_TESTS_PLAIN_INTEGER),
++                                                                 _mm_maskz_set1_epi8((__mmask16)(integer & integer_constant), BUSTER_NODE_TESTS_PLAIN_CONSTANT)),
++                                                    _mm_or_si128(_mm_maskz_set1_epi8(zero_value, BUSTER_NODE_TESTS_PLAIN_ZERO),
++                                                                 _mm_maskz_set1_epi8(small_value, BUSTER_NODE_TESTS_PLAIN_SMALL))),
++                                       _mm_or_si128(_mm_or_si128(_mm_maskz_set1_epi8(tiny_value, BUSTER_NODE_TESTS_PLAIN_TINY),
++                                                                 _mm_maskz_set1_epi8(signed_type, BUSTER_NODE_TESTS_PLAIN_SIGNED)),
++                                                    _mm_maskz_set1_epi8(pointer, BUSTER_NODE_TESTS_PLAIN_POINTER)));
+             // Its token's role.
+             const __m512i tokens = _mm512_maskz_loadu_epi32(placed, front->tokens + x);
+             const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(placed, tokens, gathered);
+@@ -3259,6 +3372,7 @@ static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFa
+         }
+         _mm_storeu_si128((__m128i*)(void*)(tests->window_types + x), own_bytes);
+         _mm_storeu_si128((__m128i*)(void*)(tests->window_values + x), value_bytes);
++        _mm_storeu_si128((__m128i*)(void*)(tests->window_plains + x), plain_bytes);
+         _mm_storeu_si128((__m128i*)(void*)(tests->window_roles + x), role_bytes);
+     }
+     *made += lines_made;
+@@ -3291,14 +3405,18 @@ static inline __attribute__((always_inline)) __m512i node_tests_window_operands(
+ // The tests' loop over a chunk's `count` records, 64 a step: what each record is as an operand (its value's and its
+ // type's bits and its operator's), its operands' such bytes together, its part of the set's tests, and a block's masks:
+ // the records whose token's parent the tree's tests read, the operators with tests of their own, and the writes.
+-static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* front, uint32_t count, uint64_t* far_count)
++static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* front, uint32_t count, uint64_t* far_count, uint64_t* quiet_count)
+ {
+     const NodeCensusScratch* s = &tests->scratch;
+     __m512i previous = _mm512_setzero_si512();
++    __m512i previous_plains = _mm512_setzero_si512();
+     uint64_t far_total = 0;
++    uint64_t quiet_total = 0;
+     for (uint32_t x = 0; x < count; x += 64)
+     {
+         const __m512i codes = _mm512_and_si512(_mm512_loadu_si512(front->ops + x), _mm512_set1_epi8(0x7f));
++        const __m512i quiets = node_tests_window_table(s->own_quiets, codes);
++        const __m512i plains = _mm512_loadu_si512(tests->window_plains + x);
+         const __m512i classes = node_tests_window_table(s->own_classes, codes);
+         const __m512i operand_bits = node_tests_window_table(s->own_operand_bits, codes);
+         const __m512i copies = node_tests_window_table(s->own_copies, codes);
+@@ -3348,17 +3466,64 @@ static void node_tests_window_loop(NodeCensusReader* tests, const NodeFront* fro
+         const __m512i set = _mm512_or_si512(_mm512_or_si512(_mm512_or_si512(uncoded, address), _mm512_or_si512(special, aggregate)),
+                                             _mm512_or_si512(_mm512_or_si512(bit_field, array), declaration));
+         _mm512_storeu_si512(tests->window_sets + x, set);
++        // The quiet rule: an operator listed for a constant operand alone, whose constants' tests have nothing to say by
++        // what its operands are to them. An operand before the block before reads as none of it, and its operator stays
++        // listed.
++        __mmask64 far_plain = 0;
++        const __m512i plain_left = node_tests_window_operands(front->window_left + x, previous_plains, plains, &far_plain);
++        const __m512i plain_right = node_tests_window_operands(front->window_right + x, previous_plains, plains, &far_plain);
++        const __mmask64 binary = (uint64_t)_mm512_test_epi16_mask(_mm512_loadu_si512(front->window_right + x), _mm512_loadu_si512(front->window_right + x)) |
++                                 (uint64_t)_mm512_test_epi16_mask(_mm512_loadu_si512(front->window_right + x + 32), _mm512_loadu_si512(front->window_right + x + 32)) << 32;
++        const __mmask64 integer_left = _mm512_test_epi8_mask(plain_left, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_INTEGER));
++        const __mmask64 integer_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_INTEGER));
++        const __mmask64 constant_left = _mm512_test_epi8_mask(plain_left, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_CONSTANT));
++        const __mmask64 constant_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_CONSTANT));
++        const __mmask64 zero_left = _mm512_test_epi8_mask(plain_left, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_ZERO));
++        const __mmask64 zero_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_ZERO));
++        const __mmask64 small_left = _mm512_test_epi8_mask(plain_left, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_SMALL));
++        const __mmask64 small_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_SMALL));
++        const __mmask64 tiny_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_TINY));
++        const __mmask64 signed_left = _mm512_test_epi8_mask(plain_left, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_SIGNED));
++        const __mmask64 signed_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_SIGNED));
++        const __mmask64 pointer_left = _mm512_test_epi8_mask(plain_left, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_POINTER));
++        const __mmask64 pointer_right = _mm512_test_epi8_mask(plain_right, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_POINTER));
++        const __mmask64 integer_own = _mm512_test_epi8_mask(plains, _mm512_set1_epi8(BUSTER_NODE_TESTS_PLAIN_INTEGER));
++        const __mmask64 pair = integer_left & integer_right & binary;
++        const __mmask64 lone = integer_left & ~binary;
++        const __mmask64 equal = (~constant_left | constant_right | zero_left | small_left) & (~constant_right | constant_left | zero_right | small_right);
++        const __mmask64 ordered = (~constant_left | constant_right | small_left | (zero_left & signed_right)) &
++                                  (~constant_right | constant_left | small_right | (zero_right & signed_left));
++        const __mmask64 shifted = (~constant_right | tiny_right) & (~constant_left | zero_left | small_left);
++        const __mmask64 divided = ~constant_right | small_right;
++        const __mmask64 stored = integer_own & constant_right & (zero_right | small_right);
++        const __mmask64 converted = integer_own & constant_left & (zero_left | small_left);
++        const __mmask64 null = binary & ((pointer_left & integer_right & zero_right) | (pointer_right & integer_left & zero_left));
++        const __mmask64 quiet_class = (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_BINARY)) & pair) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_UNARY)) & lone) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_EQUALITY)) & ((pair & equal) | null)) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_RELATIONAL)) & pair & ordered) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_SHIFT)) & pair & shifted) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_DIVISION)) & pair & divided) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_ASSIGN)) & pair & stored) |
++                                      (_mm512_cmpeq_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_CONVERT)) & lone & converted);
++        const __mmask64 alone = _mm512_testn_epi8_mask(always, always) &
++                                _mm512_cmpeq_epi8_mask(_mm512_and_si512(sends, operands), _mm512_set1_epi8(BUSTER_NODE_TESTS_OPERAND_CONSTANT));
++        const __mmask64 quiet = quiet_class & alone;
+         // The block's masks.
+         const __m512i sent = _mm512_or_si512(always, _mm512_and_si512(sends, operands));
+         uint64_t* masks = tests->window_masks + 4 * (uint64_t)(x / 64);
+         const __mmask64 equality = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_EQUALITY));
+         const __mmask64 relational = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_RELATIONAL));
+         masks[BUSTER_NODE_TESTS_MASK_TREE] = equality | relational | _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_CLASS_TREE));
+-        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent);
++        masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet;
++        quiet_total += (uint64_t)_mm_popcnt_u64(quiet);
++        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent) & ~quiet;
+         masks[BUSTER_NODE_TESTS_MASK_WRITES] = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_CLASS_WRITE));
+         previous = property;
++        previous_plains = plains;
+     }
+     *far_count += far_total;
++    *quiet_count += quiet_total;
+ }
+ 
+ // The set's bytes of the window's records `first` to `first + size - 1` together: one OR of a byte column over a range.
+@@ -3438,7 +3603,7 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+     const uint64_t t0 = __rdtsc();
+     node_tests_window_bytes(tests, state, front, &counts[NODE_FACTS_COUNT_TESTS_LINES]);
+     const uint64_t t1 = __rdtsc();
+-    node_tests_window_loop(tests, front, front->count, &counts[NODE_FACTS_COUNT_TESTS_FAR]);
++    node_tests_window_loop(tests, front, front->count, &counts[NODE_FACTS_COUNT_TESTS_FAR], &types->own_quiet);
+     const uint64_t t2 = __rdtsc();
+     uint32_t word_count = 0;
+     for (uint32_t e = 0; e < state->expression_count; e += 1)
+@@ -3466,6 +3631,7 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+             const uint32_t words = size / 64 + 1;
+             uint64_t* tree_bits = tests->tree_bits + word_count;
+             uint64_t* operator_bits = tests->operator_bits + word_count;
++            uint64_t* quiet_bits = tests->quiet_bits + word_count;
+             uint32_t writes = 0;
+             uint32_t last_write = UINT32_MAX;
+             for (uint32_t word = 0; word < words; word += 1)
+@@ -3473,6 +3639,10 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+                 const uint64_t written = node_tests_window_word(tests->window_masks, BUSTER_NODE_TESTS_MASK_WRITES, first, size, word);
+                 tree_bits[word] = node_tests_window_word(tests->window_masks, BUSTER_NODE_TESTS_MASK_TREE, first, size, word);
+                 operator_bits[word] = node_tests_window_word(tests->window_masks, BUSTER_NODE_TESTS_MASK_OPERATORS, first, size, word);
++                if (tests->verify_quiet)
++                {
++                    quiet_bits[word] = node_tests_window_word(tests->window_masks, BUSTER_NODE_TESTS_MASK_QUIET, first, size, word);
++                }
+                 writes += (uint32_t)_mm_popcnt_u64(written);
+                 last_write = written != 0 ? word * 64 + 63 - (uint32_t)_lzcnt_u64(written) : last_write;
+             }
+@@ -3488,12 +3658,17 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+                 const uint32_t lane = record & 63;
+                 const uint32_t token = front->tokens[record];
+                 operator_bits[size / 64] |= (masks[BUSTER_NODE_TESTS_MASK_OPERATORS] >> lane & 1) << (size & 63);
++                if (tests->verify_quiet)
++                {
++                    quiet_bits[size / 64] |= (masks[BUSTER_NODE_TESTS_MASK_QUIET] >> lane & 1) << (size & 63);
++                }
+                 lowest = token < token_count && token < lowest ? token : lowest;
+                 highest = token < token_count && token > highest ? token : highest;
+             }
+             loop->tests = bits;
+             loop->tree_bits = tree_bits;
+             loop->operator_bits = operator_bits;
++            loop->quiet_bits = tests->verify_quiet ? quiet_bits : NULL;
+             loop->words = words;
+             loop->types = tests->window_types + first;
+             loop->properties = tests->window_properties + first;
+@@ -3870,6 +4045,9 @@ struct NodeShadow
+     uint64_t own_constants;
+     uint64_t own_thirds;
+     uint64_t own_count_differences;
++    uint64_t own_quiet;
++    uint64_t own_quiet_checked;
++    uint64_t own_quiet_wrong;
+     // --front-facts (#2850's step 2's third piece): the fact words' kernel at reader time
+     // (c_check_node_machine_facts.c's node_facts_reader_flush). The files' counts summed (NodeFrontTypes.facts_counts,
+     // facts_wanted_ops and facts_left_ops), and the differences listed.
+@@ -5697,6 +5875,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+                    ", with a third operand %" PRIu64 ")\n",
+                    shadow->own_trees, node_census_share(shadow->own_trees, shadow->own_records), shadow->own_operators,
+                    node_census_share(shadow->own_operators, shadow->own_records), shadow->own_calls, shadow->own_constants, shadow->own_thirds);
++            printf("node-shadow: own tests operators-left-out-for-quiet-constants=%" PRIu64 " checked=%" PRIu64 " of-them-with-a-test=%" PRIu64 "\n", shadow->own_quiet,
++                   shadow->own_quiet_checked, shadow->own_quiet_wrong);
+             for (uint32_t t = 0; t < NODE_TESTS_TRIGGERS; t += 1)
+             {
+                 if (shadow->own_triggers[t] != 0)
+@@ -6093,6 +6273,9 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                     shadow->own_constants += typed->own_constants;
+                     shadow->own_thirds += typed->own_thirds;
+                     shadow->own_count_differences += typed->own_count_differences;
++                    shadow->own_quiet += typed->own_quiet;
++                    shadow->own_quiet_checked += typed->own_quiet_checked;
++                    shadow->own_quiet_wrong += typed->own_quiet_wrong;
+                     for (uint32_t c = 0; c < NODE_FACTS_COUNTS; c += 1)
+                     {
+                         shadow->reader_facts[c] += typed->facts_counts[c];
+@@ -6488,7 +6671,7 @@ static int run_node_census(int count, char** arguments)
+                                           shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0 ||
+                                           shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
+                                           shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
+-                                          shadow.own_count_differences != 0 || shadow.flat_differences != 0 ||
++                                          shadow.own_count_differences != 0 || shadow.own_quiet_wrong != 0 || shadow.flat_differences != 0 ||
+                                           shadow.reader_facts[NODE_FACTS_COUNT_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_LIST_DIFFERENCES] != 0 ||
+                                           shadow.reader_facts[NODE_FACTS_COUNT_FAILURES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] != 0 ||
+                                           shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] != 0 ||
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+index 9d9ca55c8..c04d05494 100644
+--- a/src/buster/compiler/c_check_node_machine_front.c
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -314,6 +314,11 @@ struct NodeFrontTypes
+     uint64_t own_constants;
+     uint64_t own_thirds;
+     uint64_t own_count_differences;
++    // The operators the loop left out of its list for a constant operand whose tests have nothing to say
++    // (BUSTER_NODE_TESTS_QUIET_*), and, with the reader's verify, those of them whose tests had something.
++    uint64_t own_quiet;
++    uint64_t own_quiet_checked;
++    uint64_t own_quiet_wrong;
+     // The fact words' kernel at reader time (BUSTER_NODE_READER_FACTS; c_check_node_machine_facts.c's
+     // node_facts_reader_flush): its counts (NodeFactsCount); the records it is to make and those it left to T, by
+     // operator; and the first differences, each by its record's token, its operator and what differed

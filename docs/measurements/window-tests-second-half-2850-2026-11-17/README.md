@@ -115,7 +115,8 @@ On the 9700X, in turn with the first half's build (`o`):
 ## Files
 
 - `patches/`: `tests-x1`, `-x2`, `-x5` (experiments, not for a pull request), `tests-q1`, `-q2` (the rule), each the
-  whole diff of the sources against main `9a1422eab`.
+  whole diff of the sources against main `9a1422eab`. `quiet-rule-on-main-aa09d1a04.patch`: `q2`'s rule alone,
+  against main `aa09d1a04`, which has the first half (buster14a/buster#2948, merged as `63f3918c1`).
 - `results/9700x/x1`, `x2`: `skipN-<corpus>-K.txt`, a reading at `BUSTER_TESTS_SKIP=N`. `q1`, `q2`:
   `window-tests-<corpus>-K.txt`; `o/vs-q1-*`, `o/vs-q2-*`: the first half's build in the same turns.
 - `results/cloud/`: `x3` (the shapes' histogram), `x5` (the predicate's counts), `q1`, `q2` (the rule under
