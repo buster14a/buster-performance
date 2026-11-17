@@ -258,7 +258,8 @@ here with evidence behind it.
   commits), and each measured version's code against main `2d8174328` or `d1cf1fe82` (`files-*.patch`,
   `order*.patch`).
 - `scripts/`: the harness (`ab.sh`, `build-tree.sh`, `lock.sh`, `counts.sh`, `order.sh`, `unit-cost*.sh`,
-  `where.sh`, `faults-knob.sh`, `probecost.c`, `statcost.c`), each job (`job-*.sh`), the census and its replay
+  `where.sh`, `faults-knob.sh`, `probecost.c`, `statcost.c`; `tools/abstat.c`, `tools/waitall.c`, `tools/collapse.c` and
+  `musl-common.sh`, which they call), each job (`job-*.sh`), the census and its replay
   (`census.sh`, `musl-census-run.sh`, `probes.py`, `simulate.py`), the tables (`tables.py`, `unit-tables.py`), the
   campaign (`mutants.py`) and the cloud container's checks (`run-list.sh`, `parse.sh`, `*.tests`,
   `sanitizers-files-native.sh`, `base-check.sh`).
