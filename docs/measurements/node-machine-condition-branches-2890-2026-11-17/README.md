@@ -119,9 +119,16 @@ each fails the tests.
 part 5, and for memory and address the shadow with `--fused` and with `--front-sweeps` on `sqlite3.c`, Lua and the
 compiler's own source. `results/cloud/sanitizers/progress.txt` has each step's status as it finished.
 
-**As of this commit of the record the rows are still running.** The first, memory on the `x86-64` host, is in: part 5
-passes with 210,278 checks, the six shadow runs exit 0, and the sanitizer reported nothing. The others follow in a
-later commit.
+| row | `test-checker`'s part 5 | the six shadow runs | reports |
+| --- | --- | --- | ---: |
+| memory, `x86-64` host | 210,278 checks, 0 failures | exit 0 | 0 |
+| address, `x86-64` host | 210,278 checks, 0 failures | exit 0 | 0 |
+| thread, `x86-64` host | 210,278 checks, 0 failures | not run | 0 |
+| memory, native host | 210,314 checks, 0 failures | exit 0 | 0 |
+| address, native host | 210,314 checks, 0 failures | exit 0 | 0 |
+| thread, native host | 210,314 checks, 0 failures | not run | 0 |
+
+The 36 steps (six builds, six runs of part 5, 24 shadow runs) all end with status 0, and no sanitizer wrote a report.
 
 ## Files
 
