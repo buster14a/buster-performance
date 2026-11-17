@@ -12,6 +12,11 @@ lock, timings on CPU 2 ([`run.sh`](run.sh), [`objects.sh`](objects.sh)).
   result against the whole definition, loop bodies included, up to `sqlite3VdbeExec`'s 1,577 blocks: all pass
   (`logs/export.log`).
 
+**On the final head** (`9e4ff75ab`: the deletion, the tests commit with the columns' check, and the docs), CI's
+`test-ir-source --dominators` lines on the 9700X ([`real-sources/`](real-sources/)): sqlite3.c's 7,806 forms
+(33,761,903 checks) and musl's 1,355 units' 8,325 forms (7,554,872 checks), every CFG against the whole definition
+and the columns' contract: all pass.
+
 ## The objects: byte-identical
 
 `-c` of sqlite3.c, Lua 5.4.8's 34 units and musl's 1,336 units, by base and head, compared byte by byte
