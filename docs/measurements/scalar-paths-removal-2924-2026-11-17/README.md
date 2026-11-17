@@ -153,3 +153,89 @@ that `batched` decodes one at a time through the same `x86_decode_one`. There, `
 `docs/x86-64-disassembler.md` recorded the same tradeoff when the decoder landed (PR #240:
 the vector mix 4.3% slower than the compact scalar control). Deleting the twins keeps the
 vector arms in `x86_decode_one`.
+
+# Phase C, the disassembler's pull request (c-disassembler-pr/)
+
+The head (`d2cb4438a`, the PR's tree) against main `0e8342dd7`: the twins go, the tests
+take oracles that aren't a second decoder.
+
+## The 9700X (9700x/)
+
+`run.sh` built both sides' Release under `exclusive.sh` (logs/compilers.sha256), then:
+
+- `test-x86-disassembler --objdump --file corpus.text` on both. `corpus.text` is
+  `examples/disassembler/corpus.c` at `clang -O3 -march=znver5`, CI's raw corpus, and the
+  tools are GNU binutils 2.47. Both passed:
+  - the catalogue reassembled, 13,319 instructions;
+  - the generated stream, 10,003 for the head and 10,001 for main (the random stream
+    differs by the seeds the head's new checks draw);
+  - the corpus, 152 of 152.
+
+  The head's own checks report 0 failures (logs/test-objdump-*.log).
+- `benchmark-x86-disassembler`: main with `--only batched` (its production path) against
+  the head, three alternating processes a stream, pinned to CPU 2. The streams are the
+  synthetic compiler stream, the synthetic vector stream, and the gate's `compiler.text`
+  (31.3 MB). In each cell, ns per instruction (per byte for classify) for the three
+  processes, then the change of the medians and the retired instructions per item:
+
+| stream | phase | main | head | change | instructions |
+| --- | --- | --- | --- | --- | --- |
+| compiler | decode | 7.840 / 7.651 / 7.681 | 7.564 / 7.479 / 7.621 | −1.5% | 138.0 → 130.5 |
+| compiler | decode+format | 26.03 / 25.90 / 25.88 | 23.92 / 23.86 / 24.08 | −7.6% | 394.8 → 365.2 |
+| compiler | decode+listing | 27.08 / 27.05 / 26.95 | 24.76 / 24.61 / 24.83 | −8.5% | 434.8 → 404.2 |
+| vector | decode | 28.45 / 28.76 / 28.41 | 26.78 / 26.76 / 26.89 | −5.9% | 663.2 → 605.3 |
+| vector | decode+format | 50.50 / 50.69 / 50.28 | 46.86 / 46.75 / 47.06 | −7.2% | 978.2 → 898.0 |
+| vector | decode+listing | 51.59 / 51.75 / 51.50 | 47.46 / 47.33 / 47.66 | −8.0% | 1018.2 → 937.0 |
+| compiler.text | decode | 13.77 / 13.71 / 13.65 | 13.45 / 13.28 / 13.51 | −1.9% | 262.2 → 242.9 |
+| compiler.text | decode+format | 31.16 / 31.08 / 30.92 | 28.89 / 28.71 / 28.90 | −7.0% | 548.2 → 507.1 |
+| compiler.text | decode+listing | 32.08 / 32.02 / 31.89 | 29.88 / 29.73 / 29.88 | −6.7% | 588.2 → 546.1 |
+
+The decode rows time the same harness work on both sides, one decode call a stream, so
+their change is the decoder's own. `x86_decode_one` lost its `vectorized`, `compact` and
+`indexed` parameters, and the retired instructions fall with the time. The format, listing
+and classify rows also drop main's choice of variant inside the timed loop: one choice a
+record for formatting, one a 64-byte chunk for classify. Classify halves (0.020 to 0.009–0.013
+ns a byte) for that reason alone; the classifier's code is unchanged.
+
+On the vector stream, the head's decode (26.8 ns) is now below the old `compact` control's
+27.9 ns of the gate run (c-disassembler-gate/), the one place where the selector's scalar
+arms had been faster.
+
+## Mutation check (mutation/)
+
+`mutants.py` holds 13 mutants of the decoder and formatter, one change each:
+- m01: the classifier's nibble table;
+- m02: a batch lane's REX.R;
+- m03: the index's ambiguous cells;
+- m04: the `end == size` mask;
+- m05 and m06: the compact checks, once too lax and once too strict;
+- m07: the speculative lengths;
+- m08: a format-plan token;
+- m09: the listing's hex column;
+- m10: the batch's resync;
+- m11: the FWAIT retry;
+- m12: the lanes' disp8 sign;
+- m13: the index's PEXT mask.
+
+`run.py` builds each in a copy of the tree (Develop) and runs `test-x86-disassembler`
+(the plain run, without `--objdump`), checking that every mutant applies and reverts
+cleanly first. The trees:
+- `t0`: main `33eeff166` with its twin test;
+- `t2`: the first head, the new checks without the index and truncation tests;
+- `t2b`: the PR's tree, for t2's survivors (m13b is m13's text there).
+
+| mutant | main's twin test (t0) | first head (t2) | PR's tree (t2b) |
+| --- | --- | --- | --- |
+| m01 to m02, m05 to m12 | killed | killed | (killed by t2's subset) |
+| m03 index, ambiguous cells | **survived** | survived | killed (the index test) |
+| m04 the `end == size` mask | killed | survived | killed (truncation status) |
+| m13 index PEXT | killed | killed | killed (m13b) |
+
+So the PR's test kills all 13, and main's twin test kills 12. The two that t2 missed showed
+what the twin comparison had covered: the bucket scan against the index (m13's kind; m03,
+the twins missed too), and truncated keys (m04). Two checks replace that coverage:
+- `x86_decode_test_index`: `x86_decode_index_row` against a scan of the bucket's
+  signatures, 31,168 keys in 817 buckets;
+- `x86_decode_test_truncations`: each generated instruction cut short is TRUNCATED.
+
+`logs/` keeps each run's failing lines.
