@@ -91,5 +91,46 @@ Neither row is the deletion's: the code they time is the same SEMI-NCA and loop 
 
 ## Mutation check
 
-In progress: [`mutation/`](mutation/) holds the first round's results; the second round, on the commit with the
-new checks, follows.
+[`mutation/`](mutation/): [`mutants.py`](mutation/mutants.py) and [`run.py`](mutation/run.py); each mutant built
+from an archived copy of the tree and run against `test-dominators` (the default seed, and seed 7 with 40 random
+graphs) and `test-ir-source --dominators` on `dominators.c` and 80 of c-testsuite's subset.
+- **Round 1** (`pr.results`) ran on the deletion commit `c6eb0abe7`. Its `ir-source` verdicts for s2, s3 and o1 don't
+  count: the c-testsuite checkout the copy linked to had been deleted (by me, freeing disk), and those runs read
+  "it couldn't be preprocessed". s1's crash came before any file; round 3 reruns it.
+- **Round 2** (`pr2.results`) ran on the commit with the columns' check, the first SEMI-NCA fixture, the cross-edge
+  fixture and the frontier-only budget check, and **round 3** (`pr3.results`) on the final tests commit `a0573e9e0`
+  with the second SEMI-NCA fixture. s4 and l5 replaced s3 and l3, which are equivalent.
+
+The final verdicts:
+
+| Mutant | Killed by, on the final tests |
+| --- | --- |
+| s1, the path evaluation stops one vertex short | all three, after the first SEMI-NCA fixture (before it, `test-ir-source` alone) |
+| s2, each immediate dominator is the semidominator | `test-dominators`, both seeds |
+| s3, a link's initial least is its DFS parent | equivalent (below) |
+| s4, path compression doesn't carry the least semidominator | `test-dominators`, both seeds, after the second SEMI-NCA fixture (before it, nothing) |
+| o1, `rpo_index` reversed | all three, after the columns' check (before it, the default seed's digests and `test-ir-source`) |
+| o2, the RPO half reversed | `test-dominators`, both seeds |
+| t1, each block's children in reverse order | all three, after the columns' check (before it, the default seed's digests alone) |
+| t2, a subtree's interval one short | all three |
+| f1, entry's frontier walk stops at its own idom | `test-dominators`, both seeds |
+| f2, half the frontier rows cleared (past 512 blocks) | `test-dominators`, both seeds |
+| c1, the SCC pass's ancestor interval includes its end | all three, after the cross-edge fixture (before it, `test-ir-source` alone) |
+| c2, unreachable blocks flagged irreducible | all three |
+| l1, unreachable predecessors join loop bodies | `test-dominators`, both seeds |
+| l2, loop sizes counted in the first vector only (past 512 blocks) | `test-dominators`, both seeds |
+| l3, a loop's flag taken from its header alone | equivalent (below) |
+| l4, self-loops dropped | all three |
+| l5, the first loop never flagged | `test-dominators`, both seeds |
+| a1, the frontier budget refuses its exact size | `test-dominators`, both seeds, after the frontier-only budget check (before it, nothing) |
+| a2, the loop budget refuses its exact size | `test-dominators`, both seeds |
+| a3, the matrix peak understated | `test-dominators`, both seeds |
+| v1, the CSR multiset check skipped | `test-dominators`, both seeds |
+
+The equivalent mutants:
+- **s3:** SEMI-NCA writes each vertex's semidominator into its link before any evaluation can reach it, since vertices are processed in decreasing number and only processed ones are on a path. Vertex 0 is never on one.
+- **l3:** a natural loop's body lies in its header's SCC: the header reaches each body block, which it dominates, and each reaches the header through a latch. The flag is set per SCC, so the body's flags equal the header's.
+
+The two SEMI-NCA fixtures were found by reasoning (s1) and by a search of random graphs with a Python
+transcription of the analyzer's DFS and SEMI-NCA, checked against the dominance definition on 20,000 random graphs
+([`mutation/semi_nca_search.py`](mutation/semi_nca_search.py)).
