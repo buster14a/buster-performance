@@ -143,5 +143,8 @@ period. Cycles and wall time don't move.
   by its own check: the register hint ignored, allowed to evict, ranked above value hints, given to a value that lives
   past its call; the CFG consumer's use registers left out; the straight-line consumer's hints dropped, or given to
   an interval that goes past its call; c-testsuite's size object compiled without `--tier1-no-inline`.
-- `scripts/tests/sanitizers.sh`: the x86-64 MemorySanitizer, AddressSanitizer and ThreadSanitizer builds, then the
-  tests this change touches; their results are in the pull request's description.
+- `scripts/tests/sanitizers.sh`: the x86-64 MemorySanitizer, AddressSanitizer (with UBSan) and ThreadSanitizer builds
+  of `6320f42b`, CI's sanitizer options, then `test-tier1-{allocation,cfg,emit,pipeline}`, `test-c-testsuite
+  --self-test` and `--tier1 --check-code-size`, `measure-tier1-programs --sizes-only --check-code-size`,
+  `test-tier1-cfg-source` on the c-testsuite subset, `test-calling-convention --cross-check` and `test-check-debug
+  --cross-check`: every command exited 0 with no report in any of the three (`sanitizers.txt`).
