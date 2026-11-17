@@ -17,6 +17,9 @@ I = 'c_preprocessor_impl.c'
 W = 'c_files.c'
 
 MUTANTS = [
+    # Not a fault: every file system taken for one whose directories aren't listed, so that the tests' expectations for
+    # such a one run here (run it by name; it is expected to pass every test, 'SURVIVED').
+    ('unlisted-file-system', P, '        result = result || type == types[i];', '        result = result && type == types[i];'),
     ('threshold-two', P, '#define BUSTER_FILE_CACHE_ASKING_MISSES 3u', '#define BUSTER_FILE_CACHE_ASKING_MISSES 2u'),
     ('threshold-four', P, '#define BUSTER_FILE_CACHE_ASKING_MISSES 3u', '#define BUSTER_FILE_CACHE_ASKING_MISSES 4u'),
     ('default-off', P, '    cache->asking_misses = BUSTER_FILE_CACHE_ASKING_MISSES;', '    cache->asking_misses = 0;'),

@@ -2,9 +2,9 @@
 
 The record of the first of the files' rows of
 [buster#2873](https://github.com/buster14a/buster/issues/2873) (the kernel row of a unit compiled by a process of
-its own): the pull request of buster's branch `claude/compassionate-hamilton-0mvems` (two commits on main
-`1b4acb2c8`). The design is in buster's `docs/c-files.md`, "A search directory asked for a
-subdirectory".
+its own): [buster14a/buster#2941](https://github.com/buster14a/buster/pull/2941), two commits on main `1b4acb2c8`.
+What it could not explain about two builds is [buster#2942](https://github.com/buster14a/buster/issues/2942). The
+design is in buster's `docs/c-files.md`, "A search directory asked for a subdirectory".
 
 A failed probe (ENOENT) of a path with a first component after its search directory is counted for that component, in
 one of 16 slots of the directory's record. At the component's third miss the cache `stat`s the component's own path,
@@ -186,9 +186,15 @@ Each was built and measured on the 9700X; `results/9700x/tables.md` has their A/
   it). `test-files`: the walk with one ask, on every lane count.
 - The fault campaign (`scripts/mutants.py`, in a copy of the tree): 44 faults of the new code, one at a time, a
   Debug build each, then `test-preprocessor`'s parts 1 and 4 of 4 and `test-files`
-  (`results/cloud/campaign/results-frozen.txt`). **Still running as this is written: 21 of the 21 run so far are
-  caught.** The same faults against the test before its table of counts: 25 of the 25 run (`results-vec.txt`). The
+  (`results/cloud/campaign/results-frozen.txt`): **43 fail a test.** The one that passes makes a component absent on
+  any error of its ask, not on ENOENT alone. On a file system that holds still the two are the same: a component is
+  asked for only after three probes under it failed with ENOENT, and its own `stat` then succeeds or fails with
+  ENOENT. The same faults against the test before its table of counts: 25 of the 25 run (`results-vec.txt`). The
   earlier versions' campaigns: `results-lists.txt`, `results-slots.txt`.
+- A file system whose directories aren't listed (NFS, FUSE: none here): with `file_cache_exact_names` made to refuse
+  every file system (`mutants.py run unlisted-file-system`, `results/cloud/tests/unlisted-file-system/`), the
+  directory asks and the walk's asks pass by their expectations for such a one. `test-files`'s listings test, which
+  is main's, fails there, and fails the same way on main with that change (`main-test-files.out`).
 - The cloud container's native Release build of the final tree (`scripts/final-checks.sh`,
   `results/cloud/tests/`):
   - the 18 headings of the inventory that the includes reach (`scripts/includes.tests`): 15 pass, and 3 fail as
@@ -202,7 +208,8 @@ Each was built and measured on the 9700X; `results/9700x/tables.md` has their A/
     the complete driver, prints nothing.
 - The sanitizer rows a pull request's checks don't run (`scripts/sanitizers-files-native.sh`: native memory,
   address and thread; a Release build each, `test-preprocessor`'s four parts, `test-files`, and `-c` of `hello.c` and
-  of `sqlite3.c` under memory and address): **still running as this is written**
+  of `sqlite3.c` under memory and address): the three builds and their 19 commands, each with status 0, and no
+  sanitizer wrote a report
   (`results/cloud/sanitizers/progress.txt`).
 - The baseline host (`BUSTER_HOST_ARCH=x86-64`: no AVX-512, the intrinsics emulated), a Debug build
   (`scripts/base-check.sh`, `results/cloud/tests/baseline-host/`): `test-preprocessor`'s parts 1 and 4 of 4 and
