@@ -121,4 +121,10 @@ three fused shapes (`patterns_float_equal`, `_unequal`, `_equal_sum`).
 Mutants (`scripts/mutants/`, each in a copy of the tree, rebuilt, then `test-tier1-select`, `test-tier1-emit` and the
 pattern test): round 1 on the first head, 12 of 13 killed (`mutants-round1.log`); the survivor made the fused
 candidate's cost 3 where its pattern's is 4, which the grammar's twin fixtures now check for every candidate.
-Round 2 on the final walk (`scripts/mutants/mutants.py`): `mutants-round2.log`, running as this record is first pushed.
+Round 2 on the final walk (`scripts/mutants/mutants.py`, `mutants-round2.log`): 10 of 10 killed, among them a walk
+that revisits no row, one that takes a copy or every row for an operation, one that walks through the select, and the
+cost mutant again.
+
+How often the walk runs: an instrumented copy of the final tree (a counter in `tier1_select_recurrent`, the cloud
+container's Develop build) compiling the frozen `sqlite3.c` with section 3's flags ran it 4 times, 64 rows in all, and
+found no recurrence: the two selects of section 4, each asked once by the classifier and once by its candidates.
