@@ -285,3 +285,68 @@ benchmark times a phase as a run through it less a run that stops before it, so 
 the vector path's earlier phases leave for it, not different code. On 40-record functions the two
 gaps add up to about 0.95 of the vector path's 7.94 cycles per record (12%). Deleting the scalar
 path keeps the vector phases; the numbers to beat are buster#2946.
+
+# Phase C, branch sizing's pull request (c-branch-sizing-pr/)
+
+The head (`9629a0dcf`, rebased onto main as the PR's commit with the same diff, patch-id
+`5bc4039e…`) against main `0e8342dd7`, on the 9700X (9700x/run.sh, each run under the lock),
+then a second head, `head2`, adding cmake/BusterStartOrder.txt's change (9700x/run2.sh).
+
+**GNU as**, `test-branch-sizing --cross-check` with binutils 2.47 on both sides: 404 functions,
+404 compared, 404 the same, 99,019 long branches (logs/test-cross-*.log). The cloud container's
+binutils 2.42 compares none on main too.
+
+**benchmark-branch-sizing**, `--measure size_branches` and `--measure size_encode`, three
+alternating processes a side, CPU 2. Medians of the processes' medians, ns per record:
+
+| Row | `size_branches` main | head | change | `size_encode` change |
+| --- | ---: | ---: | ---: | ---: |
+| tier0-40 | 1.375 | 1.321 | −3.9% | −1.9% |
+| optimized-40 | 1.482 | 1.431 | −3.4% | −1.8% |
+| tier0-mix | 1.124 | 1.120 | −0.4% | −0.3% |
+| tier0-250 | 0.877 | 0.877 | 0.0% | −0.8% |
+| tier0-2000 | 0.760 | 0.772 | +1.6% | +0.7% |
+| optimized-2000 | 0.847 | 0.856 | +1.1% | −0.1% |
+| tier0-10000 | 0.805 | 0.814 | +1.1% | +0.9% |
+| optimized-10000 | 0.907 | 0.914 | +0.8% | +0.1% |
+| chains | 2.329, 2.347 | 2.343, 2.354 | +0.6%, +0.3% | +0.3%, +0.2% |
+
+Small functions retire 9% fewer instructions (tier0-40: 22.1 to 20.1 per record):
+`branch_sizing_run` lost its dead scalar arms, 1,601 to 932 instructions. Functions of 2,000
+records and more retire the same instructions (10.37 against 10.40 per record on tier0-2000)
+in 1.4% more cycles, every head process above every main one: the phase loops' placement, not
+more work.
+
+**Disassembly** (logs/compare.txt, logs/classified.txt; disassembly/split.py and compare.py
+from b2-main-vs-head, classify2.py): 9,935 functions in main, 9,936 in the head, 416 differ:
+- 343 by symbols or immediates alone;
+- 15 by immediates;
+- 51 in length: tests, benchmarks, `branch_sizing_run`, `branch_sizing_validate` (it takes the
+  vector column check), the emission (`check_program_emit_timed` +7 instructions,
+  `check_program_emit_code_half` −3: the `--scalar` arms of the column check go), and a few
+  functions inlining changed around (`check_mangle_name`, `asm_assemble`).
+- The checker unit's `branch_sizing_run` is inlined into `size_branches` now, which the start
+  order didn't name: it landed in cold `.text` (logs/head-functions.txt, section 12), where main
+  had `branch_sizing_run` in `.text.buster_start`. head2 names `size_branches` there instead
+  (logs2/head2-branch-sizing.txt: section 10, the address main's `branch_sizing_run` had).
+
+**Whole drivers**, `ab --rounds 3` around `time-runs --runs 3 --copies 3` with main, the head
+and main-again, as in b2-main-vs-head (logs/time.log, logs2/time.log). Head against main, the
+three rounds, with main-again's in brackets:
+
+| List | head, user cycles | head2, user cycles | head2, wall |
+| --- | --- | --- | --- |
+| sqlite3.c `-c` | +0.38 / −0.16 / +0.05% (+0.15 / −0.07 / −0.39) | −0.17 / −0.38 / −0.34% (−0.10 / −0.11 / −0.17) | −0.20 / −0.29 / +0.02% (+0.24 / +0.22 / +0.24) |
+| sqlite3.c `-fsyntax-only` | +0.16 / +0.23 / −0.17% (−0.11 / −0.20 / −0.53) | −0.34 / +0.04 / −0.12% (−0.01 / +0.10 / +0.25) | −0.05 / −0.02 / −0.61% (−0.07 / −0.36 / −0.01) |
+| Lua | −0.38 / −0.11 / +0.07% (+0.02 / +0.18 / +0.06) | +0.07 / −0.44 / −0.12% (−0.05 / −0.40 / +0.62) | −0.24 / −0.40 / −0.06% (−0.30 / −0.48 / +0.48) |
+| musl, a process a unit | −0.35 / +0.22 / +0.26% (−0.15 / −0.14 / −0.12) | −0.18 / −0.07 / −0.07% (−0.00 / −0.08 / +0.11) | −0.16 / +0.13 / −0.03% (−0.08 / −0.01 / +0.04) |
+
+The first head's musl user cycles sat above main-again's in two rounds, as a function every
+compile runs in cold code would; head2 is within main-again's spread on every list and round.
+
+**Mutation check** (mutation/): seven mutants of the column check, the offsets, the rounds and the
+column check's loads, each built in a copy of the head and run with `test-branch-sizing` (the
+plain run). Six fail it. b7 (the targets' load unmasked) survives as an equivalent mutant: Clang
+folds the load into the masked compare (`vpcmpltud (%rcx,%rsi,4),%zmm0,%k1{%k1}`), whose masked-off
+elements don't fault, and the column check compiles to the same instructions
+(mutation/head-validate-branches.s, b7-validate-branches.s, built from mutation/wrap.c).
