@@ -1,0 +1,1228 @@
+From 96e7f99015a84a8b55975369e6daf9830eeef7f4 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 17 Nov 2026 13:47:38 +0000
+Subject: [PATCH 1/2] Include search: a directory that keeps failing for a
+ subdirectory is asked for it, once (#2873)
+
+glibc's headers include one another as <bits/...>, <sys/...>, <gnu/...>,
+<linux/...> and <asm/...>, and each such include is probed in every
+search directory before the one that has it: clang's resource directory
+and /usr/local/include have no `bits`. On the 9700X those are 40 of the
+52 failed opens of a unit with only <stdio.h>, and 167 of sqlite3.c's
+207. A listing does not reach them: a small unit never gets a first
+look, and clang's directory is read whole only at its 256th miss.
+
+A failed probe of a path with more than one component after its
+directory now counts for that first component, in one of 16 slots of the
+directory's record. At a component's third miss the cache stats the
+component's own path, once. A directory without it then gives ENOENT for
+every path under it without a system call, as a listing does; one that
+has it answers nothing, and its paths are opened as before. The ask is
+the lookup every path under the component begins with, so it is right on
+every file system, those a listing can't answer for among them.
+
+Every failed probe is counted, in units that never ask too, so the
+counting has no loop: a component's key is 16 bytes, its name and zeros,
+by one masked load of the bytes after the directory's, and its slot is
+one compare of the key with all 16 slots, four a vector. As two loops it
+was 1.6 to 2 times the instructions and 2.4 to 3.1 times the branches
+that a musl unit adds on the 9700X. The baseline host runs the same code
+by its emulated intrinsics.
+
+The third miss and a stat, from the traces of compiles without asks and
+the calls' costs on the 9700X: asked at the second miss, musl's units,
+whose components fail two or three times and are often there, lose 2,900
+cycles each; at the third, 600, where the unit with <stdio.h> keeps
+33,400 of 34,000 and sqlite3.c 162,900 of 170,000. Measured, one
+executable asking at the third, the fourth and the fifth miss reads
+alike.
+
+On the 9700X, with the next commit's start order:
+- The unit with <stdio.h> makes 59 opens for 87 and 24 failed ones for
+  52, with 2 asks. One executable with its asks on reads 0.85% and 1.07%
+  fewer kernel cycles than with them off (41 rounds each; off against
+  off: 0.05%), and the build 1.11% and 0.89% fewer than main's.
+- sqlite3.c makes 274 opens for 380 and 101 failed ones for 207, with 11
+  asks. Its cycles read as main against a copy of itself.
+- musl's 1,336 units, a process each, make 850 asks that spare 86 opens
+  of 70,664. One executable reads the same with its asks on and off
+  (0.01% and 0.04% more kernel cycles, 11 rounds each). The counting is
+  0.03% more instructions than main. The build reads 0.10% and 0.14%
+  more kernel cycles and 0.17% and 0.07% more user cycles than main's,
+  where main against a copy of itself reads 0.15% and 0.07% fewer.
+The objects are the same bytes.
+
+Tests: test-preprocessor's directory asks (28 groups of searches, each
+group's opens, asks and answers pinned, and every path, file and error
+the same as with the asks off), its component keys (each path ending
+where an unreadable page begins) and test-files's walk on every lane
+count.
+
+Part of #2873.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01TiDLnvTX4sXnEVEUdMWepR
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/c-files.md                               | 116 ++++++
+ docs/commands/files.md                        |   6 +
+ docs/commands/preprocessor.md                 |  11 +-
+ src/buster/compiler/c_files.c                 |  22 +-
+ src/buster/compiler/c_files_benchmark.c       |   9 +-
+ src/buster/compiler/c_files_test.c            | 125 +++++-
+ src/buster/compiler/c_preprocessor.c          | 161 +++++++-
+ .../compiler/c_preprocessor_benchmark.c       |   6 +-
+ src/buster/compiler/c_preprocessor_impl.c     |  15 +-
+ src/buster/compiler/c_preprocessor_test.c     | 376 ++++++++++++++++++
+ 10 files changed, 810 insertions(+), 37 deletions(-)
+
+diff --git a/docs/c-files.md b/docs/c-files.md
+index 6374858cd..a78d059ef 100644
+--- a/docs/c-files.md
++++ b/docs/c-files.md
+@@ -271,6 +271,122 @@ names once that pays:
+     instead of 2,647. Its run times are the same, within 0.1 ms on 1 to 8
+     lanes: the searches' time it saves goes to lane 0's listings.
+ 
++### A search directory asked for a subdirectory (#2873)
++
++glibc's headers include one another as `<bits/...>`, `<sys/...>`, `<gnu/...>`,
++`<linux/...>` and `<asm/...>`. Each such include is probed in every search
++directory before the one that has it, and clang's resource directory and
++`/usr/local/include` have no `bits`. On the 9700X those were 40 of the 52
++failed opens of a unit with only `<stdio.h>`, and 167 of `sqlite3.c`'s 207. A
++listing doesn't reach them: a small unit never gets a first look, and clang's
++directory is read whole only at its 256th miss. So the cache asks a directory
++about a missing subdirectory itself (`file_cache_miss_component`):
++
++- **Counting.** A probe that finds no file (ENOENT) at a path with more than
++  one component after its directory counts for that first component, in a
++  slot of the directory's `FileCacheDirectory`: its name and a count.
++- **Asking.** At a component's third miss
++  (`BUSTER_FILE_CACHE_ASKING_MISSES`), the cache `stat`s the component's own
++  path, once. ENOENT says the directory has no such name.
++- **Answering.** A path under a component its directory lacks is then absent
++  without a system call (`file_cache_component_absent`). Its path entry is the
++  one a failed probe gives it, as from a listing. A component the directory
++  has answers nothing, and its paths are opened as before.
++- **Exactly what a probe would find.** The ask is the lookup that every path
++  under the component begins with, a link followed as theirs is. So it is
++  right on every file system, those a listing can't answer for among them, and
++  for a dangling link and a name past ASCII.
++  - Never asked for: `.` and `..`, which every directory has.
++  - No miss: a regular file by the component's name gives its paths ENOTDIR,
++    and a component longer than `NAME_MAX` ENAMETOOLONG.
++  - A directory with a listing is asked nothing more: its listing answers.
++  - What an ask doesn't see is what a listing doesn't: a subdirectory made
++    during the run, after its directory was asked.
++- **The slots.** A directory counts 16 components
++  (`BUSTER_FILE_CACHE_COMPONENTS`), each a name of up to 15 bytes
++  (`BUSTER_FILE_CACHE_COMPONENT_NAME`). One past either is not counted, and
++  its paths are probed as before. A miss allocates nothing: the slots are the
++  directory record's own bytes, and the asked path is the probed path's first
++  bytes.
++- **One compare a miss.** Every failed probe is counted, in units that never
++  ask too, so the counting has no loop and no branch on a name's byte:
++  - A component's key is 16 bytes: its name, and zeros after it. One masked
++    load takes the 16 bytes after the directory's, which reads nothing past
++    the path's end, and the first `/` among them ends the component
++    (`file_cache_component_key`).
++  - A slot holds a key. The key is compared with every slot at once, four
++    slots a vector (`file_cache_find_component`).
++  - On the 9700X the counting is 2,800 to 9,400 instructions of a musl unit
++    and 150 to 350 mispredicted branches. As loops over the name's bytes and
++    over the slots it was 5,600 to 16,800 and 230 to 420: each unit is a new
++    process, whose predictor has not seen those loops.
++- **Why the third miss, and a `stat`.** An ask pays where the component is
++  absent and fails again. It is lost on a component that fails no more, and on
++  one the directory has. On the 9700X, on a warm dentry cache, a failed open
++  costs 1,270 cycles; a `stat` costs 990 of an absent path and 1,100 of one
++  that is there, where an open and a close cost 2,400. By those costs, from
++  the traces of compiles without asks, in cycles a unit:
++
++  | asked at the component's | `<stdio.h>` alone | `sqlite3.c` | a musl unit, of 1,336 |
++  | --- | ---: | ---: | ---: |
++  | first miss | +37,100 | +181,900 | -5,200 |
++  | second | +34,000 | +170,000 | -2,900 |
++  | **third** | **+33,400** | **+162,900** | **-600** |
++  | fourth | +30,900 | +155,000 | -160 |
++
++  musl's units, with seven `-I` directories, have 2,826 absent components that
++  fail twice or more, only 259 of them a third time, and 1,332 present ones
++  that fail twice or more. Measured, one executable asking at the third, the
++  fourth and the fifth miss reads alike: the unit with `<stdio.h>` 0.85%, 0.85%
++  and 0.99% fewer kernel cycles than with its asks off, and musl's units
++  within what one setting reads against itself. So the asks stay at the
++  earliest miss that isn't lost on musl's components.
++- **Across units and the walk.** As a listing's, the answers live in the
++  cache, so every unit of a run that shares it uses them. The walk moves past
++  an answered candidate as past a listed one, and counts a wave's failed
++  probes as it adds them, in the probes' order: every lane count asks at the
++  same point. A wave's own probes are all made before its first ask.
++- **The start order.** `file_cache_count_miss`, which every compile with a
++  failed probe runs, is no longer inlined. Left out of the start's code it
++  was a page of code more for every process: musl's units, a process each,
++  read 2% more instruction TLB misses than main's. `cmake/BusterStartOrder.txt`
++  was made again with it (docs/commands/build.md, "The start's code order"),
++  and they read 0.9% fewer.
++- **What stays scalar.** The asks themselves: a compile makes a handful, 2
++  for `<stdio.h>` and 11 for `sqlite3.c`, each after the probes that count
++  towards it and each a system call of a thousand cycles.
++- **Measured** on the 9700X (CPU 2, under the lock, Release), two ways: one
++  executable with its asks off and on, which is the asks' own effect, and
++  main `2d8174328` against the build with the asks and the list made again
++  ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/include-asks-2873-2026-11-17)).
++  The objects are the same bytes.
++
++  | `-c` of | `<stdio.h>` alone | `sqlite3.c` | a musl unit |
++  | --- | ---: | ---: | ---: |
++  | opens | 87 to 59 | 380 to 274 | 37 to 37 |
++  | of them failed | 52 to 24 | 207 to 101 | 23 to 23 |
++  | asks | 2 | 11 | 0 |
++
++  - **The unit with `<stdio.h>`:** with its asks on, one executable reads
++    0.85% and 1.07% fewer kernel cycles than with them off, in two comparisons
++    of 41 rounds (off against off: 0.05%), and retires 0.05% fewer user
++    instructions. The build reads 1.11% and 0.89% fewer than main's.
++  - **`sqlite3.c`:** its cycles read as main against a copy of itself does,
++    and it retires main's instructions to within 0.001%.
++  - **musl's 1,336 units, a process each:** their 850 asks, 259 of them of an
++    absent component, spare 86 opens of 70,664. With its asks on, one
++    executable reads 0.01% and 0.04% more kernel cycles than with them off and
++    0.05% and 0.04% fewer user cycles, in two comparisons of 11 rounds: what
++    off reads against off. The counting is 0.03% more instructions than
++    main. The build reads 0.10% and 0.14% more kernel cycles than main's and
++    0.17% and 0.07% more user cycles, where main against a copy of itself
++    reads 0.15% and 0.07% fewer.
++  - **Two builds on musl's units read less exactly than one copy does.** An
++    earlier build of this code read 0.73% and 0.45% more kernel cycles than
++    main's. One that takes its threshold from the environment read 0.21% to
++    0.69% more in four runs, the higher two with its asks off, where one copy
++    of it reads the two settings as equal.
++
+ ### Per-file jobs on lanes
+ 
+ `benchmark-files` and `test-files` start one command-owned `LaneTeam` before
+diff --git a/docs/commands/files.md b/docs/commands/files.md
+index 067d12d52..9274de2eb 100644
+--- a/docs/commands/files.md
++++ b/docs/commands/files.md
+@@ -82,6 +82,12 @@ the guard spelled the same, and the walk must do what it did:
+   directory rules out leaves the cache the same paths, each with a file or none
+   and the same error, as a walk with listings off, on every lane count and
+   before any unit runs; a unit of its root then opens no path through either;
++- asks (#2873): a walk whose first round fails ten probes under a subdirectory
++  its first search directory lacks asks that directory once, and its answer
++  rules out the second round's ten candidates there; the cache then holds the
++  same paths, each with a file or none and the same error, as a walk with the
++  asks off, on every lane count and before any unit runs, and a unit of its
++  root opens no path through either;
+ - special paths: a FIFO that an `#include` under `#if 0` names (the walk's
+   probe mustn't block) and an active one names (an error, as alone), and a
+   quoted name of 2,400 bytes in a directory of 2,539, three requests of which
+diff --git a/docs/commands/preprocessor.md b/docs/commands/preprocessor.md
+index 9418b1e08..58904f675 100644
+--- a/docs/commands/preprocessor.md
++++ b/docs/commands/preprocessor.md
+@@ -170,6 +170,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
+   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
+   ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
+   error the same as with listings off;
++  the search directories' answers about a subdirectory (`pp_test_directory_asks`, #2873): a directory asked for a
++  path's first component at the component's third failed probe there, once, and the opens its answer saves; what it
++  can't rule out still opened (a component the directory has, a regular file by its name, another spelling, a name
++  it begins with, `.` and `..`, a component past `NAME_MAX`); a dangling link and a name past ASCII asked as any other, and a name without a
++  `/` never; a cache another unit shares; a listed directory asked nothing; and every path, file and error the same
++  as with the asks off, whose unit opens exactly the candidates the answers spared;
+   with no descriptor left after a listing (`pp_test_listing_descriptors`), a ruled-out name's ENOENT and the next
+   directory's EMFILE, reported there, against the first directory's EMFILE without listings, and the answers a unit
+   sharing the cache then gets;
+@@ -499,8 +505,9 @@ must all give the same output. `--listing-misses` does the same for the failed
+ probes after which a search directory's names are first looked at (32 by default; 0 never
+ reads them: `docs/c-files.md`, "Search directories' listings"), each with each
+ read limit, so that one executable compares listings on and off, in turns.
+-The probe counts then also give the directories listed and the opens their
+-listings saved.
++The probe counts then also give the directories listed, the directories asked
++for a subdirectory (`docs/c-files.md`, "A search directory asked for a
++subdirectory") and the opens they saved.
+ `--clang` also times `clang -E -P` with the same options, a process per file, with `--buster-headers` translated to ours' search and every argument passed (`pp_clang_preprocess`). A failed clang run fails the benchmark and reports no timing.
+ Our predefines follow the target options as clang's do; `--predefines FILE`
+ still replaces them (the benchmark leaves it out of clang's command line). The
+diff --git a/src/buster/compiler/c_files.c b/src/buster/compiler/c_files.c
+index 6b5506f50..fa0b8af31 100644
+--- a/src/buster/compiler/c_files.c
++++ b/src/buster/compiler/c_files.c
+@@ -218,8 +218,9 @@ struct FilesPath
+     // The length of the directory the search looks in (file_cache_lookup_path's `directory_length`), or BUSTER_PP_NONE.
+     uint32_t directory_length;
+     uint64_t hash;
+-    // A path its directory's listing rules out (file_cache_listed_absent): not probed, but added to the cache with the
+-    // entry a failed probe gives it, as a unit's lookup adds it (file_cache_lookup_path).
++    // A path its directory's listing rules out (file_cache_listed_absent), or its directory's answer about its first
++    // component (file_cache_component_absent): not probed, but added to the cache with the entry a failed probe gives
++    // it, as a unit's lookup adds it (file_cache_lookup_path).
+     bool listed;
+ };
+ 
+@@ -1213,8 +1214,9 @@ static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* searc
+ }
+ 
+ // This lane's range of the round's searches goes through its candidates in order: a path the cache knows answers at
+-// once (a file there ends the search; none, the next candidate), and so does a path its directory's listing rules out
+-// (file_cache_listed_absent: none there), until the last candidate or a path the cache never looked up, which the lane
++// once (a file there ends the search; none, the next candidate), and so does a path its directory's listing or its
++// answer about the path's first component rules out (file_cache_listed_absent, file_cache_component_absent: none
++// there), until the last candidate or a path the cache never looked up, which the lane
+ // lists for this wave's probes (its bytes in the lane's names). A place the preprocessor's search can't look in (a path
+ // too long for one, or one that couldn't be opened for another reason than there being no file there) ends the search
+ // too, as it ends the preprocessor's with a fatal error (pp_find_include).
+@@ -1238,11 +1240,11 @@ static void files_advance(FilesRun* run, FilesLane* mine)
+             const PPCandidate candidate = files_candidate(run, search, search->candidate, path, &path_length, &directory, &directory_length);
+             const uint64_t hash = candidate == PP_CANDIDATE_PATH ? intern_hash_bytes((const uint8_t*)path, path_length) : 0;
+             const FileCachePath* entry = candidate == PP_CANDIDATE_PATH ? file_cache_find_path(cache, path, path_length, hash) : 0;
+-            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && cache->listed_directories != 0 &&
++            const bool listed = candidate == PP_CANDIDATE_PATH && entry == 0 && (cache->listed_directories != 0 || cache->absent_components != 0) &&
+                                 file_cache_in_directory(path, path_length, directory_length);
+             const FileCacheDirectory* place =
+                 listed ? file_cache_find_directory(cache, path, directory_length, intern_hash_bytes((const uint8_t*)path, directory_length)) : 0;
+-            const bool absent = place != 0 && file_cache_listed_absent(place, path, path_length);
++            const bool absent = place != 0 && (file_cache_listed_absent(place, path, path_length) || file_cache_component_absent(place, path, path_length));
+             mine->counts.listed += absent;
+             if (candidate == PP_CANDIDATE_END || __atomic_load_n(&run->failed, __ATOMIC_RELAXED))
+             {
+@@ -1342,9 +1344,9 @@ static void files_collect_probes(FilesRun* run)
+ }
+ 
+ // On one lane: the wave's probed paths added to the cache, in order, each with its file's record (file_cache_identify),
+-// and those a listing ruled out with ENOENT. A probe that found no file there counts towards its directory's listing
+-// (file_cache_count_miss), which the next waves' searches read: added in the probes' order, the listings are those of
+-// any lane count.
++// and those a listing or a directory's answer ruled out with ENOENT. A probe that found no file there counts towards
++// its directory's listing and its first component's ask (file_cache_count_miss), which the next waves' searches read:
++// added in the probes' order, the listings and the asks are those of any lane count.
+ static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
+ {
+     FileCache* cache = run->cache;
+@@ -1353,7 +1355,7 @@ static void files_add_probes(FilesRun* run, FileCacheCounts* counts)
+         const FilesPath* path = &run->probes[p];
+         const bool missed = !path->listed && run->found[p].error == ENOENT && file_cache_in_directory(path->path, path->length, path->directory_length);
+         FileCacheDirectory* directory = missed ? file_cache_directory(cache, path->path, path->directory_length) : 0;
+-        file_cache_count_miss(cache, directory, &run->found[p], counts);
++        file_cache_count_miss(cache, directory, path->path, path->length, &run->found[p], counts);
+         FileCachePath* entry = file_cache_add_path(cache, path->path, path->length, path->hash, &run->found[p]);
+         if (entry != 0)
+         {
+diff --git a/src/buster/compiler/c_files_benchmark.c b/src/buster/compiler/c_files_benchmark.c
+index 89111e473..738a6ef75 100644
+--- a/src/buster/compiler/c_files_benchmark.c
++++ b/src/buster/compiler/c_files_benchmark.c
+@@ -129,8 +129,10 @@ struct FilesBenchmarkCounts
+     uint64_t opens;
+     uint64_t maps;
+     uint64_t reads;
+-    // Directories listed, and the candidates their listings ruled out without an open (FileCacheDirectory).
++    // Directories listed, directories asked for a first component, and the candidates their listings and answers ruled
++    // out without an open (FileCacheDirectory).
+     uint64_t listings;
++    uint64_t asks;
+     uint64_t listed;
+ };
+ 
+@@ -225,6 +227,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
+         counts->maps += lane->counts.maps;
+         counts->reads += lane->counts.reads;
+         counts->listings += lane->counts.listings;
++        counts->asks += lane->counts.asks;
+         counts->listed += lane->counts.listed;
+     }
+     if (benchmark.run.lanes != 0)
+@@ -690,10 +693,10 @@ int run_files_benchmark(int argc, char** argv)
+     if (result)
+     {
+         printf("a run: %u rounds, %u waves; %lu files, %lu bytes, %lu tokens; %u shared ids; %lu candidates exchanged, %lu opens, %lu mappings and %lu reads, "
+-               "%lu directories listed and %lu candidates they ruled out (on %u lanes)\n",
++               "%lu directories listed, %lu asked for a subdirectory and %lu candidates they ruled out (on %u lanes)\n",
+                counts.rounds, counts.waves, (unsigned long)counts.files, (unsigned long)counts.bytes, (unsigned long)counts.tokens, counts.ids,
+                (unsigned long)counts.candidates, (unsigned long)counts.opens, (unsigned long)counts.maps, (unsigned long)counts.reads, (unsigned long)counts.listings,
+-               (unsigned long)counts.listed, lanes[lane_count - 1]);
++               (unsigned long)counts.asks, (unsigned long)counts.listed, lanes[lane_count - 1]);
+     }
+     if (result && !flat)
+     {
+diff --git a/src/buster/compiler/c_files_test.c b/src/buster/compiler/c_files_test.c
+index 1663aae07..64926d592 100644
+--- a/src/buster/compiler/c_files_test.c
++++ b/src/buster/compiler/c_files_test.c
+@@ -1135,15 +1135,17 @@ static PPOptions files_test_listing_options(const char* const* directories, File
+     return options;
+ }
+ 
+-// One walk of `root` on `lanes` lanes, into a cache that lists directories at `listing_misses` failed probes (0:
+-// never), with the candidates the walk's listings ruled out.
+-static bool files_test_listed_walk(const char* root, const char* const* directories, uint32_t lanes, uint32_t listing_misses, const char* directory, FileCache* cache,
+-                                   InternTable* table, uint64_t* listed)
++// One walk of `root` on `lanes` lanes, into a cache that lists directories at `listing_misses` failed probes and asks
++// them for a component at its `asking_misses`-th (0: never), with the candidates the walk's listings and answers ruled
++// out and the asks it made.
++static bool files_test_listed_walk(const char* root, const char* const* directories, uint32_t lanes, uint32_t listing_misses, uint32_t asking_misses,
++                                   const char* directory, FileCache* cache, InternTable* table, uint64_t* listed, uint64_t* asks)
+ {
+     static Preprocessor search;
+     PPOptions options = files_test_listing_options(directories, 0);
+     bool result = intern_initialize(table) && file_cache_initialize(cache, table, pp_prepare_options(&options));
+     cache->listing_misses = listing_misses;
++    cache->asking_misses = asking_misses;
+     options.files = cache;
+     result = result && pp_initialize(&search, &options, table);
+     const char* roots[1] = { root };
+@@ -1154,9 +1156,11 @@ static bool files_test_listed_walk(const char* root, const char* const* director
+     result = result && lane_run(lanes, files_run_lane, &run, 0) && !run.failed;
+     const uint64_t written = files_test_quiet_end(saved, path);
+     *listed = 0;
++    *asks = 0;
+     for (uint32_t l = 0; run.lanes != 0 && l < run.lane_count; l += 1)
+     {
+         *listed += run.lanes[l].counts.listed;
++        *asks += run.lanes[l].counts.asks;
+     }
+     if (run.cache != 0)
+     {
+@@ -1217,15 +1221,17 @@ static bool files_test_listings(const char* directory, const uint32_t* lanes, ui
+         static InternTable tables[2];
+         static FileCache caches[2];
+         uint64_t listed[2] = { 0 };
++        uint64_t asks[2] = { 0 };
+         uint64_t opened[2] = { 0 };
+         for (uint32_t way = 0; way < 2; way += 1)
+         {
+-            result = files_test_listed_walk(root, directories, lanes[l], way == 0 ? BUSTER_FILE_CACHE_LISTING_MISSES : 0, directory, &caches[way], &tables[way],
+-                                            &listed[way]) &&
++            result = files_test_listed_walk(root, directories, lanes[l], way == 0 ? BUSTER_FILE_CACHE_LISTING_MISSES : 0, way == 0 ? BUSTER_FILE_CACHE_ASKING_MISSES : 0,
++                                            directory, &caches[way], &tables[way], &listed[way], &asks[way]) &&
+                      result;
+         }
+-        // The caches as the walks left them, before any unit adds a path.
+-        result = result && listed[0] != 0 && listed[1] == 0 && caches[0].path_count == caches[1].path_count;
++        // The caches as the walks left them, before any unit adds a path. Names in the directories themselves ask for
++        // nothing.
++        result = result && listed[0] != 0 && listed[1] == 0 && asks[0] == 0 && asks[1] == 0 && caches[0].path_count == caches[1].path_count;
+         for (uint32_t p = 0; result && p < caches[0].path_count; p += 1)
+         {
+             const FileCachePath* on = &caches[0].paths[p];
+@@ -1271,6 +1277,108 @@ static bool files_test_listings(const char* directory, const uint32_t* lanes, ui
+     return result;
+ }
+ 
++// The asks check's headers: a root includes <bits/h0.h> to <bits/h9.h>, each of which includes <bits/g0.h> to
++// <bits/g9.h>'s one of its number, all under `bits` in a second search directory after a first that has no `bits`.
++// Round 1's searches fail 10 probes in the first, in one wave; added, the third of them asks the first directory for
++// `bits` (file_cache_miss_component), and round 2's candidates there are answered without a probe.
++#define BUSTER_FILES_TEST_ASKED 10u
++
++// The walk's asks (#2873): on every lane count, a walk whose second round's candidates a directory's answer rules out
++// leaves the cache the same paths, each with a file or none and the same error, as a walk with the asks off, before any
++// unit runs; it asks once, and its answer rules out the second round's ten; and a unit of the root then opens no path
++// through either cache.
++static bool files_test_asks(const char* directory, const uint32_t* lanes, uint32_t lane_count)
++{
++    char first[4200];
++    char second[4200];
++    char bits[4300];
++    char root[4200];
++    char path[4400];
++    char text[96];
++    snprintf(first, sizeof(first), "%s/ask-first", directory);
++    snprintf(second, sizeof(second), "%s/ask-second", directory);
++    snprintf(bits, sizeof(bits), "%s/bits", second);
++    snprintf(root, sizeof(root), "%s/ask.c", directory);
++    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(bits, 0700) == 0;
++    snprintf(path, sizeof(path), "%s/a.h", first);
++    result = result && files_test_write(path, "int a;\n");
++    FILE* file = result ? fopen(root, "w") : 0;
++    result = file != 0;
++    for (uint32_t h = 0; result && h < BUSTER_FILES_TEST_ASKED; h += 1)
++    {
++        fprintf(file, "#include <bits/h%u.h>\n", h);
++        snprintf(path, sizeof(path), "%s/h%u.h", bits, h);
++        snprintf(text, sizeof(text), "#ifndef H%u\n#define H%u\n#include <bits/g%u.h>\n#endif\n", h, h, h);
++        result = files_test_write(path, text);
++        snprintf(path, sizeof(path), "%s/g%u.h", bits, h);
++        snprintf(text, sizeof(text), "int g%u;\n", h);
++        result = result && files_test_write(path, text);
++    }
++    if (file != 0)
++    {
++        result = fclose(file) == 0 && result;
++    }
++    const char* const directories[2] = { first, second };
++    for (uint32_t l = 0; result && l < lane_count; l += 1)
++    {
++        static InternTable tables[2];
++        static FileCache caches[2];
++        uint64_t answered[2] = { 0 };
++        uint64_t asks[2] = { 0 };
++        uint64_t opened[2] = { 0 };
++        for (uint32_t way = 0; way < 2; way += 1)
++        {
++            result = files_test_listed_walk(root, directories, lanes[l], 0, way == 0 ? BUSTER_FILE_CACHE_ASKING_MISSES : 0, directory, &caches[way], &tables[way],
++                                            &answered[way], &asks[way]) &&
++                     result;
++        }
++        // The caches as the walks left them, before any unit adds a path.
++        result = result && answered[0] == BUSTER_FILES_TEST_ASKED && asks[0] == 1 && answered[1] == 0 && asks[1] == 0 && caches[0].path_count == caches[1].path_count;
++        for (uint32_t p = 0; result && p < caches[0].path_count; p += 1)
++        {
++            const FileCachePath* on = &caches[0].paths[p];
++            const FileCachePath* off = file_cache_find_path(&caches[1], on->path, on->length, on->hash);
++            result = off != 0 && (on->record != BUSTER_PP_NONE) == (off->record != BUSTER_PP_NONE) &&
++                     (on->record != BUSTER_PP_NONE || on->probe.error == off->probe.error);
++            if (!result)
++            {
++                printf("asks: on %u lanes, %s: %s against %s\n", lanes[l], on->path, on->record != BUSTER_PP_NONE ? "a file" : strerror(on->probe.error),
++                       off == 0 ? "no entry" : off->record != BUSTER_PP_NONE ? "a file" : strerror(off->probe.error));
++            }
++        }
++        for (uint32_t way = 0; result && way < 2; way += 1)
++        {
++            result = files_test_listed_unit(root, directories, &caches[way], &tables[way], &opened[way]) && opened[way] == 0;
++        }
++        if (!result)
++        {
++            printf("asks: on %u lanes: %lu and %lu candidates ruled out, %lu and %lu asks, %u and %u paths, the unit opened %lu and %lu\n", lanes[l],
++                   (unsigned long)answered[0], (unsigned long)answered[1], (unsigned long)asks[0], (unsigned long)asks[1], caches[0].path_count, caches[1].path_count,
++                   (unsigned long)opened[0], (unsigned long)opened[1]);
++        }
++        for (uint32_t way = 0; way < 2; way += 1)
++        {
++            file_cache_release(&caches[way]);
++            intern_release(&tables[way]);
++        }
++    }
++    printf("asks: %s (the walk's answered candidates' paths in the cache as without asks, one ask, on every lane count)\n", result ? "as expected" : "WRONG");
++    for (uint32_t h = 0; h < BUSTER_FILES_TEST_ASKED; h += 1)
++    {
++        snprintf(path, sizeof(path), "%s/h%u.h", bits, h);
++        unlink(path);
++        snprintf(path, sizeof(path), "%s/g%u.h", bits, h);
++        unlink(path);
++    }
++    snprintf(path, sizeof(path), "%s/a.h", first);
++    unlink(path);
++    unlink(root);
++    rmdir(bits);
++    rmdir(first);
++    rmdir(second);
++    return result;
++}
++
+ #define BUSTER_FILES_TEST_DEEP_LEVELS 10
+ #define BUSTER_FILES_TEST_DEEP_NAME 250
+ #define BUSTER_FILES_TEST_LONG_NAME 2400
+@@ -1905,6 +2013,7 @@ static int run_files_tests(int argument_count, char** arguments)
+         passed_all &= files_test_dollars(directory, lanes, lane_count, id_order);
+         passed_all &= files_test_rounds(directory, lanes, lane_count);
+         passed_all &= files_test_listings(directory, lanes, lane_count);
++        passed_all &= files_test_asks(directory, lanes, lane_count);
+         passed_all &= files_test_special(directory, lanes, lane_count, id_order);
+         passed_all &= files_test_memory(directory, seed);
+         signal(SIGALRM, SIG_DFL);
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 130235569..d493f3d2e 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -685,8 +685,9 @@ struct PPFile
+ // file is there), fstat attempts (one per successful open, even for a non-regular file or a failed fstat), and files
+ // mapped/read (the latter counts file-read operations, not individual pread attempts). Each unit/lane owns its counts.
+ // `listings` counts directories whose names were read (file_cache_list_directory: an open, an fstatfs, getdents64 to the
+-// end and a close, or fewer system calls if one of them fails), and `listed` the paths a listing answered without a
+-// system call.
++// end and a close, or fewer system calls if one of them fails), `asks` the directories asked for a path's first
++// component (file_cache_miss_component: a stat), and `listed` the paths a listing or such an answer ruled out without
++// a system call.
+ typedef struct FileCacheCounts FileCacheCounts;
+ struct FileCacheCounts
+ {
+@@ -696,6 +697,7 @@ struct FileCacheCounts
+     uint64_t reads;
+     uint64_t listings;
+     uint64_t listed;
++    uint64_t asks;
+ };
+ 
+ // What a probe of a path found (file_cache_probe): whether a regular file can be read there, its identity and
+@@ -741,6 +743,13 @@ struct FileCachePath
+     FileProbe probe;
+ };
+ 
++// The first components a directory counts the failed probes under (FileCacheDirectory.component_names, #2873): this
++// many, each a name of at most this many bytes. One past either is not counted, and its paths are probed as before.
++#define BUSTER_FILE_CACHE_COMPONENTS 16u
++#define BUSTER_FILE_CACHE_COMPONENT_NAME 15u
++_Static_assert(BUSTER_FILE_CACHE_COMPONENTS == 16 && BUSTER_FILE_CACHE_COMPONENT_NAME == 15,
++               "a component's key is 16 bytes, and file_cache_find_component compares it with 16 slots, four a vector");
++
+ // A directory the include search looked up paths in (a search directory, or an includer's), which the cache counts the
+ // failed probes of: the paths in it that had no file (ENOENT). When the count reaches BUSTER_FILE_CACHE_LISTING_MISSES,
+ // the cache reads the directory's names once (file_cache_list_directory). The listing then answers a path in the
+@@ -759,6 +768,16 @@ struct FileCacheDirectory
+     uint32_t name_mask;
+     bool deferred;
+     bool unlisted;
++    // The first components of the paths that had no file here (file_cache_miss_component), `component_count` of them,
++    // each in a slot of 16 bytes: its name's bytes and zeros after them (a key, file_cache_component_key), so that one
++    // compare finds a component among four slots a vector. A slot not taken is all zeros. Its paths' failed probes, at
++    // most 255 counted: at the cache's asking_misses-th the directory was asked for it, once. And a bit of
++    // `component_absent` for each one the directory then lacked, under which no file can be: until it lacks one, a
++    // lookup here reads none of them.
++    uint8_t component_names[BUSTER_FILE_CACHE_COMPONENTS][BUSTER_FILE_CACHE_COMPONENT_NAME + 1];
++    uint8_t component_misses[BUSTER_FILE_CACHE_COMPONENTS];
++    uint32_t component_count;
++    uint32_t component_absent;
+     FileCacheDirectory* next;
+ };
+ 
+@@ -814,6 +833,11 @@ struct FileCache
+     uint32_t listing_misses;
+     // The directories with a listing: until there is one, a lookup that finds a file looks no directory up.
+     uint32_t listed_directories;
++    // A directory is asked for a path's first component at the component's `asking_misses`-th failed probe there
++    // (BUSTER_FILE_CACHE_ASKING_MISSES; 0 for never, which the tests compare with: a component's first miss is its
++    // count's 1), and the components their directories lack, which answer as a listing does.
++    uint32_t asking_misses;
++    uint32_t absent_components;
+     // The four arrays' arena of tables, file_cache_initialize's (#1521), or empty where they are tables of a unit's
+     // (pp_initialize_once).
+     Arena arrays;
+@@ -3900,6 +3924,15 @@ static uint32_t pp_line_of(Preprocessor* pp, uint32_t range, uint32_t location,
+ // with first looks at 32 misses or none, and 64 us at 16; deflate.c's 159, 154 and 158 us, and sqlite3.c's 582, 576
+ // and 601 us. Listing every directory whole at 16 made the first 77 us and sqlite3.c's 540 (file_cache_list_directory).
+ #define BUSTER_FILE_CACHE_LISTING_MISSES 32u
++// The failed probes under one first component of a directory after which the directory is asked for the component
++// itself (file_cache_miss_component). An ask pays where the component is absent and fails again; it is lost on one
++// that fails no more, and on one the directory has. From the 9700X's traces (#2873): a unit with only <stdio.h> has two
++// absent components that fail 17 times and two that fail twice, and sqlite3.c's fail up to 86 times; musl's 1,336
++// units, with seven -I directories, have 2,826 absent components that fail twice or more, 259 of them a third time,
++// and 1,332 present ones that fail twice or more. By the calls' costs (file_cache_miss_component), asking at the
++// second miss loses musl's units 2,900 cycles each, at the third 600 and at the fourth 160, where the unit with
++// <stdio.h> gains 34,000, 33,400 and 30,900 and sqlite3.c 170,000, 162,900 and 155,000.
++#define BUSTER_FILE_CACHE_ASKING_MISSES 3u
+ #define BUSTER_FILE_CACHE_SMALL_LISTING 1024u
+ #define BUSTER_FILE_CACHE_LARGE_LISTING 8u
+ #define BUSTER_FILE_CACHE_RECORD_MAX 280u
+@@ -3939,6 +3972,7 @@ static bool file_cache_start(FileCache* cache, InternTable* table, PPPrepare pre
+     cache->table = table;
+     cache->read_limit = BUSTER_FILE_CACHE_READ_LIMIT;
+     cache->listing_misses = BUSTER_FILE_CACHE_LISTING_MISSES;
++    cache->asking_misses = BUSTER_FILE_CACHE_ASKING_MISSES;
+     cache->capacity_shift = shift;
+     const bool reserved = arrays[0] != 0 && arrays[1] != 0 && arrays[2] != 0 && arrays[3] != 0;
+     cache->path_arena = reserved ? arena_reserve(BUSTER_FILE_CACHE_PATH_BYTES) : (Arena){ 0 };
+@@ -4537,11 +4571,125 @@ static bool file_cache_listed_absent(const FileCacheDirectory* directory, const
+     return result;
+ }
+ 
+-// After a probe of a path in `directory` (null for none): a path without a file there (ENOENT, which also says the
+-// directory could be searched) counts towards the directory's listing, which the cache reads at the
++// The key of `path`'s first component after `directory`'s own bytes and a '/', where more of the path follows it: the
++// component's bytes and zeros after them, sixteen in all, as a slot holds it; and its length in `*component`. Or 0
++// there, and no key: the path is a name in the directory itself (which fails once, and is most of the misses), or the
++// component is empty, "." or "..", which every directory has, or longer than a slot holds
++// (BUSTER_FILE_CACHE_COMPONENT_NAME). The sixteen bytes after the '/' are looked at in one masked load, which reads no
++// byte past the path's end, and the first '/' among them ends the component: no loop over its bytes, and no branch on
++// one.
++static __m128i file_cache_component_key(const FileCacheDirectory* directory, const char* path, uint32_t length, uint32_t* component)
++{
++    const uint32_t first = directory->length + 1;
++    const uint32_t rest = length - first;
++    const __mmask16 looked = (__mmask16)_bzhi_u32(0xffffu, rest < 16 ? rest : 16);
++    const __m128i bytes = _mm_maskz_loadu_epi8(looked, path + first);
++    const uint32_t slashes = _mm_cmpeq_epi8_mask(bytes, _mm_set1_epi8('/'));
++    const uint32_t dotted = _mm_cmpeq_epi8_mask(bytes, _mm_set1_epi8('.'));
++    // The component's length, or 16 where no '/' is among the bytes; and the mask of its bytes.
++    const uint32_t count = _tzcnt_u32(slashes | 0x10000u);
++    const uint32_t name = _bzhi_u32(0xffffu, count);
++    // One or two bytes, each a dot; an empty component has no byte that isn't one.
++    const bool dots = count <= 2 && (dotted & name) == name;
++    const bool counted = count <= BUSTER_FILE_CACHE_COMPONENT_NAME && !dots;
++    *component = counted ? count : 0;
++    return _mm_maskz_mov_epi8((__mmask16)name, bytes);
++}
++
++// The slot of `directory`'s that counts the component with key `key`, or BUSTER_FILE_CACHE_COMPONENTS for none: the key
++// is compared with every slot at once, four a vector, by a slot's two halves. No key is all zeros, as a slot not taken
++// is: a component has a byte. Its bytes are compared in their case: what the directory was asked is that spelling.
++static uint32_t file_cache_find_component(const FileCacheDirectory* directory, __m128i key)
++{
++    const __m512i keys = _mm512_broadcast_i32x4(key);
++    uint32_t found = 0;
++    for (uint32_t v = 0; v < BUSTER_FILE_CACHE_COMPONENTS / 4; v += 1)
++    {
++        const uint32_t halves = _mm512_cmpeq_epi64_mask(keys, _mm512_loadu_si512(directory->component_names[4 * v]));
++        found |= (halves & (halves >> 1) & 0x55u) << (8 * v);
++    }
++    // A slot's bit is at twice its number; no bit counts 32 zeros.
++    return _tzcnt_u32(found) / 2;
++}
++
++// Whether `directory` was asked for `path`'s first component and has none (file_cache_miss_component): no file can be
++// at the path, and a lookup gets ENOENT without a probe, as from a listing. Lanes may read at once while no lane adds.
++static bool file_cache_component_absent(const FileCacheDirectory* directory, const char* path, uint32_t length)
++{
++    bool result = false;
++    if (directory->component_absent != 0)
++    {
++        uint32_t component = 0;
++        const __m128i key = file_cache_component_key(directory, path, length, &component);
++        const uint32_t slot = component != 0 ? file_cache_find_component(directory, key) : BUSTER_FILE_CACHE_COMPONENTS;
++        result = ((directory->component_absent >> slot) & 1) != 0;
++    }
++    return result;
++}
++
++// After a probe of `path` in `directory` found no file there (ENOENT): its first component, where more of the path
++// follows, is counted in a slot of the directory's, and at the component's cache->asking_misses-th miss the directory
++// is asked for it, once: a stat of the component's own path, which is the path's bytes up to the component's end.
++// ENOENT says the directory has none by that name, and every later path under it is answered without a probe
++// (file_cache_component_absent). Any other answer (it is there; an error) leaves its paths to be probed as before. The
++// ask is the lookup every path under the component begins with, a link followed as theirs is, so it is right on every
++// file system, those a listing can't answer for among them (file_cache_exact_names). A directory with a listing is
++// asked nothing: its listing answers. A component that finds every slot taken is not counted.
++//
++// glibc's headers include one another as <bits/...>, <sys/...>, <gnu/...>, <linux/...> and <asm/...>, and each such
++// include is probed in every search directory before the one that has it: clang's resource directory and
++// /usr/local/include have no `bits`. Those are 40 of the 52 failed opens of a unit with only <stdio.h> and 167 of
++// sqlite3.c's 207 (#2873). A listing comes too late for a small unit (BUSTER_FILE_CACHE_LISTING_MISSES) and not at all
++// in a large directory that fails fewer than BUSTER_FILE_CACHE_LARGE_LISTING times as often. On the 9700X, on a warm
++// dentry cache, a failed open costs 1,270 cycles and a stat 990 of an absent path and 1,100 of one that is there, where
++// an open and a close cost 2,400. Every failed probe comes here, in units that never ask too, so a miss is counted
++// without a loop: its key by one masked load and its slot by one compare of every slot (as loops over the name's bytes
++// and the slots, the counting gave a musl unit 200 to 400 more mispredicted branches). The slots are the directory's own
++// bytes, and an ask keeps its path among the cache's. One lane at a time.
++static void file_cache_miss_component(FileCache* cache, FileCacheDirectory* directory, const char* path, uint32_t length, FileCacheCounts* counts)
++{
++    uint32_t component = 0;
++    __m128i key = _mm_setzero_si128();
++    if (directory->names == 0)
++    {
++        key = file_cache_component_key(directory, path, length, &component);
++    }
++    uint32_t slot = component != 0 ? file_cache_find_component(directory, key) : BUSTER_FILE_CACHE_COMPONENTS;
++    if (component != 0 && slot == BUSTER_FILE_CACHE_COMPONENTS && directory->component_count < BUSTER_FILE_CACHE_COMPONENTS)
++    {
++        slot = directory->component_count;
++        _mm_storeu_si128((__m128i*)(void*)directory->component_names[slot], key);
++        directory->component_count += 1;
++    }
++    if (slot < BUSTER_FILE_CACHE_COMPONENTS)
++    {
++        directory->component_misses[slot] += directory->component_misses[slot] < UINT8_MAX;
++        if (directory->component_misses[slot] == cache->asking_misses)
++        {
++            // The component's own path, among the cache's: a frame here would be a page of every miss's stack.
++            const uint32_t end = directory->length + 1 + component;
++            char* asked = arena_push(&cache->path_arena, (uint64_t)end + 1, 1);
++            if (asked != 0)
++            {
++                memcpy(asked, path, end);
++                asked[end] = 0;
++                struct stat status;
++                const int error = stat(asked, &status) == 0 ? 0 : errno;
++                const uint32_t absent = error == ENOENT;
++                counts->asks += 1;
++                directory->component_absent |= absent << slot;
++                cache->absent_components += absent;
++            }
++        }
++    }
++}
++
++// After a probe of `path` (`length` bytes) in `directory` (null for none): a path without a file there (ENOENT, which
++// also says the directory could be searched) counts towards the directory's listing, which the cache reads at the
+ // cache->listing_misses-th, or BUSTER_FILE_CACHE_LARGE_LISTING times that for a directory its first look found large
+-// (file_cache_list_directory). One lane at a time.
+-static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* directory, const FileProbe* probe, FileCacheCounts* counts)
++// (file_cache_list_directory); and towards its first component's ask (file_cache_miss_component). One lane at a time.
++static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* directory, const char* path, uint32_t length, const FileProbe* probe,
++                                  FileCacheCounts* counts)
+ {
+     if (directory != 0 && probe->error == ENOENT)
+     {
+@@ -4551,6 +4699,7 @@ static void file_cache_count_miss(FileCache* cache, FileCacheDirectory* director
+         {
+             file_cache_list_directory(cache, directory, counts);
+         }
++        file_cache_miss_component(cache, directory, path, length, counts);
+     }
+ }
+ 
+diff --git a/src/buster/compiler/c_preprocessor_benchmark.c b/src/buster/compiler/c_preprocessor_benchmark.c
+index 67bde71a2..71b3383bf 100644
+--- a/src/buster/compiler/c_preprocessor_benchmark.c
++++ b/src/buster/compiler/c_preprocessor_benchmark.c
+@@ -196,6 +196,7 @@ static bool pp_benchmark_pass(const PPOptions* run, uint32_t read_limit, uint32_
+         sample->probes.maps += pp.probes.maps;
+         sample->probes.reads += pp.probes.reads;
+         sample->probes.listings += pp.probes.listings;
++        sample->probes.asks += pp.probes.asks;
+         sample->probes.listed += pp.probes.listed;
+         for (uint32_t phase = 0; phase < PP_PHASE_COUNT; phase += 1)
+         {
+@@ -1205,9 +1206,10 @@ int run_preprocessor_benchmark(int argc, char** argv)
+                        (double)include_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick,
+                        (double)embed_ticks[BUSTER_PP_BENCHMARK_PASSES / 2] * milliseconds_per_tick);
+                 printf("             direct file calls/pass: %lu open, %lu fstat; stat: %lu embed, %lu directory setup (not process-wide syscall totals); "
+-                       "%lu directories listed, %lu opens they saved\n",
++                       "%lu directories listed, %lu asked for a subdirectory, %lu opens they saved\n",
+                        (unsigned long)memory->probes.opens, (unsigned long)memory->probes.fstats, (unsigned long)lookups->embed_stats,
+-                       (unsigned long)lookups->directory_stats, (unsigned long)memory->probes.listings, (unsigned long)memory->probes.listed);
++                       (unsigned long)lookups->directory_stats, (unsigned long)memory->probes.listings, (unsigned long)memory->probes.asks,
++                       (unsigned long)memory->probes.listed);
+                 printf("             includes/pass: %lu searches, %lu found, %lu open, %lu fstat (subset of direct file calls); embeds: %lu searches, %lu found\n",
+                        (unsigned long)lookups->include_searches, (unsigned long)lookups->include_found, (unsigned long)lookups->include_opens,
+                        (unsigned long)lookups->include_fstats, (unsigned long)lookups->embed_searches, (unsigned long)lookups->embed_found);
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 03c57ecb8..d6d3f32d0 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -598,10 +598,12 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
+ // into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
+ // MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
+ // arenas, says why it fails). A path whose first `directory_length` bytes are a directory the search looks in, followed
+-// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent):
+-// a path the listing rules out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
++// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent),
++// or by what the directory answered about the path's first component (file_cache_component_absent): a path either rules
++// out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
+ // `*known` (if `known` isn't null) caches the directory's FileCacheDirectory for its caller: a search directory's.
+-// Until some directory has a listing, only a failed probe looks its directory up. One lane at a time.
++// Until some directory has a listing or lacks a component it was asked for, only a failed probe looks its directory up.
++// One lane at a time.
+ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, uint32_t directory_length, FileCacheDirectory** known,
+                                        FileCacheCounts* counts, int* error)
+ {
+@@ -612,16 +614,17 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
+     {
+         const bool in_directory = file_cache_in_directory(path, length, directory_length);
+         FileCacheDirectory* directory = known != 0 ? *known : 0;
+-        directory = directory == 0 && in_directory && cache->listed_directories != 0 ? file_cache_directory(cache, path, directory_length) : directory;
++        const bool answers = cache->listed_directories != 0 || cache->absent_components != 0;
++        directory = directory == 0 && in_directory && answers ? file_cache_directory(cache, path, directory_length) : directory;
+         FileProbe probe = { .record = BUSTER_PP_NONE, .error = ENOENT };
+-        const bool absent = directory != 0 && file_cache_listed_absent(directory, path, length);
++        const bool absent = directory != 0 && (file_cache_listed_absent(directory, path, length) || file_cache_component_absent(directory, path, length));
+         counts->listed += absent;
+         if (!absent)
+         {
+             Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
+             file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
+             directory = directory == 0 && in_directory && probe.error == ENOENT ? file_cache_directory(cache, path, directory_length) : directory;
+-            file_cache_count_miss(cache, directory, &probe, counts);
++            file_cache_count_miss(cache, directory, path, length, &probe, counts);
+         }
+         if (known != 0 && directory != 0)
+         {
+diff --git a/src/buster/compiler/c_preprocessor_test.c b/src/buster/compiler/c_preprocessor_test.c
+index ca6451b89..3e11fc3ea 100644
+--- a/src/buster/compiler/c_preprocessor_test.c
++++ b/src/buster/compiler/c_preprocessor_test.c
+@@ -3559,6 +3559,7 @@ static bool pp_test_directory_listings(const char* directory)
+     if (result)
+     {
+         units[1].cache->listing_misses = 0;
++        units[1].cache->asking_misses = 0;
+     }
+     uint64_t expected_opens = 0;
+     uint64_t expected_listed = 0;
+@@ -3678,6 +3679,379 @@ static bool pp_test_directory_listings(const char* directory)
+     return result;
+ }
+ 
++// A path's first component's key (file_cache_component_key, #2873): each case's path, after a directory of one byte,
++// with its component's length (0 for none) and its key: the name's bytes and zeros after them, sixteen in all. Each
++// path's bytes end where a page that can't be read begins, so that a load past them faults; and a case's `tail`
++// follows its path's bytes in a second run, in memory that can be read: a '/' or a dot there, past the path's end,
++// changes nothing.
++static bool pp_test_component_keys(void)
++{
++    static const struct
++    {
++        const char* path;
++        uint32_t component;
++        const char* name;
++        const char* tail;
++    } cases[] = {
++        { "d/bits/a.h", 4, "bits", "/b" },
++        { "d/b/a.h", 1, "b", "/" },
++        // Names in the directory itself: of one byte, of fifteen, of sixteen and of more.
++        { "d/z", 0, "", "/x/y" },
++        { "d/zz.h", 0, "", "/x.h" },
++        { "d/fifteen-bytes-x", 0, "", "/x" },
++        { "d/sixteen-bytes-xy", 0, "", "/x" },
++        { "d/a-name-of-more-than-sixteen-bytes.h", 0, "", "/x" },
++        // As many bytes as a slot holds, and one more.
++        { "d/fifteen-bytes-x/a.h", 15, "fifteen-bytes-x", "/" },
++        { "d/sixteen-bytes-xy/a.h", 0, "", "/" },
++        { "d/fifteen-bytes-x/", 15, "fifteen-bytes-x", "x" },
++        // No component, "." and "..", and names with a dot.
++        { "d//a.h", 0, "", "/" },
++        { "d/./a.h", 0, "", "/" },
++        { "d/../a.h", 0, "", "/" },
++        { "d/.a/a.h", 2, ".a", "." },
++        { "d/a./a.h", 2, "a.", "." },
++        { "d/.../a.h", 3, "...", "." },
++        { "d/.", 0, "", "./" },
++        { "d/..", 0, "", "/" },
++        // Nothing after the directory's '/'.
++        { "d/", 0, "", "bits/a.h" },
++        // A name past ASCII, and the next component's bytes, which are no part of the key.
++        { "d/\xc3\xa9/a.h", 2, "\xc3\xa9", "/" },
++        { "d/sys/types/more.h", 3, "sys", "/" },
++    };
++    const uint64_t page_bytes = (uint64_t)sysconf(_SC_PAGESIZE);
++    char* mapping = mmap(0, 2 * page_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    bool result = mapping != MAP_FAILED && mprotect(mapping + page_bytes, page_bytes, PROT_NONE) == 0;
++    const FileCacheDirectory directory = { .length = 1 };
++    uint32_t failures = 0;
++    for (uint32_t c = 0; result && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
++    {
++        const uint32_t length = (uint32_t)strlen(cases[c].path);
++        const uint32_t tail = (uint32_t)strlen(cases[c].tail);
++        uint8_t expected[16] = { 0 };
++        memcpy(expected, cases[c].name, strlen(cases[c].name));
++        for (uint32_t run = 0; run < 2; run += 1)
++        {
++            // The path's last byte is the page's last, or its tail's is.
++            char* path = mapping + page_bytes - length - (run == 0 ? 0 : tail);
++            memcpy(path, cases[c].path, length);
++            memcpy(path + length, cases[c].tail, run == 0 ? 0 : tail);
++            uint32_t component = UINT32_MAX;
++            uint8_t key[16];
++            _mm_storeu_si128((__m128i*)(void*)key, file_cache_component_key(&directory, path, length, &component));
++            // Where a path has no component to count, its key is not read.
++            const bool same = component == cases[c].component && (component == 0 || memcmp(key, expected, sizeof(key)) == 0);
++            if (!same)
++            {
++                printf("component keys: %s%s: a component of %u bytes (%u)\n", cases[c].path, run == 0 ? "" : " with bytes after it", component, cases[c].component);
++            }
++            failures += !same;
++        }
++    }
++    if (mapping != MAP_FAILED)
++    {
++        munmap(mapping, 2 * page_bytes);
++    }
++    result = result && failures == 0;
++    printf("component keys: %s (%u cases, each at the end of a page and with bytes after it)\n", result ? "as expected" : "WRONG", (uint32_t)BUSTER_ARRAY_LENGTH(cases));
++    return result;
++}
++
++// A search directory asked for a subdirectory (FileCacheDirectory.component_names, #2873). After
++// BUSTER_FILE_CACHE_ASKING_MISSES failed probes under one first component of a search directory, the cache asks the
++// directory for the component, once: a stat of the component's own path. A directory without it then gives ENOENT for
++// every path under it, without an open. The test searches paths by groups under one component, each of new names,
++// and expects after every group the opens, the asks and the answers the rule gives for what its two directories have
++// there (the table's counts, with the asks at a component's third miss). Every search also finds what it finds with
++// the asks off: the same cache with asking_misses 0 gives the same paths, files and errors, and opens every candidate
++// an answer spared. What an ask can't rule out is still opened: a component the directory has, a regular file by its
++// name (ENOTDIR, which counts no miss), another spelling of a component it lacks, a name it begins with and one that
++// begins with it, "." and "..", and a component longer than a name can be. A dangling link and a name past ASCII are
++// asked for as any other, and a name without a '/' never. A directory counts BUSTER_FILE_CACHE_COMPONENTS components,
++// of names up to BUSTER_FILE_CACHE_COMPONENT_NAME bytes: one past either is opened every time, and a component's
++// count stops at 255, so that it is asked for once. A second unit that shares the cache uses the answers at once. A
++// directory with a listing is asked nothing more: its listing answers (file_cache_listed_absent).
++static bool pp_test_directory_asks(const char* directory)
++{
++    // The asks' threshold the table's counts are for.
++    const uint32_t asking = 3;
++    char first[4200];
++    char second[4200];
++    char have[4300];
++    char bits[4300];
++    char path[4400];
++    snprintf(first, sizeof(first), "%s/ask-first", directory);
++    snprintf(second, sizeof(second), "%s/ask-second", directory);
++    snprintf(have, sizeof(have), "%s/have", first);
++    snprintf(bits, sizeof(bits), "%s/bits", second);
++    bool result = mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0 && mkdir(have, 0700) == 0 && mkdir(bits, 0700) == 0;
++    snprintf(path, sizeof(path), "%s/inner.h", have);
++    result = result && pp_test_write_file(path, "int inner;\n");
++    snprintf(path, sizeof(path), "%s/plain", first);
++    result = result && pp_test_write_file(path, "int plain;\n");
++    snprintf(path, sizeof(path), "%s/gone", first);
++    result = result && symlink("nowhere", path) == 0;
++    // `second`'s headers under `bits`: one for each search of the first group, and one for the unit that shares the cache.
++    for (uint32_t h = 0; result && h < 5; h += 1)
++    {
++        snprintf(path, sizeof(path), "%s/h%u.h", bits, h);
++        result = pp_test_write_file(path, "int header;\n");
++    }
++    // A component longer than a name can be.
++    static char long_component[300];
++    memset(long_component, 'a', 298);
++    long_component[298] = 0;
++    // The groups: a first component (none for names in the directories themselves), the names searched under it by
++    // their turn's number, whether a search finds its file, the searches, and what they add to the unit's opens, asks
++    // and answers. `first` is searched before `second`; a directory's third miss under a component asks it.
++    static const struct
++    {
++        const char* component;
++        const char* file;
++        bool found;
++        uint16_t turns;
++        uint16_t opens;
++        uint16_t asks;
++        uint16_t answered;
++    } groups[] = {
++        // `first` has no `bits`, `second` has it with these headers: `first` is opened three times, asked at the
++        // third, and answers the fourth.
++        { "bits", "h%u.h", true, 4, 7, 1, 1 },
++        // Headers `second`'s `bits` lacks: `first` answers every time; `second` is opened every time, asked at its
++        // third miss, and has the component.
++        { "bits", "x%u.h", false, 4, 4, 1, 4 },
++        // A component neither has: both are opened three times and asked, and both answer the fourth.
++        { "none", "a%u.h", false, 4, 6, 2, 2 },
++        // Another spelling of it, a name it begins with and one that begins with it are other components: opened.
++        { "None", "a%u.h", false, 1, 2, 0, 0 },
++        { "non", "a%u.h", false, 1, 2, 0, 0 },
++        { "nonesuch", "a%u.h", false, 1, 2, 0, 0 },
++        // A component `first` has, with its header: one open, and no miss.
++        { "have", "inner.h", true, 1, 1, 0, 0 },
++        // Headers `first`'s `have` lacks: `first` is opened every time and asked at its third miss; `second`, without
++        // the component, is opened three times, asked, and answers the fourth.
++        { "have", "x%u.h", false, 4, 7, 2, 1 },
++        // A regular file by the component's name in `first`: ENOTDIR every time, which is no miss and asks nothing;
++        // `second` lacks the component.
++        { "plain", "a%u.h", false, 4, 7, 1, 1 },
++        // A dangling link in `first` is a component it lacks.
++        { "gone", "a%u.h", false, 4, 6, 2, 2 },
++        // "." and ".." are no components to ask for, whatever follows them: every candidate is opened.
++        { "./none", "e%u.h", false, 4, 8, 0, 0 },
++        { "../nowhere", "a%u.h", false, 4, 8, 0, 0 },
++        { "../ask-second/bits", "h0.h", true, 1, 1, 0, 0 },
++        // A name of two bytes with one dot is a component as any other.
++        { ".a", "a%u.h", false, 4, 6, 2, 2 },
++        { "a.", "a%u.h", false, 4, 6, 2, 2 },
++        // A name past ASCII.
++        { "\xc3\xa9", "a%u.h", false, 4, 6, 2, 2 },
++        // Names in the directories themselves, and paths under the long component (ENAMETOOLONG): opened every time.
++        { "", "z%u.h", false, 4, 8, 0, 0 },
++        { long_component, "a%u.h", false, 2, 4, 0, 0 },
++        // Two names that differ past their eighth byte are two components: a slot's halves are both compared.
++        { "samehead-a", "a%u.h", false, 4, 6, 2, 2 },
++        { "samehead-b", "a%u.h", false, 1, 2, 0, 0 },
++        // A name of as many bytes as a slot holds, and one of a byte more, which is not counted.
++        { "fifteen-bytes-x", "a%u.h", false, 4, 6, 2, 2 },
++        { "sixteen-bytes-xy", "a%u.h", false, 4, 8, 0, 0 },
++        // The slots: `first` counts thirteen components by here (`plain` is none of its) and `second` fourteen, so
++        // `first` has slots for three of these and `second` for two: a component without a slot is opened every time.
++        { "c00", "a%u.h", false, 4, 6, 2, 2 },
++        { "c01", "a%u.h", false, 4, 6, 2, 2 },
++        { "c02", "a%u.h", false, 4, 7, 1, 1 },
++        { "c03", "a%u.h", false, 4, 8, 0, 0 },
++        { "c04", "a%u.h", false, 4, 8, 0, 0 },
++        // Headers `second`'s `bits` lacks, more than a count holds: `first` answers, `second` is opened, and is not
++        // asked for the component again when its count stops.
++        { "bits", "m%u.h", false, 260, 260, 0, 260 },
++    };
++    const char* const directories[] = { first, second };
++    PPOptions options = {
++        .language = {
++            .standard = 2023,
++        },
++        .no_standard_includes = true,
++        .include_directories = directories,
++        .include_directory_count = BUSTER_ARRAY_LENGTH(directories),
++        .quiet = true,
++    };
++    // Units 0 (asks) and 1 (the asks off) search every name, with listings off; unit 2 shares unit 0's cache; units 3
++    // (asks and listings) and 4 (both off) search until the directories are listed, and after.
++    static InternTable tables[5];
++    static Preprocessor units[5];
++    for (uint32_t u = 0; u < 5; u += 1)
++    {
++        units[u] = (Preprocessor){ 0 };
++        options.files = u == 2 ? units[0].cache : 0;
++        result = result && intern_initialize(&tables[u]) && pp_initialize(&units[u], &options, u == 2 ? &tables[0] : &tables[u]);
++    }
++    result = result && units[0].cache->asking_misses == asking;
++    if (result)
++    {
++        units[0].cache->listing_misses = 0;
++        units[1].cache->listing_misses = 0;
++        units[1].cache->asking_misses = 0;
++        units[4].cache->listing_misses = 0;
++        units[4].cache->asking_misses = 0;
++    }
++    uint64_t expected_opens = 0;
++    uint64_t expected_asks = 0;
++    uint64_t expected_answered = 0;
++    for (uint32_t g = 0; result && g < BUSTER_ARRAY_LENGTH(groups); g += 1)
++    {
++        static char name[400];
++        for (uint32_t turn = 0; result && turn < groups[g].turns; turn += 1)
++        {
++            const int prefix = snprintf(name, sizeof(name), "%s%s", groups[g].component, groups[g].component[0] != 0 ? "/" : "");
++            snprintf(name + prefix, sizeof(name) - (size_t)prefix, groups[g].file, turn);
++            uint32_t found[2];
++            uint32_t files[2];
++            for (uint32_t u = 0; u < 2; u += 1)
++            {
++                files[u] = pp_find_include(&units[u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found[u],
++                                           BUSTER_PP_NONE);
++            }
++            // The asks change no search's result, and an answer is an open the unit without them makes.
++            result = (files[0] != BUSTER_PP_NONE) == groups[g].found && (files[1] != BUSTER_PP_NONE) == groups[g].found && found[0] == found[1] &&
++                     units[0].probes.listings == 0 && units[1].probes.opens == units[0].probes.opens + units[0].probes.listed && units[1].probes.asks == 0 &&
++                     units[1].probes.listed == 0;
++        }
++        expected_opens += groups[g].opens;
++        expected_asks += groups[g].asks;
++        expected_answered += groups[g].answered;
++        result = result && units[0].probes.opens == expected_opens && units[0].probes.asks == expected_asks && units[0].probes.listed == expected_answered;
++        if (!result)
++        {
++            printf("directory asks: group %u, to %.40s: found %u, opens %lu/%lu, asks %lu/%lu, answered %lu/%lu, the opens without asks %lu\n", g, name,
++                   groups[g].found, (unsigned long)units[0].probes.opens, (unsigned long)expected_opens, (unsigned long)units[0].probes.asks,
++                   (unsigned long)expected_asks, (unsigned long)units[0].probes.listed, (unsigned long)expected_answered, (unsigned long)units[1].probes.opens);
++        }
++    }
++    result = result && pp_test_same_lookups(&units[0], &units[1]);
++    // The unit that shares the cache: `first` answers for `bits` at once, and both answer for `none`, without an ask.
++    if (result)
++    {
++        uint32_t found;
++        const uint32_t shared = pp_find_include(&units[2], (const uint8_t*)"bits/h4.h", 9, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
++        const uint64_t opens = units[2].probes.opens;
++        const uint32_t absent = pp_find_include(&units[2], (const uint8_t*)"none/z.h", 8, true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found, BUSTER_PP_NONE);
++        result = shared != BUSTER_PP_NONE && opens == 1 && absent == BUSTER_PP_NONE && units[2].probes.opens == 1 && units[2].probes.listed == 3 &&
++                 units[2].probes.asks == 0 && units[2].files[units[2].file_count - 2].error == ENOENT && units[2].files[units[2].file_count - 1].error == ENOENT;
++        if (!result)
++        {
++            printf("directory asks: the shared cache: opens %lu, answered %lu, asks %lu\n", (unsigned long)units[2].probes.opens,
++                   (unsigned long)units[2].probes.listed, (unsigned long)units[2].probes.asks);
++        }
++    }
++    // With listings. Four searches under `none`: both directories are asked at its third miss and answer the fourth.
++    // Then names in the directories themselves, which no ask answers, bring each directory to its
++    // BUSTER_FILE_CACHE_LISTING_MISSES-th miss (three of them `none`'s) and its listing, which answers every name
++    // after that one. Then `none` again, which the asks answer; and four searches under `have`, which `first` has
++    // and `second` lacks: `second`'s listing answers them all, so that a listed directory is asked for nothing; where
++    // this file system's directories aren't listed (lookups a listing can't answer for), `second` is opened three
++    // times, asked, and answers the fourth, as `first` is opened every time and asked at its third miss.
++    struct statfs system;
++    const bool listable = result && statfs(first, &system) == 0 && file_cache_exact_names((uint64_t)system.f_type);
++    const uint32_t flat = 40;
++    const uint32_t listed_from = BUSTER_FILE_CACHE_LISTING_MISSES - asking;
++    result = result && listed_from + 2 < flat;
++    expected_opens = 0;
++    expected_asks = 0;
++    expected_answered = 0;
++    uint64_t plain_opens = 0;
++    for (uint32_t c = 0; result && c < 4 + flat + 5; c += 1)
++    {
++        char name[64];
++        uint32_t opens = 2;
++        uint32_t asks = 0;
++        uint32_t answered = 0;
++        uint32_t looks = 0;
++        if (c < 4)
++        {
++            snprintf(name, sizeof(name), "none/a%u.h", c);
++            opens = c < 3 ? 2 : 0;
++            asks = c == 2 ? 2 : 0;
++            answered = c < 3 ? 0 : 2;
++        }
++        else if (c < 4 + flat)
++        {
++            // The name that is a directory's listing-th miss is opened, and lists it; the names after it are answered.
++            const uint32_t q = c - 4;
++            snprintf(name, sizeof(name), "q%02u.h", q);
++            const bool listed = listable && q >= listed_from;
++            opens = listed ? 0 : 2;
++            answered = listed ? 2 : 0;
++            looks = q + 1 >= listed_from ? 2 : 0;
++        }
++        else if (c == 4 + flat)
++        {
++            snprintf(name, sizeof(name), "none/b.h");
++            opens = 0;
++            answered = 2;
++            looks = 2;
++        }
++        else
++        {
++            const uint32_t a = c - 4 - flat;
++            snprintf(name, sizeof(name), "have/v%u.h", a);
++            opens = listable || a > 3 ? 1 : 2;
++            asks = !listable && a == 3 ? 2 : 0;
++            answered = listable || a > 3 ? 1 : 0;
++            looks = 2;
++        }
++        expected_opens += opens;
++        expected_asks += asks;
++        expected_answered += answered;
++        plain_opens += opens + answered;
++        uint32_t found[2];
++        uint32_t files[2];
++        for (uint32_t u = 0; u < 2; u += 1)
++        {
++            files[u] = pp_find_include(&units[3 + u], (const uint8_t*)name, (uint32_t)strlen(name), true, false, BUSTER_PP_NONE, BUSTER_PP_NONE, &found[u],
++                                       BUSTER_PP_NONE);
++        }
++        result = files[0] == BUSTER_PP_NONE && files[1] == BUSTER_PP_NONE && units[3].probes.opens == expected_opens && units[3].probes.asks == expected_asks &&
++                 units[3].probes.listed == expected_answered && units[3].probes.listings == looks && units[4].probes.opens == plain_opens &&
++                 units[4].probes.asks == 0 && units[4].probes.listed == 0 && units[4].probes.listings == 0;
++        if (!result)
++        {
++            printf("directory asks: with listings, %s: found %u/%u, opens %lu/%lu, asks %lu/%lu, answered %lu/%lu, listings %lu/%u, the opens without either %lu/%lu\n",
++                   name, files[0] != BUSTER_PP_NONE, files[1] != BUSTER_PP_NONE, (unsigned long)units[3].probes.opens, (unsigned long)expected_opens,
++                   (unsigned long)units[3].probes.asks, (unsigned long)expected_asks, (unsigned long)units[3].probes.listed, (unsigned long)expected_answered,
++                   (unsigned long)units[3].probes.listings, looks, (unsigned long)units[4].probes.opens, (unsigned long)plain_opens);
++        }
++    }
++    result = result && pp_test_same_lookups(&units[3], &units[4]);
++    for (uint32_t u = 5; u > 0; u -= 1)
++    {
++        pp_release(&units[u - 1]);
++    }
++    for (uint32_t u = 0; u < 5; u += 1)
++    {
++        intern_release(&tables[u]);
++    }
++    for (uint32_t h = 0; h < 5; h += 1)
++    {
++        snprintf(path, sizeof(path), "%s/h%u.h", bits, h);
++        unlink(path);
++    }
++    snprintf(path, sizeof(path), "%s/inner.h", have);
++    unlink(path);
++    snprintf(path, sizeof(path), "%s/plain", first);
++    unlink(path);
++    snprintf(path, sizeof(path), "%s/gone", first);
++    unlink(path);
++    rmdir(have);
++    rmdir(bits);
++    rmdir(first);
++    rmdir(second);
++    printf("directory asks: %s (%s; a component a directory lacks, one it has, a file, a dangling link, other spellings, dots, a name past ASCII, a "
++           "long one, the slots, a shared cache, listings)\n",
++           result ? "as expected" : "WRONG", listable ? "listed" : "this file system's directories aren't listed");
++    return result;
++}
++
+ // The descriptors pp_test_exhaust_descriptors takes: as many as the lowered limit leaves, at most this many.
+ #define BUSTER_PP_TEST_SPARE_DESCRIPTORS 16
+ 
+@@ -9174,6 +9548,8 @@ static bool pp_test_sections(PPTestDeal* deal, const char* directory, bool with_
+     passed &= PP_TEST_SECTION(deal, 1, pp_test_lookup_accounting(directory));
+     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_reads(directory));
+     passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_listings(directory));
++    passed &= PP_TEST_SECTION(deal, 1, pp_test_component_keys());
++    passed &= PP_TEST_SECTION(deal, 1, pp_test_directory_asks(directory));
+     passed &= PP_TEST_SECTION(deal, 1, pp_test_listing_descriptors(directory));
+     passed &= PP_TEST_SECTION(deal, 1, pp_test_final_copy_accounting());
+     passed &= PP_TEST_SECTION(deal, 1, pp_test_trailing_splices());
+-- 
+2.43.0
+
