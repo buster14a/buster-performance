@@ -1,0 +1,137 @@
+From eed51188447febf0f048f5d48dfb114a6d73f534 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 16 Nov 2026 18:01:49 +0000
+Subject: [PATCH 4/8] A process's first small releases leave their arenas to
+ its exit (#2873)
+
+A release without a pool unmaps its arena: a call that splits the
+stretch's mapping twice and frees the arena's pages apart from the
+exit's. With the same executable on the 9700X, leaving every such arena
+mapped took 2.25% of the kernel cycles off musl's units compiled a
+process each (9 rounds of 9) and nothing off sqlite3.c, whose releases
+are its large arenas' pages.
+
+So the first 32 releases of a process whose arena was taken from the
+stretch and pushed no more than 1 MiB leave it mapped: 32 MiB at the
+very most, which the exit frees with everything else. A larger arena's
+release gives its pages back at once, and so does every release after
+those.
+
+A hello.c compile here: 2 munmap calls where it made 6.
+
+Part of #2873.
+
+Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQsSoUunkrTyxkuSxop
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/lane.c      | 23 ++++++++++++++++++++++-
+ src/buster/compiler/lane_test.c | 33 ++++++++++++++++++++++++++-------
+ 2 files changed, 48 insertions(+), 8 deletions(-)
+
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 3f403cf3b..205925252 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -483,8 +483,19 @@ struct ArenaRegions
+ {
+     uintptr_t middle;
+     uint64_t carved[2];
++    // The releases that left their arena mapped (arena_release_keeps).
++    uint32_t kept;
+ };
+ #define BUSTER_ARENA_REGION_REFUSED ((uintptr_t)1)
++// A release without a pool unmaps its arena: a call that splits the stretch's mapping twice and frees the arena's pages
++// apart from the exit's, about 15,000 kernel cycles more than leaving them to the exit on the 9700X. A small unit
++// makes six. So the first BUSTER_ARENA_KEPT_COUNT releases of a process whose arena was taken from the stretch and
++// pushed no more than BUSTER_ARENA_KEPT_BYTES leave it mapped: the address space is not taken again either way, and
++// the pages, 32 MiB of them at the very most, are the exit's to free, with everything else. A larger arena's release
++// gives its pages back at once, as before, and so does every release after those: a process that reserves and
++// releases without end keeps no more.
++#define BUSTER_ARENA_KEPT_BYTES (1ull << 20)
++#define BUSTER_ARENA_KEPT_COUNT 32
+ #if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+ extern ArenaRegions arena_regions;
+ #elif defined(BUSTER_UNIT)
+@@ -1252,6 +1263,16 @@ static Arena arena_measure(void)
+     };
+ }
+ 
++// Whether a release without a pool leaves `arena`, whose mapping starts at `mapping`, mapped (above).
++static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
++{
++    const uintptr_t middle = __atomic_load_n(&arena_regions.middle, __ATOMIC_ACQUIRE);
++    const bool taken = BUSTER_ARENA_REGIONS && middle > BUSTER_ARENA_REGION_REFUSED && (uintptr_t)mapping >= middle - BUSTER_ARENA_REGION_BYTES &&
++                       (uintptr_t)mapping < middle + BUSTER_ARENA_REGION_BYTES;
++    const bool small = taken && !arena->unaccounted && arena->peak <= BUSTER_ARENA_KEPT_BYTES;
++    return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
++}
++
+ static void arena_release(Arena* arena)
+ {
+     if (arena->base != 0 && arena->grows)
+@@ -1313,7 +1334,7 @@ static void arena_release(Arena* arena)
+                 .layout = arena->layout,
+             };
+         }
+-        else
++        else if (!arena_release_keeps(arena, mapping))
+         {
+             munmap(mapping, bytes);
+         }
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index 36d453a15..44fff2341 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -614,7 +614,8 @@ static uint64_t lane_test_carved(uint32_t down)
+ // Reservations taken together (#2873: arena_reservation_map). With the limits fixed and the address space unlimited,
+ // as a compile's command has them: two arenas reserved one after the other are next to each other in the stretch's
+ // upper half, each zero-filled and writable where it pushed, as an arena of its own mapping is, and advised huge pages
+-// past its base pages from its reservation; the first's release unmaps it and leaves the second as it was; an arena
++// past its base pages from its reservation; a release without a pool leaves a small arena mapped and unmaps a large
++// one, and unmaps small ones too once BUSTER_ARENA_KEPT_COUNT have been kept (arena_release_keeps); an arena
+ // of base pages and an arena of tables come from the lower half, each right below the one before, with their
+ // mappings' flags; a pool takes a released arena and gives the same one back; commits take an arena's base pages at
+ // once and then four times what is committed where the kernel charges none, 64 KB and then twice where it does
+@@ -664,14 +665,32 @@ static void lane_test_arena_regions_child(LaneTestTally* tally)
+                          lane_test_huge_capable((uintptr_t)second.base + BUSTER_ARENA_SMALL_BYTES, &flagged) && flagged;
+     const bool base_pages = second_bytes != 0 && !(lane_test_huge_capable((uintptr_t)second.base, &flagged) || !flagged);
+     lane_test_expect(tally, !regions || (advised && base_pages), "a region's arena wasn't advised huge pages past its base pages, or its base pages could be huge");
+-    // The first's release unmaps its part of the region: the kernel has no page there, and the second keeps its bytes.
+-    const uint8_t* first_page = first.base;
++    // Releases without a pool (arena_release_keeps). The first, which pushed three pages, stays mapped; the second,
++    // which pushed more than BUSTER_ARENA_KEPT_BYTES, is unmapped: the kernel has no page there. Then small arenas
++    // until BUSTER_ARENA_KEPT_COUNT have been kept: the next one's release unmaps it, small as it is.
++    const uint8_t* first_page = (const uint8_t*)((uintptr_t)first.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
++    const uint8_t* second_page = (const uint8_t*)((uintptr_t)second.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
++    const bool neighbour = second_bytes != 0 && second_bytes[0] == 0xa5 && second_bytes[BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == 0xa5;
+     arena_release(&first);
+-    unsigned char vector = 0;
+-    const bool unmapped = first_page != 0 && mincore((void*)((uintptr_t)first_page & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)), BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
+-    const bool kept = second_bytes != 0 && second_bytes[0] == 0xa5 && second_bytes[BUSTER_ARENA_SMALL_BYTES + BUSTER_ARENA_HUGE_PAGE_BYTES - 1] == 0xa5;
+-    lane_test_expect(tally, unmapped && kept, "a released reservation of a region stayed mapped, or its neighbour lost its bytes");
+     arena_release(&second);
++    unsigned char vector = 0;
++    const bool first_mapped = first_page != 0 && mincore((void*)first_page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0;
++    const bool second_unmapped = second_page != 0 && mincore((void*)second_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
++    lane_test_expect(tally, neighbour && first.base == 0 && second_unmapped && (!regions || first_mapped), "a small arena's release unmapped it, or a large one's didn't");
++    bool every_kept = true;
++    uint32_t releases = 1;
++    for (; regions && releases < BUSTER_ARENA_KEPT_COUNT; releases += 1)
++    {
++        Arena small = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++        const uint8_t* page = small.base != 0 && arena_push(&small, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)small.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
++        arena_release(&small);
++        every_kept = every_kept && page != 0 && mincore((void*)page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0;
++    }
++    Arena past = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uint8_t* past_page = past.base != 0 && arena_push(&past, 1, 1) != 0 ? (const uint8_t*)((uintptr_t)past.base & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1)) : 0;
++    arena_release(&past);
++    const bool past_unmapped = past_page != 0 && mincore((void*)past_page, BUSTER_ARENA_PAGE_BYTES, &vector) != 0 && errno == ENOMEM;
++    lane_test_expect(tally, every_kept && past_unmapped, "a process's releases kept more small arenas mapped than they may, or fewer");
+     // The other flags' regions: base pages of 2 MB or more (MAP_STACK where the kernel maps them so), and tables.
+     Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 4 * BUSTER_ARENA_HUGE_PAGE_BYTES);
+     ArenaTable tables[] = {
+-- 
+2.43.0
+
