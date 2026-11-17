@@ -113,7 +113,7 @@ Each variant is a patch against main `0e8342dd7`, built and read by `scripts/job
 | `b` | a loop a record for the bytes, its choices `?:` and `&&` | 22.4 | 8.9 | 37.2 | 69.2 |
 | `c` | `b`, with the lists as bit words | 22.8 | 7.3 | 37.7 | 68.5 |
 | `d` | `c`, the loop written without branches (clang made one mask a branch) | 21.1 | 7.5 | 37.5 | 66.9 |
-| `e` | `a`'s gathers with `c`'s bit words | 9.4 | 7.5 | 38.9 | 56.5 |
+| `e` | `a`'s gathers with `c`'s bit words | 9.4 | 7.4 | 38.9 | 56.5 |
 | `f` | `e`, the bytes' pass run twice and the second timed | 5.5 | 7.6 | 37.6 | 51.4 |
 | `g` | `e` with comments and an unused class removed | 9.4 | 7.4 | 37.6 | 55.1 |
 | `h` | `g` with the loop a record, its mask opaque to the compiler | 14.2 | 7.5 | 37.6 | 60.2 |
@@ -130,7 +130,7 @@ Each variant is a patch against main `0e8342dd7`, built and read by `scripts/job
 - **A second run of the gathers is 5.5** (`f`). The other 3.9 of a first run are each declaration's line's byte made
   by the census's code at the line's first leaf, and the records' lines read where the kernel left them.
 - **Lists as bit words cost what compressed lists cost** (`a` against `e`): the part falls by 1.6 and the tests that
-  read the bits rise by 2.1. The words are less code and no store a listed record.
+  read the bits rise by 2.2. The words are less code and no store a listed record.
 - **Out of line changes nothing** (`i`, `j`), though inlined the passes sit in one function of 2,500 instructions
   and keep eleven values on its stack.
 
