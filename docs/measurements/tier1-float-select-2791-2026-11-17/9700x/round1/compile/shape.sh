@@ -1,0 +1,8 @@
+head -1 /var/lib/buster-9700x/owner >> holds.txt
+/home/david/buster-fast-bench/2791-claude/main/build/compiler --tier1 -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE -I/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c -o /dev/shm/claude-2791-main.o
+objdump -d --no-show-raw-insn /dev/shm/claude-2791-main.o | awk -v b=main '/^ +[0-9a-f]+:/ { n++; o = $2; c[o]++ } END { printf "%s records %d", b, n; split("cmova cmovae cmovb cmovbe cmovp cmovne cmove sete setne setnp setp seta setae setb setbe ucomisd ucomiss test", w, " "); for (i in w) printf " %s=%d", w[i], c[w[i]]; printf "\n" }' >> shape.txt
+size -A /dev/shm/claude-2791-main.o | awk -v b=main '/^.text/ { print b, ".text", $2 }' >> shape.txt
+/home/david/buster-fast-bench/2791-claude/head/build/compiler --tier1 -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE -I/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite /var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite/sqlite3.c -o /dev/shm/claude-2791-head.o
+objdump -d --no-show-raw-insn /dev/shm/claude-2791-head.o | awk -v b=head '/^ +[0-9a-f]+:/ { n++; o = $2; c[o]++ } END { printf "%s records %d", b, n; split("cmova cmovae cmovb cmovbe cmovp cmovne cmove sete setne setnp setp seta setae setb setbe ucomisd ucomiss test", w, " "); for (i in w) printf " %s=%d", w[i], c[w[i]]; printf "\n" }' >> shape.txt
+size -A /dev/shm/claude-2791-head.o | awk -v b=head '/^.text/ { print b, ".text", $2 }' >> shape.txt
+rm -f /dev/shm/claude-2791-main.o /dev/shm/claude-2791-head.o
