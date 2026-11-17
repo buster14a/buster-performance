@@ -102,3 +102,45 @@ timed as the gate was: `ab --rounds 3 --cpu 2` around `time-runs --runs 3 --copi
 Main's medians over the three rounds: 122.2 to 122.8 ms for sqlite3.c `-c`, 99.5 to 100.1 ms
 `-fsyntax-only`, 73.3 to 73.4 ms for Lua, 669.0 to 669.6 ms for musl. The head is within main-again's floor
 on every list and round: unchanged, as the identical disassembly says.
+
+# Phase C, the x86-64 disassembler's gate (c-disassembler-gate/)
+
+The disassembler's twins by request: `x86_disassemble_scalar` (`x86_disassemble_impl` with
+`vectorized` and `compact` false), the `compact` variant (`vectorized` false, `compact` true),
+`x86_decode_classify_scalar`, and the scalar formatter and listing that `--scalar` and the
+`scalar` variant select. `x86_disassemble` (the `batched` variant) is the production path.
+
+The benchmarked compiler is B2's head (the same build as b2-main-vs-head's `head`,
+SHA-256 `454405469884…`, logs/compiler.sha256). `benchmark-x86-disassembler` ran three times
+under `exclusive.sh`, pinned to CPU 2 (gate.sh): on its synthetic compiler stream, its
+synthetic vector stream (`--vector`), and real code, the benchmarked compiler's own `.text`
+(`--file compiler.text`: 31.3 MB, 6,677,043 instructions). Each figure is the median of 21
+passes, with the extremes in brackets (logs/*.log).
+
+| stream | phase | scalar | avx512 | batched (x86_disassemble) | compact |
+| --- | --- | --- | --- | --- | --- |
+| compiler.text | decode, ns/insn | 35.68 | 24.89 | **13.62** | 24.87 |
+| compiler.text | classify, ns/byte | 0.294 | 0.021 | **0.021** | 0.294 |
+| compiler.text | decode+format, ns/insn | 69.48 | 42.03 | **30.74** | 42.00 |
+| compiler.text | decode+listing, ns/insn | 72.66 | 43.03 | **31.72** | 43.03 |
+| synthetic compiler | decode | 31.73 | 23.37 | **8.44** | 23.14 |
+| synthetic compiler | classify | 0.294 | 0.020 | **0.020** | 0.294 |
+| synthetic compiler | decode+format | 61.72 | 41.71 | **26.44** | 41.40 |
+| synthetic compiler | decode+listing | 62.34 | 42.80 | **27.55** | 42.53 |
+| synthetic vector | decode | 37.90 | 28.55 | **28.74** | 27.91 |
+| synthetic vector | classify | 0.293 | 0.020 | **0.020** | 0.292 |
+| synthetic vector | decode+format | 80.54 | 50.44 | **50.46** | 49.53 |
+| synthetic vector | decode+listing | 81.40 | 51.48 | **51.49** | 50.53 |
+
+**The gate holds against the scalar path.** `x86_disassemble` is 1.6 to 3.8 times faster
+than `x86_disassemble_scalar` in every phase on every stream, and the vector classifier is 14
+times faster than the scalar one. The scalar variant's formatter and listing
+(`x86_disassembly_format_scalar`, `x86_disassembly_listing(..., true)`) ride in its
+decode+format and decode+listing rows.
+
+One exception, stated plainly: the `compact` variant (the scalar prefix test and the
+one-form-at-a-time bucket scan, with the compact form check) is 2.9% faster than `batched` on
+the synthetic vector stream's decode (27.91 against 28.74 ns) and 1.8% faster in its
+format and listing. That stream is all VEX and EVEX forms, which `batched` decodes one at a
+time through the same `x86_decode_one` with the vector header and scan. On the compiler's
+own `.text` the same variant is 1.8 times slower than `batched` (24.87 against 13.62 ns).
