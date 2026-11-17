@@ -55,3 +55,22 @@ Median of 9 runs (`logs/time.log`):
   - `check_program_target_clones` and `check_program_target_parse` read as different lengths only because the comparison keys functions by name and each unity unit has its own static copy. `objdump --disassemble` of the name prints the same code in both executables.
 
 No function moved into or out of `.text.buster_start` (`logs/head2-sections.txt`, `logs/head2-functions.txt`).
+
+## Mutation check
+
+[`mutation/`](mutation/) holds `mutants.py`, `run.py` and each mutant's test output. Each mutant was built from a copy
+of the deletion's tree and run against its tests, which have no second solver: `test-dataflow`,
+`test-ir-source --dataflow-self-test`, and `test-ir-source` on `edges.c` and 80 of c-testsuite's subset.
+
+- **The first run** (`pr.results`): 14 of 16 killed, among them the count-only mutants (d4, d5, d6) and the wrong phi
+  targets (i5). The twin comparison was the only check of d4 to d6, and nothing checked i5, since the solve never reads
+  the targets.
+- **The survivors:** i1 and i2, the range test reading `>= end` as `> end`. No fixture had a block using the first
+  instruction of the block numbered after it, which is valid SSA in a loop whose body is numbered before its header.
+- **`pr2.results`:** a fixture with that layout, whose body both used the header's phi and passed it to the header's
+  other phi, still let both through, since each use sets the same bit.
+- **The fixture split in two** (commit `4218fee69`, `pr3.results`): i1 and i2 each fail 6 self-test checks, the
+  equations, the byte oracle and the re-solve among them.
+
+The tests now kill all 16 mutants. No mutant needed main's twin-checked tree for comparison, since none survived the
+PR's tests.
