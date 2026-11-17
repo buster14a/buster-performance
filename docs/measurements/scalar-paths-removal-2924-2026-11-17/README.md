@@ -138,9 +138,18 @@ times faster than the scalar one. The scalar variant's formatter and listing
 (`x86_disassembly_format_scalar`, `x86_disassembly_listing(..., true)`) ride in its
 decode+format and decode+listing rows.
 
-One exception, stated plainly: the `compact` variant (the scalar prefix test and the
-one-form-at-a-time bucket scan, with the compact form check) is 2.9% faster than `batched` on
-the synthetic vector stream's decode (27.91 against 28.74 ns) and 1.8% faster in its
-format and listing. That stream is all VEX and EVEX forms, which `batched` decodes one at a
-time through the same `x86_decode_one` with the vector header and scan. On the compiler's
-own `.text` the same variant is 1.8 times slower than `batched` (24.87 against 13.62 ns).
+**What the selector's own arms show.** The `vectorized` selector inside the decoder
+picks the prefix test (the classifier's mask against `x86_decode_is_prefix`) and the
+bucket scan (eight signatures in one compare against one form at a time). `avx512` and
+`compact` differ only there: both run unbatched, without the index, with the compact
+validation. Their decode rows: equal on `compiler.text` (24.89 against 24.87 ns), `compact`
+1.0% faster on the synthetic compiler stream (23.14 against 23.37) and 2.3% faster on the
+vector stream (27.91 against 28.55). So the selector's scalar arms were never slower than
+its vector arms. The production path's win comes from the batch lanes and the PEXT index:
+`batched` against `avx512` is 1.8 times faster on `compiler.text`, 2.8 times on the
+synthetic compiler stream, and equal on the vector stream, which is all VEX and EVEX forms
+that `batched` decodes one at a time through the same `x86_decode_one`. There, `compact` is
+2.9% faster than `batched` in decode and 1.8% in format and listing.
+`docs/x86-64-disassembler.md` recorded the same tradeoff when the decoder landed (PR #240:
+the vector mix 4.3% slower than the compact scalar control). Deleting the twins keeps the
+vector arms in `x86_decode_one`.
