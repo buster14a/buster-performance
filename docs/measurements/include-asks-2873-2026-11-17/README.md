@@ -215,7 +215,40 @@ Each was built and measured on the 9700X; `results/9700x/tables.md` has their A/
   (`scripts/base-check.sh`, `results/cloud/tests/baseline-host/`): `test-preprocessor`'s parts 1 and 4 of 4 and
   `test-files` pass.
 
-## 9. Files
+## 9. The other files' rows: the source's mapping and the object's write
+
+[The specification](https://github.com/buster14a/buster/issues/2873#issuecomment-6944941052) left the files' other
+rows one measurement each. Both are one copy of one executable, the pull request's head, on both sides.
+
+**How a file past the read limit (16 KB) gets its bytes** (`scripts/job-bytes.sh`, `patches/files-bytes.patch`: from
+the environment; A is the code as it is, mapped with `MAP_POPULATE` on one lane):
+
+| B | `sqlite3.c`, 21 rounds: kernel cycles | page faults | `hello.c`, 41 rounds: kernel cycles | page faults | musl's units, 11 rounds: kernel cycles |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| mapped without `MAP_POPULATE`, its pages faulted in as the lexer reads them | +0.84% [-1.19, +1.89] 9/21 and -1.01% [-1.78, +2.14] 11/21 | +2.70% | -0.06% and -0.03% | +0.57% | +0.26% [-0.22, +0.35] 4/11 |
+| every file read into the lane's arena | +6.06% [+4.46, +7.53] 0/21 | +7.24% | +0.84% [+0.22, +1.52] 7/41 | +4.21% | |
+| populated again (the control) | +1.48% [-1.37, +2.67] 8/21 | +0.00% | -0.15% [-0.57, +0.55] 22/41 | +0.00% | -0.11% [-0.15, +0.10] 8/11 |
+
+- **Faulting the source in reads as populating it does:** 155 more faults on `sqlite3.c`, its 9 MB sixteen pages a
+  fault, and kernel cycles inside what the setting reads against itself. The census's small program had it cheaper a
+  page (179 cycles against 256); over the source's 2,300 pages that is 0.18 M cycles, 0.2% of the compile's kernel
+  cycles, which these runs don't resolve. Nothing to change.
+- **Reading instead of mapping is worse:** 5.3 M kernel cycles more on `sqlite3.c`, in every round.
+- The objects are the same bytes in every round.
+
+**The object's write** (`scripts/job-object.sh`: `-c sqlite3.c` with its object written in `/dev/shm`, in place over
+the round before's, against the same compile with the object's path a link to `/dev/null`; 81 rounds, twice):
+
+| | kernel cycles | user cycles |
+| --- | ---: | ---: |
+| to `/dev/null`, less than to the file | -0.50 M [-1.34, +0.48], -0.60%, 53/81 | -0.04% |
+| again | -0.40 M [-1.57, +0.77], -0.48%, 48/81 | +0.03% |
+
+The write is 0.4 M to 0.5 M of the compile's 82.5 M kernel cycles, 0.6 to 0.7 cycles a token: one copy of the object's
+bytes into pages the file already has (`object_writer.c` writes in place and never truncates). There is no change
+here with evidence behind it.
+
+## 10. Files
 
 - `patches/`: `files-head.patch` (the pull request's tree against main `05c5d95d7`), `0001-*`, `0002-*` (its two
   commits), and each measured version's code against main `2d8174328` or `d1cf1fe82` (`files-*.patch`,

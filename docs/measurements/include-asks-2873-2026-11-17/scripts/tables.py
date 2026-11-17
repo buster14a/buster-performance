@@ -10,6 +10,8 @@ jobs = [('abstat-', 'job-ask.sh (main d1cf1fe82: base against ask)'), ('abstat3-
         ('abstatw-', "job-vec.sh (base2 against vec, the counting without a loop, a key's length in its last byte; vecoff: its asks never made)"),
         ('abstatx-', "job-fin.sh (base2 against fin, the pull request's code and list; finoff: its asks never made)"),
         ('abstath-', "job-head.sh (base2 against head, the pull request's tree)"),
+        ('abstatb-', 'job-bytes.sh (one copy of one executable: a file past the read limit mapped with MAP_POPULATE against mapped without it (1), every file read (2), and populated again (0))'),
+        ('abstato-', "job-object.sh (one copy of one executable: -c sqlite3.c's object written in place in /dev/shm against /dev/null)"),
         ('abstatk-', 'job-knob.sh (one copy of one executable, its asks off against them at the third, fourth and fifth miss, and off again) and job-knob2.sh (base2 and fin against the knob build, asks at 3 or off on both sides)')]
 events = ['cycles:k', 'cycles:u', 'instructions:u', 'page-faults', 'iTLB-load-misses']
 for prefix, title in jobs:
