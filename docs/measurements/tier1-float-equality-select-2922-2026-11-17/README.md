@@ -132,3 +132,7 @@ cost mutant again.
 How often the walk runs: an instrumented copy of the final tree (a counter in `tier1_select_recurrent`, the cloud
 container's Develop build) compiling the frozen `sqlite3.c` with section 3's flags ran it 4 times, 64 rows in all, and
 found no recurrence: the two selects of section 4, each asked once by the classifier and once by its candidates.
+
+The x86-64 row's Release builds at buster `8a407c64` (plain, `BUSTER_SANITIZER=address`, `BUSTER_SANITIZER=memory`, the
+cloud container, `scripts/rows-final.sh`): `test-tier1-select`, `test-tier1-emit`, `test-tier1-pipeline --cross-check`
+and the pattern test pass on each (`x86-64-rows/`).
