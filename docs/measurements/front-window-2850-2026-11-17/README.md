@@ -23,6 +23,9 @@ record: the 9700X, the versions on the way, the checks in a cloud container, the
 - **A compile is unchanged:** no compile runs any of it.
 - **The fault campaign found a bound that did not hold:** the list of the calls' arguments could pass its array at a
   chunk's end where many cut calls wait. A cut value's arguments are no longer kept (section 5).
+- **Merged:** buster#2919, on buster's main as `2d8174328` (2026-11-17), in two commits. The first failed a check of
+  its pull request: the compiler could not compile its own source as one unit. The second fixes it (section 7).
+- **The six sanitizer rows are clean on the merged head** (section 6).
 
 ## 1. The tree
 
@@ -193,13 +196,61 @@ once. The most the list held at a chunk's end is counted, the command fails past
 part 5, and for memory and address the shadow in three modes (`--passes 0 --front-window`, the same with
 `--front-tests`, and `--passes 0 --front-facts`) on `sqlite3.c`, Lua and the compiler's own source.
 
-**Running when this record was first pushed:** this section has the rows' results once they finish.
+**On the merged head `8415bec56`** (`results/cloud/sanitizers/progress.txt`; a row's `part5-ROW.out`, and the native
+rows' shadow outputs):
+
+| row | `test-checker` part 5 of 8 | reports | the shadow's nine runs |
+| --- | --- | ---: | --- |
+| `x86-64`, memory | 210,292 checks, 0 failures | 0 | exit 0, no report |
+| `x86-64`, address | 210,292 checks, 0 failures | 0 | exit 0, no report |
+| `x86-64`, thread | 210,292 checks, 0 failures | 0 | not run in this row |
+| native, memory | 210,328 checks, 0 failures | 0 | exit 0, no report |
+| native, address | 210,328 checks, 0 failures | 0 | exit 0, no report |
+| native, thread | 210,328 checks, 0 failures | 0 | not run in this row |
+
+- **The native rows run the window's code.** There the front wrote every expression's window, with 0 differences:
+  50,996 expressions of `sqlite3.c`, 10,839 of Lua and 38,243 of the compiler's driver unit.
+- **The `x86-64` rows cover the tests' scalar side.** That build has no vector paths and reads by the scalar walk, so
+  the front isn't run on the corpora there, and its shadow says so.
+- **The first commit `a1bb78ea9`** had its three `x86-64` rows clean too (`progress-first-commit.txt`), before the
+  run was stopped for the fix. Its native rows never ran.
+
+## 7. The second commit
+
+The pull request's first run failed the `x86-64` row's third shard at Tier 0's inlining test:
+`test-tier0-inline` could not prepare the compiler's own `main.c` with `-DBUSTER_COMPLETE_DRIVER=1`. That option
+makes the driver's unit hold the rest of the compiler's code. The window's writers are declared and defined in the
+checker unit alone, and the lean front called them wherever the front is compiled, so the complete driver had nine
+calls of undeclared functions. No check of sections 4 to 6 compiled that configuration.
+
+`patches/0002-…patch` puts each call under the guard its declaration is under. The checker unit's code is the same,
+token for token. What ran on it, on a native and an `x86-64` Release build (`results/cloud/complete-driver`,
+`scripts/complete-driver-*.sh`):
+
+| | native | `x86-64` |
+| --- | --- | --- |
+| Tier 0's inlining of `main.c`, the per-file jobs, the binding columns (`light.tests`) | pass | pass |
+| the comparison of `main.c`'s checking and objects with clang's; its three `-c` compiles (`heavy.tests`) | pass | pass |
+| the workflow's parse of `main.c` | pass | pass |
+| `test-checker`'s part 5 of 8 | 210,328 checks, 0 failures | 210,292 checks, 0 failures |
+| the preprocessor's comparison with clang on the repository's units | fails here | fails here |
+
+- **The last row is this container's.** Its clang names its resource directory
+  `/usr/lib/llvm-23/lib/clang/23/include` where the search has `/usr/lib/clang/23/include`, so the line markers
+  differ; every unit's token count is clang's, and a compiler built from main fails it the same way. That is why
+  `progress.txt` has `exit 1` for the two `light` lists.
+- **clang accepts the complete driver** with the Release flags of the `znver5` and the `x86-64` hosts and with the
+  fuzzing build's, which selects it.
+- **These ran on the head's source without one sentence of a comment,** added last without moving a line. The head's
+  two executables differ from the tested ones in `.debug_line` alone (144 bytes: the file's checksum in nine units'
+  tables), and Tier 0's inlining ran again on the head's native build.
 
 
 ## Files
 
-- `patches/0001-…patch`: the commit. `patches/window-h.patch`: what the 9700X built, against `eb0a76e21`.
-  `patches/window-a.patch` to `window-g.patch`: the versions.
+- `patches/0001-…patch`: the commit, and `patches/0002-…patch`: the second one (section 7).
+  `patches/window-h.patch`: what the 9700X built, against `eb0a76e21`. `patches/window-a.patch` to `window-g.patch`:
+  the versions.
 - `scripts`: the 9700X's `job.sh`, `job-short.sh` and `job-final.sh` and what they call (`setup.sh`, `corpora.sh`,
   `lock.sh`, `build-label.sh`, `turns.sh`, `compile.sh`, `perf.sh`, `tables.py`); the cloud container's
   `cloud-checks.sh`, `shadow-limited.sh`, `checker.sh`, `sanitizers.sh` (with this container's paths;
@@ -208,5 +259,5 @@ part 5, and for memory and address the shadow in three modes (`--passes 0 --fron
 - `results/9700x`: a directory a version (`window-LABEL-CORPUS-N.txt`: the window; `window-warm-…`: with the arrays
   touched; `window-tests-…`: with the tests and C and X there; `facts-…`: the piece before in the same build;
   `perf-*`; `compile-*`), `base`, `tables.txt`, and the jobs' logs.
-- `results/cloud`: `test-checker`, `shadow`, `sanitizers`, the campaign's three runs, the probes, and the
-  self-check's, the self-parse's and the call graph's outputs.
+- `results/cloud`: `test-checker`, `shadow`, `sanitizers`, `complete-driver` (section 7), the campaign's three runs,
+  the probes, and the self-check's, the self-parse's and the call graph's outputs.
