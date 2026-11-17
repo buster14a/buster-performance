@@ -6,7 +6,7 @@
 - **On the head:**
   - `test-dataflow`, `test-ir-source --dataflow-self-test`;
   - IR dataflow's benchmark on sqlite3.c (`logs/ir-sqlite-head.log.xz`), whose scalar twin is the comparison.
-- **Whole compiles:** `-c` and `-fsyntax-only` of sqlite3.c, `-c` of Lua 5.4.8 and musl's 1,355 units, with `ab` around
+- **Whole compiles:** `-c` and `-fsyntax-only` of sqlite3.c, `-c` of Lua 5.4.8 and musl's 1,336 units, with `ab` around
   `time-runs` (main, head, main-again; `logs/time.log`).
 - **The executables:**
   - disassembly compared function by function (`logs/compare.txt`; `disassembly/` has the scripts; the 150 MB JSON files are not kept);
