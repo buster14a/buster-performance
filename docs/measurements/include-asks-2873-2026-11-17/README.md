@@ -163,6 +163,10 @@ list) read 1.88% and 1.85% more instruction TLB misses on musl's units, 5 rounds
   place (`results/9700x/order-compare-fin.txt`).
 - With it, musl's units read 0.96% and 1.03% fewer instruction TLB misses than main's (section 3).
 - Main's own list was fresh: made again from main `d1cf1fe82` it gained one function (`results/9700x/order-base`).
+- After the pull request merged, with #2940 (the scalar host removed, 171 files) merged just before it: the list
+  made again from main `0e8342dd7`'s build names the same 1,441 functions, and every name of the list is a function
+  of the build (`scripts/job-order-main.sh`, `results/9700x/order-compare-main3.txt`). The C library's names that
+  read the processors online are back where main's list before this one had them, 16 lines in another place.
 
 ## 7. The versions before this one
 
