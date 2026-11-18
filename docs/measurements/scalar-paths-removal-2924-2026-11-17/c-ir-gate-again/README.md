@@ -120,3 +120,20 @@ and 1.004. A function repeated thousands of times teaches the predictor the twin
 - Lua: 118.5 to 119.5, against 113.8 to 114.2.
 
 The verdicts above come from the pipeline alone.
+
+## The inliner's own twins (added for C9e)
+
+The inliner's region in [`areas.sh`](areas.sh) also turned over the attributes' scan, the bindings' sort and SROA after
+an expansion (bit 1). [`inline.sh`](inline.sh) runs [`c9-inline-knob.patch`](c9-inline-knob.patch): the same area knob
+plus bit 12, which turns over only the inliner's own options (`IrInlineOptions.scalar`) and its addressed callees' scan.
+It times the region with no bit, bit 1 and bit 12, five rounds in turn ([`ticks-inline.tar.xz`](ticks-inline.tar.xz),
+[`logs/compare/inline-*.txt`](logs/compare/)). Objects are identical in every setting.
+
+| Bit | Configuration | Total | 0-15 | 16-63 | 64-255 | 256-1,023 | 1,024+ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 12, the inliner's own | default | 1.093 | 1.061 | 1.122 | 1.114 | 1.136 | 1.075 |
+| 12, the inliner's own | `+all` | 1.029 | 1.024 | 1.029 | 1.034 | 1.026 | 1.029 |
+| 1, the whole region | default | 1.090 | 1.050 | 1.106 | 1.108 | 1.131 | 1.074 |
+| 1, the whole region | `+all` | 1.028 | 1.021 | 1.027 | 1.032 | 1.026 | 1.028 |
+
+The inliner's own twins lose in every bin, in every round, in both configurations.
