@@ -21,7 +21,7 @@ objects byte-identical in each mode ([`logs/status.txt`](logs/status.txt)).
 | Lua's units, `--tier1` | −0.55%, −0.70%, −0.68% | −0.03%, −0.08%, −0.08% | 0.06 M fewer |
 | sqlite3.c, `--tier1 --tier1-passes=+all` | −0.14%, −0.24%, −0.25% | −0.02%, −0.11%, −0.03% | 0.54 M fewer (−0.003%) |
 
-Head retires the same instructions, within 0.003%. Yet it reads 0.12 to 0.60 points fewer cycles than base again,
+Head retires the same instructions, within 0.003%. Yet it reads 0.12 to 0.62 points fewer cycles than base again,
 under the default passes too, where neither the unroller nor the vectorizer runs. That is code placement, not the
 deletion. `.text.buster_start` is the same size in both, and the two executables have the same function symbols.
 
