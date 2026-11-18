@@ -61,7 +61,7 @@ Release, every run under the lock, timings on CPU 2, every benchmark process fro
 sweep, the liveness adapter's dense compaction and row builder, the rematerialization marks' table, the call-save rows'
 helpers, the calls before each position, the CFG column's set check, the move resolver's scratch check and the select
 requests' batch. [`run.py`](mutation/run.py) runs `test-tier1-allocation`, `-cfg`, `-liveness`, `-select`, `-emit` and
-`-masks` on an archive of the final tree. Results: [`mutation/final.results`](mutation/final.results).
+`-masks` on an archive of the tree.
 
 Two rounds:
 
@@ -76,4 +76,5 @@ Two rounds:
   Commit `67b656ded` adds their cases: the scratch in each move's source and then its destination, of 6 moves and of
   24; and, in each case of two problems, its first 48 values one at a time with a register outside its class's or a
   definition bound outside its set, against the preferred problem's own column, which stands.
-- **Round `pr2`**, with those cases: running.
+- **Round `pr2`**, the two survivors on the deletion's tree with those cases ([`mutation/pr2.results`](mutation/pr2.results)):
+  `m1` killed by `test-tier1-allocation`, `v1` by `test-tier1-cfg`.
