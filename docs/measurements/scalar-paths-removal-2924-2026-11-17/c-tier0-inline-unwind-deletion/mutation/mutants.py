@@ -1,0 +1,33 @@
+# #2924 C8a: mutants of the vector code that stays in Tier 0's splice and the unwind analyzer. Each is (name, file, old,
+# new): `old` occurs once in the base tree, and every identifier stays used.
+I = 'src/buster/compiler/tier0_inline.c'
+U = 'src/buster/compiler/unwind_tier0.c'
+MUTANTS = [
+    ('i1-sites-lane-63', I,
+     'uint64_t found = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, call);',
+     'uint64_t found = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, call) & ~(UINT64_C(1) << 63);'),
+    ('i2-starts-step-8-lane-15', I,
+     'x = _mm512_add_epi32(x, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_sub_epi32(iota, _mm512_set1_epi32(8)), x));',
+     'x = _mm512_add_epi32(x, _mm512_maskz_permutexvar_epi32(0x7f00, _mm512_sub_epi32(iota, _mm512_set1_epi32(8)), x));'),
+    ('i3-positions-lane-15', I,
+     '_mm512_mask_compressstoreu_epi32(plan->positions + plan->position_count, inserted,',
+     '_mm512_mask_compressstoreu_epi32(plan->positions + plan->position_count, inserted & 0x7fff,'),
+    ('i4-segment-branch-kinds-3', I,
+     'uint64_t branches = _mm512_mask_cmplt_epu8_mask(lanes, _mm512_sub_epi8(kinds, first), four);',
+     'uint64_t branches = _mm512_mask_cmplt_epu8_mask(lanes, _mm512_sub_epi8(kinds, first), _mm512_sub_epi8(four, _mm512_set1_epi8(1)));'),
+    ('i5-segment-values-lane-7', I,
+     'const __mmask8 values = (__mmask8)_bzhi_u32(0xffu, take - q);',
+     'const __mmask8 values = (__mmask8)_bzhi_u32(0x7fu, take - q);'),
+    ('i6-body-return-value-jump', I,
+     'kinds = _mm512_mask_mov_epi8(kinds, returns & ~voids, _mm512_set1_epi8(BUSTER_TYPED_JUMP_VALUE));',
+     'kinds = _mm512_mask_mov_epi8(kinds, returns & ~voids, _mm512_set1_epi8(BUSTER_TYPED_JUMP));'),
+    ('i7-body-vector-constant', I,
+     'meanings = _mm512_mask_mov_epi8(meanings, constants & _mm512_cmpeq_epi8_mask(classes, vector), _mm512_set1_epi8(BUSTER_TIER0_INLINE_VECTOR));',
+     'meanings = _mm512_mask_mov_epi8(meanings, constants & _mm512_cmpeq_epi8_mask(classes, vector) & 0, _mm512_set1_epi8(BUSTER_TIER0_INLINE_VECTOR));'),
+    ('i8-body-clamp-lane-7', I,
+     'values = _mm512_mask_min_epu64(values, _mm512_cmpeq_epi64_mask(meaning, entry), values, end);',
+     'values = _mm512_mask_min_epu64(values, _mm512_cmpeq_epi64_mask(meaning, entry) & 0x7f, values, end);'),
+    ('u1-forbidden-batch-last-lane', U,
+     '(writes[lane] & forbidden) != 0 ||',
+     '(lane + 1 < count && (writes[lane] & forbidden) != 0) ||'),
+]
