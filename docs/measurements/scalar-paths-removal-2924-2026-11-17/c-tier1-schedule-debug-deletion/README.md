@@ -52,4 +52,15 @@ mutant on an archived tree.
   - `check_tier1_debug_sources` against its definition, across 16-lane batches.
 - **Never built:** s1, s4 and g8, which left a variable unused. s1b, s4b and g8b keep it used.
 
-Round `pr2`, on the final tree with the new cases, follows.
+**Round `pr2`: the final tree** (`9a3960f41`, with the four new cases):
+- **Killed (17 of 19):** s1b to s10 by `test-tier1-schedule`; g1, g4, g5, g6, g7, g8b and g9 by `test-check-debug`. So
+  the source rows' sweep and the floating call case did their work.
+- **Survived:** g2 and g3. The new floating diamond and `r12` loop pass on the real code, but they don't separate
+  the mutants:
+  - the parameter proof's worklist is first in, first out, and each block queues its branch target before its
+    fallthrough. So the diamond's taken arm, which has no copy, reaches the join first, and the mutant's skipped
+    lane changes nothing;
+  - the loop body also kills `rdi`, carrier 7, so the header is queued again whatever the mutant reports for `r12`.
+
+  The follow-up cases put the copy on the taken arm and leave `rdi` alone in the loop. They land in the next PR,
+  because #2964 is in the merge queue.
