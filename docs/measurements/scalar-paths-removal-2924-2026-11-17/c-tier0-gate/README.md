@@ -56,6 +56,43 @@ The smallest bins, finer ([`logs/small-bins.txt`](logs/small-bins.txt), [`logs/s
 - **Validation** loses below 16 entries (2,240 calls): at 0 to 3 entries in every round (12% to 16%), at 4 to 15 in four rounds of five (8% to 10%). It wins from 16 on, 1.27
   times at 16 to 23 and 1.91 at 24 to 31 ([`logs/small-bins.txt`](logs/small-bins.txt)).
 
-On both paths, the calls below 16 entries cost more ticks each than those of 16 to 31 entries (validation's vector
-path: 2,758 ticks a call at 12 to 15 entries, 1,159 at 24 to 31). So what these calls pay is not their entries: it is
-each call's fixed cost, which the vector paths pay more of. Their twins stay until the vector paths win there too.
+The section below reads these two again, each area alone, by route and warm:
+- **Validation:** below 17 entries, the vector path takes the twin's own scalar body by size, and warm the two are even.
+- **Compile:** its vector path has a fixed setup a function that costs 1.77 times its twin's cycles on tiny functions
+  (#2972).
+
+## Each area alone, the route, and warm (#2972)
+
+Flipping all four bits at once ran each area after the others' twins. So [`alone.sh`](alone.sh) takes compile's bit
+alone (`0x1`) and validation's alone (`0x2`), each against no bit, over five rounds
+([`logs/alone/analyze.txt`](logs/alone/analyze.txt), [`alone.py`](alone.py)). Both small-size losses stay:
+
+- compile: 0.874 at 0 and 1 entries (45 calls; 0.865 to 0.880 by round), 1.008 at 2 and 3, then 1.12 and up;
+- validation: 0.85 to 0.95 below 16 entries, then 1.92 and up.
+
+The same-code controls (validation under `0x1`, compile under `0x2`) read a median excess of 0 ticks, so the
+rounds' noise is far below these differences.
+
+**Validation's route** ([`route.sh`](route.sh), [`experiment-route.patch`](experiment-route.patch),
+[`logs/route/analyze.txt`](logs/route/analyze.txt)): every one of the 2,343 calls of 1 to 16 entries takes
+`tier0_validate_entries`' small route (`BUSTER_TIER0_VALIDATE_SMALL_COUNT`, 16), the scalar body the twin runs. At these
+sizes the two paths run the same validator, and the vector one adds its size test. Their difference in the gate is a
+fixed cost at each call in this experiment's processes, not the validator's work.
+
+**Warm**, on [`tiny.c`](tiny.c) (1,000 empty functions and 1,000 of one add, 3.5 entries a function), with
+`benchmark-backend-source` by #2975's head on the 9700X, a process each ([`tinyprof.sh`](tinyprof.sh),
+[`logs/tiny/`](logs/tiny/)). Cycles a typed entry:
+
+| Variant | Cycles | Instructions | IPC |
+| --- | ---: | ---: | ---: |
+| `vector` (compile) | 462.7 | 1,692 | 3.66 |
+| `scalar` (compile's twin) | 261.8 | 1,159 | 4.43 |
+| `validate` | 48.8 | 323 | 6.62 |
+| `validate-scalar` | 48.2 | 319 | 6.63 |
+
+- **Validation** is even, as its route says.
+- **Compile's vector path** takes 1.77 times its twin's cycles on these functions, about 700 cycles more a function. It
+  spends them in `tier0_compile_entries`' passes and in `tier0_generate`
+  ([`logs/tiny/vector-symbols.txt`](logs/tiny/vector-symbols.txt) against
+  [`logs/tiny/scalar-symbols.txt`](logs/tiny/scalar-symbols.txt)). That is a fixed setup a function, which the gate's
+  cold runs understate: it is #2972's work.

@@ -1,0 +1,116 @@
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index a9d9b2dbd..2af7fcad7 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -10,6 +10,52 @@
+ #ifndef BUSTER_C_CHECK_PROGRAM_INCLUDED
+ #define BUSTER_C_CHECK_PROGRAM_INCLUDED
+ 
++// Experiment only (#2924 C8's gate): BUSTER_TIER0_SCALAR_AREAS, a bitmask of the areas whose scalar twin runs (bit 0
++// Tier 0's compile, 1 its validation, 2 its inlining, 3 the unwind analyzer of --verify); BUSTER_TIER0_AREA_TICKS, a
++// file each call appends one line to, in call order: its area, its Tier 0 entries and its TSC ticks (one lane).
++#include <x86intrin.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <fcntl.h>
++#include <unistd.h>
++static __attribute__((unused)) uint32_t tier0_experiment_mask;
++static __attribute__((unused)) int tier0_experiment_fd = -1;
++__attribute__((constructor)) static void tier0_experiment_init(void)
++{
++    const char* mask = getenv("BUSTER_TIER0_SCALAR_AREAS");
++    tier0_experiment_mask = mask != 0 ? (uint32_t)strtoul(mask, 0, 0) : 0;
++    const char* out = getenv("BUSTER_TIER0_AREA_TICKS");
++    tier0_experiment_fd = out != 0 ? open(out, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
++}
++static inline __attribute__((always_inline, unused)) bool tier0_experiment_scalar(bool scalar, uint32_t area)
++{
++    return scalar || (tier0_experiment_mask & (1u << area)) != 0;
++}
++// A validation call's line with its tables and route: entries, ticks, locals, calls, arguments, then 1 where
++// tier0_validate_entries takes the scalar body by size (BUSTER_TIER0_VALIDATE_SMALL_COUNT, 16), else 0.
++static __attribute__((noinline, unused)) void tier0_experiment_log_route(const Tier0Function* function, uint64_t ticks)
++{
++    if (tier0_experiment_fd >= 0)
++    {
++        const uint32_t limit = 16;
++        const bool small = function->count != 0 && function->count <= limit && function->local_count <= limit && function->call_count <= limit &&
++                           function->argument_count <= limit;
++        char line[128];
++        const int length = snprintf(line, sizeof(line), "1 %u %llu %u %u %u %u\n", function->count, (unsigned long long)ticks, function->local_count,
++                                    function->call_count, function->argument_count, small ? 1u : 0u);
++        (void)!write(tier0_experiment_fd, line, (size_t)length);
++    }
++}
++static __attribute__((noinline, unused)) void tier0_experiment_log(uint32_t area, uint32_t count, uint64_t ticks)
++{
++    if (tier0_experiment_fd >= 0)
++    {
++        char line[64];
++        const int length = snprintf(line, sizeof(line), "%u %u %llu\n", area, count, (unsigned long long)ticks);
++        (void)!write(tier0_experiment_fd, line, (size_t)length);
++    }
++}
++
+ typedef enum CheckProgramStatus
+ {
+     CHECK_PROGRAM_OK,
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index a8f75a6cd..65f2c4d4a 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1384,7 +1384,9 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
+             .error = TIER0_OK,
+         };
+         UnwindFunction proven;
+-        const UnwindError analyzed = scalar ? unwind_tier0_scalar(&records, offsets, (uint32_t)length, &proven) : unwind_tier0(&records, offsets, (uint32_t)length, &proven);
++        const uint64_t tier0_t3 = __rdtsc();
++        const UnwindError analyzed = tier0_experiment_scalar(scalar, 3) ? unwind_tier0_scalar(&records, offsets, (uint32_t)length, &proven) : unwind_tier0(&records, offsets, (uint32_t)length, &proven);
++        tier0_experiment_log(3, code->count, __rdtsc() - tier0_t3);
+         const EmittedSame same = analyzed != UNWIND_OK ? EMITTED_SAME : emitted_unwind_same(&proven, frame, scratch);
+         status = same == EMITTED_SAME ? status : same == EMITTED_SAME_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
+         *reason = same == EMITTED_SAME ? 0 : same == EMITTED_SAME_MEMORY ? "no room to compare a function's unwind table with Tier 0's analyzer's" : mismatch;
+@@ -2089,7 +2091,12 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+                 Tier0Inlined inlined;
+                 const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &inlined);
+                 const Tier0Function* source = spliced ? &inlined.function : function;
+-                Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(source, lane->code) : tier0_compile(source, lane->code);
++                const uint64_t tier0_t0 = __rdtsc();
++                Tier0Code compiled = naked != 0 ? naked->code : tier0_experiment_scalar(run->scalar, 0) ? tier0_compile_scalar(source, lane->code) : tier0_compile(source, lane->code);
++                if (naked == 0)
++                {
++                    tier0_experiment_log(0, source->count, __rdtsc() - tier0_t0);
++                }
+                 if (spliced)
+                 {
+                     tier0_inline_code(&compiled, function, &inlined, lane->code);
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 5e89e5cfd..543bda113 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -21076,7 +21076,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+             Tier0Check check = { .error = TIER0_OK };
+             if (status->status == CHECK_PROGRAM_OK)
+             {
+-                check = shared->scalar ? tier0_validate_scalar(function) : tier0_validate(function);
++                const uint64_t tier0_t1 = __rdtsc();
++                check = tier0_experiment_scalar(shared->scalar, 1) ? tier0_validate_scalar(function) : tier0_validate(function);
++                tier0_experiment_log_route(function, __rdtsc() - tier0_t1);
+             }
+             if (check.error != TIER0_OK)
+             {
+diff --git a/src/buster/compiler/c_check_tier0_inline.c b/src/buster/compiler/c_check_tier0_inline.c
+index 5633aed07..0dddc1b5d 100644
+--- a/src/buster/compiler/c_check_tier0_inline.c
++++ b/src/buster/compiler/c_check_tier0_inline.c
+@@ -129,7 +129,9 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
+             .vector_bytes = check_tier0_inline_transport(check_tier1_inline_target(table->program, b)),
+             .shapes = run->tier0_inline_shapes,
+         };
+-        valid = run->scalar ? tier0_inline_scalar(&input, arena, result) : tier0_inline(&input, arena, result);
++        const uint64_t tier0_t2 = __rdtsc();
++        valid = tier0_experiment_scalar(run->scalar, 2) ? tier0_inline_scalar(&input, arena, result) : tier0_inline(&input, arena, result);
++        tier0_experiment_log(2, function->count, __rdtsc() - tier0_t2);
+     }
+     else
+     {
