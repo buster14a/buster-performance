@@ -1,6 +1,7 @@
 # Tier 1's selection: the twins deleted (#2924, C7, second slice)
 
-Branch `c7b-final`: base main `eb9ebe2d3`, head `dda25f737` (tests, deletion, docs; the later commits add tests only).
+Branch `c7b-final`: base main `eb9ebe2d3`, head `dda25f737` (tests, deletion, docs; the later commits add tests only),
+rebased onto #2964 as `9cb543aaa`.
 The gate is in [`../c-tier1-gate/`](../c-tier1-gate/): the selection's twin took more ticks than its vector path on
 every corpus.
 
@@ -10,9 +11,13 @@ Release, every run under the lock, timings on CPU 2.
 
 - **Tests by head:** `test-tier1-select` 1,378,380 checks (plans 5,425, digest `c485097574ea77f5`, the frozen one) and
   `test-tier1-pipeline --cross-check` 6,410 checks, no failures.
-- **`benchmark-tier1-select-source` on sqlite3.c, three processes each** (2,600 functions, 436,519 IR instructions;
-  the bottom-up rewrite's definitions hold on every node in both): head 367.0 to 367.9 cycles an IR instruction
-  against main's 369.1 to 369.9 (−0.6%), and 951.7 instructions against 955.1 (−0.35%).
+- **`benchmark-tier1-select-source` on sqlite3.c** (2,600 functions, 436,519 IR instructions; the bottom-up
+  rewrite's definitions hold on every node in both). Head retires 951.7 instructions an IR instruction against
+  main's 955.1 (−0.35%). Cycles an IR instruction:
+  - first run, three processes each: head 367.0 to 367.9, main 369.1 to 369.9 (−0.6%);
+  - [`replay/`](replay/), five more each: head 367.4 to 369.1, main 369.1 to 370.2 (−0.4%);
+  - the rebased head (`9cb543aaa`) once on sqlite3.c and once on Lua: `mismatches=0`, so the comparisons' link
+    definition holds on both corpora.
 - **Objects:** `--tier1 -c` of sqlite3.c, Lua and musl, every compile in one directory: 1,371 of 1,371 identical.
 - **Whole compiles** ([`logs/time.log`](logs/time.log)): `ab`, three rounds, around `time-runs` (3 runs, 3 copies)
   of base, head and base again, `--tier1 --lanes 1`. User cycles against base, round by round:
@@ -25,23 +30,32 @@ Release, every run under the lock, timings on CPU 2.
   Head retires fewer instructions in both. Head reads 0.09% to 0.21% above base-again on sqlite3.c and −0.02% to
   +0.18% on Lua, inside the 9700X's same-executable wobble (up to 0.4% between copies).
 
-### `benchmark-tier1-select`'s synthetic shapes ([`wide/`](wide/), [`pad/`](pad/))
+### `benchmark-tier1-select`'s synthetic shapes
 
-The run's three processes each read head 6% slower than main on the `wide` shape's selection (40.0 to 40.2 ns an IR
-instruction against 37.8 to 38.0) and the same on `chain` and `pressure`. Under `perf stat`, main read 5% to 10%
-slower than head on every shape instead. So [`pad.sh`](pad.sh) ran both builds under 16 environment pads (the stack
-moves 16 bytes a pad):
+The first run read head 6% slower than main on the `wide` shape's selection (40.0 to 40.2 ns an IR instruction
+against 37.8 to 38.0) and level on `chain` and `pressure`. Later runs of the same files disagreed, so each of these
+ran on the 9700X under the lock:
 
-| Shape, selection | Main, 16 pads | Head, 16 pads |
-| --- | --- | --- |
-| chain | 62.0 to 63.3 ns | 56.8 to 59.5 (13 of 16 under 57.6) |
-| wide | 42.4 to 42.8 | 39.9 to 43.4 (13 of 16 under 40.6) |
-| pressure | 60.1 to 60.5 | 53.7 to 58.1 (13 of 16 under 54.2) |
+- **[`wide/`](wide/), [`pad/`](pad/): `compilers/base` itself, 8 minutes later.** It read 62.0 to 63.3 ns on `chain`,
+  42.4 to 42.8 on `wide` and 60.1 to 60.5 on `pressure`, whatever the environment pad, and under `perf stat`. Head
+  read as before.
+- **[`replay/`](replay/): `run.sh`'s order and environment, five rounds.** The original file `compilers/base` stayed
+  slow (`wide` 42.4 to 42.7), while three fresh copies of it read fast (`wide` 37.7 to 38.0, `chain` 57.2 to 57.4,
+  `pressure` 54.2 to 54.4). The file's rate had changed, not the host. Fresh copies of head: `wide` 40.1 to 40.3,
+  `chain` 56.8 to 57.0, `pressure` 54.0 to 54.1.
+- **[`shape/`](shape/): an experiment build of each side** (main `8d4025fbf` and the rebased head, never pushed): one
+  shape's selection alone, a fixed 40 repetitions, a fresh copy for every run.
+  - Instructions are exact. Head retires 0.46% more on `wide` (5,071.9 M against 5,048.6 M) and 0.58% more on `chain`.
+  - `wide`: main 38.0, 38.3 and 38.6 ns; head 38.0, 38.9 and 42.2.
+  - `chain`: main 57.6 to 58.1; head 57.0 to 58.9.
+- **[`stack/`](stack/): `wide` alone with ASLR off (`setarch -R`), 16 environment pads of 16 bytes.** Main read 38.2
+  to 38.7 ns and head 38.0 to 38.9.
 
-With any pad, main sits in a slow phase that `run.sh`'s environment missed. Head is faster on every shape at every
-pad but one (`wide` at pad 2: 43.4 against 42.7). The phase is main's own: a process's rate depends on where its stack lands, as #2959's split stores did. The profiles by
-symbol ([`wide/report-*.txt`](wide/)) move work between `tier1_select_plan_checked` and `tier1_select_burs_pattern`
-(their sum 50.3% on main, 49.9% on head): the deletion changed what is inlined, not what runs.
+So `wide` selection is the same on both builds once its address placement is fixed. The 40 and 42 ns readings are
+processes in a slower placement: ASLR moves the arenas and the stack, and main's file showed the same 42.6 ns state.
+Head retires about 0.5% more instructions on the synthetic shapes, where every function is one long block, and 0.35%
+fewer on sqlite3.c's real functions. [`prof/`](prof/) profiles fresh copies by symbol: each hot function's
+instructions per cycle are within 6% between the builds.
 
 ## Mutants ([`mutation/`](mutation/))
 
@@ -78,3 +92,6 @@ and t1), b4 by `test-tier1-select` and s4 by `test-tier1-emit`.
 - The complete driver's parse and its `-Wall -Werror` self-check of `main.c` pass.
 - The start section holds the same 577 functions in main's Release build and head's; head's new functions are the
   test's digest helpers.
+- Sanitizers (vector host, Release; address with UBSan, memory and thread), on `9cb543aaa`: `test-tier1-select`,
+  `-emit`, `-masks` and `test-check-debug` pass under each, and each compiles c-testsuite's first 60 programs with
+  `--tier1`, `--tier1 -g` and `--tier1 --verify` with no failed exit and no sanitizer report.
