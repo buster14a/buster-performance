@@ -1,6 +1,7 @@
 # Mutants for #2924 C7's first slice, the schedule and the debug metadata: each breaks the vector code that stays. The
 # twin-free tests (test-tier1-schedule, test-check-debug) must fail each, on the test commit's tree (twins still in
-# src) and on the deletion's. s1 left `live` unused and never built (-Werror); s1b keeps it used; s4 left `data_reads` unused, s4b keeps it.
+# src) and on the deletion's. s1 left `live` unused and never built (-Werror); s1b keeps it used; s4 left `data_reads` unused, s4b keeps it; g8 left `high` unused, g8b keeps it. Round pr2 runs on the
+# final tree, whose debug arms are one level less indented, so no text starts with indentation there.
 S = 'src/buster/compiler/tier1_schedule.c'
 G = 'src/buster/compiler/c_check_tier1_debug.c'
 V = 'src/buster/compiler/c_check_tier1_debug_values.c'
@@ -57,14 +58,17 @@ MUTANTS = [
      'const __mmask16 changed = (_mm512_cmpneq_epi32_mask(values, before) | (at == first ? 1 : 0)) & mask;',
      'const __mmask16 changed = (_mm512_cmpneq_epi32_mask(values, before) | 0) & mask;'),
     ('g6-sources-previous-first-lane', G,
-     '            previous = entries[at + live - 1];',
-     '            previous = entries[at];'),
+     'previous = entries[at + live - 1];',
+     'previous = entries[at];'),
     ('g7-value-meet-last-lane-dropped', V,
      'equal = _mm512_cmpeq_epi32_mask(values, incoming) & lanes;',
      'equal = _mm512_cmpeq_epi32_mask(values, incoming) & (lanes >> 1);'),
     ('g8-value-follow-upper-carriers', V,
-     '        killed &= low | (high << 16);',
-     '        killed &= low;'),
+     'killed &= low | (high << 16);',
+     'killed &= low;'),
+    ('g8b-value-follow-upper-carriers', V,
+     'killed &= low | (high << 16);',
+     'killed &= low | ((high & 0) << 16);'),
     ('g9-value-ranges-callers-shifted', V,
      '_mm512_cmpneq_epi32_mask(_mm512_loadu_si512(proof->state + 16), _mm512_set1_epi32(-1)) << 16;',
      '_mm512_cmpneq_epi32_mask(_mm512_loadu_si512(proof->state + 16), _mm512_set1_epi32(-1)) << 17;'),
