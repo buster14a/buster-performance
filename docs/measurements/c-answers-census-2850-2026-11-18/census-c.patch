@@ -1,0 +1,194 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index c23a928a1..bbe98e31d 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -4198,6 +4198,135 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+     counts[NODE_FACTS_COUNT_TESTS_TICKS] += t3 - t0 + rest;
+ }
+ 
++// CENSUS (C's answers, buster#2850's step 2): a line for each record of an expression C ran on (taken, or refused for
++// a template or a row), with what the window has of it, of its operands and of its consumer, and what C answered.
++// --census-c-lines turns it on. An experiment's patch: no pull request has it.
++static uint32_t census_c_lines;
++static uint64_t census_c_expressions;
++
++static uint32_t census_c_word(const NodeMachine* machine, TypeId type)
++{
++    return type != 0 ? node_machine_word(machine, type) : 0u;
++}
++
++static uint32_t census_c_object_bits(const NodeMachine* machine, uint32_t object)
++{
++    const bool known = object != 0 && object < machine->object_count;
++    return (object != 0 ? 1u : 0u) | (known ? 2u : 0u) | (known && node_machine_local(machine, object) ? 4u : 0u) |
++           (known && check_input_bit(machine->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) ? 8u : 0u) |
++           (known && check_input_bit(machine->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC) ? 16u : 0u) |
++           (known && check_input_bit(machine->declaration_bits, object - 1, BUSTER_CHECK_BITS_REGISTER) ? 32u : 0u);
++}
++
++static void census_c_print(const NodeMachine* machine, uint32_t count, uint8_t root_context, TypeId root_target, uint32_t refusal, uint32_t root_object)
++{
++    static uint32_t parents[BUSTER_NODE_MACHINE_MOST];
++    static uint8_t slots[BUSTER_NODE_MACHINE_MOST];
++    static uint32_t argument_places[BUSTER_NODE_MACHINE_MOST];
++    const NodeMachineColumns* columns = machine->columns;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        parents[r] = UINT32_MAX;
++        slots[r] = 9;
++        argument_places[r] = 0;
++    }
++    for (uint32_t c = 0; c < count; c += 1)
++    {
++        const uint32_t operands[3] = { node_machine_record_left(machine, c), node_machine_record_right(machine, c), node_machine_record_third(machine, c) };
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            if (operands[k] < c)
++            {
++                parents[operands[k]] = c;
++                slots[operands[k]] = (uint8_t)k;
++            }
++        }
++        if (node_machine_record_op(machine, c) == CHECK_OP_CALL)
++        {
++            for (uint32_t i = 0; i < node_machine_record_argument_count(machine, c); i += 1)
++            {
++                const uint32_t argument = node_machine_record_argument(machine, c, i);
++                if (argument < c)
++                {
++                    parents[argument] = c;
++                    slots[argument] = (uint8_t)(3 + (i < 5 ? i : 5));
++                    argument_places[argument] = i;
++                }
++            }
++        }
++    }
++    const uint32_t stopped = refusal == NODE_MACHINE_REFUSED_TEMPLATE ? machine->stopped : 0;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        const uint32_t parent = parents[r];
++        const bool rooted = parent == UINT32_MAX;
++        const uint32_t slot = slots[r];
++        const uint32_t sibling = rooted ? UINT32_MAX : slot == 0 ? node_machine_record_right(machine, parent) : slot == 1 ? node_machine_record_left(machine, parent) : UINT32_MAX;
++        const TypeId target = node_machine_record_target(machine, r);
++        const TypeId parent_target = rooted ? root_target : node_machine_record_target(machine, parent);
++        const uint32_t left = node_machine_record_left(machine, r);
++        const uint32_t right = node_machine_record_right(machine, r);
++        const uint32_t third = node_machine_record_third(machine, r);
++        const CheckOp op = node_machine_record_op(machine, r);
++        const bool evaluated = node_machine_record_evaluated(machine, r);
++        const bool reached = refusal != NODE_MACHINE_REFUSED_TEMPLATE || r >= stopped;
++        const uint32_t template = evaluated ? (reached ? (uint32_t)node_machine_record_template(machine, r) : 254u) : 255u;
++        const TypeId given = rooted    ? 0 :
++                             slot < 2  ? node_machine_record_converted(machine, parent, slot) :
++                             slot == 2 ? node_machine_record_converted_third(machine, parent) :
++                                         node_machine_record_argument_converted(machine, parent, argument_places[r]);
++        const uint32_t given_flags = rooted ? 0 : slot < 2 ? node_machine_record_conversion_flags(machine, parent, slot) : slot == 2 ? 0 :
++                                                             node_machine_record_argument_conversion_flags(machine, parent, argument_places[r]);
++        const uint32_t selector = (given != 0 && target == given ? 1u : 0u) | (!rooted && target == node_machine_record_type(machine, parent) ? 2u : 0u) |
++                                  (target == BUSTER_TYPE_LONG ? 4u : 0u) | (target == BUSTER_TYPE_VOID ? 8u : 0u) | (target == 0 ? 16u : 0u) |
++                                  (target == node_machine_record_type(machine, r) ? 32u : 0u) | (parent_target != 0 && target == parent_target ? 64u : 0u);
++        const uint32_t object_bits = census_c_object_bits(machine, node_machine_record_object(machine, r));
++        const uint32_t left_object_bits = left < r ? census_c_object_bits(machine, node_machine_record_object(machine, left)) : 0u;
++        const uint32_t first = rooted ? UINT32_MAX : node_machine_record_left(machine, parent);
++        const bool first_inside = first < count;
++        bool truth = false;
++        const bool truth_known = node_machine_record_constant_kind(machine, r) != CHECK_CONSTANT_NONE && node_machine_record_truth(machine, r, &truth);
++        const uint32_t truth_bits = truth_known ? (truth ? 2u : 1u) : 0u;
++        const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
++        const uint32_t member_odd = member && node_machine_record_member_offset(machine, r) % 8 != 0 ? 1u : 0u;
++        const uint32_t arguments = op == CHECK_OP_CALL ? node_machine_record_argument_count(machine, r) : 0u;
++        const uint32_t direct = op == CHECK_OP_CALL && left < r && node_machine_direct_callee(machine, left) != 0 ? 1u : 0u;
++        uint32_t plan = 0;
++        if (template == (uint32_t)BUSTER_NODE_MACHINE_TEMPLATE_UPDATE)
++        {
++            const NodeMachineUpdate* update = node_machine_record_update(machine, r);
++            plan = (update->direct ? 1u : 0u) | (update->increment ? 2u : 0u) | (update->postfix ? 4u : 0u) | (update->subtract ? 8u : 0u) | (update->pointer ? 16u : 0u) |
++                   (update->power ? 32u : 0u) | 64u;
++        }
++        const uint8_t state = node_machine_record_state(machine, r);
++        const uint32_t hook = (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM | BUSTER_NODE_MACHINE_AFTER_BRANCH | BUSTER_NODE_MACHINE_BRANCHED)) != 0 ?
++                              node_machine_record_hook(machine, r) : r;
++        const int64_t hook_distance = hook == BUSTER_NODE_MACHINE_NO_OWNER ? -1 : (int64_t)hook - (int64_t)r;
++        printf("cc: e=%" PRIu64 " r=%u n=%u p=%u x=%u stop=%u op=%u w=%x st=%x fl=%x ex=%x ob=%x tr=%u mo=%u ac=%u dc=%u c0=%x c1=%x cf0=%x cf1=%x", census_c_expressions, r, count, parent,
++               refusal, stopped, (uint32_t)op, columns->words[r], columns->standings[r], columns->value_flags[r], columns->exponents[r], object_bits, truth_bits, member_odd,
++               arguments, direct, census_c_word(machine, node_machine_record_converted(machine, r, 0)), census_c_word(machine, node_machine_record_converted(machine, r, 1)),
++               node_machine_record_conversion_flags(machine, r, 0), node_machine_record_conversion_flags(machine, r, 1));
++        printf(" lop=%u lw=%x lst=%x lfl=%x lex=%x rop=%u rw=%x rst=%x rfl=%x rex=%x top=%u tst=%x", left < r ? (uint32_t)node_machine_record_op(machine, left) : 255u,
++               left < r ? columns->words[left] : 0u, left < r ? columns->standings[left] : 0u, left < r ? columns->value_flags[left] : 0u, left < r ? columns->exponents[left] : 0u,
++               right < r ? (uint32_t)node_machine_record_op(machine, right) : 255u, right < r ? columns->words[right] : 0u, right < r ? columns->standings[right] : 0u,
++               right < r ? columns->value_flags[right] : 0u, right < r ? columns->exponents[right] : 0u, third < r ? (uint32_t)node_machine_record_op(machine, third) : 255u,
++               third < r ? columns->standings[third] : 0u);
++        printf(" slot=%u cop=%u cw=%x cst=%x cfl=%x ctpl=%u cctx=%x cstate=%x ctw=%x cc=%x ccf=%x sop=%u sw=%x sst=%x sfl=%x sex=%x", slot,
++               rooted ? 255u : (uint32_t)node_machine_record_op(machine, parent), rooted ? 0u : columns->words[parent], rooted ? 0u : columns->standings[parent],
++               rooted ? 0u : columns->value_flags[parent],
++               rooted ? 255u : (refusal != NODE_MACHINE_REFUSED_TEMPLATE || parent >= stopped) ? (uint32_t)node_machine_record_template(machine, parent) : 254u,
++               rooted ? root_context : node_machine_record_context(machine, parent), rooted ? 0u : node_machine_record_state(machine, parent), census_c_word(machine, parent_target),
++               census_c_word(machine, given), given_flags, sibling < count ? (uint32_t)node_machine_record_op(machine, sibling) : 255u, sibling < count ? columns->words[sibling] : 0u,
++               sibling < count ? columns->standings[sibling] : 0u, sibling < count ? columns->value_flags[sibling] : 0u, sibling < count ? columns->exponents[sibling] : 0u);
++        printf(" lob=%x ro=%x caop=%u cast=%x cafl=%x caex=%x", left_object_bits, rooted ? census_c_object_bits(machine, root_object) : 0u,
++               first_inside ? (uint32_t)node_machine_record_op(machine, first) : 255u, first_inside ? columns->standings[first] : 0u, first_inside ? columns->value_flags[first] : 0u,
++               first_inside ? columns->exponents[first] : 0u);
++        printf(" | state=%x ctx=%x tw=%x ts=%x same=%u tpl=%u depth=%u up=%x hk=%" PRId64 "\n", state, node_machine_record_context(machine, r), census_c_word(machine, target), selector,
++               target == node_machine_record_type(machine, r) ? 1u : 0u, template, evaluated ? node_machine_record_call_depth(machine, r) : 0u, plan, hook_distance);
++    }
++    census_c_expressions += 1;
++}
++
+ // #2524's step 1, the shadow (--shadow): the node machine (c_check_node_machine.c) run on every expression the census
+ // takes, after the pipeline, its records compared with the stream's values and conversions node by node and its tape
+ // with the lowering's entries entry by entry, then timed. --scalar types every node by the action, --verify checks T's
+@@ -5166,6 +5295,14 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+     {
+         refusal = node_machine_run(machine, first, root, records, root_context, pop->target, object);
+     }
++    if (census_c_lines == 1 && ran && (refusal == NODE_MACHINE_TAKEN || refusal == NODE_MACHINE_REFUSED_TEMPLATE || refusal == NODE_MACHINE_REFUSED_ROW))
++    {
++        census_c_print(machine, machine->count, root_context, pop->target, (uint32_t)refusal, object);
++    }
++    else if (census_c_lines == 1)
++    {
++        printf("cx: refusal=%u ran=%u\n", (uint32_t)refusal, ran ? 1u : 0u);
++    }
+     shadow->memo_fills += machine->memo_fills - memo_fills;
+     shadow->memo_rules += machine->memo_rules - memo_rules;
+     shadow->expressions += 1;
+@@ -7062,6 +7199,12 @@ static int run_node_census(int count, char** arguments)
+             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_LEAN | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+             shadow.reader |= BUSTER_NODE_READER_FACTS | (strcmp(arguments[i], "--front-window") == 0 ? BUSTER_NODE_READER_WINDOW : 0);
+         }
++        else if (strcmp(arguments[i], "--census-c-lines") == 0 || strcmp(arguments[i], "--census-c-reader") == 0)
++        {
++            // After the pipeline, with the lowering's pop's context and target; or at reader time, on every expression T
++            // takes there (with --front-sweeps).
++            census_c_lines = strcmp(arguments[i], "--census-c-lines") == 0 ? 1 : 2;
++        }
+         else if (strcmp(arguments[i], "--window-tests") == 0)
+         {
+             // The tests in the machine's own form, on the window the front writes, from the kernel's records in place;
+diff --git a/src/buster/compiler/c_check_node_machine_reader.c b/src/buster/compiler/c_check_node_machine_reader.c
+index a355c5a5d..2c9c167bf 100644
+--- a/src/buster/compiler/c_check_node_machine_reader.c
++++ b/src/buster/compiler/c_check_node_machine_reader.c
+@@ -492,6 +492,10 @@ static inline bool node_machine_reader_discard(const CheckInputReader* reader, c
+ // together, and the second keeps their refusal, the root's target and object, the tape and the side's digest. With the
+ // census's tests (NodeMachineReader.tests), they run between T and the other two, in both runs, and C and X run on the
+ // expressions none refuses: the first run times all of it, and the second keeps the tests' bits and the root's kind.
++// CENSUS (C's answers, buster#2850's step 2): c_check_node_census.c's, which follows this file in the unit.
++static uint32_t census_c_lines;
++static void census_c_print(const NodeMachine* machine, uint32_t count, uint8_t root_context, TypeId root_target, uint32_t refusal, uint32_t root_object);
++
+ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader)
+ {
+     NodeMachine* machine = &typer->machine;
+@@ -583,6 +587,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
+                         const uint8_t context = node_machine_reader_root(typer, front, reader, record, &target, &object);
+                         swept = node_machine_contexts(machine, context, target, object);
+                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
++                        if (census_c_lines == 2 && pass != 0)
++                        {
++                            census_c_print(machine, machine->count, context, target, (uint32_t)swept, object);
++                        }
+                         if (pass != 0)
+                         {
+                             const bool taken = swept == NODE_MACHINE_TAKEN;
