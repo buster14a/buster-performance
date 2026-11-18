@@ -97,6 +97,11 @@ operand's:
 | its conversions' types' words | 17.8% | 14.3% | 19.9% | 23.8% |
 | an operand's line | 8.1% | 7.2% | 8.4% | 10.1% |
 
+**A template needs none of its conversions' types' words** (`scripts/own_words.py`, `results/own-words.txt`): with each
+operand's own type's word in their place (an array's and a function's as a pointer's; a binary operator's two
+operands' as the wider of their classes), no template of the 763,283 differs. So the 14% to 24% above read two more
+bytes of an operand's line, not a type's row.
+
 A member's offset decides nothing a flag doesn't: every member at an offset that is no byte's has its bit-field flag
 (224 of them, all on `sqlite3.c` and musl).
 
@@ -197,7 +202,7 @@ the other three): 4,385 of them have a target that is another type than their ow
 - `census-c.patch`: the experiment's code, on buster's `fd8df4371`.
 - `columns/`: the four runs' lines as columns; `sample/`: their first 400 lines; `results/shadow-*.txt`: the runs'
   reports.
-- `scripts/parse.py`, `features.py`: the lines' fields; `rules.py`: section 2; `tables.py`: section 3 (`--fields
+- `scripts/parse.py`, `features.py`: the lines' fields; `rules.py` and `own_words.py`: section 2; `tables.py`: section 3 (`--fields
   window+down`, `window+down+converted`, `window+down+converted+outside`); `counts.py`: section 4. Each runs from
   this directory (`python3 scripts/rules.py`).
 - `results/`: their outputs.
