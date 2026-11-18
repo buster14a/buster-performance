@@ -62,4 +62,5 @@ Release, every run under the lock, timings on CPU 2, every benchmark process fro
   Commit `e91cd2582` adds their cases: the fills against their definitions on random columns, in every lane; a callee
   with a vector constant spliced into a caller that has one (`iota`, `plus_iota`); and a write of an unsaved RBX in
   place of each of a body's NOPs, over two batches of filler.
-- **Round `pr2`**, with those cases: running.
+- **Round `pr2`**, the three survivors on the final tree ([`mutation/pr2.results`](mutation/pr2.results)): `i7` and `i8`
+  killed by `test-tier0-inline` (the fills, and the fixture in all three runs), `u1` by `test-unwind`.
