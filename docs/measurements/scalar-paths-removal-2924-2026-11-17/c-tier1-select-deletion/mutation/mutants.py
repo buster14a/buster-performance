@@ -15,6 +15,14 @@ MUTANTS = [
     ('b3-rules-goal-low-bit', B,
      'const __m512i index = _mm512_add_epi32(_mm512_mullo_epi32(state, _mm512_set1_epi32(TIER1_BURS_NONTERMINALS)), goal);',
      'const __m512i index = _mm512_add_epi32(_mm512_mullo_epi32(state, _mm512_set1_epi32(TIER1_BURS_NONTERMINALS)), _mm512_and_si512(goal, _mm512_set1_epi32(1)));'),
+    # b2 left `left` unused and never built; b2b keeps every variable used. b3 is the identity: the goals are STMT
+    # and REG, 0 and 1; b3b sends STMT's goal to REG.
+    ('b2b-label-left-needs-right', B,
+     'const __m512i left = _mm512_mask_i32gather_epi32(reg, left_visible, left_kid, states, 4);',
+     'const __m512i left = _mm512_mask_i32gather_epi32(reg, left_visible & right_visible, left_kid, states, 4);'),
+    ('b3b-rules-statement-goal-as-reg', B,
+     'const __m512i index = _mm512_add_epi32(_mm512_mullo_epi32(state, _mm512_set1_epi32(TIER1_BURS_NONTERMINALS)), goal);',
+     'const __m512i index = _mm512_add_epi32(_mm512_mullo_epi32(state, _mm512_set1_epi32(TIER1_BURS_NONTERMINALS)), _mm512_max_epi32(goal, _mm512_set1_epi32(TIER1_BURS_REG)));'),
     ('b4-classify-link-low-lanes', B,
      'result = _mm512_mask_mov_epi32(result, link, _mm512_set1_epi32(TIER1_BURS_OP_ICMP_LINK));',
      'result = _mm512_mask_mov_epi32(result, link & (__mmask16)0x00ff, _mm512_set1_epi32(TIER1_BURS_OP_ICMP_LINK));'),
