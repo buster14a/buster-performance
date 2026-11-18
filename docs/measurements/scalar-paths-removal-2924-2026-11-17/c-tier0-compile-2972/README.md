@@ -108,3 +108,29 @@ independent. That is the IPC difference.
 
 Each saves a round trip of about 9 to 16 ticks, out of about 350. Closing the 1-entry loss needs something structural,
 such as several small functions in one block of the passes, which share the chain's latency. That isn't started here.
+
+## The fixes' commit against its base ([`pr/`](pr/))
+
+[`pr/run.sh`](pr/run.sh) ran the commit (`749a434bd`, the four fixes and `docs/tier0.md`) against `e91cd2582` on the
+9700X, Release, under the lock on CPU 2. Every benchmark process ran from a fresh copy of its executable
+([`pr/logs/`](pr/logs/)).
+
+- **Tests by head:** `test-tier0 --cross-check` and `test-tier0-inline` (with and without the shapes) pass.
+- **Objects:** `-c`, `-c -g` and `-c --verify` of sqlite3.c, Lua, musl, buster's `main.c` and `tiny.c`: 1,373 of 1,373
+  byte-identical in each mode.
+- **`benchmark-backend-source --only vector`**, cycles a typed entry, three processes each:
+
+  | Input | Base | Head | Instructions a typed entry |
+  | --- | --- | --- | --- |
+  | `tiny.c` | 453.7 to 476.5 | 342.0 to 343.2 | 1,692 → 1,256 |
+  | Lua's units | 84.1 to 92.6 | 81.3 to 82.3 | 225.1 → 212.1 |
+
+- **Whole compiles** ([`pr/logs/time.log`](pr/logs/time.log)): `ab`, three rounds, around `time-runs` of base, head
+  and base again, `-c --lanes 1`. User cycles against base, round by round:
+
+  | Compile | Head | Base again | User instructions, head against base |
+  | --- | --- | --- | --- |
+  | sqlite3.c | +0.06%, −0.32%, −0.16% | +0.02%, −0.20%, −0.17% | 2.75 M fewer (−0.2%) |
+  | Lua's units | −0.11%, −0.42%, −0.19% | −0.10%, −0.52%, +0.07% | 1.14 M fewer |
+  | buster's `main.c` | −0.07%, −0.16%, +0.22% | −0.44%, −0.63%, +0.10% | 1.43 M fewer |
+  | `tiny.c` | −2.37%, −3.72%, −2.89% | +1.32%, −1.15%, +1.48% | 3.05 M fewer (−4.6%) |
