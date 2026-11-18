@@ -140,7 +140,7 @@ far path; no word of the masks for the calls left out). Both on main `8d4025fbf`
 | with every warning | 67.65 | 63.79 | 73.88 | 70.76 | 120.61 | 121.14 |
 | beside `--verify` (one reading) | | 85.50 | | 103.37 | | 172.49 |
 | the kernel in place, without the tests | 15.55 | 16.38 | 20.15 | 20.85 | 18.67 | 19.15 |
-| the front with the window (section 5) | 52.76 | 71.74 | 71.22 | 91.93 | 90.81 | 102.00 |
+| the front with the window (its one file's pages: section 5) | 52.76 | 71.74 | 71.22 | 91.93 | 90.81 | 102.00 |
 | the names' pass, ticks a name | 22.55 | 22.59 | 93.14 | 94.45 | 68.27 | 67.77 |
 
 Readings of the tests: `sqlite3.c` 35.4 to 36.2 for 41.7 to 42.1; Lua 52.5 to 53.3 for 57.6 to 58.7; musl 92.6 to
@@ -169,8 +169,7 @@ the patch by eight lines of the documents, which have this reading). The two in 
 
 Readings of the tests: `sqlite3.c` 35.2 to 35.9 for 41.9 to 42.5; Lua 52.6 to 53.2 for 57.7 to 61.0; musl 91.8 to
 108.1 for 94.7 to 109.6. The front with the window, each reading: 52.80, 52.91 and 52.80 for 52.70, 52.86 and 52.75;
-Lua 71.66, 70.95 and 70.77 for 70.66, 71.10 and 70.56; musl 90.91, 92.91 and 88.01 for 88.21, 90.84 and 87.75: in this
-build it reads main's (section 5). `-c sqlite3.c`: wall -0.08% and +0.06%, user cycles -0.15% and +0.16%; main against
+Lua 71.66, 70.95 and 70.77 for 70.66, 71.10 and 70.56; musl 90.91, 92.91 and 88.01 for 88.21, 90.84 and 87.75. `-c sqlite3.c`: wall -0.08% and +0.06%, user cycles -0.15% and +0.16%; main against
 itself +0.11% and -0.00%, +0.10% and +0.10%.
 
 The two other builds beside `c14`, each against `m3` in its own job:
@@ -224,15 +223,19 @@ Against the specification's gates:
    asks were 0.60 where they were timed (`c8`).
 4. **What is not this piece's reads the same:** the names' pass and `-c sqlite3.c` do. The kernel in place does not, by
    the form that replaced the specification's: its call rule gathers the arguments' part, 16.38 for 15.55 on
-   `sqlite3.c` (16.00 for 15.74 in `c9`'s build). The front with the window reads a third more in `c14`'s build and
-   main's reading in `c12`'s and `p64`'s: section 5.
+   `sqlite3.c` (16.00 for 15.74 in `c9`'s build). The front with the window read a third more from `c14`'s file and
+   main's from fresh copies of it: the file's pages, not the piece (section 5).
 
-## 5. The front's ticks by where read-only data sits (buster14a/buster#2967; `results/9700x/c14`, `p64`, `p1088`, `m3p3008`, `m3p2944`)
+## 5. The front's ticks from one file of the executable (buster14a/buster#2967; `results/9700x/c14`, `p64`, `p1088`, `m3p3008`, `m3p2944`)
+
+**Corrected 2026-11-18.** This section first said the piece's build read the front with the window a third slower "by
+where read-only data sits". It was not the build: it was the one file of it on the 9700X, as its pages sat in the page
+cache. The readings below are as they were; what they meant is in "What settled it".
 
 "The window without the tests" (`--front-window`), millions of ticks of the front's chunks on `sqlite3.c` (315,966
 records: 16.7 M is 52.8 ticks a record and 22.7 M is 71.7), every reading without a counter:
 
-| build | readings | the front with the window | the same front without it | the tree checker, and its setup |
+| the file | readings | the front with the window | the same front without it | the tree checker, and its setup |
 | --- | ---: | ---: | ---: | ---: |
 | `m3`, main | 19 | 16.6 to 17.0 | 13.9 to 14.1 | 29.4 to 29.8, 4.9 to 5.1 |
 | `c12` | 12 | 16.7 to 16.9 | 14.0 to 14.4 | 29.5 to 29.9, 5.0 to 5.2 |
@@ -242,44 +245,65 @@ records: 16.7 M is 52.8 ticks a record and 22.7 M is 71.7), every reading withou
 | `m3p3008`, `m3p2944`: main with a string of 3,008 and of 2,944 bytes there | 2 each | 16.7 to 16.9 | | |
 
 On Lua and musl: `c14` 91.6 to 95.0 and 101.9 to 105.2 ticks a record for main's 71.2 and 90.8; `c12` 70.7 to 70.9 and
-88.6 to 91.1; main with the strings 71.0 to 76.7 and 88.1 to 90.6 for 71.3 to 71.8 and 90.0 to 93.3.
+88.6 to 91.1.
 
-- **The front's code is main's:** `nm -S`, every `node_front_*` function has main's size at main's address in `c12`,
-  `c14` and `p64` (`node_front_acted` 0x629d bytes at 0x14f25f0).
+### What settled it (`scripts/copies.sh`, `scripts/evict.sh`; `results/9700x/copies.log`, `evict.log`)
+
+| `c14`'s executable | the front with the window |
+| --- | ---: |
+| its file, as it had been since its build (two readings here, fourteen above) | 22.6 M, 22.8 M |
+| four fresh copies of the file (`cp`), two readings each | 16.72 M to 16.82 M |
+| the file through a hard link: the same inode, the same pages | 22.65 M |
+| the file after its pages were dropped from the page cache (`posix_fadvise(DONTNEED)`) and read back | 16.77 M, 16.63 M |
+| `p64`'s file and four copies of it, two readings each | 16.65 M to 16.87 M |
+
+The same bytes read main's from any other pages. The slow instance is gone since the last row.
+
+### What the slow file's runs looked like
+
+- **The same ops, retired sooner** (`scripts/perf11.sh`: IBS op samples with data addresses over 60 runs a build,
+  `c14`'s file against `p64`'s; `perf11-window-samples.txt`). 8,487 samples in `node_front_chunk_window` for 8,474:
+  1,994 loads and 1,694 stores for 1,973 and 1,658, at the same addresses (the heap, six lines of `.bss`, the
+  function's `switch` tables), 28 loads and 46 stores that miss the first level for 24 and 50, one TLB miss for two.
+  Tag to retire 27.0 cycles an op for 30.3, completion to retire 13.7 for 15.7; the front's ticks under the samples
+  23.4 M for 17.5 M. Fewer ops in flight, and no load that waits longer: the ops arrive more slowly.
+- **The fetch side, in the function** (`scripts/perf13.sh`: IBS fetch samples over 20 runs, the slow file against a
+  fresh copy of it): 102 fetches of 3,282 miss the op cache for 59 of 3,647; 798 are not completed for 780; 13 miss
+  the instruction cache for 23.
+- **Counters of the whole process** (`scripts/perf12.sh`, `perf12.log`: three runs of each of two sets, the slow file
+  against a fresh copy): instruction-cache misses 89.3 M to 90.4 M for 89.6 M to 90.2 M, their fills from L2 34.8 M to
+  35.4 M for 34.0 M to 34.8 M and from further 0.43 M to 0.53 M for 0.54 M to 0.59 M, op-cache misses 138.4 M to
+  138.8 M for 139.2 M to 140.8 M, the decoder's ops 452 M to 459 M for 443 M to 451 M, L1 ITLB misses 0.86 M to 0.94 M
+  for 0.91 M to 1.05 M, L2 ITLB misses about 2,000 in each but one run. Nothing there tells the two files apart.
+- **The ITLB's page size is not it** (`scripts/perf14.sh`, `perf14.log`: one run of fetch samples in the whole text of
+  eight files): `c14`'s slow file and a fresh copy of it both fetch from 4 KB pages, as `m3`, `c12`, `h1`, `p1088` and
+  `c9` do. (`perf13`'s fresh copy fetched its samples in the function from pages of the size perf prints as
+  `RESERVED`; `perf14`'s copy did not, and read as fast.)
 - **Not the stack's place** (`pads.sh` with `--front-window`, `results/9700x/*/padw-sqlite3-pad*.txt`): with an
-  environment variable of nine sizes from 0 to 3,072 bytes `c14` reads 22.6 to 22.8, `c12` 16.7 to 16.8, `m3` 16.6 to
-  17.0.
-- **The front's struct's place is the same** (`scripts/gdb1.sh`): `front & 0xfff` is `0x6c0` in each build.
-- **What moved is the read-only data after the test file's fixture texts,** 3,008 bytes further in `c14` than in
-  `c12`. The front's function's four `switch` tables are at `0x5b388c`, `0x5b38d0`, `0x594454` and `0x59448c` in
-  `c14`; `0x5b2ccc`, `0x5b2d10`, `0x593894` and `0x5938cc` in `c12`; `0x5b1ea4`, `0x5b1ee8`, `0x592b24` and `0x592b5c`
-  in `m3`. The strings in main's own source (`m3p3008`, `m3p2944`) did not move its tables and prove nothing either
-  way.
-- **Counters of the whole process** (`scripts/perf6.sh`, one run a build; `scripts/perf10.sh`, three):
+  environment variable of nine sizes from 0 to 3,072 bytes `c14`'s file read 22.6 to 22.8, `c12`'s 16.7 to 16.8, `m3`'s
+  16.6 to 17.0. **Nor the code's:** every `node_front_*` function has main's size at main's address in `c12`, `c14`
+  and `p64`.
 
-  | | user cycles | mispredicted branches or the execution's redirects | resyncs | redirects at decode | op-cache misses | the decoder's ops | first-level misses | `stli_other` | `ls_stlf` |
-  | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-  | `c14`, `perf6` | 1,395 M | 10.6 M | | | | | 39.8 M | 11.0 M | 169 M |
-  | `p64`, `perf6` | 1,388 M | 10.3 M | | | | | 39.4 M | 11.1 M | 178 M |
-  | `c12`, `perf10`, three runs | 1,373 M to 1,377 M | 12.3 M to 12.4 M | 110 k to 132 k | 222 k to 250 k | 139 M to 143 M | 455 M to 460 M | | | |
-  | `p64`, `perf10`, three runs | 1,370 M to 1,374 M | 12.3 M to 12.5 M | 125 k to 144 k | 221 k to 244 k | 139 M to 141 M | 447 M to 451 M | | | |
-  | `c14`, `perf10`, run 2 | 1,406 M | 12.5 M | 135 k | 238 k | 138 M | 453 M | | | |
-  | `c14`, `perf10`, runs 1 and 3 | 1,480 M, 1,516 M | 12.2 M, 12.9 M | 204 k, 209 k | 296 k, 313 k | 153 M, 150 M | 516 M, 518 M | | | |
+### What was wrong here before
 
-  In `c14`'s run under `perf6` and in its second under `perf10` the user cycles are 0.5% and 2.5% over `p64`'s and the
-  other counters within the other builds' ranges (the front's window 22.7 M ticks in the first). Its two other runs
-  read the whole process 8% and 10% higher; the one whose report was kept (`perf10-run.txt`) reads every timed section
-  higher, the tree checker's 31.7 M ticks and its setup 11.3 M, the front's window 23.1 M. None of `c14`'s fourteen
-  readings without a counter has that (the table above), so the two are taken for runs with something else on the
-  machine; that is not shown.
-- **Where the cycles are** (`scripts/perf9.sh`: user cycles sampled over 24 runs a build, each at its own period;
-  `perf9-window-ips.txt`): 8,919 samples in `node_front_chunk_window` in `c14` for 6,373 in `p64`. The excess is at
-  the loads that follow a record's stores into the front's arrays and after the `switch`'s table's load. `perf7.sh`
-  and `perf8.sh` are the same at one period and at fewer runs.
+- **"What moved is the read-only data after the test file's fixture texts."** Between `c12` and `c14` the function's
+  `switch` tables did move by 3,008 bytes (`0x5b2ccc` to `0x5b388c`), but `p64`'s and `p1088`'s are where `c14`'s are
+  (`0x5b388c`, read from the code of each): their strings moved what follows them among the strings alone. `p64` was
+  fast because it was another file.
+- **"A false dependency of a load on a store fits."** No load waits longer in the slow file's samples.
+- **The earlier counters** (`perf6.sh`, `perf10.sh`, `perf7.sh` to `perf9.sh`; `c14`, `p64` and `c12`'s files) compared
+  files of different builds, and two of `c14`'s three `perf10` runs read the whole process 8% and 10% higher (every
+  timed section of the one whose report was kept, the tree checker's setup twice). They are in `results/9700x` as
+  they were; they don't bear on the cause.
 
-Not resolved here: buster14a/buster#2967 has what it fits and what is next. The pull request's sources are `c14`'s
-and the layout is not steered: on main `8d4025fbf` their build has the slow layout, and on main `5fa4e76c3`, where
-the pull request was opened, it reads main's (`h1`, section 4).
+### What changed in the jobs
+
+`scripts/turns.sh` (the earlier records' one ran each build from its one file): each reading now runs each build from
+a fresh copy of its compiler, read once before the reading's runs and removed after them. A file like `c14`'s is then
+one outlier of a build's readings, and its copy can be kept for samples. `compile.sh` already ran three copies a build.
+The tables above and in sections 2 to 4 are from the one-file jobs: their tests' sweeps agree between `c14`'s slow file
+and `p64` (35.79 and 35.62 on `sqlite3.c`), so the slow pages took their third from the front's function and not from
+the tests.
 
 ## 6. What is left, counted (`patches/left-census-experiment.patch`, `results/cloud/left`)
 
