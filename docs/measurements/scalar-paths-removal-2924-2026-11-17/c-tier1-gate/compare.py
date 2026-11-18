@@ -2,7 +2,7 @@
 # for both masks and rounds 1..ROUNDS, takes each function's median per region over the rounds, and prints OTHER/BASE
 # by the function's IR size, then each round's own total ratio (the spread). Region numbers as in analyze.py.
 import sys, os, statistics
-regions = ['select', 'chain-liveness', 'chain-allocate', 'chain-prepare', 'chain-records', 'cfg-problem', 'cfg-allocation', 'preference', 'cfg-records', 'schedule']
+regions = ['select', 'chain-liveness', 'chain-allocate', 'chain-prepare', 'chain-records', 'cfg-problem', 'cfg-allocation', 'preference', 'cfg-records', 'schedule', 'debug']
 bins = [(1, 16), (16, 64), (64, 256), (256, 1024), (1024, 1 << 30)]
 d, base, other, rounds = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
 wanted = [int(x) for x in sys.argv[5:]]
