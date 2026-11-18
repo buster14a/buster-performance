@@ -1,5 +1,10 @@
 # The IR's gate (#2924, C9): main `45f3f8561`
 
+**Superseded (2026-11-18):** every area's region here held the verifier's scalar twin, which the lowering and each
+optimizer pass's preparation took with the area's flag, and promotion's also held the vector-values scan's twin. The
+ratios below are those twins' as much as the areas'. [`c-ir-gate-again/`](../c-ir-gate-again/) measures each area alone
+on C9b's tree, where the verifier has one path.
+
 This gate measures the twins of the IR, SSA and the IR optimizer, as Tier 1's pipeline selects them, area by area. It
 uses one Release executable built from main plus [`knob.patch`](knob.patch), which is for the experiment only:
 - `BUSTER_IR_SCALAR_AREAS` is a bitmask of the areas whose twin runs. In `c_check_tier1.c` and
