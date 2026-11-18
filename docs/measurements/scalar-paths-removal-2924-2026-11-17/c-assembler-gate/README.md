@@ -56,3 +56,24 @@ The vector path wins every run, by 1.38 to 2.65 times, and every phase but layou
 the synthetic ones from 64 functions. Its only path-dependent code is the relaxation's 16-records-at-a-time arms
 (`asm_relax_first`, `asm_relax_place`). The rest of the phase is shared, and in each pass it runs after a different
 path's earlier phases, so this run doesn't separate the two arms from the cache state they find.
+
+## The relaxation's arms alone
+
+[`relax.sh`](relax.sh) built one experiment executable: main `0c113feb1` plus
+[`c11-relax-knob.patch`](c11-relax-knob.patch), in which `BUSTER_ASM_RELAX_SCALAR=1` sends `asm_relax_first` and
+`asm_relax_place` to their scalar arms while everything else stays on the vector path. It ran `benchmark-assembler
+--only vector` with the knob off and on, alternately, four rounds, every run under the lock on CPU 2
+([`relax/`](relax/)).
+
+Layout's median, in milliseconds, round by round, and the ratio with the scalar arms over the vector arms:
+
+| Input | Vector arms | Scalar arms | Scalar / vector, by round |
+| --- | --- | --- | --- |
+| sqlite3.c by gcc | 44.356, 44.076, 44.296, 44.236 | 43.713, 43.767, 43.825, 43.738 | 0.986, 0.993, 0.989, 0.989 |
+| sqlite3.c by clang, Intel | 38.940, 38.699, 38.768, 38.908 | 38.525, 38.666, 38.323, 38.601 | 0.989, 0.999, 0.989, 0.992 |
+| `lvm.c` by clang | 0.273, 0.270, 0.271, 0.271 | 0.269, 0.267, 0.267, 0.269 | 0.985, 0.989, 0.985, 0.993 |
+| mixed, 2,048 functions | 2.389, 2.441, 2.379, 2.382 | 2.344, 2.349, 2.346, 2.334 | 0.981, 0.962, 0.986, 0.980 |
+| AT&T, 2,048 functions | 2.418, 2.406, 2.424, 2.394 | 2.399, 2.402, 2.360, 2.374 | 0.992, 0.998, 0.974, 0.992 |
+
+The scalar arms are faster in every round on every input, by 0.1% to 3.8% of the phase. The relaxation's vector arms
+don't pay.
