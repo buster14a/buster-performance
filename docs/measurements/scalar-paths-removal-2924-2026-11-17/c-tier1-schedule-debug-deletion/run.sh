@@ -1,5 +1,5 @@
 #!/bin/bash
-# #2924 C7's first slice, the schedule's and the debug metadata's twins deleted: head (branch c7-tier1, from c7a.bundle)
+# #2924 C7's first slice, the schedule's and the debug metadata's twins deleted: head HEAD (the PR's branch on GitHub)
 # against its base BASE on the 9700X, Release, every run under the lock, timings on CPU 2.
 # 1. test-tier1-schedule and test-check-debug by head;
 # 2. benchmark-tier1-schedule, three rounds: base's vector row against head's one row;
@@ -13,14 +13,15 @@ export EXCLUSIVE_OWNER=claude-2924 EXCLUSIVE_TITLE="Scalar paths removed: Tier 1
 L=~/buster-fast-bench/exclusive.sh
 P=$D/../c3pr
 BASE=${BASE:?}
+HEAD_SHA=${HEAD:?}
 mkdir -p compilers logs
 for side in base head; do
     if [ ! -d src-$side ]; then git clone -q --shared $D/../c7gate/src src-$side || exit 1; fi
     git -C src-$side fetch -q https://github.com/buster14a/buster main || { echo "fetch failed" >> logs/status.txt; exit 1; }
-    git -C src-$side fetch -q "$D/c7a.bundle" "+refs/heads/c7-tier1:refs/heads/c7-tier1" || { echo "bundle failed" >> logs/status.txt; exit 1; }
+    git -C src-$side fetch -q https://github.com/buster14a/buster claude/wonderful-wozniak-vbfba7 || { echo "branch fetch failed" >> logs/status.txt; exit 1; }
 done
 git -C src-base checkout -q --detach "$BASE" && git -C src-base reset -q --hard
-git -C src-head checkout -q --detach c7-tier1 && git -C src-head reset -q --hard
+git -C src-head checkout -q --detach "$HEAD_SHA" && git -C src-head reset -q --hard
 printf 'base %s\nhead %s\n' "$(git -C src-base rev-parse HEAD)" "$(git -C src-head rev-parse HEAD)" > logs/commits.txt
 for side in base head; do
     (cd src-$side && $L timeout -k 5 1500 ./build.sh --config Release > "$D/logs/build-$side.log" 2>&1) || { echo "build $side failed" >> logs/status.txt; exit 1; }
