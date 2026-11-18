@@ -136,4 +136,4 @@ It times the region with no bit, bit 1 and bit 12, five rounds in turn ([`ticks-
 | 1, the whole region | default | 1.090 | 1.050 | 1.106 | 1.108 | 1.131 | 1.074 |
 | 1, the whole region | `+all` | 1.028 | 1.021 | 1.027 | 1.032 | 1.026 | 1.028 |
 
-The inliner's own twins lose in every bin, in every round, in both configurations.
+Above 1 the vector path wins: it does in every bin and every round, in both configurations.
