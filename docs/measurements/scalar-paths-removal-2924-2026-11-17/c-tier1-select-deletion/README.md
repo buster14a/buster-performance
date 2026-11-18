@@ -66,4 +66,15 @@ barrier scan, the known bits, the symbol firsts, the ranges and the storage's sc
 
 b4 and s4: killed.
 
-**Round `final`**, the final tree with every case: results in [`mutation/final.results`](mutation/final.results).
+**Round `final`**, the final tree (`48fa59acc`, deletion and every case): all 10 killed (b1, b2b, b3b, b4, s1 to s4, r1
+and t1), b4 by `test-tier1-select` and s4 by `test-tier1-emit`.
+
+## Locally (AVX-512 Xeon), after the rebase onto #2964
+
+- `test-tier1-select`, `-emit`, `-masks`, `-wide`, `-cfg`, `-allocation`, `-liveness`, `-model`, `-frame`,
+  `-schedule`, `-pipeline` and `test-check-debug` pass.
+- All 220 of c-testsuite's single-exec programs give byte-identical objects from main's build and head's, under
+  `--tier1`, `--tier1 -g` and `--tier1 --tier1-schedule=post`.
+- The complete driver's parse and its `-Wall -Werror` self-check of `main.c` pass.
+- The start section holds the same 577 functions in main's Release build and head's; head's new functions are the
+  test's digest helpers.
