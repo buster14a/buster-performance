@@ -3,8 +3,8 @@
 The second half of [the piece's specification](https://github.com/buster14a/buster/issues/2850#issuecomment-6951406678),
 after [the first half](../window-tests-2850-2026-11-17/README.md) (buster14a/buster#2948). Sections 1 to 5 are its
 groundwork: experiment builds and a first form of the rule, each a patch here against main `9a1422eab` (they hold the
-first half's sources). Sections 6 to 10 are the rule as its pull request has it, on main `aa09d1a04`, and the forms
-tried on the way.
+first half's sources). Sections 6 to 10 are the rule as its pull request has it (buster14a/buster#2955), on main
+`aa09d1a04`, and the forms tried on the way.
 
 - 9700X: CPU 2, Release, each run its own hold of the lock, readings in turn; the directory and scripts of the
   first half's record, and `scripts/turns-env.sh` (one executable, a setting a turn by its environment).
@@ -237,8 +237,13 @@ The pull request's sources on main `aa09d1a04` (the work branch's `02e0412b3`; 4
 - The complete driver's lists (`complete-light.log`, `complete-heavy.log`): one heading fails, as on main in this
   container, "Test the preprocessor on the repository's translation units against clang": the container's clang names
   its resource directory `/usr/lib/llvm-23/lib/clang/23`, and the 45 differences are that path.
-- `head/`: the pull request's head, the same diff on main `56e93bf02` (`head-check.sh`): `test-checker --part 5/8`
-  (210,330 checks, 0 failures) and 20 `--window-tests` runs, each status 0.
+- The sanitizer rows a pull request's checks don't run (`sanitizers.sh`, `sanitizers-progress.txt`): native memory,
+  address and thread, a build each; `test-checker --part 5/8` (210,330 checks, 0 failures) in each; and for memory and
+  address the shadow with `--window-tests --verify` and with `--window-tests --verify -Wall -Wextra` on `sqlite3.c`,
+  Lua and the compiler's own source. Every run status 0, no report.
+- `head/`: the pull request's head (buster14a/buster#2955, `305cc222b`), the same diff on main `56e93bf02`
+  (`head-check.sh`): `test-checker --part 5/8` (210,330 checks, 0 failures) and 20 `--window-tests` runs, each status
+  0.
 
 ## Files
 
