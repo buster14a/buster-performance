@@ -1,0 +1,306 @@
+diff --git a/docs/ir-loop-motion.md b/docs/ir-loop-motion.md
+index fa325f67e..c84604dc5 100644
+--- a/docs/ir-loop-motion.md
++++ b/docs/ir-loop-motion.md
+@@ -14,17 +14,26 @@ is the loop header. It does not synthesize preheaders or change CFG edges.
+ Nested loops are processed from smallest to largest. An instruction moved
+ out of an inner loop may subsequently move through the outer preheader.
+ 
++Each loop is walked over its own blocks, once, rather than the whole function
++for each loop (#2781, #2979). In reverse postorder a value comes after its
++operands (a phi's aside, and a phi doesn't move), so one forward availability
++walk finds the loop's movable values; the unrestricted motion sends every one of
++them to the preheader. On the largest functions of sqlite3.c, Lua and musl under
++`+licm`, the whole-function sweeps this replaced took up to 1.6 times the
++worklist's ticks, and the worklist itself scanned the whole function for each
++loop.
++
+ `IrLicmOptions.vectors` (#2781) restricts that motion to vector- and mask-typed
+ values and the movable operands they need. Tier 1 enables it by default for a
+ function that has such values, unless `+licm` requests unrestricted motion. A
+-loop with no safe vector or mask value is skipped. The other loops use a forward
+-availability walk and backward operand-closure walk over their own blocks rather
+-than scanning the whole function for each loop. `IrLicmOptions.whole` retains the
+-original whole-function algorithm with the same filter as an exact test oracle.
+-If nothing moves, the result borrows the input function and writes no output.
+-`test-ir-licm` compares both walks and host paths on SIMD, width-change,
+-permute2 and nested-loop fixtures, checks their interpreted behavior, and checks
+-that scalar-only loops are skipped without an output rewrite.
++loop with no safe vector or mask value is skipped. The other loops take the
++forward walk, then a backward operand-closure walk over their own blocks.
++`IrLicmOptions.whole` retains the original whole-function algorithm, below, as
++the exact test oracle of both policies' walks. If nothing moves, the result
++borrows the input function and writes no output. `test-ir-licm` compares the
++walks with it on SIMD, width-change, permute2 and nested-loop fixtures, checks
++their interpreted behavior, and checks that scalar-only loops are skipped without
++an output rewrite.
+ Candidate operations are total, pure computations: integer wrapping
+ arithmetic and bit operations, comparisons, selects, exact conversions,
+ floating sign negation, constants, parameters and address calculations.
+@@ -44,8 +53,9 @@ lane flags. A loop fixture checks the complete dependency chain on both paths,
+ its interpreted result, and the unmoved floating effects; an undef variant
+ checks that the chain stays in place.
+ 
+-For one loop, a value is initially available if its current definition lies
+-outside the loop and dominates the preheader. A candidate becomes invariant
++The whole-function oracle (`whole`): for one loop, a value is initially
++available if its current definition lies outside the loop and dominates the
++preheader. A candidate becomes invariant
+ when all its operands are available. The vector path tests 16 candidates at
+ a time, with exact masked dword operand loads and masked availability gathers.
+ Only semantically present operands are gathered; no `NONE` index is accessed.
+@@ -76,14 +86,15 @@ their original relative order and execution condition.
+ 
+ `test-ir-licm [--seed N]` calls `run_ir_licm_tests(argc, argv)`, with the
+ command in `argv[0]`. Include its file after `ir_optimize_licm.c` and
+-`ir_optimize_test.c`. Fixtures check exact vector/worklist/fallback output,
++`ir_optimize_test.c`. Fixtures check the walk's output against the oracle's
++sweeps, worklist and forced worklist completion,
+ the independent bounded interpreter, dependent arithmetic chains, nested
+ hoisting, missing dedicated preheaders, zero-iteration faulting division and
+ loads, undef dependence, no-loop functions, random arithmetic loops, every
+ guarded readiness tail and partial allocation rollback. Whole-pass progress
+ fixtures cover thin, wide, mixed and phi-dependent chains at 255/256/257/4096
+ lengths, asserting identical output and motion with bounded sweeps, visits
+-and fallback. The current motion policy has no profitability model, and its
++and fallback for the oracle, and one visit of each loop instruction for the walk. The current motion policy has no profitability model, and its
+ generated-code measurement says it needs one (below).
+ 
+ ## In `--tier1`
+diff --git a/src/buster/compiler/ir_optimize_licm.c b/src/buster/compiler/ir_optimize_licm.c
+index 5983997d1..58fbd2fa2 100644
+--- a/src/buster/compiler/ir_optimize_licm.c
++++ b/src/buster/compiler/ir_optimize_licm.c
+@@ -16,8 +16,9 @@ struct IrLicmOptions
+     // other loop is walked over its own blocks (ir_licm_loop_vectors). A function where nothing moves is returned as it
+     // was given: *result's function is the input's, and nothing is written to the output.
+     bool vectors;
+-    // With `vectors`, walk the whole function for each loop, as the unrestricted motion does, and keep the vectors'
+-    // candidates after (ir_licm_keep_vectors): the exact oracle of the walk of the loop's own blocks.
++    // Find each loop's movable values over the whole function, to the fixed point of their readiness (ir_licm_complete),
++    // in place of the walk of the loop's own blocks (ir_licm_loop_walk), whose exact oracle it is; with `vectors`, keep
++    // the vectors' candidates after (ir_licm_keep_vectors).
+     bool whole;
+ };
+ 
+@@ -290,15 +291,14 @@ static void ir_licm_keep_vectors(IrLicmWork* work)
+     }
+ }
+ 
+-// IrLicmOptions.vectors' walk of one loop (#2781), over the loop's own blocks in place of the whole function: the
+-// motion of a function of many loops then costs each loop's size, not the function's for each. In reverse postorder a
+-// value comes after its operands (a phi's aside, and a phi doesn't move), so one pass forward finds the movable values:
+-// the safe ones of the loop whose operands are each a movable value of the loop or a value whose block dominates the
+-// preheader. One pass backward then keeps the movable values of vector or mask type and, before it reaches them, the
+-// movable values their operands are, and sends each kept value to the preheader. `candidate` is the walk's state (1
+-// movable, 2 kept), current for the values `available` stamps with this walk's `epoch`: a value the walk hasn't stamped
+-// doesn't move, whatever another loop's walk left there.
+-static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint64_t* holders)
++// The walk of one loop (#2781, #2979), over the loop's own blocks in place of the whole function: the motion of a
++// function of many loops then costs each loop's size, not the function's for each. In reverse postorder a value comes
++// after its operands (a phi's aside, and a phi doesn't move), so one pass forward finds the movable values: the safe ones
++// of the loop whose operands are each a movable value of the loop or a value whose block dominates the preheader.
++// `candidate` is the walk's state (1 movable), current for the values `available` stamps with this walk's `epoch`: a
++// value the walk hasn't stamped doesn't move, whatever another loop's walk left there. Returns the reverse-postorder
++// index past the loop's last block, and in *found the movable values of vector or mask type.
++static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint32_t* found)
+ {
+     const IrFunction* f = work->ir.function;
+     const Dominators* loops = &work->loops;
+@@ -306,7 +306,7 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
+     // The header is the first of the loop's blocks in reverse postorder; the walk ends at the last one.
+     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+     uint32_t end = first;
+-    uint32_t found = 0;
++    *found = 0;
+     for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
+     {
+         const uint32_t block = rpo[r];
+@@ -329,10 +329,24 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
+             }
+             work->available[i] = epoch;
+             work->candidate[i] = movable;
+-            found += movable && f->type[i] >= IR_V4I32;
++            *found += movable && f->type[i] >= IR_V4I32;
+         }
+         work->statistics.visits += member ? f->block_offsets[(uint64_t)block + 1] - f->block_offsets[block] : 0;
+     }
++    return end;
++}
++
++// IrLicmOptions.vectors' motion of one loop (#2781): the walk (ir_licm_loop_walk), then one pass backward that keeps the
++// movable values of vector or mask type and, before it reaches them, the movable values their operands are, and sends
++// each kept value to the preheader (`candidate` 2 for kept).
++static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint64_t* holders)
++{
++    const IrFunction* f = work->ir.function;
++    const Dominators* loops = &work->loops;
++    const uint32_t* rpo = work->ir.dominators.rpo;
++    const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
++    uint32_t found = 0;
++    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
+     for (uint32_t r = end; found != 0 && r != first; r -= 1)
+     {
+         const uint32_t block = rpo[r - 1];
+@@ -363,6 +377,30 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
+     }
+ }
+ 
++// The unrestricted motion of one loop (#2979): the walk (ir_licm_loop_walk) sends every movable value to the preheader.
++static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch)
++{
++    const IrFunction* f = work->ir.function;
++    const Dominators* loops = &work->loops;
++    const uint32_t* rpo = work->ir.dominators.rpo;
++    const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
++    uint32_t found = 0;
++    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
++    for (uint32_t r = first; r < end; r += 1)
++    {
++        const uint32_t block = rpo[r];
++        const bool member = dominators_loop_contains(loops, loop, block);
++        for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
++        {
++            if (work->available[i] == epoch && work->candidate[i] != 0)
++            {
++                work->destination[i] = preheader;
++                work->moves += 1;
++            }
++        }
++    }
++}
++
+ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions options)
+ {
+     bool ok = true;
+@@ -410,6 +448,10 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
+             {
+                 ir_licm_loop_vectors(work, loop, preheader, at + 1, holders);
+             }
++            else if (held && !options.whole)
++            {
++                ir_licm_loop_all(work, loop, preheader, at + 1);
++            }
+             else if (held)
+             {
+                 for (uint32_t i = 0; i < f->instruction_count; i += 1)
+diff --git a/src/buster/compiler/ir_optimize_licm_test.c b/src/buster/compiler/ir_optimize_licm_test.c
+index ff28a49ec..52496bba8 100644
+--- a/src/buster/compiler/ir_optimize_licm_test.c
++++ b/src/buster/compiler/ir_optimize_licm_test.c
+@@ -127,12 +127,14 @@ static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
+     IrLicmResult a = { 0 };
+     IrLicmResult b = { 0 };
+     const IrCheck ac = ir_optimize_licm(f, vector, scratch, options, &a);
++    options.whole = true;
+     options.scalar = true;
+     const IrCheck bc = ir_optimize_licm(f, scalar, scratch, options, &b);
+-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm, "LICM vector and scalar accept fixture and restore scratch");
++    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm, "LICM's walk and its whole-function worklist accept fixture and restore scratch");
+     if (ac.error == IR_OK && bc.error == IR_OK)
+     {
+-        ir_optimize_test_expect(test, a.moved == expected_moved && b.moved == a.moved && ir_optimize_test_equal(&a.function, &b.function), "LICM exact vector/worklist output and expected motion count");
++        ir_optimize_test_expect(test, a.moved == expected_moved && b.moved == a.moved && ir_optimize_test_equal(&a.function, &b.function) && a.sweeps == 0 && !a.fallback,
++                                "LICM's per-loop walk matches the whole-function worklist exactly, with the expected motion count");
+         for (uint32_t trial = 0; trial < 18; trial += 1)
+         {
+             const uint64_t parameter = trial == 17 ? UINT64_MAX : trial;
+@@ -142,6 +144,10 @@ static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
+         }
+         arena_pop_to(scalar, sm);
+         options.scalar = false;
++        IrLicmResult swept = { 0 };
++        const IrCheck sc = ir_optimize_licm(f, scalar, scratch, options, &swept);
++        ir_optimize_test_expect(test, sc.error == IR_OK && ir_optimize_test_equal(&a.function, &swept.function), "LICM's per-loop walk matches the whole-function sweeps exactly");
++        arena_pop_to(scalar, sm);
+         options.sweep_limit = 0;
+         IrLicmResult fallback = { 0 };
+         const IrCheck fc = ir_optimize_licm(f, scalar, scratch, options, &fallback);
+@@ -349,6 +355,7 @@ static void ir_licm_test_progress(IrOptimizeTest* test)
+                     f.a[9] = 5;
+                 }
+                 IrLicmOptions options = ir_licm_options();
++                options.whole = true;
+                 IrLicmResult a = { 0 };
+                 IrLicmResult b = { 0 };
+                 const IrCheck ac = ir_optimize_licm(&f, &vector, &scratch, options, &a);
+@@ -359,6 +366,12 @@ static void ir_licm_test_progress(IrOptimizeTest* test)
+                 {
+                     const uint32_t moved = shape == 3 ? 0 : length;
+                     ir_optimize_test_expect(test, a.moved == moved && b.moved == moved && ir_optimize_test_equal(&a.function, &b.function), "LICM adaptive completion preserves exact worklist motion and output");
++                    const uint64_t mark = scalar.length;
++                    IrLicmResult walked = { 0 };
++                    const IrCheck wc = ir_optimize_licm(&f, &scalar, &scratch, ir_licm_options(), &walked);
++                    ir_optimize_test_expect(test, wc.error == IR_OK && walked.moved == moved && walked.sweeps == 0 && !walked.fallback && walked.visits <= f.instruction_count &&
++                                                ir_optimize_test_equal(&a.function, &walked.function), "LICM's per-loop walk visits each instruction of the loop once and matches the sweeps");
++                    arena_pop_to(&scalar, mark);
+                     const uint64_t sweeps = shape == 1 || shape == 2 ? 2 : 1;
+                     const bool fallback = shape == 0 || shape == 2;
+                     ir_optimize_test_expect(test, a.sweeps == sweeps && a.fallback == fallback && a.visits <= (sweeps + 1) * f.instruction_count, "LICM thin frontiers stop promptly and wide or stalled frontiers do not fall back");
+@@ -522,7 +535,7 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
+         for (uint32_t path = 0; path < 2; path += 1)
+         {
+             IrLicmOptions options = ir_licm_options();
+-            options.scalar = path != 0;
++            options.whole = path != 0;
+             const IrCheck check = ir_optimize_licm(&f, path != 0 ? &scalar : &vector, &scratch, options, results + path);
+             ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 5, "LICM hoists vector arithmetic, total shifts, integer compare and select");
+             if (check.error == IR_OK)
+@@ -538,7 +551,7 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
+             }
+         }
+         ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
+-                                ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM SIMD sweeps and worklist produce identical remapped rows");
++                                ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's SIMD walk and whole-function sweeps produce identical remapped rows");
+         // The restricted policy moves the same five vector values; the scalar addition depends on the loop's phi and stays.
+         ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 5);
+         f.op[0] = IR_UNDEF;
+@@ -547,7 +560,7 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
+         {
+             arena_pop_to(&vector, 0);
+             IrLicmOptions options = ir_licm_options();
+-            options.scalar = path != 0;
++            options.whole = path != 0;
+             IrLicmResult result = { 0 };
+             const IrCheck check = ir_optimize_licm(&f, &vector, &scratch, options, &result);
+             ir_optimize_test_expect(test, check.error == IR_OK && result.moved == 0, "LICM keeps undef-tainted vector operations in their original blocks");
+@@ -604,7 +617,7 @@ static void ir_licm_test_widths(IrOptimizeTest* test)
+     for (uint32_t path = 0; parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK && path < 2; path += 1)
+     {
+         IrLicmOptions options = ir_licm_options();
+-        options.scalar = path != 0;
++        options.whole = path != 0;
+         const IrCheck check = ir_optimize_licm(&f, path != 0 ? &scalar : &vector, &scratch, options, results + path);
+         ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 2, "LICM hoists the invariant widen and its extract");
+         if (check.error == IR_OK)
+@@ -622,7 +635,7 @@ static void ir_licm_test_widths(IrOptimizeTest* test)
+         }
+     }
+     ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
+-                            ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's paths hoist the width changes alike");
++                            ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's walk and its whole-function oracle hoist the width changes alike");
+     ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 2);
+     arena_release(&input);
+     arena_release(&vector);
+@@ -680,7 +693,7 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
+         {
+             ir_optimize_test_simd_semantics(test, &f, &numbered.function, &scratch);
+             IrLicmOptions options = ir_licm_options();
+-            options.scalar = path != 0;
++            options.whole = path != 0;
+             const IrCheck check = ir_optimize_licm(&numbered.function, output, &scratch, options, results + path);
+             ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 2, "LICM hoists the invariant permute2 and its sum");
+             if (check.error == IR_OK)
+diff --git a/src/buster/compiler/ir_source_passes.c b/src/buster/compiler/ir_source_passes.c
+index 94dbed18b..9d2bda127 100644
+--- a/src/buster/compiler/ir_source_passes.c
++++ b/src/buster/compiler/ir_source_passes.c
+@@ -216,6 +216,8 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
+         IrLicmResult vector = { 0 };
+         IrLicmResult scalar = { 0 };
+         const IrCheck vector_check = ir_optimize_licm(promoted, output, scratch, options, &vector);
++        // The per-loop walk against its whole-function oracle, the worklist's fixed point (#2979).
++        options.whole = true;
+         options.scalar = true;
+         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
+         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
