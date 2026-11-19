@@ -139,3 +139,26 @@ against `none`, round by round, and the instructions' median against `none`'s.
 | C12 roots | +119.57%, +119.68%, +120.21% | +91.94%, +92.02%, +91.50% | +78.59%, +78.94%, +78.88% | +2907.60 M, +1268.61 M, +8913.90 M |
 
 The control's spread: `none-again` reads −0.46% to +0.37%, the lazy planner's bit (which doesn't run) −0.38% to +0.25%.
+
+**This table measures overlapping areas; it decides nothing.** The solo deltas' instructions sum to 4,207 M, 1,571 M
+and 10,430 M against the areas together's 3,268 M, 1,368 M and 9,425 M, and leave-one-out (the areas together against
+the areas without one bit, exact counts) reads about zero for the lowering, the aliases, the emission, selection, the
+driver and emission's foreign twins: another bit already drives their code. [`table2.txt`](table2.txt) has this
+executable's `--tier1` and `-flazy-system-headers` runs ([`gate2.sh`](gate2.sh)), with the same caveat.
+
+## The overlap, and the third executable
+
+A gated value crossed area boundaries in forms rule 3 didn't make raw: a path macro around the flag
+(`BUSTER_SCALAR_PATH(scalar)`, `!BUSTER_SCALAR_PATH(parser->options.scalar)`) as a whole argument or a store, and gated
+locals of other names (`vector`) handed to another area's functions. The driver's
+`check_program_emit_timed(..., BUSTER_SCALAR_PATH(scalar), ...)` put the program's emission under the driver's bit, the
+emission's `check_lower_prepare(..., BUSTER_SCALAR_PATH(scalar), ...)` the lowering under the emission's, and so on.
+
+[`knob3.py`](knob3.py) and [`hand3.py`](hand3.py) make the third executable
+([`c12c-areas-knob3.patch`](c12c-areas-knob3.patch)): every whole argument or store that is the flag in any of its forms
+crosses raw, and the function it reaches gates the parameter it arrives in with its own file's bit, whatever the
+parameter's name (`exact`, `vector`: `P = P_raw && !area` for the vector sense). [`leaks.py`](leaks.py) lists what still
+leaves an area; what it lists on the third executable is inside its own area (the flag's locals, the reader's modes,
+the roots and the foreign wraps). [`all3.sh`](all3.sh) runs the checks, the closure, leave-one-out and the gate again.
+Results follow.
+
