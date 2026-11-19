@@ -12,7 +12,7 @@ flags=(-O1 -fPIC -ffunction-sections -fdata-sections -fasynchronous-unwind-table
 g++ -std=c++17 "${flags[@]}" -fno-inline -c "$q/sort_a.cc" -o "$inputs/sort_a.o"
 g++ -std=c++17 "${flags[@]}" -fno-inline -c "$q/sort_b.cc" -o "$inputs/sort_b.o"
 gcc -std=gnu17 "${flags[@]}" -c tools/ci/changes.c -o "$inputs/changes.o"
-sha256sum "$inputs"/*.o
+sha256sum "$inputs"/*.o | tee "$out/inputs.sha256"
 for o in "$inputs"/*.o; do
     readelf -Wr "$o" > "$o.relocations"
     readelf -wf "$o" > "$o.frames"
@@ -56,8 +56,13 @@ capture()
     UNWIND_PLAN="$sub.plan" build/compiler link-foreign --lanes 1 -o "$sub.elf" "${begin[@]}" "${args[@]}" "${end[@]}" 2>"$sub.counts" || rc=$?
     cat "$sub.counts"
     test "$rc" = 0
-    test -s "$sub.plan"
-    grep -q '^PRUNE ' "$sub.counts"
+    if [ "$version" = clean ]; then
+        cmp "$out/base-$workload.elf" "$sub.elf"
+    else
+        test -s "$sub.plan"
+        grep -q '^PRUNE ' "$sub.counts"
+        sha256sum "$sub.plan"
+    fi
     readelf -wf "$sub.elf" > "$sub.frames"
     objcopy -O binary --only-section=.eh_frame "$sub.elf" "$sub.eh"
     objcopy -O binary --only-section=.eh_frame_hdr "$sub.elf" "$sub.hdr"
@@ -72,7 +77,7 @@ capture()
         "$sub.elf" --event merge_group --files "$inputs/paths" --workflow .github/workflows/9700x.yml --root . --output "$sub.outputs" > "$sub.stdout" 2> "$sub.stderr" || { cat "$sub.stderr"; return 1; }
         echo "changes selector exit 0"
     fi
-    sha256sum "$sub".{plan,elf,eh,hdr,text,frames,relocs}
+    sha256sum "$sub".{elf,eh,hdr,text,frames,relocs}
 }
 for linker in bfd lld; do
     g++ -fuse-ld="$linker" "$inputs/sort_a.o" "$inputs/sort_b.o" -o "$out/$linker.sort"
@@ -103,6 +108,7 @@ build head-clean
 mkdir "$out/full-foreign"
 build/compiler test-foreign --cross-check --directory "$out/full-foreign" --keep > "$out/head.foreign" 2>&1 || { cat "$out/head.foreign"; exit 1; }
 cat "$out/head.foreign"
+for workload in sort reverse changes; do capture clean "$workload"; done
 git apply "$q/head-probe.patch"
 build head-instrumented
 for workload in sort reverse changes; do
@@ -121,4 +127,20 @@ readelf -wf "$before" > "$out/base-throw.frames"
 readelf -wf "$after" > "$out/head-throw.frames"
 cmp "$out/base-throw.frames" "$out/head-throw.frames"
 sha256sum "$before" "$after" "$out/head-throw.frames"
+sha256sum -c "$out/inputs.sha256"
+for workload in sort changes; do
+    awk '
+        $1 == "PRUNE" {
+            g = (FILENAME == ARGV[1]) ? 1 : 2
+            for(i=2;i<=NF;i++) { split($i, kv, "="); m[g,kv[1]] += kv[2] }
+        }
+        END {
+            for(g=1;g<=2;g++) {
+                owner[g]=m[g,"binary_cmp"]+m[g,"cursor_end_cmp"]
+                total[g]=owner[g]+m[g,"order_cmp"]+m[g,"merge_cmp"]+m[g,"overlap_cmp"]
+            }
+            printf "aggregate owner %d -> %d, sort passes %d -> %d, all counted offset comparisons %d -> %d\n", owner[1], owner[2], m[1,"merge_passes"], m[2,"merge_passes"], total[1], total[2]
+            exit !(owner[2] < owner[1] && m[2,"merge_passes"] < m[1,"merge_passes"] && total[2] < total[1])
+        }' "$out/base-$workload.counts" "$out/head-$workload.counts"
+done
 echo 'All paired plan, compact bytes/RELA, linked ELF, frame/header, decoded frames, final relocation and execution comparisons passed.'
