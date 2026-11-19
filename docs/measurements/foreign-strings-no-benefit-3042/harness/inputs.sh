@@ -15,8 +15,13 @@ syscall
 .section .note.GNU-stack,"",@progbits
 ASSEMBLY
 cc -c entry.S -o entry.o
-ar p "$(cc -print-libgcc-file-name)" _popcountdi2.o > libgcc-popcount.o
+archive=$(cc -print-libgcc-file-name)
+member=$(nm -A -g --defined-only "$archive" 2>/dev/null | awk -F: '$NF ~ / T __popcountdi2$/ { name=$(NF-1) } END { print name }')
+test -n "$member"
+printf 'libgcc input %s(%s)\n' "$archive" "$member"
+ar p "$archive" "$member" > libgcc-popcount.o
 test -s libgcc-popcount.o
+nm -g libgcc-popcount.o
 for kind in ordinary unique; do
     awk -v kind="$kind" 'BEGIN {
         if (kind == "ordinary") print ".section .rodata,\042a\042,@progbits"
