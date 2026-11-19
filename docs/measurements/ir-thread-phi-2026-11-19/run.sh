@@ -5,8 +5,9 @@ record=$(cd "$(dirname "$0")" && pwd)
 mkdir -p record
 git rev-parse HEAD | tee record/base.txt
 lscpu | grep -E 'Architecture|Model name|Hypervisor' | tee record/cpu.txt
-# Use the hosted image's compiler and runtime together. Set the target from the qualified CPU.
-export BUSTER_TOOLCHAIN=path BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0
+# The pinned Clang supplies Buster's atomic builtins and its matching MSan runtime.
+paths=$(bash tools/ci/session-toolchain.sh stage)
+export PATH="$paths:$PATH" BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0
 clang --version | tee record/clang.txt
 cmake --version
 ninja --version
