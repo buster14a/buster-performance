@@ -1,78 +1,100 @@
 --- a/src/buster/compiler/ir_thread.c
 +++ b/src/buster/compiler/ir_thread.c
-@@ -39,6 +39,7 @@
+@@ -39,6 +39,9 @@
  // A candidate's operations, its chain's and the dead ones beside it that the lowering left for the optimizer.
  #define BUSTER_IR_THREAD_BLOCK_LIMIT 32u
  #define BUSTER_IR_THREAD_COPY_LIMIT 16u
 +#define BUSTER_IR_THREAD_WIDE_PHI 32u
++// A shape candidate whose wide phis have been indexed, after the escape scan.
++#define BUSTER_IR_THREAD_INDEXED 2u
  #define BUSTER_IR_THREAD_ROUNDS 4u
  
  // A block's roles in a round (IrThreadWork.roles).
-@@ -86,6 +87,8 @@
+@@ -86,6 +89,10 @@
      uint32_t* targets;
      // Per threaded block: how many predecessors still reach it.
      uint32_t* remaining;
-+    // For indexed joins, each incoming CFG edge points to its predecessor's values in phi instruction order.
-+    const uint32_t** inputs;
++    // After reachability, reuse the CFG successor slots for the first phi's pair positions on indexed edges.
++    uint32_t* input_positions;
++    // Only joins with several indexed phis need values in addition to those positions.
++    uint32_t** other_inputs;
      uint32_t block_count;
      uint32_t copy_count;
      uint32_t redirect_count;
-@@ -262,11 +265,67 @@
+@@ -262,11 +269,85 @@
      }
  }
  
-+// Only br and cbr predecessors request an incoming value. A switch with more successors can keep its edge to the
-+// join, but never needs an indexed row. The CFG gives a cbr with equal targets a single edge.
-+static uint32_t ir_thread_input_edge(const IrCfg* cfg, uint32_t predecessor, uint32_t block)
++// A br's only edge, or a cbr's true then false edge, as ir_cfg_validated writes them. Only these terminators
++// request phi inputs during planning and rewriting. A switch or an indirect branch keeps its edge.
++static uint32_t ir_thread_input_edge(const IrThreadWork* work, uint32_t predecessor, uint32_t block)
 +{
-+    const uint32_t first = cfg->successor_offsets[predecessor];
-+    const uint32_t end = cfg->successor_offsets[(uint64_t)predecessor + 1];
-+    const uint32_t edge = first + (first != end && cfg->successors[first] != block);
-+    return end - first <= 2 && edge < end && cfg->successors[edge] == block ? edge : BUSTER_IR_NONE;
++    const IrFunction* f = work->function;
++    const uint32_t term = f->block_offsets[(uint64_t)predecessor + 1] - 1;
++    const uint32_t edge = work->cfg.successor_offsets[predecessor];
++    uint32_t result = BUSTER_IR_NONE;
++    if ((f->op[term] == IR_BR && f->a[term] == block) || (f->op[term] == IR_CBR && f->b[term] == block))
++    {
++        result = edge;
++    }
++    else if (f->op[term] == IR_CBR && f->c[term] == block)
++    {
++        result = edge + 1;
++    }
++    return result;
 +}
 +
-+// Index a wide join once. A lone phi's edge points straight into the immutable input. For several phis the first's
-+// order numbers the rows; every other phi places its own pairs by predecessor, irrespective of their order.
-+// The round's reachability queue is free to hold these row numbers until this call returns.
-+static bool ir_thread_index(IrThreadWork* work, uint32_t block, uint32_t* positions, Arena* scratch)
++// The first phi numbers a join's incoming edges in its own order. This costs no extra scratch: once reachability is
++// known the pass only needs the CFG's predecessors and offsets. Each further phi gets a column in the same order.
++static bool ir_thread_index(IrThreadWork* work, uint32_t block, Arena* scratch)
 +{
 +    const IrFunction* f = work->function;
 +    const uint32_t first = f->block_offsets[block];
++    const uint32_t width = f->b[first];
 +    uint32_t phis = 1;
 +    while (f->op[first + phis] == IR_PHI)
 +    {
 +        phis += 1;
 +    }
-+    const uint32_t width = f->b[first];
 +    bool ok = true;
-+    if (work->inputs == NULL)
++    if (phis > 1)
 +    {
-+        work->inputs = ir_allocate(scratch, work->cfg.edge_count, sizeof(*work->inputs), &ok);
-+    }
-+    uint32_t* rows = phis > 1 ? ir_allocate(scratch, (uint64_t)phis * width, sizeof(*rows), &ok) : NULL;
-+    for (uint32_t i = 0; ok && i < phis; i += 1)
-+    {
-+        const uint32_t* pairs = f->extra + f->a[first + i];
-+        for (uint32_t k = 0; k < width; k += 1)
++        if (work->other_inputs == NULL)
 +        {
-+            const uint32_t predecessor = pairs[2 * k];
-+            if (i == 0)
++            work->other_inputs = ir_allocate(scratch, f->block_count, sizeof(*work->other_inputs), &ok);
++        }
++        if (ok)
++        {
++            work->other_inputs[block] = ir_allocate(scratch, (uint64_t)(phis - 1) * width, sizeof(uint32_t), &ok);
++        }
++    }
++    if (ok)
++    {
++        if (work->input_positions == NULL)
++        {
++            work->input_positions = work->cfg.successors;
++            work->cfg.successors = NULL;
++        }
++        for (uint32_t i = 0; i < phis; i += 1)
++        {
++            const uint32_t* pairs = f->extra + f->a[first + i];
++            for (uint32_t k = 0; k < width; k += 1)
 +            {
-+                const uint32_t edge = ir_thread_input_edge(&work->cfg, predecessor, block);
++                const uint32_t edge = ir_thread_input_edge(work, pairs[2 * k], block);
 +                if (edge != BUSTER_IR_NONE)
 +                {
-+                    work->inputs[edge] = phis == 1 ? pairs + 2 * k + 1 : rows + (uint64_t)k * phis;
++                    if (i == 0)
++                    {
++                        work->input_positions[edge] = k;
++                    }
++                    else
++                    {
++                        work->other_inputs[block][(uint64_t)(i - 1) * width + work->input_positions[edge]] = pairs[2 * k + 1];
++                    }
 +                }
-+                if (phis > 1)
-+                {
-+                    positions[predecessor] = k;
-+                }
-+            }
-+            if (phis > 1)
-+            {
-+                rows[(uint64_t)positions[predecessor] * phis + i] = pairs[2 * k + 1];
 +            }
 +        }
++        work->candidates[block] = BUSTER_IR_THREAD_INDEXED;
 +    }
 +    return ok;
 +}
@@ -86,7 +108,7 @@
  {
      uint32_t value = BUSTER_IR_NONE;
      const uint32_t* entries = f->extra + f->a[phi];
-@@ -278,6 +337,21 @@
+@@ -278,6 +359,27 @@
          }
      }
      return value;
@@ -95,20 +117,26 @@
 +static uint32_t ir_thread_incoming(const IrThreadWork* work, uint32_t phi, uint32_t predecessor)
 +{
 +    const IrFunction* f = work->function;
-+    const uint32_t* row = NULL;
-+    uint32_t index = 0;
-+    if (work->inputs != NULL && f->b[phi] >= BUSTER_IR_THREAD_WIDE_PHI)
++    uint32_t input = BUSTER_IR_NONE;
++    if (work->input_positions != NULL && f->b[phi] >= BUSTER_IR_THREAD_WIDE_PHI)
 +    {
 +        const uint32_t block = work->cfg.instruction_blocks[phi];
-+        const uint32_t edge = ir_thread_input_edge(&work->cfg, predecessor, block);
-+        row = edge != BUSTER_IR_NONE ? work->inputs[edge] : NULL;
-+        index = phi - f->block_offsets[block];
++        if (work->candidates[block] == BUSTER_IR_THREAD_INDEXED)
++        {
++            const uint32_t edge = ir_thread_input_edge(work, predecessor, block);
++            if (edge != BUSTER_IR_NONE)
++            {
++                const uint32_t position = work->input_positions[edge];
++                const uint32_t column = phi - f->block_offsets[block];
++                input = column == 0 ? f->extra[f->a[phi] + 2 * position + 1] : work->other_inputs[block][(uint64_t)(column - 1) * f->b[phi] + position];
++            }
++        }
 +    }
-+    return row != NULL ? row[index] : ir_thread_scan_incoming(f, phi, predecessor);
++    return input != BUSTER_IR_NONE ? input : ir_thread_scan_incoming(f, phi, predecessor);
  }
  
  // `value`'s bits at `type`'s width.
-@@ -308,7 +382,7 @@
+@@ -308,7 +410,7 @@
          const uint32_t type = f->type[i];
          uint64_t operands[2] = { 0 };
          bool all = true;
@@ -117,7 +145,7 @@
          const uint32_t mask = op == IR_PHI ? 0 : ir_value_mask(f, i);
          for (uint32_t k = 0; k < 2; k += 1)
          {
-@@ -391,42 +465,45 @@
+@@ -391,42 +493,45 @@
  
  // The value J's successors' phis take along `predecessor`'s edge for `value`, which they took from J: a J phi's input
  // from it, or `value` itself where J doesn't define it. BUSTER_IR_NONE for a value of J's chain (only a copy has it).
@@ -170,11 +198,11 @@
  
  // Thread block J where its predecessors allow it: their actions, and the roles that keep a round's blocks apart.
 -static void ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values, uint8_t* known)
-+static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values, uint8_t* known, uint32_t* positions, Arena* scratch)
++static bool ir_thread_block(IrThreadWork* work, uint32_t block, uint64_t* values, uint8_t* known, Arena* scratch)
  {
      const IrFunction* f = work->function;
      const IrCfg* cfg = &work->cfg;
-@@ -450,7 +527,7 @@
+@@ -450,7 +555,7 @@
          const uint32_t successor = k == 0 ? yes : no;
          for (uint32_t i = f->block_offsets[successor]; f->op[i] == IR_PHI; i += 1)
          {
@@ -183,7 +211,7 @@
              if (value >= first && value < last)
              {
                  work->needed[value] = 1;
-@@ -480,11 +557,20 @@
+@@ -480,11 +585,20 @@
      uint32_t copies = 0;
      // The reachable predecessors, all of which may be threaded: one that no edge from the entry reaches keeps its edge.
      uint32_t predecessors = 0;
@@ -202,12 +230,12 @@
 +            conditionals += f->op[term] == IR_CBR && f->b[term] != f->c[term];
 +        }
 +    }
-+    const bool ok = conditionals < 2 || ir_thread_index(work, block, positions, scratch);
++    const bool ok = conditionals < 2 || ir_thread_index(work, block, scratch);
 +    for (uint32_t e = cfg->predecessor_offsets[block]; ok && safe && e < cfg->predecessor_offsets[(uint64_t)block + 1]; e += 1)
      {
          const uint32_t predecessor = cfg->predecessors[e];
          const uint32_t terminator = f->block_offsets[(uint64_t)predecessor + 1] - 1;
-@@ -505,7 +591,7 @@
+@@ -505,7 +619,7 @@
              const uint32_t target = ir_thread_evaluate(work, block, predecessor, values, known);
              const uint32_t other = f->b[terminator] == block ? f->c[terminator] : f->b[terminator];
              const bool collapse = target == other;
@@ -216,7 +244,7 @@
              if (valid)
              {
                  work->actions[predecessor] = collapse ? BUSTER_IR_THREAD_COLLAPSE : BUSTER_IR_THREAD_REDIRECT;
-@@ -550,6 +636,7 @@
+@@ -550,6 +664,7 @@
              }
          }
      }
@@ -224,7 +252,7 @@
  }
  
  // The index among a copy's operations of `value`, an operation of threaded block J (`first` its first instruction): the
-@@ -762,7 +849,7 @@
+@@ -762,7 +877,7 @@
                      {
                          const uint32_t predecessor = entries[k];
                          const uint32_t through = work->threaded[predecessor];
@@ -233,7 +261,7 @@
                          const uint32_t through_first = f->block_offsets[through];
                          const uint32_t through_end = f->block_offsets[(uint64_t)through + 1];
                          const bool chained = value >= through_first && value < through_end && f->op[value] != IR_PHI;
-@@ -774,7 +861,7 @@
+@@ -774,7 +889,7 @@
                          }
                          else
                          {
@@ -242,7 +270,7 @@
                          }
                          view.extra[extra++] = predecessor;
                          view.extra[extra++] = mapped;
-@@ -822,7 +909,7 @@
+@@ -822,7 +937,7 @@
                                      uint32_t copied = BUSTER_IR_NONE;
                                      if (inside && f->op[operand] == IR_PHI)
                                      {
@@ -251,12 +279,12 @@
                                      }
                                      else if (inside)
                                      {
-@@ -984,7 +1071,7 @@
+@@ -984,7 +1099,7 @@
                  {
                      if (work.candidates[block] != 0)
                      {
 -                        ir_thread_block(&work, block, slots, known);
-+                        check.error = ir_thread_block(&work, block, slots, known, queue, scratch) ? IR_OK : IR_ERROR_MEMORY;
++                        check.error = ir_thread_block(&work, block, slots, known, scratch) ? IR_OK : IR_ERROR_MEMORY;
                      }
                  }
              }
