@@ -1,0 +1,149 @@
+--- a/src/buster/compiler/ir_thread.c
++++ b/src/buster/compiler/ir_thread.c
+@@ -34,6 +34,7 @@
+ #ifndef BUSTER_IR_THREAD_C
+ #define BUSTER_IR_THREAD_C
+ 
++static _Thread_local uint64_t jt_scan, jt_index, jt_hits, jt_evals, jt_lookups;
+ #define BUSTER_IR_THREAD_BATCH 64u
+ #define BUSTER_IR_THREAD_CHAIN_LIMIT 4u
+ // A candidate's operations, its chain's and the dead ones beside it that the lowering left for the optimizer.
+@@ -324,6 +325,7 @@
+             const uint32_t* pairs = f->extra + f->a[first + i];
+             for (uint32_t k = 0; k < width; k += 1)
+             {
++                jt_index += 1;
+                 const uint32_t edge = ir_thread_input_edge(work, pairs[2 * k], block);
+                 if (edge != BUSTER_IR_NONE)
+                 {
+@@ -350,9 +352,11 @@
+ static uint32_t ir_thread_scan_incoming(const IrFunction* f, uint32_t phi, uint32_t predecessor)
+ {
+     uint32_t value = BUSTER_IR_NONE;
++    jt_lookups += 1;
+     const uint32_t* entries = f->extra + f->a[phi];
+     for (uint32_t p = f->b[phi]; p != 0 && value == BUSTER_IR_NONE; p -= 1)
+     {
++        jt_scan += 1;
+         if (entries[(p - 1) * 2] == predecessor)
+         {
+             value = entries[(p - 1) * 2 + 1];
+@@ -379,6 +383,8 @@
+             }
+         }
+     }
++    jt_hits += input != BUSTER_IR_NONE;
++    jt_lookups += input != BUSTER_IR_NONE;
+     return input != BUSTER_IR_NONE ? input : ir_thread_scan_incoming(f, phi, predecessor);
+ }
+ 
+@@ -581,6 +587,7 @@
+         }
+     }
+     safe = safe && chain <= BUSTER_IR_THREAD_CHAIN_LIMIT;
++    const uint64_t evals_before = jt_evals;
+     uint32_t threaded = 0;
+     uint32_t copies = 0;
+     // The reachable predecessors, all of which may be threaded: one that no edge from the entry reaches keeps its edge.
+@@ -616,6 +623,7 @@
+         }
+         else if (free && op == IR_CBR && (f->b[terminator] == block) != (f->c[terminator] == block))
+         {
++            jt_evals += 1;
+             const uint32_t target = ir_thread_evaluate(work, block, predecessor, values, known);
+             const uint32_t other = f->b[terminator] == block ? f->c[terminator] : f->b[terminator];
+             const bool collapse = target == other;
+@@ -628,6 +636,10 @@
+                 threaded += 1;
+             }
+         }
++    }
++    if (getenv("BUSTER_WIDE_PHI_CENSUS") != NULL)
++    {
++        fprintf(stderr, "JT_CAND %u %llu %u\n", f->b[first], (unsigned long long)(jt_evals - evals_before), threaded);
+     }
+     if (safe && threaded != 0)
+     {
+@@ -1003,6 +1015,17 @@
+     *changed = false;
+     *deferred = 0;
+     *result = *function;
++    if (getenv("BUSTER_WIDE_PHI_CENSUS") != NULL)
++    {
++        for (uint32_t b = 0; b < blocks; b += 1)
++        {
++            const uint32_t first = function->block_offsets[b];
++            if (function->op[first] == IR_PHI)
++            {
++                fprintf(stderr, "JT_JOIN %u\n", function->b[first]);
++            }
++        }
++    }
+     // The usual function pays only a bounded byte scan: a block of phis that ends in a conditional branch is rare.
+     bool candidate = false;
+     for (uint64_t first = 0; first < count && !candidate; first += BUSTER_IR_THREAD_BATCH)
+@@ -1128,6 +1151,7 @@
+ {
+     const uint64_t om = output->length;
+     IrCheck check = ir_check(output != scratch ? IR_OK : IR_ERROR_STRUCTURE, BUSTER_IR_NONE, 0);
++    const uint64_t scans = jt_scan, build = jt_index, hits = jt_hits, lookups = jt_lookups;
+     IrThreadResult totals = { .function = *function };
+     bool changed = true;
+     uint32_t deferred = 1;
+@@ -1145,6 +1169,25 @@
+     if (check.error == IR_OK)
+     {
+         *result = totals;
++        const char* dump = getenv("BUSTER_WIDE_PHI_IR");
++        if (dump != NULL && totals.blocks != 0)
++        {
++            FILE* file = fopen(dump, "a");
++            if (file == NULL)
++            {
++                abort();
++            }
++            fprintf(file, "blocks=%u copies=%u redirects=%u rounds=%u\n", totals.blocks, totals.copies, totals.redirects, totals.rounds);
++            if (ir_print(&totals.function, scratch, file) != IR_OK || fclose(file) != 0)
++            {
++                abort();
++            }
++        }
++        if (getenv("BUSTER_WIDE_PHI_CENSUS") != NULL)
++        {
++            fprintf(stderr, "JT_FUNCTION %llu %llu %llu %llu\n", (unsigned long long)(jt_scan - scans), (unsigned long long)(jt_index - build),
++                    (unsigned long long)(jt_hits - hits), (unsigned long long)(jt_lookups - lookups));
++        }
+     }
+     else
+     {
+--- a/src/buster/compiler/ir_thread_test.c
++++ b/src/buster/compiler/ir_thread_test.c
+@@ -693,7 +693,28 @@
+         if (valid)
+         {
+             IrThreadResult result = { 0 };
++            const uint64_t peak = scratch->peak;
++            scratch->peak = sm;
++            const uint64_t scans = jt_scan, build = jt_index, hits = jt_hits, lookups = jt_lookups, evals = jt_evals;
+             const IrCheck check = ir_thread(&f, output, scratch, &result);
++            const uint64_t charged = scratch->peak - sm;
++            scratch->peak = scratch->peak > peak ? scratch->peak : peak;
++            const char* dir = getenv("BUSTER_WIDE_PHI_DUMP");
++            if (dir != NULL && check.error == IR_OK)
++            {
++                fprintf(stderr, "wide-phi width=%u phis=%u evals=%llu lookups=%llu scans=%llu index_pairs=%llu hits=%llu scratch=%llu redirects=%u\n",
++                        width, 1u + (unsigned)two_phis, (unsigned long long)(jt_evals - evals), (unsigned long long)(jt_lookups - lookups),
++                        (unsigned long long)(jt_scan - scans), (unsigned long long)(jt_index - build), (unsigned long long)(jt_hits - hits),
++                        (unsigned long long)charged, result.redirects);
++                char path[4096];
++                snprintf(path, sizeof(path), "%s/%03u-%u.ir", dir, width, 1u + (unsigned)two_phis);
++                FILE* file = fopen(path, "w");
++                ir_optimize_test_expect(test, file != NULL && ir_print(&result.function, scratch, file) == IR_OK, "captured complete transformed IR");
++                if (file != NULL)
++                {
++                    ir_optimize_test_expect(test, fclose(file) == 0, "closed the captured IR");
++                }
++            }
+             bool exact = check.error == IR_OK && result.blocks == 1 && result.rounds == 1 && result.copies == 0 && result.redirects == width - (uint32_t)two_phis;
+             exact = exact && scratch->length == sm && ir_verify_complete(&result.function, scratch).error == IR_OK;
+             for (uint32_t k = 0; exact && k < width; k += 1)

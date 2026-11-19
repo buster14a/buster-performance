@@ -1,0 +1,144 @@
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -1485,4 +1485,7 @@
+ }
+ 
++// Temporary observation of the one scratch arena during foreign_gc_link.
++static _Thread_local const Arena* gc_watched_arena;
++static _Thread_local uint64_t gc_scratch_peak;
+ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+@@ -1501,4 +1504,8 @@
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            if (arena == gc_watched_arena && end > gc_scratch_peak)
++            {
++                gc_scratch_peak = end;
++            }
+         }
+     }
+--- a/src/buster/compiler/foreign_gc_link.c
++++ b/src/buster/compiler/foreign_gc_link.c
+@@ -54,4 +54,7 @@
+     uint64_t* values;
+     uint64_t* sizes;
++    uint64_t graph_bytes;
++    uint64_t measured_columns;
++    uint64_t measured_cursors;
+     LinkCapacity capacity;
+ };
+@@ -283,4 +286,10 @@
+ }
+ 
++static void gc_counted_copy(uint64_t* counter, void* destination, const void* source, size_t size)
++{
++    *counter += size;
++    memcpy(destination, source, size);
++}
++
+ // Only the atom columns and fixup offsets change in this temporary graph; the other immutable Link columns are
+ // borrowed. No consumer except foreign_gc_mark_edges reads it, and its graph checks validate every virtual range.
+@@ -290,4 +299,5 @@
+     Link* graph = &state->graph;
+     LinkAtoms* atoms = &graph->atoms;
++    const uint64_t saved_graph = arena->length;
+     atoms->class = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, atoms->count);
+     atoms->size = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, atoms->count);
+@@ -302,10 +312,10 @@
+     if (allocated)
+     {
+-        memcpy(atoms->class, link->atoms.class, link->atoms.count);
+-        memcpy(atoms->size, link->atoms.size, (uint64_t)link->atoms.count * sizeof(uint64_t));
+-        memcpy(atoms->bytes, link->atoms.bytes, (uint64_t)link->atoms.count * sizeof(uint8_t*));
+-        memcpy(atoms->fixup_begin, link->atoms.fixup_begin, (uint64_t)link->atoms.count * sizeof(FixupId));
+-        memcpy(atoms->fixup_count, link->atoms.fixup_count, (uint64_t)link->atoms.count * sizeof(uint32_t));
+-        memcpy(graph->fixups.offset, link->fixups.offset, (uint64_t)link->fixups.count * sizeof(uint32_t));
++        gc_counted_copy(&state->measured_columns, atoms->class, link->atoms.class, link->atoms.count);
++        gc_counted_copy(&state->measured_columns, atoms->size, link->atoms.size, (uint64_t)link->atoms.count * sizeof(uint64_t));
++        gc_counted_copy(&state->measured_columns, atoms->bytes, link->atoms.bytes, (uint64_t)link->atoms.count * sizeof(uint8_t*));
++        gc_counted_copy(&state->measured_columns, atoms->fixup_begin, link->atoms.fixup_begin, (uint64_t)link->atoms.count * sizeof(FixupId));
++        gc_counted_copy(&state->measured_columns, atoms->fixup_count, link->atoms.fixup_count, (uint64_t)link->atoms.count * sizeof(uint32_t));
++        gc_counted_copy(&state->measured_columns, graph->fixups.offset, link->fixups.offset, (uint64_t)link->fixups.count * sizeof(uint32_t));
+         memset(offsets, 0, ((uint64_t)atoms->count + 1) * sizeof(uint32_t));
+     }
+@@ -387,5 +397,5 @@
+     if (result.error == FOREIGN_LINK_ERROR_NONE)
+     {
+-        memcpy(cursors, offsets, (uint64_t)atoms->count * sizeof(uint32_t));
++        gc_counted_copy(&state->measured_cursors, cursors, offsets, (uint64_t)atoms->count * sizeof(uint32_t));
+         state->edges = (ForeignGcEdges){
+             .offsets = offsets,
+@@ -421,4 +431,5 @@
+         }
+     }
++    state->graph_bytes = arena->length - saved_graph;
+     return result;
+ }
+@@ -780,4 +791,10 @@
+         result.error = FOREIGN_LINK_ERROR_MEMORY;
+     }
++    const char* gc_dump = getenv("BUSTER_GC_MAPS");
++    if (gc_dump != 0 && scratch.arena != 0)
++    {
++        gc_watched_arena = scratch.arena;
++        gc_scratch_peak = scratch.length;
++    }
+     ForeignGcLinkState state = { 0 };
+     ForeignLink built = { 0 };
+@@ -815,4 +832,56 @@
+         result = foreign_gc_link_external(&built, &state, foreign, input, arena);
+     }
++    if (gc_dump != 0 && result.error == FOREIGN_LINK_ERROR_NONE)
++    {
++        FILE* maps = fopen(gc_dump, "w");
++        if (maps == 0)
++        {
++            abort();
++        }
++        fprintf(stderr, "GC-WORK atoms=%u symbols=%u fixups=%u synthetic_nodes=%u extra_edges=%u graph_scratch=%llu columns_copied=%llu cursors_copied=%llu adapter_peak=%llu live_atoms=%u live_symbols=%u live_fixups=%u\n",
++                input->link.atoms.count, input->link.symbols.count, input->link.fixups.count,
++                state.graph.atoms.count - input->link.atoms.count, state.edges.count,
++                (unsigned long long)state.graph_bytes, (unsigned long long)state.measured_columns,
++                (unsigned long long)state.measured_cursors, (unsigned long long)(gc_scratch_peak - scratch.length),
++                built.link.atoms.count - 1, built.link.symbols.count - 1, built.link.fixups.count - 1);
++        for (uint32_t id = 0; id < state.graph.atoms.count; ++id)
++        {
++            fprintf(maps, "mark-atom %u %u\n", id, state.marked.atoms[id]);
++        }
++        for (uint32_t id = 0; id < input->link.atoms.count; ++id)
++        {
++            fprintf(maps, "atom %u %u\n", id, state.atoms[id]);
++        }
++        for (uint32_t id = 0; id < input->link.symbols.count; ++id)
++        {
++            fprintf(maps, "symbol %u %u %u\n", id, state.marked.symbols[id], state.symbols[id]);
++        }
++        for (uint32_t id = 0; id < input->link.fixups.count; ++id)
++        {
++            fprintf(maps, "fixup %u %u\n", id, state.marked.fixups[id]);
++        }
++        for (uint32_t id = 1; id < built.link.fixups.count; ++id)
++        {
++            const LinkFixups* fixes = &built.link.fixups;
++            fprintf(maps, "compact-fixup %u %u %u %u %lld\n", id, fixes->offset[id], fixes->target[id], fixes->kind[id], (long long)link_fixup_addend(&built.link, id));
++        }
++        for (uint32_t obj = 1; obj < foreign->object_count; ++obj)
++        {
++            const ImportObject* object = &built.objects[obj];
++            for (uint32_t i = 0; i < object->section_count; ++i)
++            {
++                fprintf(maps, "object-section %u %u %u\n", obj, i, object->section_atoms[i]);
++            }
++            for (uint32_t i = 0; i < object->symbol_count; ++i)
++            {
++                fprintf(maps, "object-symbol %u %u %u\n", obj, i, object->symbols[i]);
++            }
++        }
++        if (fclose(maps) != 0)
++        {
++            abort();
++        }
++    }
++    gc_watched_arena = 0;
+     if (scratch.arena != 0)
+     {
