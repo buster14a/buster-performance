@@ -61,3 +61,5 @@ Base's `--tables` times its scalar twin by turns with the vector kernel (it has 
 [`sanitizers.sh`](sanitizers.sh), [`sanitizers.log`](sanitizers.log): MSan and ASan (vector host, Release) of head, in the cloud container.
 
 All clean, with no sanitizer report in any log: `test-preprocessor`, `test-files`, `test-parser`, `-E` of `main.c`, and `test-preprocessor-fuzz --std c23 --fuzz 300`. The script's first fuzz runs passed `--count`, which the command doesn't take; the log has the runs with `--fuzz`.
+
+TSan ([`sanitizers-thread.sh`](sanitizers-thread.sh), [`sanitizers-thread.log`](sanitizers-thread.log)): `test-files` and `test-files --flat src`, whose lanes run the files' preparation and `files_remap`, pass with no report.
