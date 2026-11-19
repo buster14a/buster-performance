@@ -1,0 +1,343 @@
+--- a/src/buster/compiler/c_check_node_machine_window.c	2026-11-19 19:06:18.340161422 +0000
++++ b/src/buster/compiler/c_check_node_machine_window.c	2026-11-19 20:25:11.266677796 +0000
+@@ -240,9 +240,69 @@
+     }
+ }
+ 
++// EXPERIMENT (views). A record as an operand, two bytes: its type's aggregate's, pointer's and atomic facts at their
++// own bits, the pointer's bit for an array's or a function's kind too, a number's class, and of its standing an integer
++// constant, any constant, and an lvalue whose constant is an address; and its operator's (not a name's leaf; a `!`; an
++// `&&` or an `||`) with its flags' object's, symbol's and register's bits at their own.
++#define BUSTER_NODE_CONTEXTS_VIEW_AGGREGATE 0x01u
++#define BUSTER_NODE_CONTEXTS_VIEW_SCALAR 0x02u
++#define BUSTER_NODE_CONTEXTS_VIEW_INTEGER 0x04u
++#define BUSTER_NODE_CONTEXTS_VIEW_POINTER 0x08u
++#define BUSTER_NODE_CONTEXTS_VIEW_CONSTANT 0x10u
++#define BUSTER_NODE_CONTEXTS_VIEW_PLACED_LVALUE 0x20u
++#define BUSTER_NODE_CONTEXTS_VIEW_ATOMIC 0x40u
++#define BUSTER_NODE_CONTEXTS_VIEW2_OPERATOR 0x01u
++#define BUSTER_NODE_CONTEXTS_VIEW2_NOT 0x02u
++#define BUSTER_NODE_CONTEXTS_VIEW2_OBJECT 0x04u
++#define BUSTER_NODE_CONTEXTS_VIEW2_SYMBOL 0x08u
++#define BUSTER_NODE_CONTEXTS_VIEW2_LOGICAL 0x10u
++#define BUSTER_NODE_CONTEXTS_VIEW2_REGISTER 0x80u
++_Static_assert(BUSTER_NODE_CONTEXTS_VIEW_AGGREGATE == BUSTER_CHECK_LOWER_TYPE_AGGREGATE && BUSTER_NODE_CONTEXTS_VIEW_POINTER == BUSTER_CHECK_LOWER_TYPE_POINTER &&
++               BUSTER_NODE_CONTEXTS_VIEW_ATOMIC == BUSTER_CHECK_LOWER_TYPE_ATOMIC && BUSTER_NODE_CONTEXTS_VIEW2_OBJECT == BUSTER_NODE_CONTEXTS_OBJECT &&
++               BUSTER_NODE_CONTEXTS_VIEW2_SYMBOL == BUSTER_NODE_CONTEXTS_SYMBOL && BUSTER_NODE_CONTEXTS_VIEW2_REGISTER == BUSTER_NODE_CONTEXTS_REGISTER,
++               "a view's bits of a type's facts and of the flags are at the facts' and the flags' own");
++typedef struct NodeViewsX NodeViewsX;
++struct NodeViewsX
++{
++    _Alignas(64) uint8_t kinds[64];
++    _Alignas(64) uint8_t classes[64];
++    _Alignas(64) uint8_t standings[64];
++    _Alignas(64) uint8_t operators[64];
++};
++static NodeViewsX node_views_x;
++
++static void node_views_x_tables(void)
++{
++    for (uint32_t i = 0; i < 64; i += 1)
++    {
++        const uint32_t constant = (i >> 2) & 7;
++        const uint32_t kind = i & BUSTER_NODE_CONTEXTS_CLASS_KIND;
++        node_views_x.kinds[i] = i >= BUSTER_TYPE_KIND_ARRAY && i <= BUSTER_TYPE_KIND_FUNCTION ? BUSTER_NODE_CONTEXTS_VIEW_POINTER : 0;
++        node_views_x.classes[i] = i >= BUSTER_TYPED_CLASS_I8 && i <= BUSTER_TYPED_CLASS_F64 ? BUSTER_NODE_CONTEXTS_VIEW_SCALAR : 0;
++        node_views_x.standings[i] = (uint8_t)((constant == CHECK_CONSTANT_INTEGER ? BUSTER_NODE_CONTEXTS_VIEW_INTEGER : 0) | (constant != 0 ? BUSTER_NODE_CONTEXTS_VIEW_CONSTANT : 0) |
++                                              ((i & 0x1f) == ((CHECK_CONSTANT_ADDRESS << 2) | CHECK_LVALUE) ? BUSTER_NODE_CONTEXTS_VIEW_PLACED_LVALUE : 0));
++        node_views_x.operators[i] = (uint8_t)((kind != BUSTER_NODE_CONTEXTS_CLASS_VALUE ? BUSTER_NODE_CONTEXTS_VIEW2_OPERATOR : 0) | (i == BUSTER_NODE_CONTEXTS_CLASS_TRUTH ? BUSTER_NODE_CONTEXTS_VIEW2_NOT : 0) |
++                                              (kind == BUSTER_NODE_CONTEXTS_CLASS_LOGICAL ? BUSTER_NODE_CONTEXTS_VIEW2_LOGICAL : 0));
++    }
++}
++
++// The views of 64 records, from their operators' classes and their five bytes.
++static inline __attribute__((always_inline)) void node_window_views(__m512i operators, __m512i type_classes, __m512i facts, __m512i kinds, __m512i standings, __m512i flags, __m512i* one,
++                                                                  __m512i* two)
++{
++    const __m512i by_kind = _mm512_permutexvar_epi8(kinds, _mm512_load_si512(node_views_x.kinds));
++    const __m512i by_class = _mm512_permutexvar_epi8(type_classes, _mm512_load_si512(node_views_x.classes));
++    const __m512i by_standing = _mm512_permutexvar_epi8(standings, _mm512_load_si512(node_views_x.standings));
++    const __m512i by_operator = _mm512_permutexvar_epi8(operators, _mm512_load_si512(node_views_x.operators));
++    const __m512i typed = _mm512_ternarylogic_epi64(facts, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_AGGREGATE | BUSTER_NODE_CONTEXTS_VIEW_POINTER | BUSTER_NODE_CONTEXTS_VIEW_ATOMIC), by_kind, 0xEA);
++    *one = _mm512_ternarylogic_epi64(typed, by_class, by_standing, 0xFE);
++    *two = _mm512_ternarylogic_epi64(flags, _mm512_set1_epi8((char)(BUSTER_NODE_CONTEXTS_VIEW2_OBJECT | BUSTER_NODE_CONTEXTS_VIEW2_SYMBOL | BUSTER_NODE_CONTEXTS_VIEW2_REGISTER)), by_operator, 0xEA);
++}
++
+ static void node_contexts_tables(NodeContextsTables* tables)
+ {
+     memset(tables, 0, sizeof(*tables));
++    node_views_x_tables();
+     for (uint32_t op = 0; op < CHECK_OP_COUNT && op < 128; op += 1)
+     {
+         const uint8_t binary = check_lower_binary((CheckOp)op);
+@@ -474,7 +534,6 @@
+ {
+     const NodeContextsTables* tables = state->c_tables;
+     const __m512i zero = _mm512_setzero_si512();
+-    __m512i next_codes = zero;
+     __m512i next_classes = zero;
+     __m512i next_keys = zero;
+     // The lowest record of a range that isn't evaluated and reaches below the block at hand (UINT32_MAX: none yet). A
+@@ -495,27 +554,52 @@
+     // column.
+     _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64] = { 0 };
+     const uint32_t blocks = (count + 63) / 64;
++    // The columns' pointers, read once: a store through a byte's pointer may be to any of them for all the compiler
++    // knows, and it read them again each step.
++    const uint8_t* const column_classes = state->window_c_classes;
++    const uint8_t* const column_facts = state->window_c_facts;
++    const uint8_t* const column_kinds = state->window_c_kinds;
++    const uint8_t* const column_standings = state->window_c_standings;
++    const uint8_t* const column_flags = state->window_c_flags;
++    uint8_t* const column_templates = state->window_c_templates;
++    uint8_t* const column_contexts = state->window_c_contexts;
++    uint8_t* const column_sources = state->window_c_sources;
++    uint8_t* const column_reasons = state->window_c_reasons;
++    uint64_t* const column_masks = state->window_c_masks;
++    const __m512i low_seven = _mm512_set1_epi8(0x7f);
++    // The last block's operators' classes and its views, which the first step reads as its own: a block's are made
++    // where it is the block before.
++    __m512i classes = zero;
++    __m512i own_one = zero;
++    __m512i own_two = zero;
++    if (blocks != 0)
++    {
++        const uint32_t last = (blocks - 1) * 64;
++        classes = node_window_table(tables->classes, _mm512_and_si512(_mm512_loadu_si512(front->ops + last), low_seven));
++        node_window_views(classes, _mm512_loadu_si512(column_classes + last), _mm512_loadu_si512(column_facts + last), _mm512_loadu_si512(column_kinds + last),
++                          _mm512_loadu_si512(column_standings + last), _mm512_loadu_si512(column_flags + last), &own_one, &own_two);
++    }
+     for (uint32_t block = blocks; block != 0; block -= 1)
+     {
+         const uint32_t x = (block - 1) * 64;
+         // The block before's bytes, read with this block's: an operand's are in either. The first block has none
+         // before it and reads itself there, which no lane's operand's place names.
+         const uint32_t back = x != 0 ? x - 64 : 0;
+-        const __m512i low_seven = _mm512_set1_epi8(0x7f);
+-        const __m512i codes = _mm512_and_si512(_mm512_loadu_si512(front->ops + x), low_seven);
+-        const __m512i classes = node_window_table(tables->classes, codes);
+-        const __m512i type_classes = _mm512_loadu_si512(state->window_c_classes + x);
+-        const __m512i facts = _mm512_loadu_si512(state->window_c_facts + x);
+-        const __m512i kinds = _mm512_loadu_si512(state->window_c_kinds + x);
+-        const __m512i standings = _mm512_loadu_si512(state->window_c_standings + x);
+-        const __m512i flags = _mm512_loadu_si512(state->window_c_flags + x);
+-        // Its consumer's operator, through its distance forward, and its operands' bytes, through their distances
+-        // back.
++        const __m512i type_classes = _mm512_loadu_si512(column_classes + x);
++        const __m512i facts = _mm512_loadu_si512(column_facts + x);
++        const __m512i kinds = _mm512_loadu_si512(column_kinds + x);
++        const __m512i standings = _mm512_loadu_si512(column_standings + x);
++        const __m512i flags = _mm512_loadu_si512(column_flags + x);
++        // Its consumer's operator's class, through its distance forward, and its operands' views, through their
++        // distances back.
+         __mmask64 near_up = 0;
+         __mmask64 far_up = 0;
+         const __m512i at_up = node_window_consumers(front->window_ups + x, front->ups + x, &near_up, &far_up);
+         __m512i consumer_classes = _mm512_maskz_permutex2var_epi8(near_up, classes, at_up, next_classes);
+-        const __m512i consumer_codes = _mm512_maskz_permutex2var_epi8(near_up, codes, at_up, next_codes);
++        // `&x`'s operand is its record's neighbour: its consumer's class is in reach, and is read before a far
++        // consumer's.
++        const __mmask64 addressed = _mm512_cmpeq_epi8_mask(_mm512_and_si512(consumer_classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_KIND)),
++                                                           _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_ADDRESS));
+         __mmask64 near_left = 0;
+         __mmask64 far_left = 0;
+         __mmask64 near_right = 0;
+@@ -529,25 +613,17 @@
+         const __mmask64 placed = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_PLACED));
+         far_up &= placed;
+         far_left &= placed;
+-        const __m512i previous_codes = _mm512_and_si512(_mm512_loadu_si512(front->ops + back), low_seven);
+-        const __m512i previous_classes = _mm512_loadu_si512(state->window_c_classes + back);
+-        const __m512i previous_facts = _mm512_loadu_si512(state->window_c_facts + back);
+-        const __m512i previous_kinds = _mm512_loadu_si512(state->window_c_kinds + back);
+-        const __m512i previous_standings = _mm512_loadu_si512(state->window_c_standings + back);
+-        const __m512i previous_flags = _mm512_loadu_si512(state->window_c_flags + back);
+-        __m512i left_codes = node_window_operands(at_left, near_left, previous_codes, codes);
+-        __m512i left_classes = node_window_operands(at_left, near_left, previous_classes, type_classes);
+-        __m512i left_facts = node_window_operands(at_left, near_left, previous_facts, facts);
+-        __m512i left_kinds = node_window_operands(at_left, near_left, previous_kinds, kinds);
+-        __m512i left_flags = node_window_operands(at_left, near_left, previous_flags, flags);
+-        __m512i left_standings = node_window_operands(at_left, near_left, previous_standings, standings);
+-        const __m512i right_classes = node_window_operands(at_right, near_right, previous_classes, type_classes);
+-        const __m512i right_facts = node_window_operands(at_right, near_right, previous_facts, facts);
+-        const __m512i right_kinds = node_window_operands(at_right, near_right, previous_kinds, kinds);
+-        const __m512i right_standings = node_window_operands(at_right, near_right, previous_standings, standings);
++        const __m512i previous_operators = node_window_table(tables->classes, _mm512_and_si512(_mm512_loadu_si512(front->ops + back), low_seven));
++        __m512i previous_one = zero;
++        __m512i previous_two = zero;
++        node_window_views(previous_operators, _mm512_loadu_si512(column_classes + back), _mm512_loadu_si512(column_facts + back), _mm512_loadu_si512(column_kinds + back),
++                          _mm512_loadu_si512(column_standings + back), _mm512_loadu_si512(column_flags + back), &previous_one, &previous_two);
++        __m512i left_one = node_window_operands(at_left, near_left, previous_one, own_one);
++        __m512i left_two = node_window_operands(at_left, near_left, previous_two, own_two);
++        const __m512i right_one = node_window_operands(at_right, near_right, previous_one, own_one);
+         // A consumer past the block after (its template is its own block's step's, stored), an operand before the
+-        // block before: their bytes by loads, a record at a time, into the frame's block. A control's root far from
+-        // its condition is most.
++        // block before: their bytes by loads, a record at a time, into the frame's block, and a far operand's views
++        // from them. A control's root far from its condition is most.
+         if (__builtin_expect((far_up | far_left) != 0, 0))
+         {
+             for (uint64_t pending = far_up; pending != 0; pending &= pending - 1)
+@@ -578,54 +654,46 @@
+                 far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_STANDING][lane] = state->window_c_standings[operand];
+             }
+             consumer_classes = _mm512_mask_loadu_epi8(consumer_classes, far_up, far_bytes[BUSTER_NODE_CONTEXTS_FAR_CONSUMER_CLASS]);
+-            left_codes = _mm512_mask_loadu_epi8(left_codes, far_left, far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_CODE]);
+-            left_classes = _mm512_mask_loadu_epi8(left_classes, far_left, far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_CLASS]);
+-            left_facts = _mm512_mask_loadu_epi8(left_facts, far_left, far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_FACTS]);
+-            left_kinds = _mm512_mask_loadu_epi8(left_kinds, far_left, far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_KIND]);
+-            left_flags = _mm512_mask_loadu_epi8(left_flags, far_left, far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_FLAGS]);
+-            left_standings = _mm512_mask_loadu_epi8(left_standings, far_left, far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_STANDING]);
++            __m512i far_one = zero;
++            __m512i far_two = zero;
++            node_window_views(node_window_table(tables->classes, _mm512_load_si512(far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_CODE])), _mm512_load_si512(far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_CLASS]),
++                              _mm512_load_si512(far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_FACTS]), _mm512_load_si512(far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_KIND]),
++                              _mm512_load_si512(far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_STANDING]), _mm512_load_si512(far_bytes[BUSTER_NODE_CONTEXTS_FAR_LEFT_FLAGS]), &far_one, &far_two);
++            left_one = _mm512_mask_mov_epi8(left_one, far_left, far_one);
++            left_two = _mm512_mask_mov_epi8(left_two, far_left, far_two);
+             far_count += (uint64_t)_mm_popcnt_u64(far_up) + (uint64_t)_mm_popcnt_u64(far_left);
+             near_left |= far_left;
+         }
+         // What its consumer says of it: its place among the consumer's operands, and whether the consumer takes that
+-        // operand for its address. `&x` passes its operand with no target. A record with no consumer is a root, and so
+-        // is an initialization's value, whose INITIALIZE is no record of the machine's. Neither asks for a mask: the
+-        // bytes of a consumer there is none of are zeros, an operator with no class, and no template's row says a
+-        // record is evaluated with no target, which is what a root is until its expression's part gives it its own.
++        // operand for its address.
+         const __m512i places = _mm512_min_epu8(_mm512_loadu_si512(front->places + x), _mm512_set1_epi8(1));
+         const __mmask64 first_place = _mm512_testn_epi8_mask(places, places);
+         const __mmask64 address = first_place & _mm512_test_epi8_mask(consumer_classes, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_CLASS_PLACE));
+-        const __mmask64 addressed = _mm512_cmpeq_epi8_mask(consumer_codes, _mm512_set1_epi8(CHECK_OP_ADDRESS));
+-        // Its operands, as masks. C's rules read T's conversion of each operand; here an operand's own type stands for
+-        // it where the two say the same: an array's and a function's are a pointer's, whose class their types have
+-        // already (the lowering's classes: an address's), with no pointer's fact; two operands of a number's class
+-        // convert to a number's. Where they may not, the record's rule reads the conversions (below).
+-        const __m512i arrays = _mm512_set1_epi8(BUSTER_TYPE_KIND_ARRAY);
+-        const __m512i decayed = _mm512_set1_epi8(BUSTER_TYPE_KIND_FUNCTION - BUSTER_TYPE_KIND_ARRAY);
+-        const __mmask64 left_decays = near_left & _mm512_cmple_epu8_mask(_mm512_sub_epi8(left_kinds, arrays), decayed);
+-        const __mmask64 right_decays = near_right & _mm512_cmple_epu8_mask(_mm512_sub_epi8(right_kinds, arrays), decayed);
+-        const __mmask64 left_pointer = left_decays | _mm512_test_epi8_mask(left_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_POINTER));
+-        const __mmask64 right_pointer = right_decays | _mm512_test_epi8_mask(right_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_POINTER));
+-        const __mmask64 left_atomic = _mm512_test_epi8_mask(left_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_ATOMIC));
++        const __m512i consumer_kinds = _mm512_and_si512(consumer_classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_KIND));
++        const __mmask64 consumer_logical = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_LOGICAL));
++        const __mmask64 consumer_truth = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_TRUTH));
++        const __mmask64 callee = first_place & _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL));
++        // Its operands, as bits of their views. A record with no operand reads a view of zeros: no pointer, no scalar,
++        // tested, a name's leaf with no object, no constant.
++        const __mmask64 left_pointer = _mm512_test_epi8_mask(left_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_POINTER));
++        const __mmask64 right_pointer = _mm512_test_epi8_mask(right_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_POINTER));
++        const __mmask64 left_atomic = _mm512_test_epi8_mask(left_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_ATOMIC));
+         const __m512i scalars = _mm512_set1_epi8(BUSTER_TYPED_CLASS_F64 - BUSTER_TYPED_CLASS_I8);
+         const __m512i i8 = _mm512_set1_epi8(BUSTER_TYPED_CLASS_I8);
+-        const __mmask64 left_scalar = _mm512_cmple_epu8_mask(_mm512_sub_epi8(left_classes, i8), scalars);
+-        const __mmask64 right_scalar = _mm512_cmple_epu8_mask(_mm512_sub_epi8(right_classes, i8), scalars);
+-        // A truth's operand, and a branched operator's: C asks that its conversion's type be one a truth's entries test
+-        // (node_machine_testable): no aggregate, of a class below a vector's that is not void's. Its conversion's
+-        // facts are its own type's (node_contexts_converted's comment), and the aggregate's is a mask: a __float128
+-        // has it, and its record a template all the same. The class asks no mask. The checker takes only a scalar
+-        // there (check_action_logic), and a scalar whose record has no such class is a half-precision float's: no
+-        // record of that type has a template (each template's mask asks a number's class of its record, a wrapper's
+-        // one below a vector's, and a plain call's result is a plain scalar's), and C evaluates the operand. So the
+-        // expression is refused for the operand where C refuses it for its consumer.
+-        const __mmask64 left_tested = _mm512_testn_epi8_mask(left_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_AGGREGATE));
+-        const __mmask64 right_tested = _mm512_testn_epi8_mask(right_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_AGGREGATE));
+-        const __mmask64 named = near_left & _mm512_cmpeq_epi8_mask(left_codes, _mm512_set1_epi8(CHECK_OP_VALUE)) &
+-                                _mm512_test_epi8_mask(left_flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_OBJECT));
+-        const __mmask64 named_global = _mm512_test_epi8_mask(left_flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_SYMBOL));
+-        const __mmask64 right_constant = near_right & _mm512_cmpeq_epi8_mask(_mm512_and_si512(right_standings, _mm512_set1_epi8(0x1c)),
+-                                                                             _mm512_set1_epi8(CHECK_CONSTANT_INTEGER << 2));
++        const __mmask64 left_scalar = _mm512_test_epi8_mask(left_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_SCALAR));
++        const __mmask64 right_scalar = _mm512_test_epi8_mask(right_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_SCALAR));
++        const __mmask64 left_tested = _mm512_testn_epi8_mask(left_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_AGGREGATE));
++        const __mmask64 right_tested = _mm512_testn_epi8_mask(right_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_AGGREGATE));
++        const __mmask64 left_named = _mm512_testn_epi8_mask(left_two, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW2_OPERATOR));
++        const __mmask64 left_object = _mm512_test_epi8_mask(left_two, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW2_OBJECT));
++        const __mmask64 named = near_left & left_named & left_object;
++        const __mmask64 named_global = _mm512_test_epi8_mask(left_two, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW2_SYMBOL));
++        const __mmask64 left_register = _mm512_test_epi8_mask(left_two, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_VIEW2_REGISTER));
++        const __mmask64 left_logical = _mm512_test_epi8_mask(left_two, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW2_LOGICAL));
++        const __mmask64 left_not = _mm512_test_epi8_mask(left_two, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW2_NOT));
++        const __mmask64 left_variable = _mm512_testn_epi8_mask(left_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_CONSTANT));
++        const __mmask64 left_placed = _mm512_test_epi8_mask(left_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_PLACED_LVALUE));
++        const __mmask64 right_constant = _mm512_test_epi8_mask(right_one, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_VIEW_INTEGER));
+         // The record's own bits.
+         const __mmask64 unfit = _mm512_test_epi8_mask(facts, _mm512_set1_epi8((char)(BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)));
+         const __mmask64 address_value = _mm512_test_epi8_mask(facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_ADDRESS));
+@@ -720,17 +788,9 @@
+         // A branched record's operands are evaluated, each a branch in its turn or a value C tests: its template is
+         // none where an operand is none a truth's entries test (above). A `!` and a CONDITION have no second operand,
+         // whose bytes then read zero.
+-        const __m512i consumer_kinds = _mm512_and_si512(consumer_classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_KIND));
+-        const __mmask64 consumer_logical = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_LOGICAL));
+-        const __mmask64 consumer_truth = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_TRUTH));
+         const __mmask64 is_condition = is_truth & _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITION));
+         const __mmask64 is_not = is_truth & ~is_condition;
+-        const __mmask64 left_logical = _mm512_cmple_epu8_mask(_mm512_sub_epi8(left_codes, _mm512_set1_epi8(CHECK_OP_LOGICAL_AND)), _mm512_set1_epi8(1));
+-        const __mmask64 left_not = _mm512_cmpeq_epi8_mask(left_codes, _mm512_set1_epi8(CHECK_OP_NOT));
+         // A first operand's standing: its category and its constant's kind are five bits of one byte.
+-        const __mmask64 left_variable = _mm512_testn_epi8_mask(left_standings, _mm512_set1_epi8(0x1c));
+-        const __mmask64 left_placed = _mm512_cmpeq_epi8_mask(_mm512_and_si512(left_standings, _mm512_set1_epi8(0x1f)), _mm512_set1_epi8((CHECK_CONSTANT_ADDRESS << 2) | CHECK_LVALUE));
+-        const __mmask64 left_object = _mm512_test_epi8_mask(left_flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_OBJECT));
+         const __mmask64 left_unknown = left_variable | (left_placed & left_object);
+         const __mmask64 branched_not = is_not & free & consumer_logical;
+         const __mmask64 branched_logical = is_logical & free & left_unknown & (consumer_logical | consumer_truth);
+@@ -758,7 +818,6 @@
+         // Its callee, where the lowering calls it directly (node_machine_direct_callee): no lvalue, an address constant
+         // with no offset, of an object that has a symbol, and no effect. C doesn't evaluate it. Whether an object has a
+         // symbol is a name's leaf's line's: another record with an object's address, as a callee, lists its expression.
+-        const __mmask64 callee = first_place & _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL));
+         const __mmask64 offset = _mm512_test_epi8_mask(standings, _mm512_set1_epi8(BUSTER_NODE_MACHINE_OFFSET));
+         const __mmask64 called = callee & ~lvalue & address_constant & ~offset & has_object & ~effects;
+         const __mmask64 direct = called & symbol;
+@@ -768,8 +827,8 @@
+         // destination of one and a divisor that is an integer constant have, and no other update.)
+         const __mmask64 update_divisor = integral & right_constant & _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_QUOTIENT));
+         const __mmask64 divisor = (is_divide & right_constant) | update_divisor;
+-        _mm512_storeu_si512(state->window_c_contexts + x, _mm512_maskz_mov_epi8(address, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS)));
+-        _mm512_storeu_si512(state->window_c_reasons + x, class_kinds);
++        _mm512_storeu_si512(column_contexts + x, _mm512_maskz_mov_epi8(address, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS)));
++        _mm512_storeu_si512(column_reasons + x, class_kinds);
+         // An update: C asks its plan (node_machine_update_plan) of a record of a number's class that is not read for its
+         // address (node_machine_classify's case). No update's record is read for its address: its value is no lvalue
+         // and no struct's, and each operator that takes its first operand's address asks for one. And a record the
+@@ -796,8 +855,6 @@
+         // of it is the reference's to say.
+         const __mmask64 update_asked = free & is_update & numeric & ~update_divisor;
+         const __mmask64 increment = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_INCREMENT));
+-        const __mmask64 left_register = _mm512_test_epi8_mask(left_flags, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_REGISTER));
+-        const __mmask64 left_named = _mm512_cmpeq_epi8_mask(left_codes, _mm512_set1_epi8(CHECK_OP_VALUE));
+         const __mmask64 update_masked = update_asked & ~left_atomic & ~(left_named & left_register) & (increment | left_pointer | right_scalar);
+         // A pointer's sum, a subscript and a pointer's update: its stride is its type's row's, a record at a time, here
+         // where the step's other bytes are masks. An update's pointer's type is its destination's
+@@ -865,8 +922,8 @@
+         const __mmask64 evaluates = _mm512_test_epi8_mask(rows, _mm512_set1_epi8((char)BUSTER_NODE_CONTEXTS_EVALUATES)) & ~direct;
+         // An operand of `&x` has no target, and no more has a record evaluated as branches.
+         const __m512i sources = _mm512_maskz_mov_epi8(~(addressed | branched), _mm512_and_si512(rows, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_SOURCE)));
+-        _mm512_storeu_si512(state->window_c_templates + x, templates);
+-        _mm512_storeu_si512(state->window_c_sources + x, sources);
++        _mm512_storeu_si512(column_templates + x, templates);
++        _mm512_storeu_si512(column_sources + x, sources);
+         // The records it takes out with it where it isn't evaluated: its subtree's, the front's sizes'. And those a
+         // record of a block after took out.
+         uint64_t dead = dead_low <= x ? ~UINT64_C(0) : dead_low < x + 64 ? ~UINT64_C(0) << (dead_low - x) : 0;
+@@ -880,15 +937,17 @@
+             dead_low = low < x && low < dead_low ? low : dead_low;
+         }
+         const __mmask64 alive = placed & evaluates & ~dead;
+-        uint64_t* masks = state->window_c_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(block - 1);
++        uint64_t* masks = column_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(block - 1);
+         masks[BUSTER_NODE_CONTEXTS_MASK_ALIVE] = alive;
+         masks[BUSTER_NODE_CONTEXTS_MASK_NONE] = alive & _mm512_testn_epi8_mask(templates, templates);
+         masks[BUSTER_NODE_CONTEXTS_MASK_LISTED] = listed;
+         masks[BUSTER_NODE_CONTEXTS_MASK_DIVISOR] = placed & divisor;
+         masks[BUSTER_NODE_CONTEXTS_MASK_WIDE] = placed & wide;
+-        next_codes = codes;
+         next_classes = classes;
+         next_keys = keys;
++        classes = previous_operators;
++        own_one = previous_one;
++        own_two = previous_two;
+     }
+     counts->strides += strides;
+     counts->asked += asked;
