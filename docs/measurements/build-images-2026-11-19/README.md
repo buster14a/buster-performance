@@ -1,6 +1,6 @@
 # A build's places beyond one compile: header images, a unit's fixed cost, the process (2026-11-19)
 
-Evidence for the design issue [buster#ISSUE](https://github.com/buster14a/buster/issues/ISSUE): what a build of
+Evidence for the design issue [buster#3070](https://github.com/buster14a/buster/issues/3070): what a build of
 many units pays outside the per-token pipeline that
 [buster#2850](https://github.com/buster14a/buster/issues/2850) budgets, and the first test of a design that takes
 those costs out. It is research: nothing here changes the compiler. The one compiler change, the census's hooks, is an
