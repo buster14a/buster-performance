@@ -40,6 +40,11 @@ spread over the checker's functions, whose code this change leaves as it was: `c
 cycles and +0.65 of the branch misses, others moving either way by up to 0.3, and no parser function among them. It is
 where this executable's code lies, not the parser's work.
 
+**C12a and C12b together** ([`probe4.sh`](probe4.sh), `probe4/`): main before C12a (`a847fd0e6`) against the final
+deletion, `ab`'s three rounds. `-c` of sqlite3.c: +0.51%, +0.52%, +0.60% (main again +0.09%, −0.21%, +0.14%), with
+0.55 M fewer instructions; its parse alone: +0.45%, +0.10%, −0.49% (main again +0.00%, −0.12%, −0.61%), 0.47 M fewer.
+Each step alone read +0.4% to +0.6% on `-c` of sqlite3.c; together they read the same, not the sum.
+
 **The start section** (`logs/start-*.txt`): head has `parse_vector`, which the start order now names, and no longer
 `parse_fallback` and `parse_convert_token`, both inlined into functions there now.
 
