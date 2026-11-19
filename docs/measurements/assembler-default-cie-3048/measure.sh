@@ -7,7 +7,11 @@ out=${RUNNER_TEMP:-/tmp}/cie-results
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 base=6427879e1143026a12fb0388a20bdea1fe4b2bc5
-head=${1:-9682975b12965212eb0c1d0683e4f405f6ed3878}
+head=${1:-72c0872fa40d398c573b6419546531d226fb8697}
+script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+git diff --quiet && git diff --cached --quiet || { echo "Use a clean, disposable Buster checkout." >&2; exit 1; }
+: > "$out/counts.tsv"
+: > "$out/objects.sha256"
 git checkout --quiet --detach "$base"
 {
     clang --version
@@ -77,7 +81,16 @@ ret
 ret
 .cfi_endproc
 ASM
-inputs=(short-1 short-100 short-1000 gcc-rerun clang-rerun mixed)
+awk 'BEGIN {
+    print ".cfi_sections .eh_frame, .debug_frame\n.text"
+    for (pass=0; pass<2; pass++) for (i=0; i<1024; i++) {
+        key=pass ? 1023-i : i
+        print ".cfi_startproc" (key%2 ? " simple" : "")
+        if (int(key/2)%2) print ".cfi_signal_frame"
+        print ".cfi_return_column " int(key/4) "\nret\n.cfi_endproc"
+    }
+}' > "$out/all-keys.s"
+inputs=(short-1 short-100 short-1000 gcc-rerun clang-rerun mixed all-keys)
 frames()
 {
     local object=$1 prefix=$2 section
@@ -90,6 +103,7 @@ frames()
     done
 }
 for input in "${inputs[@]}"; do
+    if [[ $input == all-keys ]]; then continue; fi
     as --64 -o "$out/$input.gas.o" "$out/$input.s"
     frames "$out/$input.gas.o" "$out/$input.gas"
 done
@@ -116,17 +130,44 @@ measure()
     git restore -- "$file"
 }
 measure base "$base"
-if [[ -n "$head" ]]; then
-    git fetch --no-tags origin "$head"
-    measure head "$head"
-    for input in "${inputs[@]}"; do
-        cmp "$out/$input.base.o" "$out/$input.head.o"
-        sha256sum "$out/$input.head.o" | sed "s|$out/||" | tee -a "$out/objects.sha256"
-    done
-    echo 'All complete base and head objects match.'
-fi
+git fetch --no-tags origin "$head"
+measure head "$head"
+for input in "${inputs[@]}"; do
+    cmp "$out/$input.base.o" "$out/$input.head.o"
+    sha256sum "$out/$input.head.o" | sed "s|$out/||" | tee -a "$out/objects.sha256"
+done
+echo 'All complete base and head objects match.'
 oracle_fail=0
 for input in "${inputs[@]}"; do
+    if [[ $input == mixed ]]; then
+        # GAS may use a shorter CIE and put the remaining initial instructions in the FDE.
+        for label in gas base head; do
+            awk -v buster="$([[ $label == gas ]] && echo 0 || echo 1)" -f "$script_dir/mixed.awk" "$out/mixed.$label.frames" | sort > "$out/mixed.$label.rows"
+        done
+        cmp "$out/mixed.gas.rows" "$out/mixed.base.rows"
+        cmp "$out/mixed.base.rows" "$out/mixed.head.rows"
+        echo 'Mixed frames: all 22 effective rows match GNU as; all 20 Buster FDEs reference the expected first CIE.'
+        continue
+    fi
+    if [[ $input == all-keys ]]; then
+        for label in base head; do
+            awk '
+                $1=="Contents" {sec=$4}
+                $4=="CIE" {id=sec ":" $1; in_cie=1; cies[sec]++}
+                $1=="Augmentation:" {sig[id]=index($2,"S")!=0}
+                $1=="Return" && $2=="address" {col[id]=$NF}
+                in_cie && $1=="DW_CFA_def_cfa:" {ordinary[id]=1}
+                $4=="FDE" {
+                    in_cie=0; i=fdes[sec]++; key=i<1024 ? i : 2047-i; id=sec ":" substr($5,5)
+                    if (!(id in col) || col[id]!=int(key/4) || sig[id]!=int(key/2)%2 || !!ordinary[id]==key%2) bad=1
+                    if (i<1024) first[sec,key]=id; else if (first[sec,key]!=id) bad=1
+                }
+                END {exit (bad || cies[".eh_frame"]!=1024 || cies[".debug_frame"]!=1024 || fdes[".eh_frame"]!=2048 || fdes[".debug_frame"]!=2048)}
+            ' "$out/all-keys.$label.frames"
+        done
+        echo 'All-keys frames: all 1,024 distinct identities and their reverse-order repeats point to the expected CIE in both sections.'
+        continue
+    fi
     for part in frames relocs eh_frame debug_frame; do
         if [[ -f "$out/$input.gas.$part" ]]; then
             if ! cmp "$out/$input.gas.$part" "$out/$input.base.$part"; then
