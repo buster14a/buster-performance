@@ -195,3 +195,11 @@ The checks ran on the commit before the pull request's (`revision.txt`). The
 pull request's differs from it in comments and in one function written as
 main has it: the two builds' `.text`, `.rodata` and `.data` are the same byte
 for byte.
+
+`cloud/sanitizers/` is the rows a pull request's checks skip, on the pull
+request's commit `164f337e2` (`sanitizers-native.sh TREE OUT "--passes 0
+--window-contexts"`; `progress.txt` has a line a step): memory, address and
+thread, native, each a Release build as CI's rows build it and `test-checker
+--part 5/8` (210,344 checks, 0 failures under each), and under memory and
+address C on the window on `sqlite3.c`, Lua and the compiler's own source. No
+report.
