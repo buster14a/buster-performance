@@ -1,13 +1,13 @@
 # Register transfers in Buster’s errno-aware square-root leaves
 
-Buster issue [#3078](https://github.com/buster14a/buster/issues/3078). Base `3741c264fb349e86359acfd1c732ee1c2eaa4052`, head `f423d6c3251b1a97b997fc6f6e52f5231d3472cd`.
+Buster issue [#3078](https://github.com/buster14a/buster/issues/3078). Base `3741c264fb349e86359acfd1c732ee1c2eaa4052`, head `c7a26554aa6560483d319dfa9fa1c7c30f77b9df`.
 
 | Leaf | ELF symbol bytes, base → head | Decoded instructions | Explicit stack transports | Frame bytes |
 | --- | ---: | ---: | ---: | ---: |
 | sqrt | 49 → 33 | 13 → 9 | 4 → 0 | 16 → 0 |
 | sqrtf | 47 → 30 | 13 → 9 | 4 → 0 | 16 → 0 |
 
-Both the default compiler path and `--tier1` emitted these sizes and counts at `-march=x86-64`. The input consists of ordinary functions returning `__builtin_sqrt(x)` and `__builtin_sqrtf(x)`. For each object, `--helper-report` counted two planned math helpers, two helper calls, and zero direct forms. Both callers reference `__errno_location`. The conditional four-byte EDOM store through RSI is each leaf’s only explicit memory operand at head. Each base leaf has two loads and two stores through RSP, plus the stack adjustments. Counts use the ELF function size to exclude alignment padding. This experiment measures code shape.
+Both the default compiler path and `--tier1` emitted these sizes and counts at `-march=x86-64`. The input consists of ordinary functions returning `__builtin_sqrt(x)` and `__builtin_sqrtf(x)`. For each object, `--helper-report` counted two planned math helpers, two helper calls, and zero direct forms. Both callers reference `__errno_location`. The `plain.c` control calls declared `sqrt` and `sqrtf`. Its only undefined symbols are those two library functions and its helper count is zero. Its object is byte-identical across revisions at each tier. The conditional four-byte EDOM store through RSI is each leaf’s only explicit memory operand at head. Each base leaf has two loads and two stores through RSP, plus the stack adjustments. Counts use the ELF function size to exclude alignment padding. This experiment measures code shape.
 
 Each head FDE covers the exact leaf byte range and inherits the CIE’s CFA of `rsp+8` throughout. Each base FDE changes the CFA to `rsp+24` after the reservation and back to `rsp+8` at the return. [Decoded instructions and FDEs](decoded.txt)
 
@@ -26,7 +26,7 @@ Use a verified non-9700X Linux host with the ISA required by Buster’s `host_is
 ```sh
 git clone https://github.com/buster14a/buster.git sqrt-repo
 git -C sqrt-repo worktree add --detach ../sqrt-base 3741c264fb349e86359acfd1c732ee1c2eaa4052
-git -C sqrt-repo worktree add --detach ../sqrt-head f423d6c3251b1a97b997fc6f6e52f5231d3472cd
+git -C sqrt-repo worktree add --detach ../sqrt-head c7a26554aa6560483d319dfa9fa1c7c30f77b9df
 for t in sqrt-base sqrt-head; do
     (
         cd "$t" || exit 1

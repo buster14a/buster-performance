@@ -22,7 +22,7 @@ shape() {
     gawk -v name="$name" -v side="$side" -v tier="$tier" -v bytes="$bytes" '
         /^[[:space:]]*[[:xdigit:]]+:/ {
             ++inst
-            if (/\[rsp\]/) ++stack
+            if (/\[[^]]*(rsp|rbp|esp|ebp)/) ++stack
             if ($2 == "sub" && $3 == "rsp,") frame = strtonum($4)
             if ($2 == "jp") jp = strtonum($3)
             if ($2 == "jae") jae = strtonum($3)
@@ -62,6 +62,10 @@ for i in 0 1; do
         mkdir -p "$out"
         "$cc" "${args[@]}" -c roots.c -o "$out/roots.o" > "$out/helper-report.txt" 2>&1
         "$cc" "${args[@]}" -c controls.c -o "$out/controls.o" > "$out/control-report.txt" 2>&1
+        "$cc" "${args[@]}" -c plain.c -o "$out/plain.o" > "$out/plain-report.txt" 2>&1
+        grep -Fxq $'helpers.math\tdirect=0\thelper=0\tplanned=0' "$out/plain-report.txt"
+        nm --undefined-only --format=posix "$out/plain.o" | awk '{ print $1 }' | sort > "$out/plain-externals.txt"
+        printf 'sqrt\nsqrtf\n' | cmp - "$out/plain-externals.txt"
         grep -Fxq $'helpers.math\tdirect=0\thelper=2\tplanned=2' "$out/helper-report.txt"
         grep -Fxq $'helpers.math\tdirect=0\thelper=12\tplanned=12' "$out/control-report.txt"
         llvm-objdump -dr --x86-asm-syntax=intel "$out/roots.o" > "$out/disassembly.txt"
@@ -80,8 +84,9 @@ done
 for tier in tier0 tier1; do
     cmp "base/$tier/helper-report.txt" "head/$tier/helper-report.txt"
     cmp "base/$tier/controls.o" "head/$tier/controls.o"
+    cmp "base/$tier/plain.o" "head/$tier/plain.o"
     cmp "base/$tier/matrix.tsv" "head/$tier/matrix.tsv"
-    sha256sum {base,head}/"$tier"/{controls.o,matrix.tsv}
+    sha256sum {base,head}/"$tier"/{controls.o,plain.o,matrix.tsv}
 done
 cmp base/tier0/matrix.tsv base/tier1/matrix.tsv
 cat counts.tsv
