@@ -33,6 +33,27 @@ EDITS = [
     ('c_check_source_prepare.c', r'requested && \(\(request\.scalar \|\| buster_scalar_area\(10\)\) \|\| \(source->options\.scalar \|\| buster_scalar_area\(10\)\)\)',
      r'requested && (request.scalar || source->options.scalar)', 1),
     ('c_check_source_prepare.c', r'\(source->scalar \|\| buster_scalar_area\(10\)\) \? "scalar"', r'source->scalar ? "scalar"', 1),
+    # The literal table's store: the parser's flag under another name.
+    ('c_check_literal_table_input.c', r'const bool scalar_store = reader->parser->options\.scalar;', r'const bool scalar_store = reader->parser->options.scalar || buster_scalar_area(10);', 1),
+    # The knob itself: a load, a shift and a mask of a global the executable's constructor sets, inlined everywhere, so
+    # that a gate costs the same few instructions in every setting (an out-of-line call per evaluation read as 0.7% of
+    # sqlite3.c's instructions, and only where the raw flag was false).
+    ('host_isa.h', r'static __attribute__\(\(unused\)\) unsigned buster_scalar_area_bits\(void\)\n\{.*?\n\}\nstatic __attribute__\(\(unused\)\) int buster_scalar_area\(unsigned area\)\n\{\n.*?\n\}\n',
+     '__attribute__((weak)) unsigned buster_scalar_area_mask = 0;\n'
+     'static __attribute__((constructor, unused)) void buster_scalar_area_initialize(void)\n'
+     '{\n'
+     '    char path[4096];\n'
+     '    const ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);\n'
+     '    unsigned bits = 0;\n'
+     '    if (length > 0)\n'
+     '    {\n'
+     '        path[length] = 0;\n'
+     '        const char* at = strstr(path, "-areas");\n'
+     '        bits = at != 0 ? (unsigned)strtoul(at + 6, 0, 0) : 0;\n'
+     '    }\n'
+     '    buster_scalar_area_mask = bits;\n'
+     '}\n'
+     '#define buster_scalar_area(area) ((int)((buster_scalar_area_mask >> (area)) & 1u))\n', 1),
 ]
 
 def main():
@@ -44,7 +65,7 @@ def main():
         total = 0
         for f in files:
             text = open(f).read()
-            new, n = re.subn(pattern, replacement, text)
+            new, n = re.subn(pattern, replacement, text, flags=re.S)
             if n:
                 open(f, 'w').write(new)
                 total += n
