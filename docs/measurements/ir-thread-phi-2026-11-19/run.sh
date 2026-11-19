@@ -4,7 +4,7 @@ export LC_ALL=C
 record=$(cd "$(dirname "$0")" && pwd)
 mkdir -p record
 git rev-parse HEAD | tee record/base.txt
-lscpu | rg 'Architecture|Model name|Hypervisor' | tee record/cpu.txt
+lscpu | grep -E 'Architecture|Model name|Hypervisor' | tee record/cpu.txt
 # Use the hosted image's compiler and runtime together. Set the target from the qualified CPU.
 export BUSTER_TOOLCHAIN=path BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0
 clang --version | tee record/clang.txt
@@ -15,7 +15,7 @@ git apply "$record/base-count.patch"
 ./build.sh --config Develop >record/build.log 2>&1 || { tail -90 record/build.log; exit 1; }
 mkdir -p record/ir
 BUSTER_WIDE_PHI_DUMP="$PWD/record/ir" ./build/compiler test-ir-optimize >record/test.log 2>&1 || { tail -100 record/test.log; exit 1; }
-rg 'wide-phi|test-ir-optimize|failed|checks|passed' record/test.log | tail -40
+grep -E 'wide-phi|test-ir-optimize|failed|checks|passed' record/test.log | tail -40
 sha256sum record/ir/* | tee record/ir.sha256
 bash tools/ci/fetch-corpus.sh "$RUNNER_TEMP/corpus"
 corpus="$RUNNER_TEMP/corpus"
