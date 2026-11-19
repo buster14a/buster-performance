@@ -53,3 +53,49 @@ address stream.
 
 The scalar single-instruction encoder (`encode_one`) also serves `x86_validate` in 16- and 32-bit modes: an instruction
 whose mode adds a 66 or a 67 must stay within 15 bytes, which validation checks by encoding it.
+
+## `x86_measure` against its scalar twin
+
+The runs above time encoding alone. `x86_measure`, which gives the offsets and length without bytes (branch sizing's
+and the assembler's), has its own vector loop and scalar twin, so it was measured too, in [`measure/`](measure/), on
+main `bc66290c5` with an experiment patch that adds measuring entries to `benchmark-x86-encoder`. Each is checked
+against the scalar loop's offsets and length, then timed on the compiler mix and the vector mix. Release, every run
+under the lock on CPU 2.
+
+**First run** ([`measure/first/`](measure/first/), [`c10-measure-gate.patch`](measure/first/c10-measure-gate.patch)):
+`measure_scalar` (`x86_measure_scalar`) and `measure_vector` (`x86_measure`), at 1, 4, 16 and 256 instructions a call
+and whole, each in a run of every implementation and three times alone (`--only`). From four instructions a call the
+vector path wins by 7 to 39 times, but at one it loses: 105.6 cycles an instruction against 88.0 (compiler mix) and
+91.4 to 92.5 (vector mix), every round.
+
+**Why:** `x86_measure` copied a last partial group into a zeroed array of 16 records and loaded it back as four 64-byte
+vectors, which can't take their data from the copy's narrower stores and wait for them. A call of one record is all
+tail.
+
+**Second run** ([`measure/masked/`](measure/masked/), [`c10-measure-masked.patch`](measure/masked/c10-measure-masked.patch)):
+the same, with a third entry, `measure_masked`, that loads the last partial group by masked loads of its records'
+dwords, straight from the records. Each entry alone (`--only`), three rounds in turn. Cycles per instruction:
+
+| Stream | Calls of | `x86_measure_scalar` | `x86_measure` (zeroed copy) | Masked loads |
+| --- | ---: | --- | --- | --- |
+| Compiler mix | 1 | 88.03, 87.91, 88.03 | 105.56, 105.56, 105.56 | 41.94, 41.82, 41.82 |
+| Compiler mix | 2 | 84.71, 84.70, 84.55 | 52.69, 52.74, 52.69 | 21.00, 21.08, 21.01 |
+| Compiler mix | 3 | 85.22, 85.19, 85.21 | 35.13, 35.14, 35.13 | 14.15, 14.16, 14.16 |
+| Compiler mix | 4 | 86.79, 86.84, 87.06 | 11.97, 11.95, 13.34 | 10.52, 10.52, 10.52 |
+| Compiler mix | 8 | 84.09, 83.98, 83.76 | 6.02, 6.01, 6.28 | 5.36, 5.36, 5.45 |
+| Compiler mix | 16 | 81.84, 81.80, 81.70 | 2.75, 2.76, 2.76 | 2.61, 2.61, 2.60 |
+| Compiler mix | all | 80.31, 80.44, 80.27 | 2.15, 2.15, 2.15 | 2.15, 2.15, 2.15 |
+| Vector mix | 1 | 92.47, 91.43, 91.47 | 105.56, 105.33, 105.34 | 41.99, 41.90, 41.90 |
+| Vector mix | 2 | 89.71, 90.10, 89.83 | 52.70, 52.69, 52.69 | 21.12, 21.08, 21.08 |
+| Vector mix | 3 | 92.94, 92.78, 92.98 | 35.15, 35.15, 35.15 | 14.23, 14.28, 14.33 |
+| Vector mix | 4 | 92.98, 93.17, 92.41 | 11.98, 11.90, 11.90 | 10.61, 10.60, 10.60 |
+| Vector mix | 8 | 89.10, 89.39, 89.46 | 6.12, 6.06, 6.04 | 5.44, 5.43, 5.44 |
+| Vector mix | 16 | 86.01, 85.87, 86.11 | 2.78, 2.77, 2.77 | 2.71, 2.71, 2.71 |
+| Vector mix | all | 84.33, 84.05, 83.75 | 2.15, 2.15, 2.15 | 2.15, 2.15, 2.15 |
+
+With masked loads the vector path wins at every size, by 2.1 times at one instruction a call, and is never slower than
+the zeroed copy. C10 makes it `x86_measure`'s tail, then deletes the twin.
+
+The encoder's own tail (`encode_tail64`, and the other entry points' last partial groups) copies into a zeroed array
+the same way, and loses or nearly loses at one instruction a call in 32-bit and 16-bit modes (above). That is the next
+thing to try for those modes.
