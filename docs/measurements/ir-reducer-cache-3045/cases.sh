@@ -24,7 +24,7 @@ run()
 run real-natural --arg 5 --arg 2 --arg 1 --arg 8 "$inputs/real.ir"
 run real --inject verify-phi "$inputs/real.ir"
 run stress --inject memory-store --passes 0 --frames 2 --arg 0 "$inputs/stress.ir"
-run exhausted --inject memory-store --passes 0 --frames 2 --arg 0 --memory 4194304 "$inputs/stress.ir"
+run exhausted --inject verify-phi --memory 1048576 --max-candidates 120000 "$inputs/stress.ir"
 run rejected --inject memory-store --passes 0 --frames 2 --arg 1 "$inputs/stress.ir"
 test "$(cat "$out/real.rc")" = 0
 test "$(cat "$out/stress.rc")" = 0

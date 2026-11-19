@@ -30,6 +30,9 @@ int main(void)
     printf("  %%%u = symbol_addr.ptr @2\n", address);
     printf("  %%%u = store.void %%%u, %%%u align=8 volatile\n", row++, address, quotient);
     printf("  %%%u = not.i64 %%%u\n", row++, sum);
-    printf("  %%%u = ret.void %%%u\n}\n", row, quotient);
+    printf("  %%%u = br.void b1\nb1:\n", row++);
+    const unsigned int phi = row++;
+    printf("  %%%u = phi.i64 [%%%u, b0]\n", phi, quotient);
+    printf("  %%%u = ret.void %%%u\n}\n", row, phi);
     return ferror(stdout) != 0;
 }
