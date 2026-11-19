@@ -1,0 +1,142 @@
+diff --git a/src/buster/compiler/c_check_node_machine_expand.c b/src/buster/compiler/c_check_node_machine_expand.c
+index 3e7b51ebc..f2771815f 100644
+--- a/src/buster/compiler/c_check_node_machine_expand.c
++++ b/src/buster/compiler/c_check_node_machine_expand.c
+@@ -478,6 +478,20 @@ static NodeMachineRefusal node_machine_after_row(NodeMachine* machine, uint32_t
+ // (BUSTER_NODE_MACHINE_TAPE_MOST), so no record tests the room left. A record tests its state twice, as before the
+ // updates: whether it's evaluated, then whether anything follows (a state past BUSTER_NODE_MACHINE_EVALUATED, which an
+ // update's destination read by name has too).
++// CENSUS (X's rows, buster#2850's step 2; an experiment's patch, no pull request has it): where each record's row's
++// parts end on the tape: its own entries, its conversion's, and what follows its row.
++static uint32_t census_x_starts[BUSTER_NODE_MACHINE_MOST];
++static uint32_t census_x_owns[BUSTER_NODE_MACHINE_MOST];
++static uint32_t census_x_rows[BUSTER_NODE_MACHINE_MOST];
++static uint32_t census_x_ends[BUSTER_NODE_MACHINE_MOST];
++static uint8_t census_x_folded[BUSTER_NODE_MACHINE_MOST];
++static uint32_t census_x_lines;
++static uint64_t census_x_expressions;
++__attribute__((constructor)) static void census_x_read(void)
++{
++    census_x_lines = getenv("BUSTER_CENSUS_X") != NULL ? 1 : 0;
++}
++
+ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t object)
+ {
+     NodeMachineRefusal refusal = NODE_MACHINE_TAKEN;
+@@ -489,6 +503,10 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
+     while (refusal == NODE_MACHINE_TAKEN && r < count)
+     {
+         const uint8_t state = node_machine_record_state(machine, r);
++        census_x_starts[r] = machine->entry_count;
++        census_x_owns[r] = machine->entry_count;
++        census_x_rows[r] = machine->entry_count;
++        census_x_folded[r] = 0;
+         if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0)
+         {
+             const uint32_t before = machine->entry_count;
+@@ -503,13 +521,18 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
+             // An integer constant's one CONST takes its conversion where it folds, as the tasks' does (#2678).
+             const bool constant = machine->entry_count == before + 1 && node_machine_record_template(machine, r) == CHECK_LOWER_TEMPLATE_CONSTANT &&
+                                   node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_INTEGER;
+-            const bool takes = (constant && node_machine_fold_conversion(machine, r, before)) || node_machine_conversion(machine, r);
++            census_x_owns[r] = machine->entry_count;
++            const bool folded = constant && node_machine_fold_conversion(machine, r, before);
++            census_x_folded[r] = folded ? 1 : 0;
++            const bool takes = folded || node_machine_conversion(machine, r);
++            census_x_rows[r] = machine->entry_count;
+             refusal = !takes || machine->entry_count - before > BUSTER_NODE_MACHINE_ROW_MOST ? NODE_MACHINE_REFUSED_ROW : NODE_MACHINE_TAKEN;
+         }
+         if (refusal == NODE_MACHINE_TAKEN && state > BUSTER_NODE_MACHINE_EVALUATED)
+         {
+             refusal = node_machine_after_row(machine, r, state);
+         }
++        census_x_ends[r] = machine->entry_count;
+         r += 1;
+     }
+     // The record X stopped at: the one whose row refused, or else the last, the root, which is evaluated.
+@@ -517,5 +540,70 @@ static NodeMachineRefusal node_machine_expand(NodeMachine* machine, uint32_t obj
+     return refusal;
+ }
+ 
++static uint32_t census_x_word(const NodeMachine* machine, TypeId type)
++{
++    return type != 0 ? node_machine_word(machine, type) : 0u;
++}
++
++static void census_x_entries(const NodeMachine* machine, uint32_t from, uint32_t to)
++{
++    for (uint32_t at = from; at < to; at += 1)
++    {
++        printf("%s%u:%u", at == from ? "" : ",", (uint32_t)machine->kinds[at], (uint32_t)machine->classes[at]);
++    }
++    if (from == to)
++    {
++        printf("-");
++    }
++}
++
++// A line for each record of an expression X took: what the window has of it and what C answered, then its row's
++// entries, a kind and a class each: its own, its conversion's, and what follows its row.
++static void census_x_print(const NodeMachine* machine)
++{
++    const NodeMachineColumns* columns = machine->columns;
++    const uint32_t count = machine->count;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        const uint8_t state = node_machine_record_state(machine, r);
++        if ((state & BUSTER_NODE_MACHINE_EVALUATED) != 0 || census_x_ends[r] != census_x_starts[r])
++        {
++            const CheckOp op = node_machine_record_op(machine, r);
++            const TypeId type = node_machine_record_type(machine, r);
++            const TypeId target = node_machine_record_target(machine, r);
++            const uint32_t object = node_machine_record_object(machine, r);
++            const bool known = object != 0 && object < machine->object_count;
++            const uint32_t object_bits = (object != 0 ? 1u : 0u) | (known ? 2u : 0u) | (known && node_machine_local(machine, object) ? 4u : 0u);
++            const uint32_t template = (state & BUSTER_NODE_MACHINE_EVALUATED) != 0 ? (uint32_t)node_machine_record_template(machine, r) : 255u;
++            const bool hooked = (state & (BUSTER_NODE_MACHINE_AFTER_CONDITION | BUSTER_NODE_MACHINE_AFTER_ARM | BUSTER_NODE_MACHINE_AFTER_BRANCH | BUSTER_NODE_MACHINE_BRANCHED)) != 0;
++            const uint32_t hook = hooked ? node_machine_record_hook(machine, r) : UINT32_MAX;
++            const bool hook_inside = hook < count;
++            const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
++            uint32_t plan = 0;
++            if (template == (uint32_t)BUSTER_NODE_MACHINE_TEMPLATE_UPDATE || (state & BUSTER_NODE_MACHINE_SPLIT) != 0)
++            {
++                const NodeMachineUpdate* update = node_machine_record_update(machine, r);
++                plan = (update->direct ? 1u : 0u) | (update->increment ? 2u : 0u) | (update->postfix ? 4u : 0u) | (update->subtract ? 8u : 0u) | (update->pointer ? 16u : 0u) |
++                       (update->power ? 32u : 0u) | 64u | ((uint32_t)update->stored_class << 8) | ((uint32_t)update->calculated_class << 16) | ((uint32_t)update->computing << 24);
++            }
++            printf("xx: e=%" PRIu64 " r=%u n=%u op=%u tpl=%u w=%x st=%x fl=%x ctx=%x state=%x tw=%x same=%u c0=%x c1=%x ob=%x off=%u mo=%u fold=%u up=%x hop=%u hw=%x hc0=%x last=%u", census_x_expressions,
++                   r, count, (uint32_t)op, template, columns->words[r], columns->standings[r], columns->value_flags[r], node_machine_record_context(machine, r), state,
++                   census_x_word(machine, target), target == type ? 1u : target == 0 ? 2u : 0u, census_x_word(machine, node_machine_record_converted(machine, r, 0)),
++                   census_x_word(machine, node_machine_record_converted(machine, r, 1)), object_bits, node_machine_record_offset(machine, r) != 0 ? 1u : 0u,
++                   member && node_machine_record_member_offset(machine, r) / 8 != 0 ? 1u : 0u, (uint32_t)census_x_folded[r], plan,
++                   hook_inside ? (uint32_t)node_machine_record_op(machine, hook) : 255u, hook_inside ? columns->words[hook] : 0u,
++                   hook_inside ? census_x_word(machine, node_machine_record_converted(machine, hook, 0)) : 0u, r == count - 1 ? 1u : 0u);
++            printf(" | own=");
++            census_x_entries(machine, census_x_starts[r], census_x_owns[r]);
++            printf(" conv=");
++            census_x_entries(machine, census_x_owns[r], census_x_rows[r]);
++            printf(" after=");
++            census_x_entries(machine, census_x_rows[r], census_x_ends[r]);
++            printf("\n");
++        }
++    }
++    census_x_expressions += 1;
++}
++
+ 
+ #endif
+diff --git a/src/buster/compiler/c_check_node_machine_reader.c b/src/buster/compiler/c_check_node_machine_reader.c
+index b66935e42..9e1fa910b 100644
+--- a/src/buster/compiler/c_check_node_machine_reader.c
++++ b/src/buster/compiler/c_check_node_machine_reader.c
+@@ -598,6 +598,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
+                             node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target);
+                         }
+                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
++                        if (pass != 0 && census_x_lines != 0 && swept == NODE_MACHINE_TAKEN)
++                        {
++                            census_x_print(machine);
++                        }
+                         if (pass != 0)
+                         {
+                             const bool taken = swept == NODE_MACHINE_TAKEN;
