@@ -160,5 +160,86 @@ crosses raw, and the function it reaches gates the parameter it arrives in with 
 parameter's name (`exact`, `vector`: `P = P_raw && !area` for the vector sense). [`leaks.py`](leaks.py) lists what still
 leaves an area; what it lists on the third executable is inside its own area (the flag's locals, the reader's modes,
 the roots and the foreign wraps). [`all3.sh`](all3.sh) runs the checks, the closure, leave-one-out and the gate again.
-Results follow.
+
+## The third executable's results
+
+Its logs are in [`logs3.tar.gz`](logs3.tar.gz) (`logs/`); [`table3.txt`](table3.txt), [`table3-modes.txt`](table3-modes.txt)
+and [`verdicts3.txt`](verdicts3.txt) are `gate_parse.py`'s and the verdicts' output.
+
+**Objects:** byte-identical to main's for every setting (1,372 each), and with `--tier1` (1,371) and
+`-flazy-system-headers` (35) for the bits run there.
+
+**Closure** (`logs/closure5-*.log`, instructions): no bit against main +16.09 M, +5.58 M, +40.68 M (the knob); the areas
+against the areas with the roots +8.33 M, +3.26 M, +21.94 M. The roots with the driver's bit now reach what the roots
+alone reach (+0.01 M, +0.01 M, +0.38 M): the driver's earlier +356 M was emission's, which no C12 root covers (emission
+kept the command's flag there).
+
+**Additivity:** the areas' solo deltas sum to 3,414 M, 1,356 M and 9,356 M against the areas together's 3,274 M,
+1,370 M and 9,441 M. Leave-one-out (`logs/bisect-loo-*.txt`) equals each solo delta to within 0.5 M but for four
+areas, which share some work: the reader and the warnings each read 140 M more alone than left out on sqlite3.c
+(1,596 M against 1,456 M, and 859 M against 719 M), and 13.6 M on musl for the warnings; the reader 13 M and 98 M less
+alone on Lua and musl, the core 15 M and 104 M less; the attested declarations 2 M and 20 M more alone on Lua and musl.
+Those four win by +3.4% to +64%, beyond any share of the overlap.
+
+**Whole compiles, `-c --lanes 1`** (user cycles against `none`, three rounds; instructions' median against `none`'s):
+
+| Area (bit) | sqlite3.c | Lua | musl | Instructions (sqlite3.c, Lua, musl) |
+| --- | --- | --- | --- | --- |
+| none again (control) | −0.17%, +0.11%, −0.17% | −0.09%, −0.34%, −0.15% | +0.16%, +0.09%, +0.45% | +0.00 M, +0.00 M, +0.29 M |
+| driver (21) | −0.53%, +0.37%, −0.20% | −0.11%, −0.19%, −0.27% | +0.21%, +0.45%, +0.25% | +0.01 M, +0.01 M, −0.01 M |
+| reader (10) | +61.92%, +63.14%, +64.03% | +37.68%, +37.79%, +36.99% | +30.13%, +30.28%, +30.71% | +1595.56 M, +604.17 M, +3989.60 M |
+| core (14) | +18.34%, +19.35%, +18.84% | +5.09%, +4.95%, +4.66% | +3.59%, +3.48%, +3.44% | +540.46 M, +93.22 M, +488.11 M |
+| bindings (11) | +1.04%, +2.04%, +1.68% | +1.00%, +0.96%, +0.48% | +1.38%, +1.58%, +1.72% | +12.22 M, +4.03 M, +35.25 M |
+| attested (13) | −0.40%, +0.14%, +0.53% | +23.10%, +22.99%, +22.55% | +23.75%, +23.68%, +23.66% | +0.00 M, +268.43 M, +2400.73 M |
+| warnings (12) | +36.38%, +36.94%, +37.37% | +17.17%, +17.14%, +16.52% | +13.58%, +13.49%, +13.69% | +858.73 M, +265.02 M, +1800.27 M |
+| asm (20) | +0.15%, −0.06%, −0.30% | −0.36%, −0.12%, −0.06% | +0.86%, +0.37%, +0.62% | +0.00 M, +0.01 M, +0.01 M |
+| program (15) | +1.80%, +1.59%, +1.56% | +0.92%, +1.44%, +0.93% | +0.94%, +1.18%, +1.25% | +55.45 M, +23.30 M, +150.79 M |
+| selection (19) | +0.59%, +0.92%, +0.57% | +0.33%, +0.65%, +0.63% | +1.08%, +0.92%, +0.88% | +18.13 M, +7.70 M, +53.86 M |
+| lowering (16) | +4.10%, +4.14%, +3.89% | +1.93%, +2.35%, +2.38% | +2.71%, +2.68%, +2.85% | +120.80 M, +37.30 M, +296.31 M |
+| emission (18) | +0.44%, +0.60%, +0.18% | −0.03%, +0.08%, +0.42% | +0.17%, +0.32%, +0.38% | +6.34 M, +2.76 M, +18.71 M |
+| aliases (17) | +0.35%, +0.49%, +0.21% | +0.09%, +0.37%, +0.20% | +0.63%, +0.43%, +0.31% | +6.41 M, +1.12 M, +8.64 M |
+| foreign: emission (28) | +9.71%, +10.46%, +10.49% | +4.98%, +4.86%, +4.70% | +2.09%, +2.13%, +2.12% | +192.39 M, +45.60 M, +91.58 M |
+| foreign: front end (22) | −0.23%, +0.19%, +0.40% | +0.16%, +0.09%, −0.05% | −0.06%, +0.31%, +0.07% | +1.71 M, +1.23 M, +4.76 M |
+| foreign: builtins lowering (27) | −0.87%, −0.04%, +0.01% | −0.15%, −0.15%, −0.38% | −0.14%, +0.11%, +0.24% | +0.08 M, +0.01 M, +0.07 M |
+| static data (23) | −0.11%, +0.03%, +0.35% | +0.18%, +0.06%, +0.03% | −0.02%, +0.19%, +0.23% | +5.71 M, +2.51 M, +17.01 M |
+| checker Tier 1 (26) | −0.67%, −0.16%, −0.23% | +0.08%, −0.00%, −0.16% | +0.19%, +0.58%, +0.58% | +0.01 M, +0.00 M, −0.01 M |
+| lazy planner (control) (24) | −0.33%, −0.28%, +0.11% | −0.32%, +0.02%, −0.39% | −0.04%, +0.24%, +0.41% | +0.01 M, +0.01 M, −0.02 M |
+| node machine (25) | −0.84%, −0.25%, −0.10% | +0.13%, +0.01%, −0.18% | −0.18%, +0.25%, +0.07% | +0.01 M, +0.01 M, −0.02 M |
+| all areas | +130.17%, +130.52%, +129.95% | +95.94%, +95.43%, +95.69% | +80.51%, +80.35%, +80.91% | +3274.30 M, +1369.71 M, +9440.69 M |
+| C12 roots | +113.89%, +114.11%, +113.97% | +87.29%, +86.89%, +87.19% | +74.65%, +74.52%, +75.19% | +2909.49 M, +1269.12 M, +8920.08 M |
+
+**With `--tier1`, and with `-flazy-system-headers` (sqlite3.c and Lua):**
+
+| Area (bit) | sqlite3.c | Lua | musl | Instructions (sqlite3.c, Lua, musl) |
+| --- | --- | --- | --- | --- |
+| none again (control) | −0.12%, +0.01%, −0.14% | −0.18%, −0.41%, −0.22% | +0.47%, −0.13%, −0.03% | +0.00 M, +0.00 M, +0.00 M |
+| foreign: emission (28) | +0.58%, +0.57%, +0.47% | +0.14%, −0.03%, +0.06% | +0.45%, +0.05%, +0.12% | +35.87 M, +5.09 M, +5.27 M |
+| emission (18) | +0.11%, +0.12%, +0.12% | +0.16%, −0.20%, −0.02% | +0.46%, +0.11%, +0.17% | +6.34 M, +2.76 M, +18.88 M |
+| checker Tier 1 (26) | −0.01%, −0.00%, −0.04% | −0.01%, −0.29%, −0.05% | +0.41%, −0.01%, +0.10% | +0.01 M, +0.00 M, −0.01 M |
+| none again (control) | +0.27%, −0.29%, −0.08% | −0.29%, +0.09%, +0.34% |  | +0.00 M, +0.00 M |
+| lazy planner (control) (24) | +0.25%, −0.06%, −0.09% | +0.41%, +0.55%, +0.66% |  | +10.33 M, +12.04 M |
+
+The pre-registered control (`none-again`, and the lazy planner's bit where it doesn't run) reads −0.39% to +0.45%. The
+six bits whose code changes no instruction on these lists (the driver's, the asm's, the builtins' lowering, the
+checker's Tier 1, the lazy planner's, the node machine's) read −0.87% to +0.86%: the floor is wider than the control.
+
+## Verdicts, by the rule
+
+- **The vector path wins** (its scalar path reads more cycles in every round where its code runs):
+  - the reader (+30.1% to +64.0%), the warnings (+13.5% to +37.4%), the core (+3.4% to +19.4%), the lowering
+    (+1.9% to +4.1%), the attested declarations (+22.6% to +23.8% on Lua and musl; they don't run on sqlite3.c), the
+    program (+0.92% to +1.80%), the bindings (+0.48% to +2.04%, eight rounds of nine above the wider floor), and
+    emission's foreign twins on a plain `-c` (Tier 0's compile and validation, the IR's promotion, the unwind tables:
+    +2.1% to +10.5%);
+  - selection (+0.33% to +1.08%: nine of nine positive, eight above the control, four above the wider floor) and the
+    aliases (+0.09% to +0.63%: nine of nine positive, two above the control, none above the floor) win by the rule's
+    letter, by little.
+- **At parity** (a round at or below zero, within the control): the program's emission (bit 18: Lua −0.03%; with
+  `--tier1` −0.20% and −0.02%; its scalar paths retire 6 M to 19 M more instructions), the front end's foreign twins
+  (the bindings' sort, the type table's lookups, the builtins' fold and filter: −0.23% to +0.40%), the static data
+  (−0.11% to +0.35%), emission's foreign twins with `--tier1` (Lua −0.03%) and the lazy planner (sqlite3.c −0.06%,
+  −0.09%; Lua +0.41% to +0.66%).
+- **No evidence** (no instruction changes on these lists, `--tier1` included): the program's asm, the builtins'
+  lowering, the checker's Tier 1 and the driver's own twins. The node machine is #2850's.
+- **Loses:** none.
 

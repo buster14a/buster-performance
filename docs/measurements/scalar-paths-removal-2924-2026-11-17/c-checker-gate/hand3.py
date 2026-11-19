@@ -37,6 +37,9 @@ EDITS = [
     ('c_check_attribute_checks_input.c', r'(check_sparse_next\(input->body_declarations, (?:0|opening \+ 1), count, )vector\)', r'\1!parser->options.scalar)', 2),
     ('c_check_binding.c', r'(check_sparse_next\(input->body_declarations, (?:0|opening \+ 1), count, )vector\)', r'\1!parser->options.scalar)', 2),
     ('c_check_common_warnings.c', r'(c_bindings_sort\([^;]*?), vector, varying\)', r'\1, !(parser->options.scalar || buster_scalar_area(22)), varying)', 7),
+    # Their locals have no other reader left.
+    ('c_check_attribute_checks_input.c', r'(const bool vector = !\(parser->options\.scalar \|\| buster_scalar_area\(10\)\);)', r'\1 (void)vector;', 1),
+    ('c_check_binding.c', r'(const bool vector = valid && BUSTER_VECTOR_PATH\(!\(parser->options\.scalar \|\| buster_scalar_area\(11\)\)\);)', r'\1 (void)vector;', 1),
     # The knob itself: a load, a shift and a mask of a global the executable's constructor sets.
     ('host_isa.h', r'static __attribute__\(\(unused\)\) unsigned buster_scalar_area_bits\(void\)\n\{.*?\n\}\nstatic __attribute__\(\(unused\)\) int buster_scalar_area\(unsigned area\)\n\{\n.*?\n\}\n',
      '__attribute__((weak)) unsigned buster_scalar_area_mask = 0;\n'
