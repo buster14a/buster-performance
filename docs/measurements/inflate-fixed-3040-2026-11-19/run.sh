@@ -44,6 +44,9 @@ for rev in base head; do
     "$work/$rev.exe"
     llvm-dwarfdump --verify "$work/$rev.exe"
     sha256sum "$work/$rev.exe"
+    ./build/compiler link-foreign -static -e _start -o "$work/$rev-chunked.exe" "$work/start.o" "$work/chunked.o"
+    cmp "$work/$rev.exe" "$work/$rev-chunked.exe"
+    echo "Original ELF and chunked .debug_info produced identical executables."
 done
 if [[ -f "$work/head.exe" ]]; then
     cmp "$work/base.exe" "$work/head.exe"

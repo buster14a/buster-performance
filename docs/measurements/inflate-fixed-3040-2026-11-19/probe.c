@@ -177,7 +177,7 @@ static void stream(const char* name, const char* kinds, unsigned repeat, bool er
     }
 }
 
-static uint8_t* read_file(const char* path)
+static uint8_t* read_file(const char* path, size_t* size)
 {
     FILE* f = fopen(path,"rb");
     assert(f && fseek(f,0,SEEK_END) == 0);
@@ -186,13 +186,51 @@ static uint8_t* read_file(const char* path)
     uint8_t* data = malloc((size_t)n);
     assert(data && fread(data,1,(size_t)n,f) == (size_t)n);
     assert(fclose(f) == 0);
+    *size = (size_t)n;
     return data;
 }
 
-static void elf(const char* path, const char* raw_path)
+// Keep the producer's ELF, DWARF, relocations and section indices. Change only the encoding of .debug_info.
+static void chunked(const uint8_t* object, size_t object_size, const Elf64_Shdr* section, const Elf64_Chdr* ch,
+                    const uint8_t* plain, const char* output_path)
 {
-    uint8_t* obj = read_file(path);
-    uint8_t* raw = read_file(raw_path);
+    size_t size = ch->ch_size;
+    size_t capacity = 2*size + 2048;
+    uint8_t* data = malloc(capacity);
+    assert(data && size > 64 && capacity <= UINT32_MAX);
+    z_stream stream = {0};
+    assert(deflateInit2(&stream, 6, Z_DEFLATED, 15, 8, Z_FIXED) == Z_OK);
+    stream.next_out = data;
+    stream.avail_out = (uInt)capacity;
+    for (size_t at = 0; at < size; at += 64)
+    {
+        bool last = size - at <= 64;
+        stream.next_in = (Bytef*)(plain + at);
+        stream.avail_in = last ? (uInt)(size - at) : 64;
+        assert(deflate(&stream, last ? Z_FINISH : Z_SYNC_FLUSH) == (last ? Z_STREAM_END : Z_OK));
+        assert(stream.avail_out && !stream.avail_in);
+    }
+    size_t compressed = stream.total_out;
+    assert(deflateEnd(&stream) == Z_OK);
+    assert(check(data,compressed,plain,size,true,"chunked-debug-info") == INFLATE_ERROR_NONE);
+    assert(counts.blocks[1] > 1 && counts.blocks[0] > 0 && counts.blocks[2] == 0);
+    Elf64_Shdr changed = *section;
+    changed.sh_offset = (object_size + 7) & ~(size_t)7;
+    changed.sh_size = sizeof(*ch) + compressed;
+    FILE* f = fopen(output_path,"wb");
+    assert(f && fwrite(object,1,object_size,f) == object_size);
+    assert(fseek(f,(long)changed.sh_offset,SEEK_SET) == 0);
+    assert(fwrite(ch,sizeof(*ch),1,f) == 1 && fwrite(data,1,compressed,f) == compressed);
+    assert(fseek(f,(long)((const uint8_t*)section-object),SEEK_SET) == 0 && fwrite(&changed,sizeof(changed),1,f) == 1);
+    assert(fclose(f) == 0);
+    free(data);
+}
+
+static void elf(const char* path, const char* raw_path, const char* chunked_path)
+{
+    size_t obj_size = 0, raw_size = 0;
+    uint8_t* obj = read_file(path,&obj_size);
+    uint8_t* raw = read_file(raw_path,&raw_size);
     const Elf64_Ehdr* e = (const Elf64_Ehdr*)obj;
     const Elf64_Ehdr* r = (const Elf64_Ehdr*)raw;
     const Elf64_Shdr* sections = (const Elf64_Shdr*)(obj+e->e_shoff);
@@ -213,6 +251,8 @@ static void elf(const char* path, const char* raw_path)
             while (j < r->e_shnum && strcmp(raw_names+originals[j].sh_name,name)) ++j;
             assert(j < r->e_shnum && originals[j].sh_size == ch.ch_size);
             assert(check(obj+section->sh_offset+sizeof(ch), section->sh_size-sizeof(ch),raw+originals[j].sh_offset,ch.ch_size,true,name) == INFLATE_ERROR_NONE);
+            if (strcmp(name,".debug_info") == 0)
+                chunked(obj,obj_size,section,&ch,raw+originals[j].sh_offset,chunked_path);
             ++found;
         }
     }
@@ -223,7 +263,7 @@ static void elf(const char* path, const char* raw_path)
 
 int main(int argc, char** argv)
 {
-    assert(argc == 4);
+    assert(argc == 5);
     classes = fopen(argv[3],"w");
     assert(classes);
     printf("zlib=%s sizeof(InflateCode)=%zu table_workspace=%zu sizeof(bool)=%zu\n",zlibVersion(),sizeof(InflateCode),2*sizeof(InflateCode),sizeof(bool));
@@ -234,7 +274,7 @@ int main(int argc, char** argv)
     stream("mixed","ff0fds0Ff",1,true);
     stream("dynamic-first","d0fdF",1,false);
     stream("stored-only","s00s",1,false);
-    elf(argv[1],argv[2]);
+    elf(argv[1],argv[2],argv[4]);
     printf("oracle_checks=%u statuses none/header/data/truncated/size/checksum=%u/%u/%u/%u/%u/%u\n",checks,statuses[0],statuses[1],statuses[2],statuses[3],statuses[4],statuses[5]);
     return fclose(classes) != 0;
 }

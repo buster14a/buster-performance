@@ -20,7 +20,7 @@ awk '
     }
 ' "$src" > "$work/inflate-counted.c"
 clang "${flags[@]}" -I "$work" "$tools/probe.c" -lz -o "$work/probe"
-"$work/probe" "$work/adler.o" "$work/adler.raw.o" "$work/$rev.classes" | tee "$work/$rev.counts"
+"$work/probe" "$work/adler.o" "$work/adler.raw.o" "$work/$rev.classes" "$work/chunked.o" | tee "$work/$rev.counts"
 awk -v rev="$rev" '
     BEGIN {
         expected["fixed-1"]=2; expected["fixed-16"]=rev=="base"?32:2; expected["fixed-256"]=rev=="base"?512:2
