@@ -24,11 +24,12 @@ for role in "${roles[@]}"; do
     ./build.sh print-compile-flags --config Release > "$out/$role.flags"
     sha256sum "$out/$role.flags"
     ./build.sh --config Release > "$out/build.log" 2>&1 || { tail -60 "$out/build.log"; exit 1; }
+    ./build/compiler test-ir-reduce
     ./build/compiler test-ir-reduce --seed 733 --count 64
     bash "$record/inputs.sh" "$out/$role-input"
     if [[ "$role" == head ]]; then
         cmp "$out/base.flags" "$out/head.flags"
-        for input in real stress; do cmp "$out/base-input/$input.ir" "$out/head-input/$input.ir"; done
+        for input in real schedule stress; do cmp "$out/base-input/$input.ir" "$out/head-input/$input.ir"; done
     fi
     for mode in clean counts; do
         if [[ "$mode" == counts ]]; then
@@ -37,7 +38,8 @@ for role in "${roles[@]}"; do
         fi
         echo "run $role $mode"
         bash "$record/cases.sh" "$out/base-input" "$out/$role-$mode" "$revision"
-        for name in real-natural real stress exhausted rejected; do
+        for status_file in "$out/base-clean/"*.rc; do
+            name=$(basename "$status_file" .rc)
             left="$out/base-clean/$name"
             right="$out/$role-$mode/$name"
             cmp "$left.rc" "$right.rc"

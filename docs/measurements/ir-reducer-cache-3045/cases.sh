@@ -23,10 +23,16 @@ run()
 }
 run real-natural --arg 5 --arg 2 --arg 1 --arg 8 "$inputs/real.ir"
 run real --inject verify-phi "$inputs/real.ir"
+run schedule-natural "$inputs/schedule.ir"
+run schedule --inject verify-phi --max-candidates 30000 "$inputs/schedule.ir"
 run stress --inject memory-store --passes 0 --frames 2 --arg 0 "$inputs/stress.ir"
 run exhausted --inject verify-phi --memory 1048576 --max-candidates 120000 "$inputs/stress.ir"
 run rejected --inject memory-store --passes 0 --frames 2 --arg 1 "$inputs/stress.ir"
+for path in tests/ir/optimize/*-before.ir; do
+    run "fixture-$(basename "$path" -before.ir)" --steps 5000 --max-candidates 512 "$path"
+done
 test "$(cat "$out/real.rc")" = 0
+test "$(cat "$out/schedule.rc")" = 0
 test "$(cat "$out/stress.rc")" = 0
 test "$(cat "$out/exhausted.rc")" = 0
 test "$(cat "$out/rejected.rc")" = 2

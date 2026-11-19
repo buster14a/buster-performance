@@ -12,10 +12,20 @@ bool fit(uint64_t peak, uint64_t used, uint64_t running, uint64_t budget)
 {
     return test_deal_memory_fits(peak, used, running, budget);
 }
+uint64_t schedule(const uint64_t *weights, const uint64_t *held, const uint64_t *peaks, uint64_t count, const uint64_t *assigned, uint64_t bin, uint64_t cpus, uint64_t budget, uint64_t *ends, uint64_t *holds, uint64_t *memories)
+{
+    return test_deal_makespan(weights, held, peaks, count, assigned, bin, cpus, budget, ends, holds, memories);
+}
 EOF
-./build/compiler test-ir-source --print test_deal_memory_fits -std=c17 -ffreestanding -nostdinc -isystem "$(clang -print-resource-dir)/include" -Isrc "$out/fit.c" > "$out/emitted.txt"
-awk '/^ir-source: test_deal_memory_fits as promoted:/{keep=1; next} keep && /^function /{body=1} body{print} body && /^}/{exit}' "$out/emitted.txt" > "$out/real.ir"
-grep -q '^function ' "$out/real.ir"
-grep -q ' = phi\.' "$out/real.ir"
-wc -cl "$out"/{real,stress}.ir
-sha256sum "$out"/{real,stress}.ir
+emit()
+{
+    local name=$1 file=$2
+    ./build/compiler test-ir-source --print "$name" -std=c17 -ffreestanding -nostdinc -isystem "$(clang -print-resource-dir)/include" -Isrc "$out/fit.c" > "$out/$name.txt"
+    awk -v title="ir-source: $name as promoted:" '$0==title{keep=1; next} keep && /^function /{body=1} body{print} body && /^}/{exit}' "$out/$name.txt" > "$out/$file.ir"
+    grep -q '^function ' "$out/$file.ir"
+    grep -q ' = phi\.' "$out/$file.ir"
+}
+emit test_deal_memory_fits real
+emit test_deal_makespan schedule
+wc -cl "$out"/{real,schedule,stress}.ir
+sha256sum "$out"/{real,schedule,stress}.ir
