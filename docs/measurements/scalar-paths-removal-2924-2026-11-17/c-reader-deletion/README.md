@@ -68,3 +68,25 @@ On the deletion and the unrecorded-digest commit rebased onto main `ec9f8f712` (
 On `e526b3bfb`: `test-checker`'s four parts, 0 failures. On `e372e6cd3` with MemorySanitizer and with
 AddressSanitizer (vector host): `test-checker`'s four parts and `test-checker-driver`'s first, 0 failures and no
 sanitizer report.
+
+## Open PRs merged onto it (`open-prs/`)
+
+Each open PR that touches the reader's files or adds checker fixtures, merged onto the PR in a scratch worktree, built
+(Develop) and run through `test-checker`'s four parts (`queue.sh` on `e372e6cd3`, `queue2.sh` on `47cbcd24a`, whose
+compiler code is the same). The head alone: 844,141 checks, 1,084 cases with a digest line and 4 without, 0 failures.
+
+| PR | Checks | Cases with a line, without | Failures |
+| --- | --- | --- | --- |
+| #3010 | 844,141 | 1,084, 4 | 0 |
+| #3008 | 844,141 | 1,084, 4 | 0 |
+| #2916 | 844,146 | 1,084, 4 | 0 |
+| #2920 | 845,318 | 1,084, 4 | 0 |
+| #2923 | 844,147 | 1,084, 4 | 0 |
+| #2993 | 844,143 | 1,084, 4 | 0 |
+| #2998 | 845,100 | 1,084, 8 | 0 |
+| #3002 | 844,176 | 1,084, 4 | 0 |
+| #3004 | 844,143 | 1,084, 4 | 0 |
+| #3005 | 844,143 | 1,084, 4 | 0 |
+
+#2896, #2908, #2925 and #2937 conflict with main already. The first queue's own status lines read the cases without a
+line from the wrong field; the table is from the logs.
