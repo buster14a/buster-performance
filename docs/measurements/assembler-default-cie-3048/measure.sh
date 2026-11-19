@@ -25,7 +25,9 @@ for n in 1 100 1000; do
     awk -v n="$n" 'BEGIN { print ".text"; for (i=0;i<n;i++) printf "fn%d:\n.cfi_startproc\nret\n.cfi_endproc\n",i }' > "$out/short-$n.s"
 done
 for tool in gcc clang; do
-    "$tool" -O2 -march=x86-64 -fcf-protection=none -fasynchronous-unwind-tables -fno-ident -S tools/ci/rerun.c -o "$out/$tool-rerun.s"
+    flags=()
+    if [[ $tool == clang ]]; then flags+=(-fno-integrated-as); fi
+    "$tool" -O2 -march=x86-64 -fcf-protection=none -fasynchronous-unwind-tables -fno-ident "${flags[@]}" -S tools/ci/rerun.c -o "$out/$tool-rerun.s"
 done
 cat > "$out/mixed.s" <<'ASM'
 .cfi_sections .eh_frame, .debug_frame
