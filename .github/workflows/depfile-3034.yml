@@ -1,0 +1,129 @@
+# Single issue #3034 measurement submission on this isolated ref.
+name: Dependency formatter baseline 3034
+on:
+  push:
+    branches: ['hosted/depfile-3034-6aff4f23']
+    paths: ['.github/workflows/depfile-3034.yml']
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    env:
+      BUSTER_HOST_ARCH: vector
+      BUSTER_SANITIZER: none
+      BUSTER_SANITIZER_OPTIMIZATION: '3'
+      BUSTER_DEBUG_INFO: '0'
+      BUSTER_LINKER: auto
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: buster14a/buster
+          ref: 6427879e1143026a12fb0388a20bdea1fe4b2bc5
+          persist-credentials: false
+      - name: Trace complete dependency formatting passes at the compiler CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc -std=c17 -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe"
+          lscpu | awk '/Model name:|Hypervisor vendor:/ {print}'
+          git rev-parse HEAD
+          export PATH="$(bash tools/ci/session-toolchain.sh stage):$PATH"
+          export BUSTER_TOOLCHAIN=path
+          clang --version
+          cmake --version
+          ninja --version
+          cat > "$RUNNER_TEMP/instrument.py" <<'PROBE_PY'
+          from pathlib import Path
+          
+          formatter = Path("src/buster/compiler/c_dependency.c")
+          text = formatter.read_text()
+          def replace_once(old, new):
+              global text
+              assert text.count(old) == 1, old
+              text = text.replace(old, new)
+          
+          replace_once("#include <stdbool.h>", "#include <stdbool.h>\n#include <stdio.h>\n#include <stdlib.h>")
+          replace_once("    DependencyStatus status;\n};",
+                       "    DependencyStatus status;\n    uint64_t visited;\n    uint64_t quoted;\n};")
+          line = "        uint64_t mask = dependency_special(bytes + offset, count, scalar);"
+          replace_once(line, "        sink->visited += count;\n        sink->quoted += quote ? count : 0;\n" + line)
+          start = text.index("static void dependency_emit(")
+          end = text.index("\n}", start)
+          text = text[:end] + '''
+              if (getenv("BUSTER_DEPENDENCY_TRACE") != NULL && sink->status == DEPENDENCY_OK)
+              {
+                  fprintf(stderr, "DEP_PASS %s visited=%llu quoted=%llu output=%llu\\n",
+                          sink->pointer == NULL ? "size" : "write", (unsigned long long)sink->visited,
+                          (unsigned long long)sink->quoted, (unsigned long long)sink->count);
+              }''' + text[end:]
+          start = text.index("static DependencyStatus dependency_rule(")
+          offset = text.index("\n{\n", start) + 3
+          text = text[:offset] + '''    if (getenv("BUSTER_DEPENDENCY_TRACE") != NULL)
+              {
+                  fprintf(stderr, "DEP_RULE %s\\n", output == NULL ? "query" : "write");
+              }
+          ''' + text[offset:]
+          formatter.write_text(text)
+          
+          driver = Path("src/buster/compiler/c_dependency_driver.c")
+          text = driver.read_text()
+          replace_once("        const bool input_stdin = strcmp(source,", '''        if (getenv("BUSTER_DEPENDENCY_TRACE") != NULL)
+                  {
+                      fprintf(stderr, "DEP_PREPARE source=%s files=%u\\n", source, (unsigned)file_count);
+                  }
+                  const bool input_stdin = strcmp(source,''')
+          driver.write_text(text)
+          PROBE_PY
+          cat > "$RUNNER_TEMP/sample.sh" <<'SAMPLE_SH'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          compiler=$(realpath "$1")
+          out=$(realpath -m "$2")
+          mkdir -p "$out"
+          root=$PWD
+          run()
+          {
+              local label=$1
+              shift
+              local status=0
+              BUSTER_DEPENDENCY_TRACE=1 "$compiler" "$@" > "$out/$label.out" 2> "$out/$label.err" || status=$?
+              printf '%s status=%d\n' "$label" "$status"
+              cat "$out/$label.err"
+              test "$status" -eq 0
+              local dep="$out/$label.out"
+              if [[ -f "$label.d" ]]; then dep="$label.d"; cp "$dep" "$out/$label.dep"; fi
+              wc -c "$dep"
+              sha256sum "$dep"
+              awk '/^DEP_PASS / { passes++; split($3,a,"="); visited+=a[2]; split($4,b,"="); quoted+=b[2] } END { if (!passes) exit 1; printf "TOTAL passes=%d visited=%d quoted=%d\n",passes,visited,quoted }' "$out/$label.err"
+          }
+          run real -M -MP tools/performance/main.c
+          run example -c -MD -MP -MF example.d examples/assembler/compiler-corpus.c -o example.o
+          cp example.o "$out/example.o"
+          scratch=$(mktemp -d)
+          cd "$scratch"
+          mkdir headers
+          for ((i=0;i<512;i++)); do
+              printf -v h 'h%03d.h' "$i"
+              printf '#define VALUE_%d %d\n' "$i" "$i" > "headers/$h"
+              printf '#include "headers/%s"\n' "$h" >> all.c
+          done
+          printf 'int answer(void) { return VALUE_511; }\n' >> all.c
+          run stress -M -MP all.c
+          run stress_md -c -MMD -MP -MF stress_md.d all.c -o all.o
+          cp all.o "$out/stress.o"
+          cd "$root"
+          SAMPLE_SH
+          python3 "$RUNNER_TEMP/instrument.py"
+          git diff --check
+          ./build.sh --config Release --jobs "$(nproc)"
+          ./build.sh print-compile-flags --config Release | tr '\0' ' '
+          echo
+          bash "$RUNNER_TEMP/sample.sh" ./build/compiler "$RUNNER_TEMP/dependency-samples"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: depfile-baseline
+          path: ${{ runner.temp }}/dependency-samples
+          if-no-files-found: error
