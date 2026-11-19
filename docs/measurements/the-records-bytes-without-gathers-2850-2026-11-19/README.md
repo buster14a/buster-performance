@@ -75,7 +75,7 @@ eleven other modes on `sqlite3.c` and Lua; the self-check, the self-parse and th
 check; and the complete driver's lists (`complete-light-items.txt`: one item fails in this container, as on main).
 
 `head/`, the same checks on the pull request's head (`447ef81fb`, the piece on main `3741c264f`):
-`checks-progress.txt`; `test-checker`'s eight parts pass (`test-checker-status.txt`); and the shadow's sixteen runs
+`checks-progress.txt`; `test-checker`'s eight parts pass (`test-checker-status.txt`); and the shadow's eight runs
 read the counts of the run above, each (`shadow-counts.txt`: a run's lines with their times left out, by
 `9700x/count-lines.py`, as a digest before and on the head).
 
