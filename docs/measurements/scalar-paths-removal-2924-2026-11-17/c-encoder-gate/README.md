@@ -99,3 +99,44 @@ the zeroed copy. C10 makes it `x86_measure`'s tail, then deletes the twin.
 The encoder's own tail (`encode_tail64`, and the other entry points' last partial groups) copies into a zeroed array
 the same way, and loses or nearly loses at one instruction a call in 32-bit and 16-bit modes (above). That is the next
 thing to try for those modes.
+
+## The encoder's last partial group by masked loads
+
+`x86_encode` and the other entry points copied a last partial group into a zeroed array too, so a call of one
+instruction waited on the copy's stores as `x86_measure`'s did. That is what made 32-bit and 16-bit modes lose at one
+instruction a call (the first table).
+
+[`tail/`](tail/) ran an experiment ([`tailexp.patch`](tail/tailexp.patch)) on main `bc66290c5` against main itself. In
+it, `encode_group` loads a partial group's records by masked loads of their dwords and takes their forms from the loaded
+records (`X86_GATHER_INSERTS_FORMS_FROM_RECORDS`), with no copy. It passes main's `test-x86-encoder`, page edges and the
+twins' comparisons included. The scalar loop and each mode's production loop ran alone (`--only`), by main and by the
+experiment in turn, three rounds ([`tail/logs.tar.gz`](tail/logs.tar.gz)). Cycles per instruction, the scalar loop and
+the vector loop by main, then by the experiment:
+
+| Stream | Calls of | Scalar, main | Vector, main | Scalar, experiment | Vector, experiment |
+| --- | ---: | --- | --- | --- | --- |
+| 64-bit mix | 1 | 82.98, 82.88, 82.74 | 77.91, 77.92, 77.89 | 82.71, 82.31, 82.46 | 35.33, 35.62, 35.67 |
+| 64-bit mix | 2 | 75.83, 75.83, 75.67 | 39.00, 39.00, 38.98 | 75.75, 75.15, 75.29 | 17.79, 18.03, 17.99 |
+| 64-bit mix | 4 | 78.80, 79.18, 78.75 | 10.17, 10.33, 10.17 | 78.30, 78.59, 78.47 | 8.41, 8.47, 8.45 |
+| 64-bit mix | 16 | 72.56, 72.20, 72.82 | 3.22, 3.19, 3.19 | 72.28, 72.41, 71.91 | 3.23, 3.25, 3.26 |
+| 64-bit mix | all | 69.53, 69.29, 69.75 | 3.03, 3.16, 3.04 | 69.55, 69.32, 69.66 | 3.06, 3.07, 3.07 |
+| Vector mix | 1 | 87.85, 87.50, 87.47 | 78.00, 78.03, 78.00 | 87.78, 87.42, 87.46 | 35.42, 35.49, 35.43 |
+| Vector mix | 2 | 83.03, 83.17, 83.18 | 39.07, 39.08, 39.09 | 83.85, 83.17, 83.30 | 17.69, 17.86, 17.93 |
+| Vector mix | 4 | 88.62, 88.23, 88.44 | 10.14, 10.20, 10.15 | 87.81, 87.94, 88.88 | 8.35, 8.33, 8.37 |
+| Vector mix | 16 | 80.42, 80.47, 80.16 | 3.18, 3.16, 3.19 | 80.79, 80.53, 80.59 | 3.18, 3.14, 3.15 |
+| Vector mix | all | 77.47, 77.83, 78.16 | 3.17, 3.09, 3.10 | 77.60, 77.21, 77.40 | 3.14, 3.13, 3.04 |
+| 32-bit mode | 1 | 91.69, 92.20, 91.52 | 103.29, 103.40, 103.45 | 92.25, 91.49, 91.46 | 69.94, 69.78, 70.01 |
+| 32-bit mode | 2 | 84.88, 84.04, 84.04 | 51.98, 52.71, 51.92 | 84.26, 84.33, 84.24 | 34.89, 34.83, 35.04 |
+| 32-bit mode | 4 | 85.57, 85.46, 85.44 | 17.21, 17.28, 17.72 | 85.96, 86.31, 86.05 | 17.13, 17.12, 17.27 |
+| 32-bit mode | 16 | 80.30, 80.03, 80.15 | 4.01, 3.91, 4.30 | 80.99, 80.78, 81.04 | 3.91, 3.93, 4.03 |
+| 32-bit mode | all | 78.93, 78.60, 78.52 | 3.70, 3.77, 3.74 | 79.44, 79.48, 79.69 | 3.74, 3.69, 3.65 |
+| 16-bit mode | 1 | 93.73, 93.70, 93.48 | 102.86, 105.60, 103.39 | 91.85, 92.13, 91.81 | 69.49, 69.51, 70.01 |
+| 16-bit mode | 2 | 86.91, 86.70, 86.55 | 53.00, 52.12, 52.03 | 85.52, 85.82, 85.92 | 35.03, 34.87, 34.90 |
+| 16-bit mode | 4 | 89.72, 89.38, 89.78 | 18.17, 17.28, 17.14 | 88.36, 88.59, 88.51 | 17.21, 17.16, 17.08 |
+| 16-bit mode | 16 | 83.13, 83.14, 83.21 | 3.90, 3.92, 4.00 | 82.32, 82.22, 82.32 | 4.02, 4.05, 3.98 |
+| 16-bit mode | all | 80.87, 80.71, 80.74 | 3.78, 3.78, 3.71 | 80.17, 79.94, 80.39 | 3.75, 3.77, 3.79 |
+
+With masked loads, the vector encoder wins at every size in every mode measured. At one instruction a call it takes
+35.4 cycles in 64-bit mode (from 77.9) and 69.5 to 70.0 in 32-bit and 16-bit modes (from 102.9 to 105.6), where the
+scalar loop takes 91.5 to 93.7. From 16 instructions a call the two read the same. APX's and 32-bit addresses' entry
+points have no stream in the benchmark, so they still need a gate of their own.
