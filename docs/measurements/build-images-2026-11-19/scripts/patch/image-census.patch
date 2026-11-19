@@ -1,0 +1,289 @@
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 92d1b62..0f00cd0 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -933,6 +933,208 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t
+     return result;
+ }
+ 
++
++// ---------------------------------------------------------------------------------------------------------------------
++// EXPERIMENT ONLY (header images' census, not for a pull request): with BUSTER_PP_IMAGE_CENSUS_FILE set, every segment of
++// a file's processing (from its entry, or its return from a nested inclusion, to its exit or its next nested inclusion)
++// is written as a line: the unit, the depth, the file's identity, the segment's start, its output's count and hash, the
++// macro names it observed before writing them (with their definitions' hashes) and the macros it set.
++#include <stdio.h>
++#include <stdlib.h>
++typedef struct PPCensusState
++{
++    FILE* stream;
++    bool checked;
++    uint32_t unit;
++    uint32_t stamp;
++    uint32_t* mark;
++    uint32_t mark_capacity;
++    uint32_t* observed_id;
++    uint64_t* observed_def;
++    uint32_t observed_count;
++    uint32_t observed_capacity;
++    uint32_t* effect_id;
++    uint64_t* effect_def;
++    uint32_t effect_count;
++    uint32_t effect_capacity;
++    bool active;
++    uint32_t depth;
++    uint64_t device;
++    uint64_t inode;
++    uint32_t start;
++    uint32_t output_begin;
++    uint32_t dynamic;
++} PPCensusState;
++static PPCensusState pp_census;
++
++static uint64_t pp_census_mix(uint64_t h, uint64_t v)
++{
++    h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
++    h *= 0xff51afd7ed558ccdull;
++    return h ^ (h >> 33);
++}
++
++static bool pp_census_on(void)
++{
++    if (!pp_census.checked)
++    {
++        pp_census.checked = true;
++        const char* name = getenv("BUSTER_PP_IMAGE_CENSUS_FILE");
++        pp_census.stream = name != 0 ? fopen(name, "a") : 0;
++    }
++    return pp_census.stream != 0;
++}
++
++static uint64_t pp_census_definition(const Preprocessor* pp, IdentId id)
++{
++    uint64_t h = 0x1234;
++    if ((pp->is_macro[id / 64] >> (id % 64)) & 1)
++    {
++        const PPMacro* m = &pp->macros[pp->macro_of[id]];
++        h = pp_census_mix(h, m->flags);
++        h = pp_census_mix(h, m->builtin);
++        h = pp_census_mix(h, m->parameter_count);
++        if (m->builtin == 0 && m->data < pp->data_count)
++        {
++            // By the spelling: the bytes from the parameters (or the body) to the body's last token's end.
++            const PPFileData* d = &pp->datas[m->data];
++            const uint32_t first = m->parameter_count != 0 ? m->parameters_begin : m->body_begin;
++            if (first < m->body_end && m->body_end <= d->token_count && d->bytes != 0)
++            {
++                const uint32_t from = d->starts[first];
++                const uint32_t to = d->values[m->body_end - 1] > from && (d->kinds[m->body_end - 1] & 0x7F) != C_TOKEN_RAW_IDENTIFIER
++                                        ? d->values[m->body_end - 1] : d->starts[m->body_end - 1] + 64;
++                for (uint32_t b = from; b < to && b < d->length; b += 1)
++                {
++                    h = pp_census_mix(h, d->bytes[b]);
++                }
++            }
++            for (uint32_t t = m->body_begin; t < m->body_end && t < d->token_count; t += 1)
++            {
++                h = pp_census_mix(h, d->kinds[t] & 0x7F);
++            }
++        }
++    }
++    return h;
++}
++
++static void pp_census_grow(void** p, uint32_t* capacity, uint32_t need, size_t size)
++{
++    if (need > *capacity)
++    {
++        uint32_t c = *capacity != 0 ? *capacity : 1024;
++        while (c < need)
++        {
++            c *= 2;
++        }
++        *p = realloc(*p, (size_t)c * size);
++        *capacity = c;
++    }
++}
++
++static __attribute__((noinline)) void pp_census_observe(const Preprocessor* pp, IdentId id)
++{
++    if (pp_census.active)
++    {
++        if (id >= pp_census.mark_capacity)
++        {
++            uint32_t old = pp_census.mark_capacity;
++            uint32_t c = old != 0 ? old : 65536;
++            while (c <= id)
++            {
++                c *= 2;
++            }
++            pp_census.mark = realloc(pp_census.mark, (size_t)c * sizeof(uint32_t));
++            memset(pp_census.mark + old, 0, (size_t)(c - old) * sizeof(uint32_t));
++            pp_census.mark_capacity = c;
++        }
++        if (pp_census.mark[id] != pp_census.stamp)
++        {
++            pp_census.mark[id] = pp_census.stamp;
++            pp_census_grow((void**)&pp_census.observed_id, &pp_census.observed_capacity, pp_census.observed_count + 1, sizeof(uint32_t));
++            pp_census.observed_def = realloc(pp_census.observed_def, (size_t)pp_census.observed_capacity * sizeof(uint64_t));
++            pp_census.observed_id[pp_census.observed_count] = id;
++            pp_census.observed_def[pp_census.observed_count] = pp_census_definition(pp, id);
++            pp_census.observed_count += 1;
++        }
++    }
++}
++
++static __attribute__((noinline)) void pp_census_effect(const Preprocessor* pp, IdentId id)
++{
++    if (pp_census.active)
++    {
++        if (id < pp_census.mark_capacity)
++        {
++            pp_census.mark[id] = pp_census.stamp;
++        }
++        else
++        {
++            pp_census_observe(pp, id);
++            pp_census.observed_count -= 1; // marked, not an observation
++        }
++        pp_census_grow((void**)&pp_census.effect_id, &pp_census.effect_capacity, pp_census.effect_count + 1, sizeof(uint32_t));
++        pp_census.effect_def = realloc(pp_census.effect_def, (size_t)pp_census.effect_capacity * sizeof(uint64_t));
++        pp_census.effect_id[pp_census.effect_count] = id;
++        pp_census.effect_def[pp_census.effect_count] = pp_census_definition(pp, id);
++        pp_census.effect_count += 1;
++    }
++}
++
++static void pp_census_end(const Preprocessor* pp)
++{
++    if (pp_census.active)
++    {
++        uint64_t out = 0x55;
++        for (uint32_t i = pp_census.output_begin; i < pp->output.count; i += 1)
++        {
++            // Kinds and flags, and an identifier's name: other tokens' values are places, which differ by unit.
++            out = pp_census_mix(out, pp->output.kinds[i]);
++            out = pp_census_mix(out, pp->output.flags[i]);
++            out = pp_census_mix(out, (pp->output.kinds[i] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp->output.values[i] : 0);
++        }
++        uint64_t eff = 0x77;
++        for (uint32_t i = 0; i < pp_census.effect_count; i += 1)
++        {
++            eff = pp_census_mix(eff, pp_census.effect_id[i]);
++            eff = pp_census_mix(eff, pp_census.effect_def[i]);
++        }
++        fprintf(pp_census.stream, "S\t%u\t%u\t%llu:%llu\t%u\t%u\t%016llx\t%u\t%u\t%016llx\t", pp_census.unit, pp_census.depth,
++                (unsigned long long)pp_census.device, (unsigned long long)pp_census.inode, pp_census.start, pp->output.count - pp_census.output_begin,
++                (unsigned long long)out, pp_census.dynamic, pp_census.effect_count, (unsigned long long)eff);
++        fprintf(pp_census.stream, "%u\t", pp_census.observed_count);
++        for (uint32_t i = 0; i < pp_census.observed_count; i += 1)
++        {
++            fprintf(pp_census.stream, "%s%u:%llx", i != 0 ? "," : "", pp_census.observed_id[i], (unsigned long long)pp_census.observed_def[i]);
++        }
++        fputc('\n', pp_census.stream);
++        pp_census.active = false;
++    }
++}
++
++static void pp_census_begin(const Preprocessor* pp, const PPContext* context)
++{
++    if (pp_census_on() && context != 0 && context->kind == BUSTER_PP_CONTEXT_FILE)
++    {
++        const PPFileData* d = &pp->datas[context->data];
++        pp_census.active = true;
++        pp_census.stamp += 1;
++        pp_census.observed_count = 0;
++        pp_census.effect_count = 0;
++        pp_census.dynamic = 0;
++        pp_census.device = d->device;
++        pp_census.inode = d->inode;
++        pp_census.start = context->position;
++        pp_census.output_begin = pp->output.count;
++        uint32_t depth = 0;
++        for (uint32_t c = 0; c < pp->context_count; c += 1)
++        {
++            depth += pp->contexts[c].kind == BUSTER_PP_CONTEXT_FILE;
++        }
++        pp_census.depth = depth;
++    }
++}
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // Macros
+ 
+@@ -940,6 +1142,10 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t
+ // run, although pp_is_defined does not consider them definitions.
+ BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
+ {
++    if (__builtin_expect(pp_census.active, 0))
++    {
++        pp_census_observe(pp, id);
++    }
+     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
+ }
+ 
+@@ -955,6 +1161,10 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
+     }
+     pp->macro_of[name] = id;
+     pp->macro_epoch += 1;
++    if (__builtin_expect(pp_census.active, 0))
++    {
++        pp_census_effect(pp, name);
++    }
+     if (id != 0)
+     {
+         pp->is_macro[name / 64] |= 1ull << (name % 64);
+@@ -2839,10 +3049,18 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
+         pp_end_regions(pp, context->file == pp->main_file);
+         pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
+     }
++    if (context->kind == BUSTER_PP_CONTEXT_FILE)
++    {
++        pp_census_end(pp);
++    }
+     pp->context_count -= 1;
+     if (context->kind == BUSTER_PP_CONTEXT_FILE)
+     {
+         pp_note_file_run(pp);
++        if (pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE)
++        {
++            pp_census_begin(pp, &pp->contexts[pp->context_count - 1]);
++        }
+     }
+     if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE)
+     {
+@@ -8042,6 +8260,8 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
+     pp->history_anchor = name.location;
+     pp->diagnostic_origin = name.origin;
+     const PPBuiltin builtin = (PPBuiltin)pp->macros[id].builtin;
++    pp_census.dynamic |= builtin == PP_BUILTIN_COUNTER ? 1u : builtin == PP_BUILTIN_INCLUDE_LEVEL ? 2u : builtin == PP_BUILTIN_BASE_FILE ? 4u :
++                         (builtin == PP_BUILTIN_DATE || builtin == PP_BUILTIN_TIME) ? 8u : builtin == PP_BUILTIN_TIMESTAMP ? 16u : 0u;
+     // The answer takes the name's flags, as clang's ExpandBuiltinMacro gives them: its line start among a macro's
+     // arguments too (BUSTER_PP_LINE_SPACE), and pp_name_line's.
+     const uint8_t flags = (uint8_t)((name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, name.flags, name.location));
+@@ -8836,6 +9056,8 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
+             pp_note_system_run(pp, range, pp->ranges[range].base, pp->ranges[range].system);
+             pp->include_depth += pp->context_count > 1;
+             pp_show_include(pp, file);
++            pp_census_end(pp);
++            pp_census_begin(pp, context);
+         }
+     }
+ }
+@@ -14512,10 +14734,16 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnose_eval_method_use(Preprocessor* pp, uin
+ 
+ BUSTER_PREPROCESSOR_ENTRY bool pp_run(Preprocessor* pp, const char* main_path)
+ {
++    if (pp_census_on())
++    {
++        pp_census.unit += 1;
++        fprintf(pp_census.stream, "U\t%u\t%s\n", pp_census.unit, main_path);
++    }
+     pp->history_path = main_path;
+     // A deferred run counts its diagnostics without printing them, which its end does (pp_history_report).
+     pp->options.quiet |= pp->history_deferred;
+     const bool result = pp_preprocess_file(pp, main_path);
++    pp_census_end(pp);
+     pp_history_report(pp, result);
+     return result && !pp->fatal;
+ }
