@@ -22,8 +22,14 @@ To reproduce, run `CC=clang ./build-programs.sh /path/to/base/compiler /path/to/
 
 ## Application checks
 
-SQLite 3.53.2 amalgamation SHA-256 is `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`. Compile with `--tier1 -O2 -march=znver5 --lanes 1 -w -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -c`. ELF `.text` is 1,441,816 bytes on both revisions. Of 1,316 text symbols, 20 shrank and one grew. The sum of function sizes grew by 10 bytes (1,431,625→1,431,635), including 80 extra bytes in `sqlite3WhereCodeOneLoopStart`. The linker’s section padding hides this difference in the section total. The changed symbols and both object digests accompany this record.
+SQLite 3.53.2 amalgamation SHA-256 is `0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d`. Compile with `--tier1 -O2 -march=znver5 --lanes 1 -w -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -c`. ELF `.text` is 1,441,816 bytes on both revisions. Of 1,316 text symbols, 20 shrank and one grew. The sum of function sizes grew by 10 bytes (1,431,625→1,431,635), including 80 extra bytes in `sqlite3WhereCodeOneLoopStart`. Alignment between functions absorbs this difference in the relocatable object’s section total. The changed symbols and both object digests accompany this record.
 
 Build the matching SQLite `test/speedtest1.c` (SHA-256 `b5eaf4bbcbb320fd8eb3f3e6c4cd5f51a64dd0cd70efe969634d1785e3419675`) as a second object and link the corresponding pair. With `--memdb --verify --size 3 --testset main`, parent, candidate and Clang -O0 agree on the full verification hash. Timings printed in those local correctness logs are incidental.
 
 Compile each Lua 5.4.8 source with `--tier1 -O2 -march=znver5 --lanes 1 -w -std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX`. Of the 34 generated objects, only `lgc.o` changed. Link the Lua interpreter, omitting the separate luac driver. Its output for the repository's calls, tables, strings, arithmetic and closures scripts matches the parent and Clang -O0 byte for byte. The per-output SHA-256s accompany this record.
+
+## Frozen musl objects
+
+Across 1,336 source files, four complete objects changed. Each had fewer text bytes. The sum fell by 26 bytes from 640,129 to 640,103. Individual changes were `__mo_lookup.c` −2, `getgr_r.c` −19, `__randname.c` −2 and `__secs_to_tm.c` −3.
+
+The corpus is Zig 0.14.1’s vendored musl 1.2.5 at `d03a147ea0a590ca711b3db07106effc559b0fc6`, with the frozen x86-64 generated headers. This follows the project’s [ordered includes and source list](https://github.com/buster14a/buster-performance/blob/4787f4abe5220d2aeca116d38f2828110262d611/docs/measurements/tier1-compile-cost-138-2026-11-12/scripts/corpora.sh), selecting the first source per basename under `src/*/*.c` and `src/*/x86_64/*.c`. Flags also include `--tier1 -O2 -march=znver5 --lanes 1 -w`. The TSV contains each return code, complete ELF SHA-256 and ELF `.text` size. Every file compiled successfully on both sides.

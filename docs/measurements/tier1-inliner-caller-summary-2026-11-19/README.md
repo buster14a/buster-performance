@@ -20,3 +20,9 @@ Each of the six SQLite Tier 1 cycle pairs improved (0.29%–1.11%). CPU time wen
 ## Correctness
 
 The new regression exercises a caller with 8,192 stack slots and 4 KiB of scratch. Only that check fails with the parent inliner restored and the regression present. The candidate passes all 125,211 `test-ir-inline` checks with 22,432 independent interpreter executions. `objects.tsv` gives the identical SHA-256 for each pair in local Tier 1 builds of all 34 Lua translation units and SQLite at both `-O2` and `-O2 -g`, using the same flags as the harness.
+
+## Frozen musl objects
+
+All 1,336 complete objects matched byte for byte.
+
+The corpus is Zig 0.14.1’s vendored musl 1.2.5 at `d03a147ea0a590ca711b3db07106effc559b0fc6`, with the frozen x86-64 generated headers. This follows the project’s [ordered includes and source list](https://github.com/buster14a/buster-performance/blob/4787f4abe5220d2aeca116d38f2828110262d611/docs/measurements/tier1-compile-cost-138-2026-11-12/scripts/corpora.sh), selecting the first source per basename under `src/*/*.c` and `src/*/x86_64/*.c`. Flags also include `--tier1 -O2 -march=znver5 --lanes 1 -w`. The TSV contains each return code, complete ELF SHA-256 and ELF `.text` size. Every file compiled successfully on both sides.
