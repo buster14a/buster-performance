@@ -1,5 +1,7 @@
 # Private local values in Buster Tier 1 on Zen 4
 
+The PR now implements native live-frontier placement. Its follow-up campaign compares that implementation with both the initial PR and untouched main, measures construction memory, and exercises the bounded fallback. [Native compiler, timings and correctness results](native/)
+
 The opt-in compiler in [Buster PR 3067](https://github.com/buster14a/buster/pull/3067) carries simple local values directly into Tier 1, resolves other private reads on demand and records cross-block operands during escape classification. The PR's compiler source revision is `3dc3d4f6d74ba353c07101ff614600416272817f`. The baseline is its parent, `b847801169f2b73aed6496c8fa23e9a5499c94e7`. All measurements used a local Ryzen 9 7940HS.
 
 ## Source-to-object compilation
@@ -95,7 +97,7 @@ The three records below count provisional merge locations in the earlier demand-
 | Lua | 1,103 | 9,091 | 1,633 | 1,461 | 0 |
 | musl | 2,755 | 24,084 | 4,734 | 4,192 | 0 |
 
-The replay covers every published location, with 1,271 extra candidates across 6,460 promotions. The compiler timed above uses demand-driven construction. Native frontier placement, operand renaming, scratch cost and its effect on compile time remain open. [Recorded graphs and per-promotion counts](graphs/) · [Independent replay results](checks/replay.txt)
+The replay covers every published location, with 1,271 extra candidates across 6,460 promotions. The compiler timed above uses demand-driven construction. The later native implementation also supplies the incoming operands and measures scratch use and source-to-object time. [Recorded graphs and per-promotion counts](graphs/) · [Independent replay results](checks/replay.txt) · [Native results](native/)
 
 ```sh
 cc -std=c17 -O2 -Wall -Wextra -Werror "$RECORD/scripts/replay.c" -o replay

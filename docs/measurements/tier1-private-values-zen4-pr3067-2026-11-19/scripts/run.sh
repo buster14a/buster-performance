@@ -11,6 +11,14 @@ corpus=${5:?sqlite, lua or musl}
 cpus=${6:?CPU IDs separated by commas}
 out=$(realpath -m "${7:?output directory}")
 rounds=${8:-12}
+pipeline=(--tier1)
+case ${10:-tier1} in
+    tier1) ;;
+    plain) pipeline=() ;;
+    *) exit 2 ;;
+esac
+demand=""
+if [[ -n ${9:-} ]]; then demand=$(realpath "$9"); fi
 IFS=, read -r -a cpu_array <<< "$cpus"
 cores=${#cpu_array[@]}
 mkdir -p "$out"
@@ -40,13 +48,25 @@ export LC_ALL=C SOURCE_DATE_EPOCH=1700000000 BUSTER_EXIT_HELPER=0 BUSTER_HUGE_PA
 printf '%s\n' 'round,position,mode,case,cores,source_bytes,wall_ms,user_ms,sys_ms,minor_faults,major_faults,involuntary,peak_rss_kib,cycles_u,instructions_u,branches_u,branch_misses_u,min_run_pct' > "$out/runs.csv"
 cd "$out/objects"
 for ((r=0;r<=rounds;r++)); do
-    if ((r%2)); then arms=(candidate base); else arms=(base candidate); fi
-    for pos in 0 1; do
+    if [[ -n "$demand" ]]; then
+        case $((r % 6)) in
+            0) arms=(base demand candidate) ;;
+            1) arms=(candidate demand base) ;;
+            2) arms=(demand candidate base) ;;
+            3) arms=(base candidate demand) ;;
+            4) arms=(candidate base demand) ;;
+            5) arms=(demand base candidate) ;;
+        esac
+    elif ((r%2)); then arms=(candidate base); else arms=(base candidate); fi
+    for pos in "${!arms[@]}"; do
         mode=${arms[pos]}
         exe=$base
-        if [[ $mode = candidate ]]; then exe=$candidate; fi
+        case "$mode" in
+            candidate) exe=$candidate ;;
+            demand) exe=$demand ;;
+        esac
         rm -f ./*.o
-        taskset -c "$cpus" perf stat --no-big-num -x ';' -o "$out/current.perf" -e '{cycles:u,instructions:u,branches:u,branch-misses:u}' -- "$tool" "$out/elapsed" "$exe" --lanes "$cores" --lane-cpus "$cpus" --tier1 -c "${flags[@]}" "${files[@]}" > "$out/stdout" 2> "$out/stderr"
+        taskset -c "$cpus" perf stat --no-big-num -x ';' -o "$out/current.perf" -e '{cycles:u,instructions:u,branches:u,branch-misses:u}' -- "$tool" "$out/elapsed" "$exe" --lanes "$cores" --lane-cpus "$cpus" "${pipeline[@]}" -c "${flags[@]}" "${files[@]}" > "$out/stdout" 2> "$out/stderr"
         objects=(*.o)
         [[ ${#objects[@]} = ${#files[@]} && -f ${objects[0]} ]]
         counts=$(awk -F ';' '$3 ~ /^(cycles:u|instructions:u|branches:u|branch-misses:u)$/ { if ($1 !~ /^[0-9]+$/ || $5+0 < 98) bad=1; n++; a[$3]=$1; if (!min || $5+0<min) min=$5+0 } END {if (bad||n!=4) exit 1; printf "%s,%s,%s,%s,%.2f", a["cycles:u"],a["instructions:u"],a["branches:u"],a["branch-misses:u"],min}' "$out/current.perf")

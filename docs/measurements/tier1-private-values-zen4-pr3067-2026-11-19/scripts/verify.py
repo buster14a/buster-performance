@@ -19,6 +19,7 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--mode", default="0,0")
     p.add_argument("--case", nargs="+", default=["sqlite", "lua", "musl"])
+    p.add_argument("--plain", action="store_true")
     p.add_argument("--census", action="store_true")
     p.add_argument("--option", action="append", default=[])
     p.add_argument("--dump", action="store_true")
@@ -67,7 +68,7 @@ def main():
                     str(binary),
                     "--lanes",
                     a.lanes,
-                    "--tier1",
+                    *([] if a.plain else ["--tier1"]),
                     "-c",
                     *a.option,
                     *flags,
