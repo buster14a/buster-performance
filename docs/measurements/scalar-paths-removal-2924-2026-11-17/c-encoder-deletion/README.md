@@ -53,11 +53,16 @@ On the largest functions it takes the same time.
 
 ## Tests
 
-On head ([`logs/status.txt`](logs/status.txt)): the encoder's tests and its callers' (branch sizing, x86 semantics, the
-assembler, target selection, the disassembler, Zen 5's costs, unwind, Tier 0, Tier 1, IR lowering and SIMD, the builtin
-lowering and helpers, the C driver's inline assembly and driver), c-testsuite's subset by `test-tier1-cfg-source` and
-`test-ssa-source --typed --tier1`, three benchmarks, the call graph's and ownership checks and the complete driver's
-checks of `main.c`.
+On head ([`logs/status.txt`](logs/status.txt)), all pass: the encoder's tests and its callers' (branch sizing, x86
+semantics, the assembler, target selection, the disassembler, Zen 5's costs, unwind, Tier 0, Tier 1, IR lowering and
+SIMD, the builtin lowering and helpers, the C driver's inline assembly), c-testsuite's subset by
+`test-tier1-cfg-source` and `test-ssa-source --typed --tier1`, three benchmarks, the call graph's and ownership checks
+and the complete driver's checks of `main.c`.
+
+`test-checker-driver` (exit 124, [`logs/t33.log`](logs/t33.log)) is not a result. It ran without the inventory's
+`--executable`, `--in-process` and `--part`, started every child through `/proc/self/exe`, and each came back with
+status -1, on preprocessor fixtures too, until the run's time limit. The PR's checks run its eight parts as the
+inventory has them.
 
 MSan and ASan, on head in the cloud ([`sanitizers.sh`](sanitizers.sh), [`sanitizers.log`](sanitizers.log)): the
 encoder's and its callers' tests, and `-c` and `-c --tier1` of c-testsuite's first 30 programs, all clean.
