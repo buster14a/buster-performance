@@ -12,6 +12,7 @@ script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
 git diff --quiet && git diff --cached --quiet || { echo "Use a clean, disposable Buster checkout." >&2; exit 1; }
 : > "$out/counts.tsv"
 : > "$out/objects.sha256"
+: > "$out/compilers.sha256"
 git checkout --quiet --detach "$base"
 {
     clang --version
@@ -107,6 +108,7 @@ for input in "${inputs[@]}"; do
     as --64 -o "$out/$input.gas.o" "$out/$input.s"
     frames "$out/$input.gas.o" "$out/$input.gas"
 done
+(cd "$out" && sha256sum short-{1,100,1000}.s gcc-rerun.s clang-rerun.s mixed.s all-keys.s) | tee "$out/inputs.sha256"
 file=src/buster/compiler/assembler_cfi.c
 measure()
 {
@@ -114,6 +116,7 @@ measure()
     git checkout -q --detach "$rev"
     git rev-parse HEAD > "$out/$label.commit"
     ./build.sh --config Release > "$out/$label.build" 2>&1 || { tail -60 "$out/$label.build"; return 1; }
+    sha256sum build/compiler | awk -v id="$label.clean" '{print $1, id}' | tee -a "$out/compilers.sha256"
     for input in "${inputs[@]}"; do
         ./build/compiler assemble -o "$out/$input.$label.o" "$out/$input.s"
         frames "$out/$input.$label.o" "$out/$input.$label"
@@ -122,6 +125,7 @@ measure()
     test "$(grep -Fc 'asm_cfi_length(&candidate, 0);' "$file")" = 1
     sed -i '/asm_cfi_length(\&candidate, 0);/a\            fprintf(stderr, "CIE-built %u\\n", candidate.size);' "$file"
     ./build.sh --config Release > "$out/$label.count-build" 2>&1 || { tail -60 "$out/$label.count-build"; return 1; }
+    sha256sum build/compiler | awk -v id="$label.counted" '{print $1, id}' | tee -a "$out/compilers.sha256"
     for input in "${inputs[@]}"; do
         ./build/compiler assemble -o "$out/count.o" "$out/$input.s" 2> "$out/$input.$label.trace"
         cmp "$out/count.o" "$out/$input.$label.o"
@@ -150,22 +154,15 @@ for input in "${inputs[@]}"; do
         continue
     fi
     if [[ $input == all-keys ]]; then
+        cc -std=c11 -O2 -Wall -Wextra -Werror "$script_dir/keys.c" -o "$out/check-keys"
         for label in base head; do
-            awk '
-                $1=="Contents" {sec=$4}
-                $4=="CIE" {id=sec ":" $1; in_cie=1; cies[sec]++}
-                $1=="Augmentation:" {sig[id]=index($2,"S")!=0}
-                $1=="Return" && $2=="address" {col[id]=$NF}
-                in_cie && $1=="DW_CFA_def_cfa:" {ordinary[id]=1}
-                $4=="FDE" {
-                    in_cie=0; i=fdes[sec]++; key=i<1024 ? i : 2047-i; id=sec ":" substr($5,5)
-                    if (!(id in col) || col[id]!=int(key/4) || sig[id]!=int(key/2)%2 || !!ordinary[id]==key%2) bad=1
-                    if (i<1024) first[sec,key]=id; else if (first[sec,key]!=id) bad=1
-                }
-                END {exit (bad || cies[".eh_frame"]!=1024 || cies[".debug_frame"]!=1024 || fdes[".eh_frame"]!=2048 || fdes[".debug_frame"]!=2048)}
-            ' "$out/all-keys.$label.frames"
+            prefix="$out/all-keys.$label"
+            for section in eh_frame debug_frame; do
+                awk -v header="'.rela.$section'" '/^\047/ {take=($0==header); next} take' "$prefix.relocs" > "$prefix.$section.relocations"
+                "$out/check-keys" "$section" "$prefix.$section" "$prefix.$section.relocations"
+                echo "$label .$section: verified all 1,024 CIE identities and 2,048 FDEs with their relocations."
+            done
         done
-        echo 'All-keys frames: all 1,024 distinct identities and their reverse-order repeats point to the expected CIE in both sections.'
         continue
     fi
     for part in frames relocs eh_frame debug_frame; do
@@ -183,4 +180,5 @@ cat "$out/mixed.base.relocs"
 ./build.sh --config Release > "$out/clean.build" 2>&1 || { tail -60 "$out/clean.build"; exit 1; }
 ./build/compiler test-assembler --cross-check > "$out/cross-check.log" 2>&1 || { tail -80 "$out/cross-check.log"; exit 1; }
 tail -8 "$out/cross-check.log"
+grep -E 'assembler: [0-9]+ checks, 0 failures' "$out/cross-check.log"
 test "$oracle_fail" = 0
