@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Run in a checked-out Buster tree with the pinned toolchain on PATH.
 set -euo pipefail
 export LC_ALL=C BUSTER_HOST_ARCH=vector BUSTER_DEBUG_INFO=0 BUSTER_SANITIZER=none
@@ -6,7 +7,7 @@ out=${RUNNER_TEMP:-/tmp}/cie-results
 mkdir -p "$out"
 out=$(cd "$out" && pwd)
 base=6427879e1143026a12fb0388a20bdea1fe4b2bc5
-head=${1:-}
+head=${1:-9682975b12965212eb0c1d0683e4f405f6ed3878}
 git checkout --quiet --detach "$base"
 {
     clang --version
@@ -95,7 +96,7 @@ done
 file=src/buster/compiler/assembler_cfi.c
 measure()
 {
-    local label=$1 rev=$2 input normalized
+    local label=$1 rev=$2 input
     git checkout -q --detach "$rev"
     git rev-parse HEAD > "$out/$label.commit"
     ./build.sh --config Release > "$out/$label.build" 2>&1 || { tail -60 "$out/$label.build"; return 1; }
@@ -120,6 +121,7 @@ if [[ -n "$head" ]]; then
     measure head "$head"
     for input in "${inputs[@]}"; do
         cmp "$out/$input.base.o" "$out/$input.head.o"
+        sha256sum "$out/$input.head.o" | sed "s|$out/||" | tee -a "$out/objects.sha256"
     done
     echo 'All complete base and head objects match.'
 fi
@@ -134,6 +136,9 @@ for input in "${inputs[@]}"; do
         fi
     done
 done
+printf '%s\n' 'Mixed CIE and FDE offsets (readelf -wf):'
+grep -E 'Contents of| CIE$| FDE cie=' "$out/mixed.base.frames"
+cat "$out/mixed.base.relocs"
 ./build.sh --config Release > "$out/clean.build" 2>&1 || { tail -60 "$out/clean.build"; exit 1; }
 ./build/compiler test-assembler --cross-check > "$out/cross-check.log" 2>&1 || { tail -80 "$out/cross-check.log"; exit 1; }
 tail -8 "$out/cross-check.log"
