@@ -19,21 +19,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rev-parse HEAD
+          base=6427879e1143026a12fb0388a20bdea1fe4b2bc5
+          head=037f264e1f1b6964082bb6a0ad6472bb3702a60a
+          ev="$RUNNER_TEMP/memory-proof"
+          mkdir -p "$ev"
           lscpu | sed -n '/Model name:/p'
-          cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
-          "$RUNNER_TEMP/probe"
+          cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$ev/probe"
+          "$ev/probe"
           paths=$(bash tools/ci/session-toolchain.sh stage)
           export PATH="$paths:$PATH"
           export BUSTER_HOST_ARCH=vector BUSTER_DEBUG_INFO=0 BUSTER_TOOLCHAIN=path
           clang --version | head -1
           cmake --version | head -1
           ninja --version
-          ./build.sh --config Release
-          build/compiler test-ir-optimize
-          ev="$RUNNER_TEMP/memory-proof"
-          mkdir -p "$ev"
-          cat > "$ev/kernel.c" <<'C_SOURCE'
+          git fetch -q --depth=1 origin "$head"
+          cat > "$ev/kernel.c" <<'KERNEL'
           union cell
           {
               unsigned wide;
@@ -65,8 +65,8 @@ jobs:
               *q = 0x5a;
               return p->words[0];
           }
-          C_SOURCE
-          cat > "$ev/check.c" <<'C_CHECK'
+          KERNEL
+          cat > "$ev/check.c" <<'CHECK'
           #include <stdio.h>
           #include <stdint.h>
           #include <string.h>
@@ -105,33 +105,86 @@ jobs:
               puts("65536 inputs: return values, full writes, guards and alias cases passed");
               return 0;
           }
-          C_CHECK
-          flags=(--tier1 --tier1-passes=+memory --verify --tier1-report -O2 -march=x86-64 -fno-strict-aliasing)
-          build/compiler "${flags[@]}" -c "$ev/kernel.c" -o "$ev/kernel.o"
-          objdump -d -M intel --no-show-raw-insn "$ev/kernel.o"
-          clang -O2 -fno-strict-aliasing "$ev/check.c" "$ev/kernel.o" -o "$ev/run"
-          "$ev/run"
-          clang -O2 -fno-strict-aliasing "$ev/check.c" "$ev/kernel.c" -o "$ev/oracle"
-          "$ev/oracle"
-          for name in puff.c puff.h; do curl -fsSL --retry 3 "https://raw.githubusercontent.com/madler/zlib/51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf/contrib/puff/$name" -o "$ev/$name"; done
-          cat > "$ev/check-puff.c" <<'C_PUFF'
+          CHECK
+          cat > "$ev/check-puff.c" <<'PUFF_CHECK'
           #include <stdio.h>
           #include <string.h>
           #include "puff.h"
-          int main(void)
+          
+          int main(int argc, char **argv)
           {
-              unsigned char block[] = {1, 6, 0, 249, 255, 'b', 'u', 's', 't', 'e', 'r'};
-              unsigned char out[12] = {0};
-              unsigned long size = sizeof(out), input = sizeof(block);
-              if (puff(out, &size, block, &input) != 0 || size != 6 || input != sizeof(block) || memcmp(out, "buster", 6))
+              static unsigned char input[65536], output[131072];
+              if (argc != 2)
                   return 1;
-              printf("puff decoded %lu bytes from %lu: %.*s\n", size, input, (int)size, out);
+              FILE *stream = fopen(argv[1], "rb");
+              if (!stream)
+                  return 2;
+              size_t bytes = fread(input, 1, sizeof(input), stream);
+              if (ferror(stream) || !feof(stream) || fclose(stream) || bytes < 19 || input[0] != 31 || input[1] != 139 || input[3] != 0)
+                  return 3;
+              unsigned long in = bytes - 18, out = sizeof(output);
+              if (puff(output, &out, input + 10, &in) != 0 || in != bytes - 18 || fwrite(output, 1, out, stdout) != out)
+                  return 4;
+              fprintf(stderr, "puff: block type %u, %lu deflate bytes, %lu output bytes\n", (input[10] >> 1) & 3, in, out);
               return 0;
           }
-          C_PUFF
-          build/compiler "${flags[@]}" -c "$ev/puff.c" -o "$ev/puff.o"
-          objcopy -O binary -j .text "$ev/puff.o" "$ev/puff.text"
-          wc -c "$ev/puff.text"
-          sha256sum "$ev/puff.text"
-          clang -O2 -I"$ev" "$ev/check-puff.c" "$ev/puff.o" -o "$ev/check-puff"
-          "$ev/check-puff"
+          PUFF_CHECK
+          for name in puff.c puff.h; do
+              curl -fsSL --retry 3 "https://raw.githubusercontent.com/madler/zlib/51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf/contrib/puff/$name" -o "$ev/$name"
+          done
+          gzip -n9c LICENSE > "$ev/license.gz"
+          clang -O2 -march=x86-64 -fno-strict-aliasing "$ev/check.c" "$ev/kernel.c" -o "$ev/oracle"
+          "$ev/oracle"
+          clang -O2 -march=x86-64 -fno-strict-aliasing -I"$ev" "$ev/check-puff.c" "$ev/puff.c" -o "$ev/puff-oracle"
+          "$ev/puff-oracle" "$ev/license.gz" > "$ev/puff-oracle.out"
+          cmp LICENSE "$ev/puff-oracle.out"
+          status=0
+          common=(--tier1 --verify --tier1-report -O2 -march=x86-64 -fno-strict-aliasing)
+          for label in base head; do
+              revision=$base
+              if [[ "$label" == head ]]; then revision=$head; fi
+              git checkout -q --detach "$revision"
+              echo "=== $label $(git rev-parse HEAD) ==="
+              ./build.sh --config Release
+              build/compiler test-ir-optimize || status=1
+              if [[ "$label" == head ]]; then
+                  build/compiler test-ir-optimize --print-text > "$ev/printed.txt" || status=1
+                  sed -n '/^== memory-narrow$/{n; :a; /^== /q; p; n; ba;}' "$ev/printed.txt" > "$ev/narrow.ir"
+                  diff -u tests/ir/optimize/memory-narrow-after.ir "$ev/narrow.ir" || status=1
+              fi
+              build/compiler test-ir-source --passes -march=x86-64 -fno-strict-aliasing "$ev/kernel.c" || status=1
+              if [[ "$label" == base ]]; then
+                  for symbol in put_byte put_word; do
+                      build/compiler test-ir-source --print "$symbol" -march=x86-64 -fno-strict-aliasing "$ev/kernel.c" || status=1
+                  done
+              fi
+              build/compiler "${common[@]}" --tier1-passes=+memory -c "$ev/kernel.c" -o "$ev/$label-kernel.o"
+              objdump -d -M intel --no-show-raw-insn "$ev/$label-kernel.o"
+              for symbol in put_byte put_word other_byte may_alias; do
+                  objdump -d -M intel --no-show-raw-insn --disassemble="$symbol" "$ev/$label-kernel.o" > "$ev/$label-$symbol.asm"
+              done
+              clang -O2 -march=x86-64 -fno-strict-aliasing "$ev/check.c" "$ev/$label-kernel.o" -o "$ev/$label-run"
+              "$ev/$label-run" || status=1
+              build/compiler "${common[@]}" -c "$ev/kernel.c" -o "$ev/$label-default.o"
+              objcopy -O binary -j .text "$ev/$label-default.o" "$ev/$label-default.text"
+              build/compiler "${common[@]}" --tier1-passes=+memory -c "$ev/puff.c" -o "$ev/$label-puff.o"
+              objcopy -O binary -j .text "$ev/$label-puff.o" "$ev/$label-puff.text"
+              wc -c "$ev/$label-puff.text"
+              sha256sum "$ev/$label-puff.text"
+              clang -O2 -march=x86-64 -fno-strict-aliasing -I"$ev" "$ev/check-puff.c" "$ev/$label-puff.o" -o "$ev/$label-puff"
+              "$ev/$label-puff" "$ev/license.gz" > "$ev/$label-puff.out" && cmp "$ev/puff-oracle.out" "$ev/$label-puff.out" || status=1
+          done
+          for symbol in put_byte put_word other_byte may_alias; do
+              for label in base head; do
+                  asm="$ev/$label-$symbol.asm"
+                  reads=$(grep -Ec 'movzx +eax,(BYTE|WORD) PTR \[rdi(\+0x1)?\]' "$asm" || true)
+                  writes=$(grep -Ec 'mov +DWORD PTR \[rdi\],' "$asm" || true)
+                  printf '%s %s: narrow reads %s, 32-bit stores %s\n' "$label" "$symbol" "$reads" "$writes"
+                  expect=1
+                  if [[ "$label" == head && ( "$symbol" == put_byte || "$symbol" == put_word ) ]]; then expect=0; fi
+                  [[ "$reads" == "$expect" && "$writes" == 1 ]] || status=1
+              done
+          done
+          cmp "$ev/base-default.text" "$ev/head-default.text" || status=1
+          sha256sum "$ev/"*-default.text
+          exit "$status"
