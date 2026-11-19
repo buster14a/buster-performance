@@ -20,7 +20,16 @@ awk '
     }
 ' "$src" > "$work/inflate-counted.c"
 clang "${flags[@]}" -I "$work" "$tools/probe.c" -lz -o "$work/probe"
-"$work/probe" "$work/adler.o" "$work/adler.raw.o" "$work/$rev.classes"
+"$work/probe" "$work/adler.o" "$work/adler.raw.o" "$work/$rev.classes" | tee "$work/$rev.counts"
+awk -v rev="$rev" '
+    BEGIN {
+        expected["fixed-1"]=2; expected["fixed-16"]=rev=="base"?32:2; expected["fixed-256"]=rev=="base"?512:2
+        expected["fixed-stored"]=rev=="base"?4:2; expected["mixed"]=rev=="base"?13:7
+        expected["dynamic-first"]=10; expected["stored-only"]=0
+    }
+    $1 in expected { if ($5 != "builds=" expected[$1]) exit 1; matched++ }
+    END { if (matched != 7) exit 1 }
+' "$work/$rev.counts"
 sha256sum "$work/$rev.classes"
 cat > "$work/frame.c" <<'SRC'
 #include <stdbool.h>

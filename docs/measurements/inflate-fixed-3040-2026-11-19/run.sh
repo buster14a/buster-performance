@@ -29,11 +29,14 @@ clang -c "$work/start.s" -o "$work/start.o"
 sha256sum "$work/adler.o"
 for rev in base head; do
     if [[ $rev == head ]]; then
-        [[ -f "$tools/change.patch" ]] || break
-        git apply --check "$tools/change.patch"
-        git apply "$tools/change.patch"
+        head=4fcc52d74b68ac2b60f638deb43793d4bf559dac
+        if ! git cat-file -e "$head^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$head"
+        fi
+        git switch --detach "$head"
     fi
     echo "=== $rev ==="
+    git rev-parse HEAD
     bash "$tools/count.sh" "$work" "$rev"
     ./build.sh --config Release --jobs "$(nproc)" > "$work/build.log" 2>&1 || { tail -90 "$work/build.log"; exit 1; }
     ./build/compiler test-inflate
