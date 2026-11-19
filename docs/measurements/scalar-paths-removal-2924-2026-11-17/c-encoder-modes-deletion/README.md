@@ -68,6 +68,19 @@ C10c leaves the compile's code as C10b's: it changes the benchmark and the encod
 the test ran. The gate, the encoder test's digests (the recorded values, in every mode), the ownership check and the
 benchmark's own check of every implementation against the scalar loop, in every mode, ran on its head.
 
+**C10c's head `c98e08a5a` on benchpress** ([`c10c-run.sh`](c10c-run.sh), [`c10c-logs.tar.gz`](c10c-logs.tar.gz),
+`logs/status.txt`), Release, every run under the lock. All pass:
+- `test-x86-encoder` (and with `--seed 7`), `test-branch-sizing --cross-check`, `test-assembler --cross-check` and
+  `test-x86-disassembler`;
+- `benchmark-x86-encoder`'s check of every implementation against the scalar loop, in every mode, with `--uniform` for
+  APX and 32-bit addresses (`--count 20000 --section 7 --offsets --fixups`);
+- `test-call-graph`, `check-call-graph`, `test-files` on the benchmarks, the complete driver's `-fsyntax-only -Wall
+  -Werror` and `--verify -c` of `main.c`, and the ownership check.
+
+**MSan and ASan** on C10c's head ([`sanitizers-c10c.sh`](sanitizers-c10c.sh),
+[`sanitizers-c10c.log`](sanitizers-c10c.log)), all clean: `test-x86-encoder` (and with `--seed 7`), `test-assembler`
+and `test-branch-sizing`.
+
 ## Mutants
 
 [`mutation/`](mutation/) holds the mutants and their results. Each is a build of `test-x86-encoder` alone
