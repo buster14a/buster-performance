@@ -1,0 +1,110 @@
+--- a/src/buster/compiler/ir_thread_test.c
++++ b/src/buster/compiler/ir_thread_test.c
+@@ -591,6 +591,94 @@
+     ir_optimize_test_expect(test, escaped && found != 0, "threading's escapes' scan, against its definition");
+ }
+ 
++// Each comparison can succeed for a different parameter. Its true edge reaches the join; its false edge tries the
++// next comparison. The second phi lists the same predecessors in reverse and uses a different bit of the block number.
++static void ir_thread_test_wide(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch, uint32_t width, bool two_phis)
++{
++    const uint64_t im = input->length;
++    const uint64_t om = output->length;
++    const uint64_t sm = scratch->length;
++    const uint32_t none = BUSTER_IR_NONE;
++    const uint32_t join = width + 1;
++    const uint32_t yes = join + 1;
++    const uint32_t no = join + 2;
++    const uint32_t first = 4 + 3 * width;
++    const uint32_t branch = first + (two_phis ? 3 : 1);
++    const IrSizes sizes = {
++        .instruction_count = branch + 3,
++        .block_count = no + 1,
++        .constant_count = width,
++        .extra_count = width * (two_phis ? 4 : 2),
++        .parameter_count = 1,
++    };
++    IrFunction f = { 0 };
++    const bool created = ir_create(input, &sizes, &f) == IR_OK;
++    ir_optimize_test_expect(test, created, "wide threading fixture allocated");
++    if (created)
++    {
++        f.parameter_types[0] = IR_I32;
++        f.result_type = IR_I1;
++        ir_optimize_test_instruction(&f, 0, IR_PARAM, IR_I32, 0, none, none);
++        ir_optimize_test_instruction(&f, 1, IR_CONST, IR_I1, 0, none, none);
++        ir_optimize_test_instruction(&f, 2, IR_CONST, IR_I1, 1, none, none);
++        ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 1, none, none);
++        for (uint32_t k = 0; k < width; k += 1)
++        {
++            const uint32_t block = k + 1;
++            const uint32_t row = 4 + 3 * k;
++            f.constants[k].low = k;
++            f.block_offsets[block] = row;
++            ir_optimize_test_instruction(&f, row, IR_CONST, IR_I32, k, none, none);
++            ir_optimize_test_instruction(&f, row + 1, IR_ICMP, IR_I1, 0, row, IR_EQ);
++            ir_optimize_test_instruction(&f, row + 2, IR_CBR, IR_VOID, row + 1, join, block == width ? no : block + 1);
++            f.extra[2 * k] = block;
++            // A nonconstant input on the first edge keeps that edge and its phi entries in the two-phi case.
++            f.extra[2 * k + 1] = two_phis && k == 0 ? row + 1 : 1 + (k & 1);
++            if (two_phis)
++            {
++                const uint32_t at = 2 * (2 * width - 1 - k);
++                f.extra[at] = block;
++                f.extra[at + 1] = 1 + ((k >> 1) & 1);
++            }
++        }
++        f.block_offsets[join] = first;
++        f.block_offsets[yes] = branch + 1;
++        f.block_offsets[no] = branch + 2;
++        f.block_offsets[no + 1] = branch + 3;
++        ir_optimize_test_instruction(&f, first, IR_PHI, IR_I1, 0, width, none);
++        if (two_phis)
++        {
++            ir_optimize_test_instruction(&f, first + 1, IR_PHI, IR_I1, 2 * width, width, none);
++            ir_optimize_test_instruction(&f, first + 2, IR_XOR, IR_I1, first, first + 1, none);
++        }
++        ir_optimize_test_instruction(&f, branch, IR_CBR, IR_VOID, branch - 1, yes, no);
++        ir_optimize_test_instruction(&f, branch + 1, IR_RET, IR_VOID, 2, none, none);
++        ir_optimize_test_instruction(&f, branch + 2, IR_RET, IR_VOID, 1, none, none);
++
++        const bool valid = ir_verify_complete(&f, scratch).error == IR_OK;
++        ir_optimize_test_expect(test, valid, "wide threading input is complete SSA");
++        if (valid)
++        {
++            IrThreadResult result = { 0 };
++            const IrCheck check = ir_thread(&f, output, scratch, &result);
++            bool exact = check.error == IR_OK && result.blocks == 1 && result.rounds == 1 && result.copies == 0 && result.redirects == width - (uint32_t)two_phis;
++            exact = exact && scratch->length == sm && ir_verify_complete(&result.function, scratch).error == IR_OK;
++            for (uint32_t k = 0; exact && k < width; k += 1)
++            {
++                const uint32_t row = result.function.block_offsets[k + 2] - 1;
++                const uint32_t bit = (k & 1) ^ (two_phis ? (k >> 1) & 1 : 0);
++                const uint32_t target = two_phis && k == 0 ? join : bit != 0 ? yes : no;
++                const uint32_t other = k + 1 == width ? no : k + 2;
++                exact = target == other ? result.function.op[row] == IR_BR && result.function.a[row] == target :
++                                          result.function.op[row] == IR_CBR && result.function.b[row] == target && result.function.c[row] == other;
++            }
++            ir_optimize_test_expect(test, exact, "wide threading chooses each edge, including the refused edge and a collapse");
++        }
++    }
++    arena_pop_to(output, om);
++    arena_pop_to(input, im);
++}
++
+ static void ir_thread_tests(IrOptimizeTest* test)
+ {
+     ir_thread_test_scans(test);
+@@ -604,6 +692,12 @@
+     {
+         ir_thread_test_fixture(test, &ir_thread_test_fixtures[k], &input, &vector, &optimized, &scratch);
+     }
++    const uint32_t widths[] = { 2, 31, 32, 33, 64, 128, 256, 512 };
++    for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(widths); k += 1)
++    {
++        ir_thread_test_wide(test, &input, &vector, &scratch, widths[k], false);
++        ir_thread_test_wide(test, &input, &vector, &scratch, widths[k], true);
++    }
+     arena_release(&scratch);
+     arena_release(&optimized);
+     arena_release(&vector);
