@@ -27,4 +27,6 @@ MUTANTS = [
      "        while (right_count != 0 && kernels->waiting_thresholds[right_count - 1] >= key)"),
     ('m5c-k4-wide-unsplit', C, "                    part_fits |= size == 1;\n                    size = part_fits ? size : size / 2;\n                }\n                parse_top_left8_block(",
      "                    part_fits |= size <= 32;\n                    size = part_fits ? size : size / 2;\n                }\n                parse_top_left8_block("),
+    ('m13-k1-deep-enclosing', C, "        enclosing[i] = *depth > 0 ? open_stack[*depth - 1] : BUSTER_PARSE_NONE;",
+     "        enclosing[i] = *depth > 1 ? open_stack[*depth - 2] : BUSTER_PARSE_NONE;"),
 ]

@@ -91,14 +91,24 @@ src`. TSan, clean: `test-files` and `test-files --flat src`, whose lanes parse.
 [`mutation/`](mutation): each mutant built in an archived copy of the tree and checked against `test-parser` (from the
 tree's root, for its digests) and `test-gnu`.
 
-- **Killed (12):** K1's last open opener of a block (m1); K3's lane 63 (m2); K2's per-block loop's typed state (m3); the
+- **Killed (13):** K1's last open opener of a block (m1); K1's deep-block walk's enclosing openers (m13, on the final
+  deletion); K3's lane 63 (m2); K2's per-block loop's typed state (m3); the
   after-colons pass at a later block's first lane (m4, once the tests commit's new snippet put a `{` there; it survived
   the first round); K4's deep fallback's right-side resolution at equal thresholds (m6b); K5's carried class (m7); K5's
   statement stack at a do's `;` (m8); K6's block fallback's frames (m9); the function roles' lane 63 (m10); the
   handoff's `::` (m11); the GNU records' asm labels (m12); and K4's 16-bit parts left unsplit (m5c, by a crash).
-- **Equivalent (2):** m5, a 16-bit part of 2 tokens taken whole (two tokens span at most one depth, which always fits);
+- **Equivalent (2):** m5, a 16-bit part of 2 tokens taken whole (two tokens span at most one depth, which always fits:
+  an opener raises a token's node depth by one, a closer lowers it by one, `:` included, and a chain of ternaries in
+  else position stays at one depth, as `test-parser --print-tree` shows);
   m6, K4's deep fallback popping equal keys (a later token pops two equal keys together or neither, so no parent can
   differ).
 - **Survived (1):** m5b, a 16-bit part of 8 tokens taken whole. Eight tokens span at most 7 depths, and a byte holds
   their keys (7 × 32 + 31) but for a right threshold one past the highest level: only such a role at the part's top
   depth would show it, and no input has one.
+
+## Open PRs
+
+[`open-prs/`](open-prs): each open PR that touches the parser's files (#2923, #2920, #2915, #2908, #2989) merged onto
+the final deletion (`git merge-tree`) and run through `test-parser`. #2923 passes every check but changes the
+alignments batch's digest (its recovery's diagnostics); #2920, #2915 and #2989 give all three digests; #2908 conflicts
+with main in the node census files and doesn't build merged.
