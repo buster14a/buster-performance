@@ -1,0 +1,130 @@
+--- a/src/buster/compiler/foreign_unwind.c
++++ b/src/buster/compiler/foreign_unwind.c
+@@ -261,8 +261,68 @@
+     }
+ }
+ 
++static uint32_t probe_owner_at(const ForeignUnwind* output, uint64_t offset, uint64_t* calls, uint64_t* comparisons)
++{
++    *calls += 1;
++    uint32_t low = 0;
++    uint32_t high = output->record_count;
++    while (low < high)
++    {
++        const uint32_t middle = low + (high - low) / 2;
++        const ForeignUnwindRecord* record = &output->records[middle];
++        *comparisons += 1;
++        if (record->old_offset + record->length <= offset)
++        {
++            low = middle + 1;
++        }
++        else
++        {
++            high = middle;
++        }
++    }
++    return low;
++}
++
++static uint32_t* probe_sort(const String8 entries, uint32_t* order, uint32_t* spare, uint64_t n, uint64_t* passes, uint64_t* comparisons)
++{
++    uint32_t* from = order;
++    uint32_t* to = spare;
++    for (uint64_t width = 1; width < n; width *= 2)
++    {
++        *passes += 1;
++        for (uint64_t start = 0; start < n; start += 2 * width)
++        {
++            const uint64_t middle = start + width < n ? start + width : n;
++            const uint64_t end = start + 2 * width < n ? start + 2 * width : n;
++            uint64_t left = start;
++            uint64_t right = middle;
++            for (uint64_t out = start; out < end; out += 1)
++            {
++                bool take_left = left < middle;
++                if (take_left && right < end)
++                {
++                    Elf64_Rela a;
++                    Elf64_Rela b;
++                    memcpy(&a, entries.pointer + (uint64_t)from[left] * sizeof(Elf64_Rela), sizeof(a));
++                    memcpy(&b, entries.pointer + (uint64_t)from[right] * sizeof(Elf64_Rela), sizeof(b));
++                    *comparisons += 1;
++                    take_left = a.r_offset <= b.r_offset;
++                }
++                to[out] = take_left ? from[left] : from[right];
++                left += take_left ? 1 : 0;
++                right += take_left ? 0 : 1;
++            }
++        }
++        uint32_t* swap = from;
++        from = to;
++        to = swap;
++    }
++    return from;
++}
++
+ static ForeignUnwindResult foreign_unwind_prune(const ForeignUnwindInput* input, ForeignPath path, Arena* arena, ForeignUnwind* output)
+ {
++    uint64_t bins = 0, bin_cmp = 0, cursor_cmp = 0, order_cmp = 0, passes = 0, sort_cmp = 0, overlap_cmp = 0;
+     ForeignUnwindResult result = { 0 };
+     const bool arguments = input != 0 && arena != 0 && output != 0 && input->symbols != 0 && input->sections != 0 &&
+                            (path == FOREIGN_PATH_EXACT || path == FOREIGN_PATH_VECTOR);
+@@ -418,7 +478,7 @@
+             owners[i] = UINT32_MAX;
+             if (widths[i] != 0)
+             {
+-                const uint32_t r = foreign_unwind_record_at(&built, relocation.r_offset);
++                const uint32_t r = probe_owner_at(&built, relocation.r_offset, &bins, &bin_cmp);
+                 const uint64_t symbol = ELF64_R_SYM(relocation.r_info);
+                 if (widths[i] == UINT64_MAX)
+                 {
+@@ -474,7 +534,7 @@
+             .pointer = (char*)input->relocations,
+             .length = (uint64_t)input->relocation_count * sizeof(Elf64_Rela),
+         };
+-        const uint32_t* sorted = import_sort_relocations(relocation_bytes, order, spare, input->relocation_count);
++        const uint32_t* sorted = probe_sort(relocation_bytes, order, spare, input->relocation_count, &passes, &sort_cmp);
+         uint64_t previous_end = 0;
+         for (uint32_t at = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && at < input->relocation_count; at += 1)
+         {
+@@ -482,7 +542,7 @@
+             if (widths[i] != 0)
+             {
+                 const uint64_t start = foreign_unwind_relocation(input, i).r_offset;
+-                if (start < previous_end)
++                if ((overlap_cmp += 1, start < previous_end))
+                 {
+                     result = foreign_unwind_fail(FOREIGN_UNWIND_ERROR_MALFORMED, start, i + 1);
+                 }
+@@ -598,6 +658,31 @@
+     }
+     if (result.error == FOREIGN_UNWIND_ERROR_NONE)
+     {
++        const char* sample = getenv("UNWIND_PLAN");
++        if (sample != 0)
++        {
++            FILE* stream = fopen(sample, "ab");
++            if (stream == 0) abort();
++            uint32_t cies = 0;
++            fprintf(stream, "records %u\n", built.record_count);
++            for (uint32_t r = 0; r < built.record_count; r += 1)
++            {
++                const ForeignUnwindRecord* row = built.records + r;
++                cies += row->kind == FOREIGN_UNWIND_CIE && row->new_offset != UINT64_MAX;
++                fprintf(stream, "%llu %llu %llu %llu %u %u %u\n", (unsigned long long)row->old_offset,
++                        (unsigned long long)row->new_offset, (unsigned long long)row->length,
++                        (unsigned long long)row->cie_offset, row->kind, row->section, (unsigned)row->atom);
++            }
++            fprintf(stream, "payload %llu %u\n", (unsigned long long)built.bytes.length, built.relocation_count);
++            if (fwrite(built.bytes.pointer, 1, built.bytes.length, stream) != built.bytes.length ||
++                fwrite(built.relocations, sizeof(Elf64_Rela), built.relocation_count, stream) != built.relocation_count ||
++                fclose(stream) != 0) abort();
++            fprintf(stderr, "PRUNE records=%u relas=%u kept_cie=%u kept_fde=%u kept_relas=%u frame_bytes=%llu binary_calls=%llu binary_cmp=%llu cursor_end_cmp=%llu order_cmp=%llu merge_passes=%llu merge_cmp=%llu overlap_cmp=%llu\n",
++                    built.record_count, input->relocation_count, cies, built.fde_count, built.relocation_count,
++                    (unsigned long long)built.bytes.length, (unsigned long long)bins, (unsigned long long)bin_cmp,
++                    (unsigned long long)cursor_cmp, (unsigned long long)order_cmp, (unsigned long long)passes,
++                    (unsigned long long)sort_cmp, (unsigned long long)overlap_cmp);
++        }
+         *output = built;
+     }
+     else if (arena != 0)
