@@ -73,3 +73,13 @@ The sweep's verify then got a count of such records (a record the kernel didn't 
 with the default warnings and with `-Wall -Wextra` (`shadow/`: the counts of buster#3030, no difference); the shadow's
 eleven other modes on `sqlite3.c` and Lua; the self-check, the self-parse and the call graph; the build's ownership
 check; and the complete driver's lists (`complete-light-items.txt`: one item fails in this container, as on main).
+
+`head/`, the same checks on the pull request's head (`447ef81fb`, the piece on main `3741c264f`):
+`checks-progress.txt`; `test-checker`'s eight parts pass (`test-checker-status.txt`); and the shadow's sixteen runs
+read the counts of the run above, each (`shadow-counts.txt`: a run's lines with their times left out, by
+`9700x/count-lines.py`, as a digest before and on the head).
+
+`sanitizers-progress.txt`: the rows a pull request's checks skip (memory, address and thread, native), on main
+`b84780116` with `patches/sweep-main-2.diff`: the node machine's part of `test-checker` (5 of 8) under each, and under
+memory and address the tests on the window and C on the window on `sqlite3.c`, Lua and the compiler's own source. No
+report in any of the fifteen runs.
