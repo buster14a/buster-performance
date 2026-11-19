@@ -40,6 +40,10 @@ The Release host compiler used the explicit AVX-512 `vector` target and pinned C
 
 The uninstrumented `test-tier1-wide` passed on both revisions with 34,247 checks, zero failures, five wide-vector fixtures at both widths, 160 wide-vector native runs at the 16-byte width, and four wide-vector refusals. An additional unmodified base run established the suite baseline. The measured improvement is compiler scratch. Timing and Zen 5 throughput were outside this experiment. [Comparison job](https://github.com/buster14a/buster-performance/actions/runs/44602704096/job/135838348800) · [Baseline job](https://github.com/buster14a/buster-performance/actions/runs/44601256620/job/135833511642)
 
+### MemorySanitizer
+
+A separate hosted EPYC 9V74 ran the clean base and head with the repository's `vector` Release configuration, `BUSTER_SANITIZER=memory`, optimization level 3, and Clang 23.1.4. Its positive control detected an uninitialized read with the expected exit code 86. Each revision then passed all 34,247 checks of `test-tier1-wide`, including 160 native wide-vector executions, and the report audit found zero diagnostics. The two compiler binary hashes and the audit results are in `msan.txt`. Run `bash "$evidence/msan.sh"` in a fresh disposable checkout of the same base to repeat it. [MemorySanitizer job](https://github.com/buster14a/buster-performance/actions/runs/44604082096/job/135843011972)
+
 ## Reproduction
 
 Use a fresh disposable Buster checkout at the base SHA and a Linux x86-64 hosted machine that passes Buster's vector probe. In the commands below, `evidence` names this directory in a separate checkout of buster-performance. The harness swaps the two source files within the disposable checkout and builds both revisions with the same tools and flags.
