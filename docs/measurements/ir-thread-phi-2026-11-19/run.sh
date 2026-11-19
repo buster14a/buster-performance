@@ -20,12 +20,13 @@ grep -E 'wide-phi|test-ir-optimize|failed|checks|passed' record/test.log | tail 
 sha256sum record/ir/* | tee record/ir.sha256
 bash tools/ci/fetch-corpus.sh "$RUNNER_TEMP/corpus"
 corpus="$RUNNER_TEMP/corpus"
-options=(--tier1 --lanes=1 -c -w --predefines "$corpus/provenance/gnu17-pinned-predefines.txt"
-         --clang-features --no-default-config --target=x86_64-linux-gnu -march=x86-64 -std=gnu17 -nostdinc
+options=(--tier1 --tier1-report --lanes=1 -c -w --predefines "$corpus/provenance/gnu17-pinned-predefines.txt"
+         -march=x86-64 -std=gnu17 -nostdinc
          -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include"
          -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE)
 sha256sum "$corpus/sqlite/sqlite3.c" | tee record/source.sha256
 BUSTER_WIDE_PHI_CENSUS=1 ./build/compiler "${options[@]}" "$corpus/sqlite/sqlite3.c" -o record/sqlite.o >record/compile.log 2>&1 || { tail -50 record/compile.log; exit 1; }
+grep -Ev '^JT_(CAND|FUNCTION|JOIN) ' record/compile.log | tail -10 || true
 readelf -SW record/sqlite.o >record/sections.txt
 objcopy --dump-section .text=record/sqlite.text record/sqlite.o
 wc -c record/sqlite.text
