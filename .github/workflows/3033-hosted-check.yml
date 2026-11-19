@@ -1,0 +1,137 @@
+name: Check Tier 1 narrow reloads on a GitHub-hosted vector CPU
+on:
+  push:
+    branches: ['codex/3033-hosted-check']
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out the compiler revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          repository: buster14a/buster
+          ref: 6427879e1143026a12fb0388a20bdea1fe4b2bc5
+          persist-credentials: false
+      - name: Verify and run the emitted objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rev-parse HEAD
+          lscpu | sed -n '/Model name:/p'
+          cc -O2 -march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni tools/ci/vector-probe.c -o "$RUNNER_TEMP/probe"
+          "$RUNNER_TEMP/probe"
+          paths=$(bash tools/ci/session-toolchain.sh stage)
+          export PATH="$paths:$PATH"
+          export BUSTER_HOST_ARCH=vector BUSTER_DEBUG_INFO=0 BUSTER_TOOLCHAIN=path
+          clang --version | head -1
+          cmake --version | head -1
+          ninja --version
+          ./build.sh --config Release
+          build/compiler test-ir-optimize
+          ev="$RUNNER_TEMP/memory-proof"
+          mkdir -p "$ev"
+          cat > "$ev/kernel.c" <<'C_SOURCE'
+          union cell
+          {
+              unsigned wide;
+              unsigned short words[2];
+              unsigned char bytes[4];
+          };
+          
+          unsigned put_byte(union cell *p, unsigned char value)
+          {
+              p->wide = value;
+              return p->bytes[0];
+          }
+          
+          unsigned put_word(union cell *p, unsigned short value)
+          {
+              p->wide = value;
+              return p->words[0];
+          }
+          
+          unsigned other_byte(union cell *p, unsigned short value)
+          {
+              p->wide = value;
+              return p->bytes[1];
+          }
+          
+          unsigned may_alias(union cell *p, unsigned char *q, unsigned short value)
+          {
+              p->wide = value;
+              *q = 0x5a;
+              return p->words[0];
+          }
+          C_SOURCE
+          cat > "$ev/check.c" <<'C_CHECK'
+          #include <stdio.h>
+          #include <stdint.h>
+          #include <string.h>
+          
+          union cell { unsigned wide; unsigned short words[2]; unsigned char bytes[4]; };
+          extern unsigned put_byte(union cell *, unsigned char);
+          extern unsigned put_word(union cell *, unsigned short);
+          extern unsigned other_byte(union cell *, unsigned short);
+          extern unsigned may_alias(union cell *, unsigned char *, unsigned short);
+          
+          int main(void)
+          {
+              union cell cells[3] = { { .wide = 0x87654321 }, { .wide = 0 }, { .wide = 0x12345678 } };
+              for (unsigned i = 0; i <= UINT16_MAX; ++i)
+              {
+                  union cell *p = &cells[1];
+                  p->wide = ~0u;
+                  if (put_byte(p, (unsigned char)i) != (unsigned char)i || p->wide != (unsigned char)i)
+                      return 1;
+                  p->wide = ~0u;
+                  if (put_word(p, (unsigned short)i) != i || p->wide != i)
+                      return 2;
+                  if (other_byte(p, (unsigned short)i) != (i >> 8) || p->wide != i)
+                      return 3;
+                  for (unsigned j = 0; j < 3; ++j)
+                  {
+                      unsigned char separate = 0;
+                      unsigned char *q = j < 2 ? &p->bytes[j] : &separate;
+                      const unsigned expected = j == 0 ? (i & 0xff00u) | 0x5au : j == 1 ? (i & 0xffu) | 0x5a00u : i;
+                      if (may_alias(p, q, (unsigned short)i) != expected || p->wide != expected || (j == 2 && separate != 0x5a))
+                          return 4;
+                  }
+                  if (cells[0].wide != 0x87654321 || cells[2].wide != 0x12345678)
+                      return 5;
+              }
+              puts("65536 inputs: return values, full writes, guards and alias cases passed");
+              return 0;
+          }
+          C_CHECK
+          flags=(--tier1 --tier1-passes=+memory --verify --tier1-report -O2 -march=x86-64 -fno-strict-aliasing)
+          build/compiler "${flags[@]}" -c "$ev/kernel.c" -o "$ev/kernel.o"
+          objdump -d -M intel --no-show-raw-insn "$ev/kernel.o"
+          clang -O2 -fno-strict-aliasing "$ev/check.c" "$ev/kernel.o" -o "$ev/run"
+          "$ev/run"
+          clang -O2 -fno-strict-aliasing "$ev/check.c" "$ev/kernel.c" -o "$ev/oracle"
+          "$ev/oracle"
+          for name in puff.c puff.h; do curl -fsSL --retry 3 "https://raw.githubusercontent.com/madler/zlib/51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf/contrib/puff/$name" -o "$ev/$name"; done
+          cat > "$ev/check-puff.c" <<'C_PUFF'
+          #include <stdio.h>
+          #include <string.h>
+          #include "puff.h"
+          int main(void)
+          {
+              unsigned char block[] = {1, 6, 0, 249, 255, 'b', 'u', 's', 't', 'e', 'r'};
+              unsigned char out[12] = {0};
+              unsigned long size = sizeof(out), input = sizeof(block);
+              if (puff(out, &size, block, &input) != 0 || size != 6 || input != sizeof(block) || memcmp(out, "buster", 6))
+                  return 1;
+              printf("puff decoded %lu bytes from %lu: %.*s\n", size, input, (int)size, out);
+              return 0;
+          }
+          C_PUFF
+          build/compiler "${flags[@]}" -c "$ev/puff.c" -o "$ev/puff.o"
+          objcopy -O binary -j .text "$ev/puff.o" "$ev/puff.text"
+          wc -c "$ev/puff.text"
+          sha256sum "$ev/puff.text"
+          clang -O2 -I"$ev" "$ev/check-puff.c" "$ev/puff.o" -o "$ev/check-puff"
+          "$ev/check-puff"
