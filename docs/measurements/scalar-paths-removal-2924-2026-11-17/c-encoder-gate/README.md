@@ -140,3 +140,29 @@ With masked loads, the vector encoder wins at every size in every mode measured.
 35.4 cycles in 64-bit mode (from 77.9) and 69.5 to 70.0 in 32-bit and 16-bit modes (from 102.9 to 105.6), where the
 scalar loop takes 91.5 to 93.7. From 16 instructions a call the two read the same. APX's and 32-bit addresses' entry
 points have no stream in the benchmark, so they still need a gate of their own.
+
+## APX's registers and 32-bit addresses
+
+`benchmark-x86-encoder` had no stream for these two entry points, so the first runs couldn't gate them.
+[`apx-address32/`](apx-address32/) ran a build with two streams added (C10c's `--apx` and `--address32`). Both are the
+compiler mix: with registers 16 to 31 in the forms that can have them, or with 32-bit addresses. The build also has
+C10b's tail by masked loads. Each entry point's scalar loop and its production loop ran alone (`--only`), in turn,
+three rounds ([`apx-address32/logs.tar.gz`](apx-address32/logs.tar.gz)). Cycles per instruction:
+
+| Stream | Calls of | Scalar loop | Vector loop |
+| --- | ---: | --- | --- |
+| APX's registers | 1 | 93.85, 93.60, 93.13 | 71.00, 71.91, 70.95 |
+| APX's registers | 2 | 87.00, 87.21, 87.33 | 35.65, 35.73, 36.03 |
+| APX's registers | 4 | 90.55, 90.70, 90.68 | 17.57, 17.52, 17.45 |
+| APX's registers | 16 | 83.79, 84.35, 84.15 | 3.90, 3.75, 3.77 |
+| APX's registers | 256 | 81.77, 81.72, 81.78 | 3.55, 3.46, 3.51 |
+| APX's registers | all | 81.39, 81.41, 81.43 | 3.46, 3.46, 3.48 |
+| 32-bit addresses | 1 | 84.74, 84.41, 84.52 | 63.43, 63.32, 61.60 |
+| 32-bit addresses | 2 | 78.06, 78.07, 78.00 | 31.38, 31.53, 31.84 |
+| 32-bit addresses | 4 | 82.16, 81.85, 81.99 | 15.57, 14.96, 15.64 |
+| 32-bit addresses | 16 | 75.45, 75.45, 75.19 | 3.20, 3.14, 3.17 |
+| 32-bit addresses | 256 | 72.73, 72.84, 72.85 | 2.94, 2.94, 2.91 |
+| 32-bit addresses | all | 72.63, 73.04, 72.69 | 2.93, 2.98, 2.91 |
+
+The vector loops win at every size: by 1.32 times at one instruction a call with APX's registers and 1.34 times with
+32-bit addresses, and 23 to 25 times on whole streams.
