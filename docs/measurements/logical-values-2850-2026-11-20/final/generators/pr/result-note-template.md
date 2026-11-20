@@ -20,6 +20,7 @@ Beside the gates, as the specification asked: what the reference's C and X read 
 **What it means.**
 
 {{file:means}}
+- **On the compiler's own source,** which no gate named, {{=d('own','more_taken')}} expressions more have their tape whole ({{=d('own','after','taken')}} for {{=d('own','before','taken')}}, of {{=d('own','after','expressions')}}). {{=d('own','after','sunk')}} of its {{=d('own','after','valued')}} operators' values are listed for their target and X lists {{=d('own','after','x_listed_branches')}} expressions at a turn for {{=d('own','before','x_listed_branches')}}: an arm converted to bool and a second operand of a narrow class are what the piece lists there, and this source has `bool` where the corpora have `int`.
 
 **Next: a taken expression's references and events, the flip's first piece (#2524's step 2).** Its specification follows here before its code. It is where the window's sweeps run in a compile, so its gates state a chunk's first run for every sweep it touches, C's among them, and [#3196](https://github.com/buster14a/buster/issues/3196)'s cold start is measured there.
 
