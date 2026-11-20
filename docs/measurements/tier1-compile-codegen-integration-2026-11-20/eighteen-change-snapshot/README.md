@@ -36,3 +36,5 @@ The [1,204 paired self-host compiler measurements](selfhost-compile-counters/) c
 A [new 256-seed Csmith and YARPGen campaign](generated-programs/) found the same 245 passes, nine Clang runtime limits and two Tier 0 argument-count limits in both compiler snapshots.
 
 The [126 complete clean builds](ninja/) changed Buster compile wall time by −0.41%, −1.12% and −1.09% at one, two and four jobs. Lua debug wall time fell 4.82%, 5.75% and 5.48%. The distinct [single-file lane scaling experiment](scaling/) found SQLite debug wall time fell 13.6%, 15.4% and 19.1% at those lane counts. Its two-lane release Lua parser was 2.5% slower.
+
+The [direct 9700X measurements](9700x/) cover all three real inputs, with three post-warm-up pairs and complete hardware counter and object receipts.
