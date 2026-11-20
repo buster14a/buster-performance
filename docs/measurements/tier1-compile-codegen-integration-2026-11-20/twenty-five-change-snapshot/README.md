@@ -28,3 +28,7 @@ The [suite receipts](suites/status.tsv) give individual exit codes. For ASan/UBS
 The official testfixture runner compiled the same amalgamation for pinned Clang at -O0 and both Buster tiers, then ran the upstream full permutation with two jobs. The [runner summary](sqlite/summary.log) includes the check totals and comparisons. The individual test outcome and worker logs are retained in [the same directory](sqlite/).
 
 The [direct 9700X measurements](9700x/) cover all three real inputs, with three post-warm-up pairs and complete hardware counter and object receipts.
+
+The [fresh differential campaign](generated-programs/) records 238 common passes, 13 Clang reference timeouts and five common Tier 0 argument-limit diagnostics across 256 seeds.
+
+[Six complete upstream Lua suites and 320 timed interpreter processes](lua/) cover language, C API and generated-program behavior.
