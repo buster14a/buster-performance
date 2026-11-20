@@ -9,7 +9,7 @@ tree=$1; out=$2; modes=$3; parts=${4:-5}
 cd "$tree" || exit 1
 mkdir -p "$out"
 . /home/user/keep/corpora.sh
-symbolizer=/root/.cache/buster/toolchain/4444af0bee44de2d/llvm-23.1.4/bin/llvm-symbolizer
+symbolizer=$(ls /root/.cache/buster/toolchain/*/llvm-23.1.4/bin/llvm-symbolizer | head -1)
 clang -dM -E -march=native -fwrapv -funsigned-char -x c /dev/null > "$out/predefines.h"
 main_arguments="-march=native -Isrc -fwrapv -funsigned-char --predefines $out/predefines.h src/buster/compiler/main.c"
 for row in native:memory native:address native:thread; do

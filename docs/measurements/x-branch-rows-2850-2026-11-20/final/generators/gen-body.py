@@ -24,12 +24,18 @@ for name in os.listdir(checks + '/shadow'):
         text = open('%s/shadow/%s' % (checks, name), errors='replace').read()
         assert re.search(r'window rows expressions=\d+ records=\d+ taken=\d+ \([\d.]+%\) their-records=\d+ \([\d.]+%\) their-entries=\d+ differences=0 not-kept-by-the-reference=0 second-runs-that-differ=0', text), name
         assert re.search(r'window contexts expressions=\d+ records=\d+ decided=\d+ \([\d.]+%\) their-records=\d+ \([\d.]+%\) of-them-refused=\d+ differences=0 records-that-differ=0', text), name
-sanitized = open(san + '/progress.txt').read().splitlines()
-runs = [l for l in sanitized if 'part5' in l]
-assert len(runs) == 3 and all('status 0' in l and 'reports 0' in l and ', 0 failures' in l for l in runs) and any(l.startswith('all done') for l in sanitized), sanitized
-shadows = [l for l in sanitized if ' shadow ' in l]
-assert len(shadows) == 6 and all('status 0' in l and 'reports 0' in l and '--window-rows' in l for l in shadows), shadows
-assert all('build status 0' in l for l in sanitized if ' build ' in l) and len([l for l in sanitized if ' build ' in l]) == 3
+san_done = os.path.exists(san + '/progress.txt') and any(l.startswith('all done') for l in open(san + '/progress.txt'))
+if san_done:
+    sanitized = open(san + '/progress.txt').read().splitlines()
+    runs = [l for l in sanitized if 'part5' in l]
+    assert len(runs) == 3 and all('status 0' in l and 'reports 0' in l and ', 0 failures' in l for l in runs) and any(l.startswith('all done') for l in sanitized), sanitized
+    shadows = [l for l in sanitized if ' shadow ' in l]
+    assert len(shadows) == 6 and all('status 0' in l and 'reports 0' in l and '--window-rows' in l for l in shadows), shadows
+    assert all('build status 0' in l for l in sanitized if ' build ' in l) and len([l for l in sanitized if ' build ' in l]) == 3
+values['sanitizers_done'] = 'yes' if san_done else 'no'
+values['sanitizers'] = ("the rows a PR's checks skip, on the code's commit: native memory, address and thread builds, `test-checker` part 5 under each, and under memory and address the shadow with `--window-rows` on `sqlite3.c`, Lua and the compiler's own source: no report."
+                        if san_done else
+                        "the rows a PR's checks skip (native memory, address and thread builds, `test-checker` part 5 under each, and under memory and address the shadow with `--window-rows` on `sqlite3.c`, Lua and the compiler's own source) are running on the code's commit as this is opened; this description gets their result. The session before ran them on `9eb233772`, this code but for three comments: no report.")
 revision = open(checks + '/revision.txt').read().split()[0]
 head = subprocess.run(['git', '-C', tree, 'rev-parse', 'HEAD'], capture_output=True, text=True).stdout.strip()
 base = subprocess.run(['git', '-C', tree, 'merge-base', 'HEAD', 'origin/main'], capture_output=True, text=True).stdout.strip()

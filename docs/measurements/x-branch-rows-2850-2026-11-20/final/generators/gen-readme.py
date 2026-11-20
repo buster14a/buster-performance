@@ -32,6 +32,9 @@ syntax2 = [l for p in sorted(glob.glob(record + '/faults/syntax-round2/shard-*.t
 probes = {name: len(lines('%s/probes/%s.txt' % (record, name))) for name in ('earlier', 'cases9', 'cases10', 'cases11', 'cases12', 'cases13', 'cases14')}
 agree = re.compile(r' status 0 .*refused [0-9]* diff 0 .*entries [0-9]* diff 0 ')
 assert all(agree.search(l) for name in probes for l in lines('%s/probes/%s.txt' % (record, name)))
+again_lines = [l for name in probes for l in lines('%s/final/cloud-checks/probes/%s.txt' % (record, name))]
+assert all(agree.search(l) for l in again_lines)
+again = len(again_lines)
 listed14 = len([l for l in lines(record + '/probes/cases14.txt') if re.search(r'listed upd \d+ br [1-9]', l)])
 def pins(path):
     m = re.search(r"listed: update=(\d+) \((\d+)\) branches=(\d+) \((\d+)\)", open(path, errors='replace').read())
@@ -40,8 +43,26 @@ tie = pins(record + '/faults/mutants/reason-mark-other-way-with-the-line.err')
 assert tie and tie[0] != tie[1] and tie[2] != tie[3], tie
 two = re.search(r"made (\d+) tapes \((\d+)\) of (\d+) entries \((\d+)\)", open(record + '/faults/mutants/list-branching-with-two-on-the-turns-count.err', errors='replace').read())
 assert two and two.group(3) != two.group(4), two
-san = lines(record + '/final/cloud-sanitizers/progress.txt') if glob.glob(record + '/final/cloud-sanitizers/progress.txt') else []
+san = lines(record + '/final/cloud-sanitizers/progress-73b723aa9.txt') if glob.glob(record + '/final/cloud-sanitizers/progress-73b723aa9.txt') else []
 checks = open(record + '/final/cloud-checks/progress.txt').read()
+clang = lines(record + '/final/cloud-checks/complete-light-the-preprocessor-against-clang.txt')
+m = re.search(r'files: (\d+) of (\d+) differ', '\n'.join(clang))
+differing, units = int(m.group(1)), int(m.group(2))
+marked = [l for l in clang if 'the line markers place token' in l]
+assert len(marked) == differing and all(re.search(r'\(of (\d+), clang \1\)', l) for l in marked)
+HANDOFF = '''
+## 7. Who did what
+
+The session that specified, built and measured the piece (the specification, the five builds, the three fault
+rounds, the probes, its own checks and sanitizer pass, and [buster14a/buster#3190](https://github.com/buster14a/buster/pull/3190))
+handed it off at its user's request before the final readings
+([the hand-off](https://github.com/buster14a/buster/issues/2850#issuecomment-7042274752)), with their job running on
+the 9700X. The session that took #2850 over ([its claim](https://github.com/buster14a/buster/issues/2850#issuecomment-7042574537))
+read that job's results (sections 5 and its gates), ran the generators on them, checked the code's commit again on
+the main of that hour (section 6) and opened [buster14a/buster#3191](https://github.com/buster14a/buster/pull/3191),
+which has #3190's one commit, cherry-picked unchanged, and the design's two sections as a second: it pushes to its
+own branch alone, so #3190 was closed for it.
+'''
 functions = {}
 for l in lines(record + '/builds/functions.txt'):
     label, name, size = l.split()
@@ -139,42 +160,54 @@ kind; conditions C lists) and %d tested values that might have a conversion of t
 decayed array's and function's, a qualified, an atomic and a bit-field's read, a cast's, a class past double's; %d of
 them list their expression for branches, each a qualified `_Bool`'s read). And the pieces' before, %d
 (`probes/earlier.txt`, `cases9` to `cases12`; their cases are in the records before this one). Every one reads as X
-on T's columns does: no tape differs, and no answer of C's.
+on T's columns does: no tape differs, and no answer of C's. The pull request's commit's build read them again
+(`final/cloud-checks/probes/`, `final/cloud-checks/run-probes.sh`): %d lines, none that does not agree.
 
 ## 5. The final readings (`final/9700x/`)
 
-`final/9700x/FINAL/` (its patch on main `00faef7dd`'s lineage beside it) and the piece before's executable's runs
-(`final/9700x/xu8/`), `builds/job-xb.sh`'s seven readings with no other job of this session's on the 9700X;
-`final/FINAL-table.txt` by `builds/xb-table.py`. TSC ticks.
+`final/9700x/FINAL/` (its patch on main `00faef7dd`'s lineage beside it, its build's log and its executable's hash)
+and the piece before's executable's runs (`final/9700x/xu8/`): `builds/job-xb.sh`'s seven readings, the job the
+session before started as it handed the work off (`final/9700x/job-FINAL.log`); `final/FINAL-table.txt` by
+`builds/xb-table.py`. The patch's sources are the pull request's code's commit's with the experiment's switch and
+three comments' wording apart: main `00faef7dd` with the patch, compared file by file with the commit. TSC ticks.
 
 | | `sqlite3.c` | Lua | musl |
 | --- | ---: | ---: | ---: |
-''' % (probes['cases13'], probes['cases14'], listed14, sum(probes[k] for k in ('earlier', 'cases9', 'cases10', 'cases11', 'cases12')))
+''' % (probes['cases13'], probes['cases14'], listed14, sum(probes[k] for k in ('earlier', 'cases9', 'cases10', 'cases11', 'cases12')), again)
 text += measured.split('\n', 2)[2] + '''
 
 **Against its gates** ([the specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7037879405)):
 
 ''' + gates + '''
 
-`final/gen-docs.py` made the design's two sections of these files (`final/node-machine-section.md` and
-`final/one-core-path-section.md` are its templates; `final/values.json` its values), and `final/apply-docs.py` put
-them in the docs. `final/gen-readme.py` made this file from its second section on, and `final/gen-body.py` the pull
-request's body and the issue's note (`final/body-template.md`, `final/result-note-template.md`, `final/tests.md`).
+`final/generators/gen-docs.py` made the design's two sections of these files (`node-machine-section.md` and
+`one-core-path-section.md` beside it are its templates; `values.json` its values), and `apply-docs.py` put them in
+the docs. `gen-readme.py` made this file from its second section on, and `gen-body.py` the pull request's body and
+the issue's note (`body-template.md`, `result-note-template.md`, `tests.md`); `assemble.sh` copied this session's
+files here. The session before wrote the generators and their templates against the fifth build's readings; this
+session ran them on the final ones, with the fault rounds' paragraph as the rounds went, the final build's line and
+Lua's two runs' note added (the record's history has them as handed off, at `0c2e9decc`).
 
 ## 6. The cloud container's checks (`final/cloud-*`)
 
-`final/cloud-checks/` (`checks-rows.sh`, on the commit in `revision.txt`: the pull request's sources, on the main it
-was opened on): a native Release build; `test-checker`, its eight parts; the shadow with `--window-rows` and with
+`final/cloud-checks/` (`checks-rows.sh`, on the commit in `revision.txt`: the pull request's code's commit, on the
+main it was opened on, in the container of the session that took the work over; the session before ran the same on
+its own commit, whose files are in this record's history at `0c2e9decc`): a native Release build; `test-checker`, its eight parts; the shadow with `--window-rows` and with
 `--window-contexts` on `sqlite3.c`, Lua and musl and with `--window-rows` on the compiler's own source, with the
 default warnings and with `-Wall -Wextra` (`rows-counts.txt`); the shadow's other modes on `sqlite3.c` and Lua; the
 self-check, the self-parse, the call graph's two; the ownership check; and the complete driver's lists and parse.
 `progress.txt` has each one's status. All pass but the preprocessor's comparison with clang in the complete driver's
-light list, which fails in this container on main too (its system clang is 23.1.6).
+light list: %d of its %d units differ, each by where its line markers place a token and none by a token's count
+(`complete-light-the-preprocessor-against-clang.txt`). The container's clang (23.1.6) names its resource directory
+otherwise; the session before read the same of main in its own container.
 
-`final/cloud-sanitizers/` (`sanitizers-parts.sh`, on the same sources): native memory, address and thread builds;
+`final/cloud-sanitizers/` (`sanitizers-parts.sh`, on the same commit, `progress-73b723aa9.txt`; and the session
+before's pass on `9eb233772`, that code but for three comments, `progress-9eb233772.txt`): native memory, address and thread builds;
 `test-checker` part 5 under each, and under memory and address the shadow with `--window-rows` on `sqlite3.c`, Lua
 and the compiler's own source. %s
-''' % (('No report: ' + '; '.join(l for l in san if 'part5' in l).replace('test-checker: ', '') + '.') if san and all('reports 0' in l for l in san if 'status' in l and 'build' not in l) and any(l.startswith('all done') for l in san) else 'PENDING')
+''' % (differing, units, ('No report in either: ' + '; '.join(l for l in san if 'part5' in l).replace('test-checker: ', '') + '.') if san and all('reports 0' in l for l in san if 'status' in l and 'build' not in l) and any(l.startswith('all done') for l in san) else 'PENDING')
+text += HANDOFF
+#
 final_label = sorted(k for k in functions if k not in ('xu8', 'xb1', 'xb2', 'xb3', 'xb4', 'xb5'))
 assert len(final_label) == 1, final_label
 text = text.replace('FINAL', final_label[0])

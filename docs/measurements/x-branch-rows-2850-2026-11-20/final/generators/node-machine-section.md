@@ -82,8 +82,9 @@ its entries to the row's length, so the two loops' order is no one's to say
 and nothing changed).
 
 **How it came to its cost.** Builds on the 9700X, TSC ticks a record swept,
-three readings each: the rows' sweeps with the branches' rows on, and what
-they read more than the piece before's executable in the same readings.
+three readings each and seven for the last: the rows' sweeps with the
+branches' rows on, and what they read more than the piece before's
+executable in the same readings.
 
 @@builds_table@@
 

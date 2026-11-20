@@ -33,7 +33,10 @@ before = {c: counts(T, c, 'before') for c in CORPORA}
 assert all(on[c]['same'] == 'True' and off[c]['same'] == 'True' and before[c]['same'] == 'True' for c in CORPORA)
 assert all(on[c]['differences'] == 0 and before[c]['differences'] == 0 and off[c]['differences'] == 0 for c in CORPORA)
 # The switch gives the piece before's answers.
-assert all(all(off[c][k] == before[c][k] for k in ('expressions', 'taken', 'entries', 'written', 'update', 'branches', 'conversion', 'floating', 'words', 'lines', 'updates')) and off[c]['turns'] == 0 for c in CORPORA)
+# (The final code's reason for a listed expression is by its record's own shape: with the switch off the branches'
+# template is the mark that lists, which that reason counts with the updates. The two reasons' sum is the piece before's.)
+assert all(all(off[c][k] == before[c][k] for k in ('expressions', 'taken', 'entries', 'written', 'conversion', 'floating', 'words', 'lines', 'updates')) and off[c]['turns'] == 0 and
+           off[c]['update'] + off[c]['branches'] == before[c]['update'] + before[c]['branches'] for c in CORPORA)
 assert len(set(on[c]['readings'] for c in CORPORA)) == 1
 readings = on['sqlite3']['readings']
 assert 'without status 0: 0' in T.splitlines()[0], T.splitlines()[0]
@@ -114,7 +117,7 @@ for label, what in BUILDS:
     a = row(B[label], 'sqlite3', SUM); b = row(B[label], 'lua', SUM)
     lines.append('| %s | %.2f | %s | %.2f | %s | %s |' % (what, a['on'], s(a['e']), b['on'], s(b['e']), n(code(label))))
 a = R['sqlite3'][SUM]; b = R['lua'][SUM]
-lines.append("| the fifth's, an operand's rule with one mask for its shape and its length (%s readings) | **%.2f** | **%s** | **%.2f** | **%s** | %s |" % (
+lines.append("| the fifth's after the fault rounds' changes, the code as it is: an operand's rule with one mask for its shape and its length, the narrow test by its upper bound alone, the chunk's guard on the operators with a turn (%s readings) | **%.2f** | **%s** | **%.2f** | **%s** | %s |" % (
     values['readings'], a['on'], s(a['e']), b['on'], s(b['e']), n(code(final))))
 values['builds_table'] = ("| build | `sqlite3.c`, with the branches' rows | more than the piece before's | Lua, with them | more | the lists' and the loops' code, bytes |\n| --- | ---: | ---: | ---: | ---: | ---: |\n"
                           + '\n'.join(lines))
@@ -136,6 +139,9 @@ notes.append("- **The loop where the lists are made.** The fourth build's branch
     s(l4['sqlite3']['e']), s(l4['lua']['e'])))
 notes.append("- **`sqlite3.c` moved little, Lua by half.** Across the five builds `sqlite3.c` read from %s to %s more than the\n  piece before's, their readings' ranges overlapping; Lua from %s down to %s." % (
     s(min(part(l, 'sqlite3', SUM)['e'] for l, _ in BUILDS)), s(max(part(l, 'sqlite3', SUM)['e'] for l, _ in BUILDS)), s(max(part(l, 'lua', SUM)['e'] for l, _ in BUILDS)), s(l5['lua']['e'])))
+f5 = {c: part('xb5', c, LISTS) for c in ('sqlite3', 'lua')}
+notes.append("- **The fault rounds' changes read less on `sqlite3.c`.** They touched the timed code after the fifth build: an\n  operand's rule (one mask for its shape and its length), the narrow test (its upper bound alone) and the chunk's\n  guard (the operators with a turn). By the switch, on less off, the lists and the two loops read %s ticks a record\n  swept on `sqlite3.c` and %s on Lua in the fifth build's three readings, and %s and %s in the final code's %s; the\n  rows %s and %s more than the piece before's, for %s and %s. Which of the three changes it is was not measured." % (
+    s(f5['sqlite3']['d']), s(f5['lua']['d']), s(R['sqlite3'][LISTS]['d']), s(R['lua'][LISTS]['d']), values['readings'], s(R['sqlite3'][SUM]['e']), s(R['lua'][SUM]['e']), s(l5['sqlite3']['e']), s(l5['lua']['e'])))
 values['builds_notes'] = '\n'.join(notes)
 # The final readings.
 def cell(name, key='on', fmt='%.2f'):
@@ -205,11 +211,19 @@ ASKED = {'sqlite3': (0.6, 1.0), 'lua': (0.4, 0.8)}
 def verdict(c):
     return 'met' if round(e[c]['e'], 2) <= ASKED[c][0] else 'refuted' if round(e[c]['e'], 2) > ASKED[c][1] else 'not met'
 b3 = verdict('sqlite3') if verdict('sqlite3') == verdict('lua') else '%s on `sqlite3.c`, %s on Lua' % (verdict('sqlite3'), verdict('lua'))
-g.append("- **B3, cost: %s.** The rows' sweeps and the part read %s ticks a record swept more than the piece before's\n  executable on `sqlite3.c` (%s to %s; 0.6 asked, 1.0 refutes) and %s on Lua (%s to %s; 0.4 asked, 0.8 refutes);\n  %s on musl (%s to %s), which the gate did not name. By the switch, on less off, the lists and the two loops read\n  %s, %s and %s: %.0f, %.0f and %.0f ticks a turn. On a chunk's second run the whole reads %s, %s and %s more than\n  the piece before's." % (
+def sum_of(path):
+    return float(re.search(r"window rows ticks=\d+ \(([\d.]+) a record swept", open(path, errors='replace').read()).group(1))
+lua_on = sorted(sum_of('%s/%s/rows-%s-lua-%d.txt' % (fetch, final, tag, k)) for k in range(1, readings + 1) for tag in ('on1', 'on2'))
+disturbed = [v for v in lua_on if v > 1.2 * statistics.median(lua_on)]
+calm = [v for v in lua_on if v <= 1.2 * statistics.median(lua_on)]
+values['lua_note'] = ('' if not disturbed else " %s of Lua's %d runs with the branches' rows on read %s, each with one part some 300,000 ticks over its\n  other readings (the lists and the loops in the one, the rows' write in the other); the other %d read\n  %.2f to %.2f." % (
+    {1: 'One', 2: 'Two', 3: 'Three'}[len(disturbed)], len(lua_on), ' and '.join('%.2f' % v for v in disturbed), len(calm), min(calm), max(calm)))
+g.append("- **B3, cost: %s.** The rows' sweeps and the part read %s ticks a record swept more than the piece before's\n  executable on `sqlite3.c` (%s to %s; 0.6 asked, 1.0 refutes) and %s on Lua (%s to %s; 0.4 asked, 0.8 refutes);\n  %s on musl (%s to %s), which the gate did not name.@@lua_note@@ By the switch, on less off, the lists and the two loops read\n  %s, %s and %s: %.0f, %.0f and %.0f ticks a turn. On a chunk's second run the whole reads %s, %s and %s more than\n  the piece before's." % (
     b3, s(e['sqlite3']['e']), s(e['sqlite3']['elo']), s(e['sqlite3']['ehi']), s(e['lua']['e']), s(e['lua']['elo']), s(e['lua']['ehi']),
     s(e['musl']['e']), s(e['musl']['elo']), s(e['musl']['ehi']), s(R['sqlite3'][LISTS]['d']), s(R['lua'][LISTS]['d']), s(R['musl'][LISTS]['d']),
     turn('sqlite3', LISTS), turn('lua', LISTS), turn('musl', LISTS),
     s(R['sqlite3']['(a second run) a record swept']['e']), s(R['lua']['(a second run) a record swept']['e']), s(R['musl']['(a second run) a record swept']['e'])))
+g[-1] = g[-1].replace('@@lua_note@@', values['lua_note'])
 def within(names, c):
     return max(abs(R[c][name]['d']) for name in names)
 others = ('the kernel in place, a record', "the records' bytes", "the tests' loop", "the tests' expression's part", "the tests on T's records", "C's sweeps, a record swept")
@@ -227,13 +241,14 @@ b5 = '@@b5@@**'; b5_short = '@@b5_short@@**'
 NOTHING = {'list-count-not-ended', 'loop-before-the-updates', 'turn-second-before-first', 'operand-narrow-with-void'}
 GUARD = {'list-branching-with-two', 'window-branches-count-of-roots'}
 REASON = {'reason-a-root-tested'}
-if len(V) >= 2 and not V[-1]['survived'] and set(V[0]['survived']) == NOTHING | GUARD | REASON and all(not v['survived'] for v in V[1:]):
-    b5 = ("met.** %s rounds: each term of an operand's rule and of an operator's turn, each of their stores, the second\n  list's sweep, the chunk's guard, the reader's sense, each new row of the tables and the listed expression's reason\n  changed alone, a build and the fixture's tests a fault. The first round's %d faults left %d. %s change nothing\n  a program reaches, and are no faults: a count set to the lesser of itself and its block's end, which the loop\n  before it leaves no less; the two loops in the other order (an update that is a tested value has its own part from\n  the one and its conversion's from the other); a second operand given its sense before the first; and void's class\n  taken for a narrow one, which no tested value has (the test is by its upper bound alone now). %s found code to\n  change. The chunk's guard counted the CONDITIONs, which take no turn, so a guard of two for one and a count without\n  them both passed: the count is the turns' now, and a unit of one chunk with one turn separates them (run against\n  the first fault's build before the next round). And the listed expression's reason read its record's consumer\n  behind a test that the record has one, which a fault removed unseen: a build with a line for each listed record\n  with no consumer printed none on the three corpora and the fixture, so the test was a term no record asked. The\n  reason is by the record's own shape now, with no consumer's read. %s" % (
-        words[len(V)].capitalize(), faults(V[0]), len(V[0]['survived']), words[len(NOTHING)].capitalize(), words[len(GUARD | REASON)].capitalize(),
-        ' '.join("The %s round's %d, on the code as it %s, are all caught." % ({1: 'second', 2: 'third', 3: 'fourth'}[k], faults(V[k]), 'is' if k == len(V) - 1 else 'was then') for k in range(1, len(V)))))
-    b5_short = "met.** The first round's %d faults left %d: %s change nothing a program reaches, and %s found code to change\n  (the chunk's guard's count, and the listed expression's reason, which reads no consumer now). The\n  last round's %d faults, on the code as it is, are all caught.**" % (
-        faults(V[0]), len(V[0]['survived']), words[len(NOTHING)], words[len(GUARD | REASON)], faults(V[-1]))
-    b5_short = b5_short[:-2]
+# The rounds as they went: the first left NOTHING, GUARD and REASON; the second two in the rewritten reason; the third none.
+SECOND = {'reason-mark-of-its-conversion', 'reason-mark-other-way'}
+assert len(V) == 3 and set(V[0]['survived']) == NOTHING | GUARD | REASON and set(V[1]['survived']) == SECOND and not V[2]['survived'], [v['survived'] for v in V]
+b5 = ("met.** %s rounds: each term of an operand's rule and of an operator's turn, each of their stores, the second\n  list's sweep, the chunk's guard, the reader's sense, each new row of the tables and the listed expression's reason\n  changed alone, a build and the fixture's tests a fault. The first round's %d faults left %d. %s change nothing\n  a program reaches, and are no faults: a count set to the lesser of itself and its block's end, which the loop\n  before it leaves no less; the two loops in the other order (an update that is a tested value has its own part from\n  the one and its conversion's from the other); a second operand given its sense before the first; and void's class\n  taken for a narrow one, which no tested value has (the test is by its upper bound alone now). %s found code to\n  change. The chunk's guard counted the CONDITIONs, which take no turn, so a guard of two for one and a count without\n  them both passed: the count is the turns' now, and a unit of one chunk with one turn separates them (run against\n  the first fault's build before the next round). And the listed expression's reason read its record's consumer\n  behind a test that the record has one, which a fault removed unseen: a build with a line for each listed record\n  with no consumer printed none on the three corpora and the fixture, so the test was a term no record asked. The\n  reason is by the record's own shape now, with no consumer's read. The second round's %d faults left %d, both in\n  that rewritten reason: one changes nothing (the tables give a destination with no room the mark in both of its\n  parts), and one swapped the two reasons a record with the bit alone can have, which the fixture hid, its counts\n  for the two being the same. A fourth `const` bool condition makes them differ, and that fault's build fails on it,\n  run before the third round. The third round's %d faults, on the code as it is, are all caught." % (
+    words[len(V)].capitalize(), faults(V[0]), len(V[0]['survived']), words[len(NOTHING)].capitalize(), words[len(GUARD | REASON)].capitalize(),
+    faults(V[1]), len(V[1]['survived']), faults(V[2])))
+b5_short = "met.** Three rounds. The first's %d faults left %d: %s change nothing a program reaches, and %s found code to\n  change (the chunk's guard's count, and the listed expression's reason, which reads no consumer now). The second's\n  %d left %d, in that reason: one changes nothing, and one got its line in the fixture. The third's %d, on the code\n  as it is, are all caught." % (
+    faults(V[0]), len(V[0]['survived']), words[len(NOTHING)], words[len(GUARD | REASON)], faults(V[1]), len(V[1]['survived']), faults(V[2]))
 g.append("- **B5, faults: " + b5)
 values['gates'] = '\n'.join(g)
 sg = []
@@ -247,7 +262,7 @@ sg.append("- **B5, faults: " + b5_short)
 values['short_gates'] = '\n'.join(sg)
 # What stays a record at a time: the loop's reading, and the update's piece's reading of a rare case's terms in a big
 # sweep (its fourth build: the record of that piece).
-xu4 = open('/home/user/keep/xupd/fetch/xu4-table.txt').read()
+xu4 = open('/home/user/keep/xbranch/xupd/xu4-table.txt').read()
 u4 = {c: row(xu4, c, 'the shapes') for c in ('sqlite3', 'lua')}
 values['vector_note'] = ("The loop reads %s\nticks a record swept on `sqlite3.c` and %s on Lua by the switch (%.0f and %.0f a turn), and the rows with it %s and\n%s over the piece before's: %s its gate, so that build was not made. What the update's piece read of a rare\ncase's terms in a big sweep stands against it: as masks in the shapes' sweep an update's terms made that sweep\nread %.2f ticks a record more on `sqlite3.c` and %.2f on Lua, %.2f and %.2f of it with no update to make, and an\noperator with a turn is one record in %.0f of `sqlite3.c`'s and one in %.0f of Lua's." % (
     s(R['sqlite3'][LISTS]['d']), s(R['lua'][LISTS]['d']), turn('sqlite3', LISTS), turn('lua', LISTS), s(e['sqlite3']['e']), s(e['lua']['e']),
