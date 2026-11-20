@@ -11,3 +11,5 @@ In Opus 1.5.2 all 56 encoder and placement comparisons retired fewer instruction
 Part of #2829. Stacked on #3122. Direct Ryzen 7 9700X timing and four memory-form scheduler cost rows are pending.
 
 The [44-leaf hardware oracle](proven/checks.tsv), [high register pressure test](pressure/results.log), [all musl comparisons](libm/comparison.tsv), [Opus encoder and decoder counters](opus/timing/paired.tsv), and [separate loop counters](kernels/paired.tsv) retain the input definitions, layouts and results. The full C driver completed 196,392 checks with zero failures. The kernel trials use within-expression contraction under `-ffp-contract=on`. An initial `fast` configuration emitted separate multiply and add in both Buster versions, while Clang fused them.
+
+The [recheck after merging the calibrated parent](measured-parent/) records the updated compiler head and its object and floating-point comparisons.

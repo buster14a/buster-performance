@@ -21,6 +21,10 @@ Both compilers reached a byte-for-byte [self-host fixed point](fixedpoints.tsv) 
 
 Both release compilers passed 220 C programs and compiled all 430 functions with Tier 1, as well as the debug, pipeline, emitter, selector and inliner suites. In this corpus the candidate's 380 matched functions occupy 62,298 bytes versus 45,748 with Clang. The size comparison is recorded as a non-enforced failure in the [raw C-suite result](suites/candidate-c-testsuite.txt). The main-side release suite receipts use the exactly identical baseline compiler already qualified in the eighteen-change run.
 
-The [suite receipts](suites/status.tsv) give individual exit codes. For ASan/UBSan, six compiler suites completed in each configuration and the compiler, runner and child-report audits were clean.
+The [suite receipts](suites/status.tsv) give individual exit codes. For ASan/UBSan and separate MemorySanitizer, six compiler suites completed in each configuration and the compiler, runner and child-report audits were clean.
+
+## Full SQLite Tcl suite
+
+The official testfixture runner compiled the same amalgamation for pinned Clang at -O0 and both Buster tiers, then ran the upstream full permutation with two jobs. The [runner summary](sqlite/summary.log) includes the check totals and comparisons. The individual test outcome and worker logs are retained in [the same directory](sqlite/).
 
 The [direct 9700X measurements](9700x/) cover all three real inputs, with three post-warm-up pairs and complete hardware counter and object receipts.

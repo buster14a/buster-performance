@@ -13,3 +13,5 @@ Five Opus objects changed per build configuration. Encoder instructions ranged f
 Part of #2829. Stacked on #3139.
 
 The [upstream Vorbis results](vorbis/official.tsv), [all stream and decoder hashes](vorbis/applications/), [production floor-fitting object and checks](vorbis/floor/), [Opus timings](opus/timing/paired.tsv), and [floating-point oracle](proven/checks.tsv) give the results per input. Each Vorbis floor distribution runs on four address placements. In the full codec the input, packet and output digests were identical for all six builds. The full driver used system Clang 23.1.6 and reports the skipped implicit-library-name comparisons for that reference version.
+
+The [recheck after merging the calibrated parent](measured-parent/) records the updated compiler head and its object and floating-point comparisons.

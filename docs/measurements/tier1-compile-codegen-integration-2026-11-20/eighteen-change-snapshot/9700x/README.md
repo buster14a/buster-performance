@@ -7,3 +7,5 @@ The exact main and integrated compilers each built three real translation units 
 | lua-lvm | -32.113% | -22.267% | -22.56,-22.19 |
 | sqlite-O2 | -20.519% | -12.252% | -12.28,-12.01 |
 | sqlite-tier1 | -2.217% | -1.531% | -1.74,-1.51 |
+
+Local replay with the native compilation directory reproduced all six 9700X objects byte for byte, including the four debug objects. [Directory-controlled hashes](directory-replay.tsv) and [replay harness](path-replay.py).

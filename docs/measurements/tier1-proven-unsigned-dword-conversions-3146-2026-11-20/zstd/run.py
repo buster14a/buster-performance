@@ -29,7 +29,7 @@ for r in range(8):
  for n in range(len(cases)):
   pad,seed=cases[(n+3*r)%len(cases)]
   for v in (['head','parent'] if (n+r)%2 else ['parent','head']):
-   stat=p/'last.stat';e=p/f'{v}-{pad}';res=run('perf','stat','--no-big-num','-x',';','-e',','.join(metrics),'-o',stat,'--',e,f'-s{seed}','-n128','-t','--block-type=2','--max-content-size-log=15',capture_output=True)
+   stat=p/'last.stat';e=p/f'{v}-{pad}';res=run('perf','stat','--no-big-num','-x',';','-e',','.join(metrics),'-o',stat,'--',e,f'-s{seed}','-n128','-t',capture_output=True)
    m={a[2]:float(a[0]) for l in stat.read_text().splitlines() if len(a:=l.split(';'))>2 and a[2] in metrics};assert len(m)==len(metrics)
    raw.append([r,pad,seed,v,*[m[k] for k in metrics]]);vals[r,pad,seed,v]=m
  print('round',r,flush=True)
