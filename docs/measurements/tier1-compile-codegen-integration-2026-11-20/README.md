@@ -33,3 +33,5 @@ The source merge matrix records 30 comparisons across active emitter, inliner, D
 The signed conversion and FMA stack was built with [#2921](https://github.com/buster14a/buster/pull/2921) at `aa6ed7d2b50590200eb53cc10d8c27a3597f348f`. Both the parent composition and the candidate composition passed the selector, emitter and end-to-end pipeline suites. The two composition commits were `30d01900a986465971d78398a9f2c7231cff9ca4` and `f4be1b87fa181c116255b51ded24f77ae1ca88a0`. Per-suite logs are included.
 
 For [#3117](https://github.com/buster14a/buster/pull/3117), generating the earlier self-host source grew each copy of `foreign_unwind_prune` by 67 bytes. We also compiled the actual proposed function at [#3061](https://github.com/buster14a/buster/pull/3061) commit `1c882f4d3a94ae8416a8c633bab7e39a26bca9dd` with the same parent and candidate compilers. The function shrank from 11,822 to 11,816 bytes in both executable and checker unity objects. Their SHA-256 digests are in `foreign3061.tsv`.
+
+The [fifteen-change measurement](fifteen-change-snapshot/) includes full clean builds, bootstrap comparisons and checked Opus output and per-change performance.

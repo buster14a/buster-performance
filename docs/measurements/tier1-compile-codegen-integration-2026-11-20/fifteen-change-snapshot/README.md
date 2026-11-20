@@ -1,0 +1,11 @@
+# Fifteen Tier 1 compiler changes on one main snapshot
+
+The local integration applies the [fifteen exact PR heads](heads.tsv) to main `80284640a93e2d6cdaab00419ca7ace232218c76`, yielding local commit `d1b8a05d76029a8ece6301816675cee8a498223e`. Both compilers were built in Release targeting znver5, then executed on the same Ryzen 9 7940HS. Clang 23.1.4 supplied the reference compiler. The snapshot stops at #3133.
+
+In eight alternated one-lane pairs, generating Tier 1 SQLite release code used 2.099% fewer instructions. The paired cycle median decreased 0.843%, with observations on both sides of zero. SQLite `-O2 -g` used 20.195% fewer instructions and 12.489% fewer cycles. The Lua VM debug compile retired 30.336% fewer instructions and used 20.740% fewer cycles. Each pair improved on both debug workloads. Lua parser debug compilation used 5.607% fewer instructions with a 4.462% lower cycle median and one or more slower pairs. [Normal processes](normal-processes.tsv), [normal medians](normal-summary.txt), [debug processes](debug-processes.tsv), and [debug medians](debug-summary.txt).
+
+The [126 clean Ninja builds](ninja/) measure whole-project compile and link wall time with one, two and four physical cores. Opus is a separate measurement of generated-program speed and [audio output through five PRs](opus/).
+
+Both compilers built their own 43 source units twice and reproduced each object and its complete executable byte for byte between stages 2 and 3. Compiling the same source on both sides changed 32 of the 43 objects and reduced aggregate text by 5,428 bytes. Of 10,474 matched function records, 623 shrank and two grew. The generated compiler's linked text shrank 9,792 bytes and its file shrank 8,192 bytes. [Fixed points](fixedpoints.tsv), [common-source objects](selfhost-objects.tsv), [individual function deltas](selfhost-function-changes.tsv), and [linked totals](selfhost-totals.tsv).
+
+Both versions passed the 220-program upstream C subset. The non-enforced code-size comparison still reports 62,298 Buster bytes for 380 matched functions versus 45,748 Clang bytes. The [native suites and six fatal ASan/UBSan suite transcripts](suites/) include the full diagnostics. The sanitizer audit reported no findings for those suites.
