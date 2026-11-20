@@ -1,0 +1,23 @@
+# Tier 1 long-double literal loads
+
+[PR #3136](https://github.com/buster14a/buster/pull/3136) at `7a0179e5d81b3639289356d2eca367fa47d71d7e` was compared with [#3134](https://github.com/buster14a/buster/pull/3134) at `b437ac27b843f411646a3e05744f751a07b127ae`. The [parent record](../tier1-x87-exact-binary32-homes-3134-2026-11-20/) includes the before-stack comparison and the independent value and exception oracle. Local hardware was a Ryzen 9 7940HS. Reference compiler was Clang 23.1.4.
+
+Tier 1 can leave an x87 constant definition empty and load its immutable bytes from a local RIP-relative literal at the original consumer. The existing literal section merges identical bytes across functions. The original x87 waiting point, ten-byte ABI stores and signed-zero representation are preserved. The emitter bounds references for ordinary arguments, returns, arithmetic and incoming phi edges.
+
+Of 1,336 frozen musl objects, 27 changed. Every changed text section shrank, saving 3,317 text bytes in total. Read-only data grew by 1,296 bytes. The 141 extra code relocations added 3,384 relocation bytes and the unlinked objects grew 7,072 bytes overall. A linked application using twelve long-double functions from the 300-member musl math archive retained its 88,784-byte file size. Its text shrank 1,712 bytes and its read-only data grew 560.
+
+On a local Ryzen 9 7940HS, relative to #3134, the generated affine loop used 17.3–18.0% fewer cycles across four placements, polynomial used 29.0–29.7% fewer, and the full-precision loop used 55.2–55.3% fewer. The recurrence retired 2.83% fewer instructions and used 0.80–1.06% more cycles. In actual musl, log10l used 6.14–6.44% fewer cycles across placements, coshl 1.44–2.00% fewer, and erfl 1.53–1.62% fewer. The twelve-function timing ledger includes unchanged and mixed results. Direct Ryzen 7 9700X measurements remain pending.
+
+Eight object configurations each had 1,551 independently decoded and checked PC-relative load relocations reaching exactly 194 unique literals. Forty-eight executable, PIE and symbolically bound shared-library links with GNU ld and LLD each reproduced 135,024 value and machine-state observations. Eighty further raw-IR fixtures per compiler covered noncanonical encodings, infinities, signed zeros and multiple NaN payloads. Each ran its 32 native and 48 interpreted cases. Both compilers also agreed on all 294,912 real musl observations, including flags, and on the pending-exception/volatile-store sequence. The full checker driver passed 196,416 checks with zero failures.
+
+Part of #1387, stacked on #3134.
+
+The [object ledger](footprint/objects.tsv.gz) includes every corpus unit. [Individual changes](footprint/changes.tsv) and [linked section sizes](footprint/linked.tsv) distinguish executable text, literal data, relocation overhead and disk size.
+
+The [ELF verifier](elfcheck.py) decodes each [RIP-relative memory operand](elf/relocated-loads.tsv.gz) and its literal bytes, then checks [48 final links](elf/linked.tsv). The general compiler option `-fPIC` is unsupported in both compiler versions. The shared-library check binds symbols within the library with `-Bsymbolic`. An ordinary preemptible shared link encounters the existing unwind reference limitation. The [raw IR test generator](raw-ir.py) and [outcomes](raw-ir/results.tsv) cover unusual raw encodings that the C parser need not produce.
+
+The [generated C test configuration](operands/generate.py), [runtime driver](operands/driver.c), [artifact identities](operands/identities.tsv) and [pending-exception checks](pending/comparisons.tsv) include distinct scheduling and target choices. The source compilers agree in every record. The parent record documents Clang differences in inherited flag behavior.
+
+In the [four-loop ledger](loops/paired.tsv), the historical executable labels `parent` and `narrow` identify #3134 and #3136, respectively. The runner took a warm-up plus eight alternate-order pairs, saving [288 checked process results](loops/counters.tsv.gz) at four link placements. The [assembly](loops/assembly) shows each target function.
+
+For the [twelve musl workloads](libm/timed.c), the [paired results](libm/timed/paired.tsv) and [1,152 process results](libm/timed/counters.tsv.gz) compare pre-#3134, #3134 and #3136. These tables use `before`, `narrow` and `pool`, respectively. Each timed invocation performs 32,768 calls and verifies the ten-byte result hash and x87 flags. Separate [per-function checks](libm/comparisons.tsv) cover twelve precision/rounding modes. Both compilers have the same 10,908 observations differing from Clang in at least one field.
