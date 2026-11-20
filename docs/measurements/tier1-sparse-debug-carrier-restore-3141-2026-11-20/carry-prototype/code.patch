@@ -1,0 +1,115 @@
+diff --git a/src/buster/compiler/c_check_debug_tier1_bindings_test.c b/src/buster/compiler/c_check_debug_tier1_bindings_test.c
+index dddbc3f72..2ce9e3f61 100644
+--- a/src/buster/compiler/c_check_debug_tier1_bindings_test.c
++++ b/src/buster/compiler/c_check_debug_tier1_bindings_test.c
+@@ -225,7 +225,11 @@ static void check_debug_tier1_values_fresh(CheckDebugTestTally* tally)
+                                 check_tier1_debug_value_region(&proof, 1, 1, 19) == BUSTER_IR_NONE,
+                                 "a local is visible only inside its half-open source and machine regions", "empty list, source endpoints, maximum entry and other block");
+         CheckTier1DebugValueLive live = { 0 };
+-        check_tier1_debug_value_start(&proof, &live);
++        check_tier1_debug_value_start(&proof, &live, false);
++        check_tier1_debug_value_change(&proof, &live, X86_REGISTER_RDI, 0);
++        check_debug_test_expect(tally, live.value_count == 0 && proof.state[X86_REGISTER_RDI] == 0 && live.heads[0] == X86_REGISTER_RDI,
++                                "fixed-point changes still update the carrier state without a publication event", "incoming register");
++        check_tier1_debug_value_start(&proof, &live, true);
+         memset(proof.winner, 0xff, ((uint64_t)proof.value_count + 1) * 4);
+         memset(live.users, 0xff, ((uint64_t)proof.value_count + 1) * 4);
+         check_tier1_debug_value_change(&proof, &live, X86_REGISTER_RDI, 0);
+diff --git a/src/buster/compiler/c_check_tier1_debug_values.c b/src/buster/compiler/c_check_tier1_debug_values.c
+index 3e977f326..eed106375 100644
+--- a/src/buster/compiler/c_check_tier1_debug_values.c
++++ b/src/buster/compiler/c_check_tier1_debug_values.c
+@@ -138,7 +138,7 @@ static void check_tier1_debug_value_change(const CheckTier1DebugValues* proof, C
+ static void check_tier1_debug_value_follow(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, CheckTier1DebugValueTransfer transfer);
+ static void check_tier1_debug_value_boundary(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, uint32_t record);
+
+-static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live)
++static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, CheckTier1DebugValueLive* live, bool publish)
+ {
+     *live = proof->live;
+     live->known_count = 0;
+@@ -147,7 +147,9 @@ static void check_tier1_debug_value_start(const CheckTier1DebugValues* proof, Ch
+     memset(proof->state, 0xff, (uint64_t)proof->carrier_count * 4);
+     memset(live->heads, 0xff, ((uint64_t)proof->value_count + 1) * 4);
+     memset(live->known_at, 0xff, (uint64_t)proof->carrier_count * 4);
+-    memset(live->value_queued, 0, (uint64_t)proof->value_count + 1);
++    // Only the range publisher consumes changed values. Mark them all present during the preceding
++    // CFG fixed point so that carrier changes update their reverse lists without appending to its queue.
++    memset(live->value_queued, publish ? 0 : 1, (uint64_t)proof->value_count + 1);
+ }
+
+ static uint32_t check_tier1_debug_value_width(uint32_t type)
+@@ -833,7 +835,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
+     if (valid && proof.machine)
+     {
+         CheckTier1DebugValueLive live;
+-        check_tier1_debug_value_start(&proof, &live);
++        check_tier1_debug_value_start(&proof, &live, false);
+         for (uint32_t reg = 0; reg < 32; reg += 1)
+         {
+             check_tier1_debug_value_change(&proof, &live, reg, seed[reg]);
+@@ -844,6 +846,8 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
+         queued[0] = 1;
+         queue[0] = 0;
+         uint32_t pending = 1;
++        // The seed already is block zero's first incoming row.
++        uint32_t current = 0;
+         uint32_t head = 0;
+         uint32_t tail = proof.block_count == 1 ? 0 : 1;
+         while (valid && pending != 0)
+@@ -852,15 +856,19 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
+             head = head + 1 == proof.block_count ? 0 : head + 1;
+             pending -= 1;
+             queued[block] = 0;
+-            while (live.known_count != 0)
++            if (current != block)
+             {
+-                check_tier1_debug_value_change(&proof, &live, live.known[live.known_count - 1], BUSTER_IR_NONE);
+-            }
+-            const CheckTier1DebugValueBlock incoming = proof.blocks[block];
+-            for (uint32_t f = 0; f < incoming.count; f += 1)
+-            {
+-                check_tier1_debug_value_change(&proof, &live, incoming.facts[f].place, incoming.facts[f].value);
++                while (live.known_count != 0)
++                {
++                    check_tier1_debug_value_change(&proof, &live, live.known[live.known_count - 1], BUSTER_IR_NONE);
++                }
++                const CheckTier1DebugValueBlock incoming = proof.blocks[block];
++                for (uint32_t f = 0; f < incoming.count; f += 1)
++                {
++                    check_tier1_debug_value_change(&proof, &live, incoming.facts[f].place, incoming.facts[f].value);
++                }
+             }
++            current = BUSTER_IR_NONE;
+             for (uint32_t r = proof.first[block]; r < proof.first[block + 1]; r += 1)
+             {
+                 check_tier1_debug_value_boundary(&proof, &live, r);
+@@ -883,13 +891,14 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
+                         pending += 1;
+                         queued[destination] = 1;
+                     }
++                    // The meet keeps only facts from this exit. Equal counts prove that its entire
++                    // carrier state already matches the successor at the front of the worklist.
++                    if (valid && pending != 0 && queue[head] == destination && proof.blocks[destination].count == live.known_count)
++                    {
++                        current = destination;
++                    }
+                 }
+             }
+-            for (uint32_t k = 0; k < live.value_count; k += 1)
+-            {
+-                live.value_queued[live.changed_values[k]] = 0;
+-            }
+-            live.value_count = 0;
+         }
+     }
+     *result = valid ? proof : (CheckTier1DebugValues){ 0 };
+@@ -1275,7 +1284,7 @@ static bool check_tier1_debug_value_ranges(const CheckTier1DebugValues* proof, c
+     const uint32_t carriers = proof->carrier_count;
+     const uint32_t values = proof->value_count;
+     CheckTier1DebugValueLive live;
+-    check_tier1_debug_value_start(proof, &live);
++    check_tier1_debug_value_start(proof, &live, true);
+     bool valid = true;
+     memset(proof->winner, 0xff, ((uint64_t)values + 1) * 4);
+     memset(proof->active, 0xff, ((uint64_t)locals + 1) * 4);

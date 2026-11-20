@@ -35,3 +35,5 @@ The signed conversion and FMA stack was built with [#2921](https://github.com/bu
 For [#3117](https://github.com/buster14a/buster/pull/3117), generating the earlier self-host source grew each copy of `foreign_unwind_prune` by 67 bytes. We also compiled the actual proposed function at [#3061](https://github.com/buster14a/buster/pull/3061) commit `1c882f4d3a94ae8416a8c633bab7e39a26bca9dd` with the same parent and candidate compilers. The function shrank from 11,822 to 11,816 bytes in both executable and checker unity objects. Their SHA-256 digests are in `foreign3061.tsv`.
 
 The [fifteen-change measurement](fifteen-change-snapshot/) includes full clean builds, bootstrap comparisons and checked Opus output and per-change performance.
+
+The [eighteen-change integration](eighteen-change-snapshot/) includes the combined source patch, six whole-compiler profiles, two three-stage self-hosts, both sanitizer configurations and real libjpeg-turbo applications.
