@@ -1,0 +1,8 @@
+| build | expressions more taken: `sqlite3.c`; Lua; musl | C's loop, a record swept, more, a chunk's first run: `sqlite3.c`; Lua | its second run: `sqlite3.c`; Lua | C's sweeps' first run less their second, ticks a chunk, more: `sqlite3.c`; Lua |
+| --- | ---: | ---: | ---: | ---: |
+| the first: two more permutes a block, of the block's answers by the consumer's lane (a `!` that is not deep has its consumer's answer) and of its classes (a comma's consumer's, before the loop that reads its type); a comma's and a conditional's keys three blends in a row; the discard's context a blend | +789; +360; +958 | +1.34 (+1.04 to +1.49); +1.97 (+1.63 to +2.01) | +0.61 (+0.59 to +0.62); +0.65 (+0.62 to +0.83) | +495 (+342 to +602); +632 (+504 to +683) |
+| the second: neither permute (a `!` under an operator is entered or chained as an `&&` is, and a value whose first operand is a `!` lists; every comma under a wrapper or an arm loads its consumer's byte), the three keys made beside the templates and placed in one step, a discarded comma's context a byte's store each, a block's edge listed from the block below | +785; +360; +955 | +0.91 (+0.62 to +1.06); +1.34 (+1.20 to +1.58) | +0.52 (+0.47 to +0.53); +0.54 (+0.51 to +0.65) | +302 (+158 to +395); +443 (+382 to +538) |
+| the code: the second, with the terms the first fault round found implied taken out and the sinks' rule its three terms | +769; +360; +949 | +1.02 (+0.94 to +1.49); +1.94 (+1.44 to +2.94) | +0.44 (+0.35 to +0.48); +0.53 (+0.51 to +0.57) | +410 (+379 to +668); +630 (+324 to +1051) |
+
+A second run's readings fell with each build. The first runs' are too wide to
+order the three builds: the third build's ranges hold the first's on Lua.
