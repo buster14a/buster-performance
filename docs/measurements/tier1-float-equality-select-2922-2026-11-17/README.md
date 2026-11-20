@@ -136,3 +136,9 @@ found no recurrence: the two selects of section 4, each asked once by the classi
 The x86-64 row's Release builds at buster `8a407c64` (plain, `BUSTER_SANITIZER=address`, `BUSTER_SANITIZER=memory`, the
 cloud container, `scripts/rows-final.sh`): `test-tier1-select`, `test-tier1-emit`, `test-tier1-pipeline --cross-check`
 and the pattern test pass on each (`x86-64-rows/`).
+
+After main's merge (buster `914c284`, 2026-11-20): the native Release builds with `BUSTER_SANITIZER=address` and
+`BUSTER_SANITIZER=memory` pass `test-tier1-select` (1,433,498 checks, with the frozen plan digest `0x5801a905df59174d`),
+`test-tier1-emit`, `test-tier1-pipeline --cross-check` and the pattern test (`native-sanitizers-914c284/`,
+`scripts/rows-native.sh`), and CI's Clang Static Analyzer step, run locally with its flags and clang 23.1.4 over all 43
+units, reports nothing.
