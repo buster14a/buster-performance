@@ -52,7 +52,7 @@ other 5 reach no scan). The vector paths are the faster at every size measured.
 ## The deletion (`deletion/`)
 
 `run.sh`: base `60fea8b56` (the generic masks' test, the twins present) against head `19e6a2172` (the deletion), both
-on #3186's head; Release. The PR's commits, `007afe62f` (tests) and `9e4070625` (the deletion) on main `79f565efe`, are
+on #3186's head; Release. The PR's commits, `6d6546f3f` (tests) and `88741d83b` (the deletion) on main `875980f24`, are
 these with the mutation round's next-entry test folded into the tests commit, rebased: the same production code.
 
 - **Objects** (`logs/status.txt`): `-c --lanes 1` of sqlite3.c, Lua's units, musl's units and buster's `main.c` (the
@@ -103,7 +103,17 @@ All nine are killed. `logs.tar.gz` has every run's build and test logs.
 
 ## Local tests (cloud container, `local/`)
 
-On the deletion `19e6a2172`, Develop: `test-checker`'s eight parts, 0 failures; rebased onto main `79f565efe`, the same
-eight, 0 failures, every case with a recorded stream digest. On `40a828376` (with the next-entry test), the seventh
-part, 0 failures. The local CI blocks, the tests commit's parts and the sanitizer rows on the PR's commits follow here
-when they finish.
+On `9e4070625`, the deletion on main `79f565efe` (`final2.sh`, `final-status.txt`):
+- the 27 blocks of `tools/ci/correctness.tests` that run a checker test and need no corpus, through the `parallel`
+  runner with clang 23.1.4 first on `PATH`: all pass (359.3 s); then, one at a time, the two that compile the complete
+  driver's `main.c`; then the integer builtins' fourth part and the two c-testsuite blocks, and the three on the frozen
+  SQLite and musl sources: all pass (`localcheck-results.txt`);
+- **MemorySanitizer and AddressSanitizer** (vector host): `test-checker`'s eight parts, `test-checker-driver`'s first
+  and second, `test-checker-deferred` and `test-check-lanes`, 0 failures and no sanitizer report (`san-status.txt`);
+- the ownership check on a Release build with CI's toolchain (640 fixture paths, 63 exact shared exceptions), and the
+  self-check of `main.c` and the complete driver's, `-fsyntax-only -Wall -Werror`.
+
+On the tests commit alone, `007afe62f` (the twins present): `test-checker`'s eight parts and all eight of
+`test-checker-driver`'s, 0 failures. On the PR's head `88741d83b`, the same commits rebased onto main `875980f24`, which
+touches none of their files: the same sixteen parts, 0 failures. Earlier, on the deletion `19e6a2172`, `test-checker`'s
+eight parts, 0 failures.
