@@ -19,62 +19,65 @@ type's) and its row's entries as the reference's tape has them at reader time, a
 (`xv` lines; one `xh` line has the operators' and the templates' numbers). On the 9700X (`before/census-run.sh`: the
 working tree's incremental Develop build and `test-checker --seed 133 --part 5/8`, `dev-census.log`; then the shadow
 on `sqlite3.c`, Lua and musl, CPU 2, each run its own hold of the lock, `census-corpora.log` and
-`corpus-CORPUS.txt`, the runs' outputs without the census's lines). Counts, no times. The lines are
-`CORPUS.tsv.xz` (`lines.txt`: 268,942, 61,509 and 188,250 records' lines and a header each).
+`corpus-CORPUS.txt`, the runs' outputs without the census's lines; and on the compiler's own source, the working
+tree's `main.c` with the patch in it, `before/census-own.sh`). Counts, no times. The lines are `CORPUS.tsv.xz`
+(`lines.txt`: 268,942, 61,509, 188,250 and 205,869 records' lines and a header each).
 
-**The simulation** (`before/simulate-values.py`, its outputs `sim-CORPUS.txt` and `sim-three.txt`): a candidate rule
+**The simulation** (`before/simulate-values.py`, its outputs `sim-CORPUS.txt`, and `sim-three.txt` for the three C corpora together): a candidate rule
 for each entry's value, a function of the window's fields alone, run over the lines and compared with the
-reference's value. Every rule gives every entry's value on the three corpora but a floating constant's, which the
-simulation does not compute (its significand and exponent, converted to its class's bits): 540,534 entries, none
-wrong. `before/census-table.py` makes the table:
+reference's value. Every rule gives every entry's value on the four corpora but a floating constant's, which the
+simulation does not compute (its significand and exponent, converted to its class's bits): 796,051 entries, none
+wrong. `before/census-table.py` makes the table (`before/table.md`), and `before/census-totals.py` the totals the
+list below has:
 
-| | `sqlite3.c` | Lua | musl |
-| --- | ---: | ---: | ---: |
-| expressions the rows take; their records | 49,073; 268,942 | 9,888; 61,509 | 39,495; 188,250 |
-| their entries; those whose value is not zero | 302,047; 152,808 (50.59%) | 54,341; 29,859 (54.95%) | 184,146; 96,945 (52.65%) |
-| values that are not zero, a record | 0.568 | 0.485 | 0.515 |
-| **by its source: entries; of them not zero** | | | |
-| its record's object: a name's read, an address constant's, an update's read by name | 67,111; 67,111 | 14,532; 14,532 | 58,111; 58,111 |
-| its destination's record's object: a store or an update by name | 10,881; 10,881 | 1,649; 1,649 | 9,641; 9,641 |
-| an integer constant's bits, by its class | 22,277; 10,553 | 4,324; 3,030 | 11,755; 9,123 |
-| a folded constant's, by its target's class | 10,889; 4,838 | 1,194; 845 | 6,481; 4,853 |
-| a member's offset in bytes | 21,511; 21,511 | 3,431; 3,431 | 2,822; 2,822 |
-| the 1 of an offset's sum (a member's, an address constant's) | 22,272; 22,272 | 3,485; 3,485 | 3,167; 3,167 |
-| an address constant's offset | 959; 761 | 525; 54 | 719; 345 |
-| a pointer's stride (a sum's, a subscript's) | 6,184; 6,184 | 923; 923 | 3,546; 3,546 |
-| a pointer's update's stride; its step's 1 | 768; 768 | 588; 588 | 1,070; 1,070 |
-| an update's step: one, of the class it is computed in | 1,633; 1,633 | 251; 251 | 932; 932 |
-| a floating constant's bits | 83; 46 | 10; 9 | 956; 898 |
-| a branch's label: the control's | 3,969; 3,969 | 352; 352 | 1,434; 1,434 |
-| a branch's label: an operator's own | 891; 58 | 76; 5 | 380; 12 |
-| a call's row | 12,501; 398 | 3,710; 180 | 6,957; 611 |
-| a temporary's number | 1,825; 1,825 | 525; 525 | 380; 380 |
-| an access's value (a vector's bytes, else 0) | 29,526; 0 | 4,850; 0 | 10,090; 0 |
-| a test's zero | 15,077; 0 | 1,820; 0 | 8,681; 0 |
-| none: an operation's, a conversion's, a discard's | 73,690; 0 | 12,096; 0 | 57,024; 0 |
-| **expressions with two or more of an evaluated call, a labeled operator and a postfix update through an address** | 474 (0.97%) | 163 (1.65%) | 635 (1.61%) |
+| | `sqlite3.c` | Lua | musl | the compiler's own source |
+| --- | ---: | ---: | ---: | ---: |
+| expressions the rows take; their records | 49,073; 268,942 | 9,888; 61,509 | 39,495; 188,250 | 39,456; 205,869 |
+| their entries; those whose value is not zero | 302,047; 152,808 (50.59%) | 54,341; 29,859 (54.95%) | 184,146; 96,945 (52.65%) | 255,517; 129,265 (50.59%) |
+| values that are not zero, a record | 0.568 | 0.485 | 0.515 | 0.628 |
+| **by its source: entries; of them not zero** | | | | |
+| its record's object: a name's read, an address constant's, an update's read by name | 67,111; 67,111 | 14,532; 14,532 | 58,111; 58,111 | 62,499; 62,499 |
+| its destination's record's object: a store or an update by name | 10,881; 10,881 | 1,649; 1,649 | 9,641; 9,641 | 7,130; 7,130 |
+| an integer constant's bits, by its class | 22,277; 10,553 | 4,324; 3,030 | 11,755; 9,123 | 5,314; 4,147 |
+| a folded constant's, by its target's class; to bool | 10,889; 4,838 | 1,194; 845 | 6,481; 4,853 | 21,446; 11,358 |
+| a member's offset in bytes | 21,511; 21,511 | 3,431; 3,431 | 2,822; 2,822 | 13,584; 13,584 |
+| the 1 of an offset's sum (a member's, an address constant's) | 22,272; 22,272 | 3,485; 3,485 | 3,167; 3,167 | 14,545; 14,545 |
+| an address constant's offset | 959; 761 | 525; 54 | 719; 345 | 1,200; 961 |
+| a pointer's stride (a sum's, a subscript's) | 6,184; 6,184 | 923; 923 | 3,546; 3,546 | 8,349; 8,349 |
+| a pointer's update's stride; its step's 1 | 768; 768 | 588; 588 | 1,070; 1,070 | 104; 104 |
+| an update's step: one, of the class it is computed in | 1,633; 1,633 | 251; 251 | 932; 932 | 190; 190 |
+| a floating constant's bits | 83; 46 | 10; 9 | 956; 898 | 31; 31 |
+| a branch's label: the control's | 3,969; 3,969 | 352; 352 | 1,434; 1,434 | 5,589; 5,589 |
+| a branch's label: an operator's own | 891; 58 | 76; 5 | 380; 12 | 756; 66 |
+| a call's row | 12,501; 398 | 3,710; 180 | 6,957; 611 | 8,674; 437 |
+| a temporary's number | 1,825; 1,825 | 525; 525 | 380; 380 | 275; 275 |
+| an access's value (a vector's bytes, else 0) | 29,526; 0 | 4,850; 0 | 10,090; 0 | 22,355; 0 |
+| a test's zero | 15,077; 0 | 1,820; 0 | 8,681; 0 | 14,420; 0 |
+| none: an operation's, a conversion's, a discard's | 73,690; 0 | 12,096; 0 | 57,024; 0 | 69,056; 0 |
+| **expressions with two or more of an evaluated call, a labeled operator and a postfix update through an address** | 474 (0.97%) | 163 (1.65%) | 635 (1.61%) | 479 (1.21%) |
 
 What the rules are, as the simulation has them:
 
 - **A record's object** is its line's (`NodeFactsRecord.object`). At reader time a global's entry holds its object,
-  which stands for its symbol (the machine's `object_symbols` has the object there): no record of the three corpora
+  which stands for its symbol (the machine's `object_symbols` has the object there): no record of the four corpora
   has another symbol than its object.
 - **A store or an update by name** has its destination's record's object, its first operand's; the store's own
-  record has it too for 3,022 of the 22,171.
+  record has it too for 3,137 of the 29,301.
 - **An integer constant's CONST** is its payload masked to its class's width and extended from it by the class's
   signedness; a folded one's the same by its target's class, and whether it is not zero for a bool's.
 - **A member's offset** is its line's, in bits, over eight; an address constant's offset is its payload.
 - **A stride** is its first operand's conversion's type's (`check_action_pointer_stride`): a pointer's update's own
-  type's is the same for every one of the 1,388 (`before/check-strides.py`, `check-strides.txt`).
-- **An update's step** is 1, or one's bits of a floating class (four of the 3,854 are a double's).
+  type's is the same for every one of the 1,492 (`before/check-strides.py`, `check-strides.txt` and
+  `check-strides-own.txt`).
+- **An update's step** is 1, or one's bits of a floating class (four of the 4,044 are a double's).
 - **A branch's label** is the control's own (`BUSTER_NODE_MACHINE_CONTROL_LABEL`) or the label of the operator that
   owns the tested value (an `&&` branched where true, an `||` where false: its first operand's), which is its
-  preorder number among the expression's labeled operators: zero for 1,272 of the 1,347.
-- **A call's row** is its preorder number among the expression's evaluated calls: zero for 21,979 of the 23,168.
+  preorder number among the expression's labeled operators: zero for 1,962 of the 2,103.
+- **A call's row** is its preorder number among the expression's evaluated calls: zero for 30,216 of the 31,842.
 - **A temporary's number** is the pair 0 and 1 in every postfix update through an address: no expression of the
-  three corpora has two such updates (`check-strides.txt`'s `kept` lines have each row's pattern).
+  four corpora has two such updates (`check-strides.txt`'s `kept` lines have each row's pattern).
 - **An access's value** is zero for every LOAD, STORE and SET: none is a vector's.
 
 So an expression's values are fields of its records' lines and fixed numbers, but for the expressions with two or
-more of an evaluated call, a labeled operator and a postfix update through an address, 0.97%, 1.65% and 1.61% of
-them, whose rows, labels and temporaries are numbered.
+more of an evaluated call, a labeled operator and a postfix update through an address, 0.97%, 1.65%, 1.61% and
+1.21% of them, whose rows, labels and temporaries are numbered.

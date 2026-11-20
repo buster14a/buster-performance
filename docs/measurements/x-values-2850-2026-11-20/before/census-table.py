@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # census-table.py: the specification's table of the values' census, from the simulation's outputs beside this file
-# (sim-sqlite3.txt, sim-lua.txt, sim-musl.txt): a row a source of a value, its entries and those whose value is not
+# (sim-sqlite3.txt, sim-lua.txt, sim-musl.txt, sim-own.txt): a row a source of a value, its entries and those whose value is not
 # zero; no rule of the simulation may have a wrong entry.
 import re, os
 here = os.path.dirname(os.path.abspath(__file__))
-C = ('sqlite3', 'lua', 'musl')
+C = ('sqlite3', 'lua', 'musl', 'own')
 T = {c: open('%s/sim-%s.txt' % (here, c)).read() for c in C}
 assert all('WRONG' not in T[c] for c in C)
 def head(c):
@@ -28,7 +28,7 @@ rows = [('expressions the rows take; their records', lambda c: '%s; %s' % (n(exp
 SOURCES = (("its record's object: a name's read, an address constant's, an update's read by name", "its record's object"),
            ("its destination's record's object: a store or an update by name", "its destination's record's object"),
            ("an integer constant's bits, by its class", "an integer constant's bits, by its class"),
-           ("a folded constant's, by its target's class", "a folded constant's bits, by its target's class"),
+           ("a folded constant's, by its target's class; to bool", ("a folded constant's bits, by its target's class", "a folded constant's, to bool")),
            ("a member's offset in bytes", "a member's offset in bytes"),
            ("the 1 of an offset's sum (a member's, an address constant's)", "an offset's sum (1)"),
            ("an address constant's offset", "an address constant's offset (its payload)"),
@@ -44,11 +44,11 @@ SOURCES = (("its record's object: a name's read, an address constant's, an updat
            ("a test's zero", "a test's zero"),
            ("none: an operation's, a conversion's, a discard's", "none (0)"))
 total_checked = {c: 0 for c in C}
-print('| | `sqlite3.c` | Lua | musl |')
-print('| --- | ---: | ---: | ---: |')
+print('| | `sqlite3.c` | Lua | musl | the compiler\'s own source |')
+print('| --- | ---: | ---: | ---: | ---: |')
 for name, f in rows:
     print('| %s | %s |' % (name, ' | '.join(f(c) for c in C)))
-print('| **by its source: entries; of them not zero** | | | |')
+print('| **by its source: entries; of them not zero** | | | | |')
 for name, keys in SOURCES:
     keys = keys if isinstance(keys, tuple) else (keys,)
     cells = []
