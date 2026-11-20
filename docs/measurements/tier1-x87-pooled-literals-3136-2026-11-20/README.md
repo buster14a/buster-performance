@@ -21,3 +21,5 @@ The [generated C test configuration](operands/generate.py), [runtime driver](ope
 In the [four-loop ledger](loops/paired.tsv), the historical executable labels `parent` and `narrow` identify #3134 and #3136, respectively. The runner took a warm-up plus eight alternate-order pairs, saving [288 checked process results](loops/counters.tsv.gz) at four link placements. The [assembly](loops/assembly) shows each target function.
 
 For the [twelve musl workloads](libm/timed.c), the [paired results](libm/timed/paired.tsv) and [1,152 process results](libm/timed/counters.tsv.gz) compare pre-#3134, #3134 and #3136. These tables use `before`, `narrow` and `pool`, respectively. Each timed invocation performs 32,768 calls and verifies the ten-byte result hash and x87 flags. Separate [per-function checks](libm/comparisons.tsv) cover twelve precision/rounding modes. Both compilers have the same 10,908 observations differing from Clang in at least one field.
+
+The [static musl parsing experiment](libc-parsing/) checks the three string-to-floating APIs against Clang across four syntax groups and four rounding modes.
