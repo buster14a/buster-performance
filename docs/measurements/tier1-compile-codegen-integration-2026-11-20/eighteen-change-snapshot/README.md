@@ -30,3 +30,7 @@ The upstream source is [libjpeg-turbo 3.1.3](https://github.com/libjpeg-turbo/li
 Clang and both Buster builds each passed all 211 upstream tests using the upstream checksum for contracted 12-bit floating-point output. Automatic configuration initially selected the other official checksum and the same single test failed on all three compilers. The executable hashes were unchanged when the expected mode was corrected. Both sets of CTest logs are included.
 
 All [216 command outputs](jpeg/applications/checks.tsv) across 18 operations, three compilers and four placements matched byte for byte. All [99 cross-decoder comparisons](jpeg/applications/cross-decodes.tsv) agreed. The [1,296 process observations](jpeg/applications/counters.tsv.gz) cover eight measured local pairs after warm-up. Lossless rotation used 3.632% fewer instructions with cycle changes from −0.582% to +1.275% across four placements. Floating IDCT used about 0.194% fewer instructions and 0.175–0.590% fewer cycles. The remaining cases were near neutral. [All paired counters](jpeg/applications/paired.tsv).
+
+The [1,204 paired self-host compiler measurements](selfhost-compile-counters/) cover all 43 Buster release sources and compare both the fifteen-change and eighteen-change snapshots with their own controls.
+
+A [new 256-seed Csmith and YARPGen campaign](generated-programs/) found the same 245 passes, nine Clang runtime limits and two Tier 0 argument-count limits in both compiler snapshots.
