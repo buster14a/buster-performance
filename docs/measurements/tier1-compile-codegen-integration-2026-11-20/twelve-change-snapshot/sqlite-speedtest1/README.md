@@ -1,0 +1,7 @@
+# SQLite speedtest1 on generated code
+
+Pinned SQLite 3.53.2, Git checkout `ccc132c5be20ab5c755c97a08d06b1b592fef330` and amalgamation Fossil ID `d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24`. The same Clang-built speedtest1 driver called each library. The amalgamation enabled R-Tree, disabled threading and omitted load extensions. Twelve linked executables cover Clang and both Buster compilers at four linker placements.
+
+All 108 verification runs agreed across nine workload sets and 77 named subtests. The upstream verification hash covers values for some tests. JSON, star, app and parsenumber supplied zero bytes to that hash. For floating-point results the upstream hash records the type and omits the numeric value. `upstream-hashes.tsv` gives the per-workload byte counts and digests. The standalone upstream `trigger` set creates `z1` and `z2` and tries to insert into `t1` and `t2`. All twelve binaries reported the same missing-table error. Its individual results are retained.
+
+The 576 local counters include a warm-up and seven measured pairs for each workload and placement. SQLite's main workload retired about 0.043% fewer instructions at each placement. Across the remaining sets the change was about −0.002% to −0.017%. Cycle effects varied by placement and workload. The paired medians for R-Tree ranged from −12.33% to +1.38%. The executable table includes the actual function addresses and sizes.

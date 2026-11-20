@@ -1,5 +1,7 @@
 # Buster built by Buster, and linked C programs
 
+The [twelve-change integration record](twelve-change-snapshot/) adds measured one-, two- and four-core compile times, compiler bootstrap fixed points, the full SQLite Tcl suite and generated application results for SQLite and Zstandard.
+
 These local correctness and code-size measurements cover four individual compiler changes and six changes combined. Every comparison uses the same 43 source units at Buster commit `5449b579cdc4bd21e8d7c7e0c71ac0eb1ad3c6cd`, compiled in the same directory with one lane, Tier 1, `-O2 -march=znver5`. The source and flag lists are included in both text and the harness’s NUL-separated format. The test host was a Ryzen 9 7940HS.
 
 | Compiler change | Identical objects / 43 | Sum of object .text, bytes | Functions smaller / larger | Linked stage-2 .text, bytes |
