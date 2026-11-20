@@ -23,3 +23,11 @@ An initial ambient-load bootstrap exposed eleven arena resource-profile test fai
 ## Full compiler fixed points
 
 The baseline and the six-change candidate each compiled its own source tree twice through the self-host harness, using the first generated compiler to produce the next. For each variant all 43 object files and the complete linked stage-2 and stage-3 executables matched byte for byte. Each stage also passed the smoke and executable probes. The baseline executable’s SHA-256 was `4e693e0f6ff037bdc13034c5fe8c41cf7ae4eba0ccd53ad11c11417a7edb952a`. The combined-source executable’s was `f6bf3cadc2d83673909ac00d515927cf8d937e629497a519a091382ea938d282`. The per-file comparisons are in `fixed-point.tsv`. This follow-up uses the candidate source when checking the candidate fixed point. The earlier table compiles one common source as the code-size workload.
+
+## Interaction with concurrent pull requests
+
+The source merge matrix records 30 comparisons across active emitter, inliner, DWARF and floating-point work. Each candidate is compared with its functional parent against the same peer commit. All 30 preserve their parent’s clean/conflicted result. Rows with pre-existing conflicts remain visible. The two inliner changes had no independent inliner peer in this snapshot.
+
+The signed conversion and FMA stack was built with [#2921](https://github.com/buster14a/buster/pull/2921) at `aa6ed7d2b50590200eb53cc10d8c27a3597f348f`. Both the parent composition and the candidate composition passed the selector, emitter and end-to-end pipeline suites. The two composition commits were `30d01900a986465971d78398a9f2c7231cff9ca4` and `f4be1b87fa181c116255b51ded24f77ae1ca88a0`. Per-suite logs are included.
+
+For [#3117](https://github.com/buster14a/buster/pull/3117), generating the earlier self-host source grew each copy of `foreign_unwind_prune` by 67 bytes. We also compiled the actual proposed function at [#3061](https://github.com/buster14a/buster/pull/3061) commit `1c882f4d3a94ae8416a8c633bab7e39a26bca9dd` with the same parent and candidate compilers. The function shrank from 11,822 to 11,816 bytes in both executable and checker unity objects. Their SHA-256 digests are in `foreign3061.tsv`.
