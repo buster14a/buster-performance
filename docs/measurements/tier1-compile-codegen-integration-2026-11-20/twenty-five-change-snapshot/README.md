@@ -32,3 +32,5 @@ The [direct 9700X measurements](9700x/) cover all three real inputs, with three 
 The [fresh differential campaign](generated-programs/) records 238 common passes, 13 Clang reference timeouts and five common Tier 0 argument-limit diagnostics across 256 seeds.
 
 [Six complete upstream Lua suites and 320 timed interpreter processes](lua/) cover language, C API and generated-program behavior.
+
+A further [126 clean whole-project builds](ninja/) measure Buster and release/debug Lua wall time at one, two and four parallel jobs, with verified executable outputs.
