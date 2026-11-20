@@ -1,0 +1,159 @@
+--- a/src/buster/compiler/host_isa.h
++++ b/src/buster/compiler/host_isa.h
+@@ -17,4 +17,25 @@
+ #define BUSTER_SCALAR_PATH(requested) (requested)
+ #define BUSTER_VECTOR_PATH(requested) (requested)
+ #include <immintrin.h>
++// EXPERIMENT ONLY (#2924 C12c-3 core-3's gate): the scalar arms this executable takes, by the bits after "-areas" in its
++// file's name: 1 the string literals' step, 2 the unsequenced checks' scans, 4 the deferred merge's scans, 8 the overload
++// index's probe, 16 the mangling's scans, 32 the condition declarations' marks.
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++__attribute__((weak)) unsigned buster_scalar_area_mask = 0;
++static __attribute__((constructor, unused)) void buster_scalar_area_initialize(void)
++{
++    char path[4096];
++    const ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
++    unsigned bits = 0;
++    if (length > 0)
++    {
++        path[length] = 0;
++        const char* at = strstr(path, "-areas");
++        bits = at != 0 ? (unsigned)strtoul(at + 6, 0, 0) : 0;
++    }
++    buster_scalar_area_mask = bits;
++}
++#define buster_scalar_area(area) ((int)((buster_scalar_area_mask >> (area)) & 1u))
+ #endif
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -6654,7 +6654,7 @@
+             CheckStringLiteral literal = { 0 };
+             if (valid)
+             {
+-                literal = check_literal_strings_by(parts, count, parser->language.standard >= 2023, BUSTER_SCALAR_PATH(parser->options.scalar), reader->arena);
++                literal = check_literal_strings_by(parts, count, parser->language.standard >= 2023, BUSTER_SCALAR_PATH(parser->options.scalar || buster_scalar_area(0)), reader->arena);
+                 reader->output->resource |= literal.resource;
+                 valid = literal.valid;
+                 // (Not a static assertion's message, an unevaluated string literal, whose escapes are the driver's:
+--- a/src/buster/compiler/c_check_unsequenced.c
++++ b/src/buster/compiler/c_check_unsequenced.c
+@@ -942,7 +942,7 @@
+         {
+             const uint32_t live = end - base < 16 ? end - base : 16;
+             uint32_t selected = live == 16 ? 0xffffu : (1u << live) - 1;
+-            if (vector)
++            if (vector && !buster_scalar_area(1))
+             {
+                 const __mmask16 lanes = (__mmask16)selected;
+                 const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + base);
+@@ -1049,7 +1049,7 @@
+     {
+         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
+         uint32_t selected = live == 16 ? 0xffffu : (1u << live) - 1;
+-        if (vector)
++        if (vector && !buster_scalar_area(1))
+         {
+             const __mmask16 lanes = (__mmask16)selected;
+             const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+--- a/src/buster/compiler/c_check_deferred.c
++++ b/src/buster/compiler/c_check_deferred.c
+@@ -1589,7 +1589,7 @@
+ static uint32_t check_deferred_entries(const uint32_t* column, uint32_t begin, uint32_t end, uint32_t none, bool vector, uint32_t* positions)
+ {
+     uint32_t total = 0;
+-    if (vector)
++    if (vector && !buster_scalar_area(2))
+     {
+         const __m512i empty = _mm512_set1_epi32((int)none);
+         for (uint32_t first = begin; first < end; first += 64)
+@@ -1626,7 +1626,7 @@
+ static uint32_t check_deferred_entries64(const uint64_t* column, uint32_t begin, uint32_t end, bool vector, uint32_t* positions)
+ {
+     uint32_t total = 0;
+-    if (vector)
++    if (vector && !buster_scalar_area(2))
+     {
+         for (uint32_t first = begin; first < end; first += 64)
+         {
+@@ -1663,7 +1663,7 @@
+ static uint32_t check_deferred_count_bytes(const uint8_t* column, uint32_t begin, uint32_t end, bool vector)
+ {
+     uint32_t total = 0;
+-    if (vector)
++    if (vector && !buster_scalar_area(2))
+     {
+         for (uint32_t first = begin; first < end; first += 64)
+         {
+--- a/src/buster/compiler/c_check_deferred_expressions.c
++++ b/src/buster/compiler/c_check_deferred_expressions.c
+@@ -340,7 +340,7 @@
+             // Rebuild once with the existing SIMD/scalar byte counter, before the ordered top-level gaps run.
+             reader->output->constant_warning_count = reader->output->constant_warnings != NULL ?
+                 check_deferred_count_bytes(reader->output->constant_warnings, 0, reader->parser->tokens.count,
+-                                           !BUSTER_SCALAR_PATH(reader->parser->options.scalar)) : 0;
++                                           !BUSTER_SCALAR_PATH(reader->parser->options.scalar || buster_scalar_area(2))) : 0;
+             if (reader->warning_index_ready)
+             {
+                 memset(reader->warning_index, 0xff, (uint64_t)reader->warning_index_base * 2 * sizeof(uint16_t));
+@@ -634,7 +634,7 @@
+ #undef BUSTER_CHECK_EXPRESSION_COPY
+         check_deferred_expression_leaves(to, from, leaves);
+         uint32_t n = 0;
+-        for (; !BUSTER_SCALAR_PATH(!vector) && n < from->count; n += 16)
++        for (; !BUSTER_SCALAR_PATH(!vector || buster_scalar_area(2)) && n < from->count; n += 16)
+         {
+             const uint32_t length = from->count - n < 16 ? from->count - n : 16;
+             const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
+@@ -900,7 +900,7 @@
+             // Value chains, first/last_value, region_roots and vla_sizes have no consumer after this boundary.
+             // Only the retained token roots and sparse receipts need final node identities.
+             uint32_t t = part->first_token;
+-            for (; valid && !BUSTER_SCALAR_PATH(deferred->scalar_merge) && t < part->end_token; t += 16)
++            for (; valid && !BUSTER_SCALAR_PATH(deferred->scalar_merge || buster_scalar_area(2)) && t < part->end_token; t += 16)
+             {
+                 const uint32_t length = part->end_token - t < 16 ? part->end_token - t : 16;
+                 const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, length);
+--- a/src/buster/compiler/c_check_overload_index.c
++++ b/src/buster/compiler/c_check_overload_index.c
+@@ -123,7 +123,7 @@
+     {
+         uint32_t matches = 0;
+         uint32_t empty = 0;
+-        if (scalar)
++        if (scalar || buster_scalar_area(3))
+         {
+             // Keep the scalar source reader an independent executable reference for the intrinsic group probe.
+             #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
+--- a/src/buster/compiler/c_check_mangle.c
++++ b/src/buster/compiler/c_check_mangle.c
+@@ -124,7 +124,7 @@
+     {
+         const uint32_t count = writer->substitution_count - first < 16 ? writer->substitution_count - first : 16;
+         uint32_t matches = 0;
+-        if (BUSTER_SCALAR_PATH(writer->source->scalar))
++        if (BUSTER_SCALAR_PATH(writer->source->scalar || buster_scalar_area(4)))
+         {
+             for (uint32_t lane = 0; lane < count; lane += 1)
+             {
+@@ -171,7 +171,7 @@
+             uint32_t body_end = 0;
+             for (uint32_t first = 0; first < input->token_count; first += 64)
+             {
+-                const uint64_t lanes = BUSTER_SCALAR_PATH(source->scalar) ? check_input_scan_all(first, input->token_count) :
++                const uint64_t lanes = BUSTER_SCALAR_PATH(source->scalar || buster_scalar_area(4)) ? check_input_scan_all(first, input->token_count) :
+                                        check_input_scan_equal(input->declaration_kinds, first, input->token_count, C_BINDING_TAG_KIND) |
+                                        check_input_scan_equal(parser->tree.roles, first, input->token_count, PARSE_ROLE_OPEN_BODY);
+                 for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+--- a/src/buster/compiler/c_check_condition.c
++++ b/src/buster/compiler/c_check_condition.c
+@@ -1222,7 +1222,7 @@
+             const bool overloadable = (check_input_overload_flags(check_input_attributes_at(input, entry->declaration)) & BUSTER_CHECK_OVERLOADABLE) != 0;
+             marked[entry->declaration] = (entry->independent || entry->restricted) && !overloadable ? 1u : 0u;
+         }
+-        const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar) && count <= INT32_MAX;
++        const bool vector = BUSTER_VECTOR_PATH(!(parser->options.scalar || buster_scalar_area(5))) && count <= INT32_MAX;
+         uint32_t first = 0;
+         while (vector && first < count)
+         {
