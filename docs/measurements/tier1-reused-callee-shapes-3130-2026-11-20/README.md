@@ -1,0 +1,7 @@
+# Reusing callee shapes during Tier 1 inlining
+
+[Compiler PR #3130](https://github.com/buster14a/buster/pull/3130) compares parent `f45ddd83b8b5ec33416f97def4094ffbed4cbf07` against `802ad721317a7f36feb1bd78de10b0e2ba72ffd7`. Both use the Release Clang build for a znver5 host. A Ryzen 9 7940HS ran the local paired counters with one compiler lane. The first pair warms each workload. The next eight give the reported paired medians.
+
+SQLite needed 8,531 callee shape inspections for 1,691 distinct bodies. The repeated inspections visited 845,217 instructions. The most-used body was inspected 155 times. The final implementation adds an eight-byte pointer to the summary and stores 56 bytes plus optional slot marks for each successfully cached shape. Its scratch fallback still handles allocation failure. The paired output names the intermediate embedded-shape design separately.
+
+SQLite compiler instructions fell 0.615%, from 7,763,930,657 to 7,716,185,746. The eight paired cycle changes ranged from −1.15% to +2.56%, with a median of −0.101%. The Lua parser and VM required 0.747% and 0.076% fewer compiler instructions. All 1,336 musl objects, 70 debug application objects, both linked Lua programs and ten script results matched the parent. The 108 separate compilations over three runs and one, two and four lanes preserved object bytes. The inliner checked 125,265 conditions and executed 22,432 independent cases. The 9700X comparison is pending.
