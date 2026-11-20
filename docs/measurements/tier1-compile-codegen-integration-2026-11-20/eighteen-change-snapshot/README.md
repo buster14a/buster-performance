@@ -19,7 +19,7 @@ The [six compiler profiles](profiles/) cover release and debug compilation of SQ
 
 ## Compiler output and correctness
 
-Both compilers rebuilt all 43 Buster release translation units, then rebuilt themselves with their own resulting executable. [Stage two and three](fixedpoints.tsv) produced bit-identical executables and objects per compiler. On common source the candidate reduced text by 13,124 bytes across the 43 objects. Of 10,476 matching function symbols, 685 became smaller and two became larger. The candidate's own linked compiler used 14,464 fewer text bytes and occupied 12,288 fewer file bytes. [Totals](selfhost-totals.tsv) and [individual function changes](selfhost-function-changes.tsv).
+Both compilers rebuilt all 43 Buster release translation units, then rebuilt themselves with their own resulting executable. [Stage two and three](fixedpoints.tsv) produced bit-identical executables and objects per compiler. On common source the candidate reduced text by 13,124 bytes across the 43 objects. Of 10,476 matching function symbols, 685 became smaller and two became larger. On the same source, the executable linked from the candidate compiler's output used 14,464 fewer text bytes and occupied 12,288 fewer file bytes. [Totals](selfhost-totals.tsv) and [individual function changes](selfhost-function-changes.tsv).
 
 The [24 suite results](suites/status.tsv) cover both release builds and the candidate under separate ASan/UBSan and MemorySanitizer configurations. The two sanitizer report audits were clean. The C suite passed 220 programs and 430 functions on each compiler. Its recorded code-size comparison remains above the Clang total on this corpus. The per-suite logs retain the exact expectations and non-enforced size comparison.
 

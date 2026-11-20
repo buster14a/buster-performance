@@ -37,3 +37,5 @@ For [#3117](https://github.com/buster14a/buster/pull/3117), generating the earli
 The [fifteen-change measurement](fifteen-change-snapshot/) includes full clean builds, bootstrap comparisons and checked Opus output and per-change performance.
 
 The [eighteen-change integration](eighteen-change-snapshot/) includes the combined source patch, six whole-compiler profiles, two three-stage self-hosts, both sanitizer configurations and real libjpeg-turbo applications.
+
+The [twenty-five-change integration](twenty-five-change-snapshot/) measures the full stack on SQLite and Lua, and records exact source, six compiler profiles, two self-host fixed points and independent correctness evidence.
