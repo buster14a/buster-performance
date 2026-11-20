@@ -12,7 +12,7 @@ Eight object configurations each had 1,551 independently decoded and checked PC-
 
 Part of #1387, stacked on #3134.
 
-The [object ledger](footprint/objects.tsv.gz) includes every corpus unit. [Individual changes](footprint/changes.tsv) and [linked section sizes](footprint/linked.tsv) distinguish executable text, literal data, relocation overhead and disk size.
+The [object ledger](musl-objects.tsv.gz) includes every corpus unit. The [section ledger](footprint/objects.tsv.gz) breaks down its 27 changed objects. [Individual changes](footprint/changes.tsv) and [linked section sizes](footprint/linked.tsv) distinguish executable text, literal data, relocation overhead and disk size.
 
 The [ELF verifier](elfcheck.py) decodes each [RIP-relative memory operand](elf/relocated-loads.tsv.gz) and its literal bytes, then checks [48 final links](elf/linked.tsv). The general compiler option `-fPIC` is unsupported in both compiler versions. The shared-library check binds symbols within the library with `-Bsymbolic`. An ordinary preemptible shared link encounters the existing unwind reference limitation. The [raw IR test generator](raw-ir.py) and [outcomes](raw-ir/results.tsv) cover unusual raw encodings that the C parser need not produce.
 
