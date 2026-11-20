@@ -265,7 +265,8 @@ On `ec32ed54f` (the piece on main `505904cd0`; the commit pushed has its code, w
 - `final/cloud-sanitizers/` (`sanitizers-parts.sh`): native memory, address and thread builds; `test-checker` part 5
   under each, and under memory and address the shadow with `--window-rows`, `--window-contexts` and `--window-tests`
   on `sqlite3.c`, Lua and the compiler's own source: 24 lines with status 0, no report.
-- `final/cloud-final-verify/` (`final-verify.sh`), on the commit as pushed (the same code on main `00faef7dd`): the
+- `final/cloud-final-verify/` (`final-verify.sh`), on the squashed commit on main `00faef7dd` (`b27a2ac66`; the commit
+  pushed, `16d18403d`, is that one with a number of its docs amended): the
   build, `test-checker` part 5, the self-check, the ownership check and the DCO audit pass; the shadow with
   `--window-rows` on the compiler's own source there, with the default warnings and with `-Wall -Wextra`: C decides
   41,414 expressions and takes 40,087, the rows make 31,607 tapes of 171,414 entries and list 5,210 for an update,
