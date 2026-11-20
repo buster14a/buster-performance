@@ -1,0 +1,9 @@
+# Proven unsigned dword conversions
+
+Part of #2829. When Tier 1 has already proved that a 32-bit value occupies a zero-extended general-purpose register, its signed 64-bit representation is exactly the original unsigned value. Select the existing scalar conversion directly for this case. Parameters and call returns whose upper bits are unknown retain their explicit clean-up.
+
+Across four output architectures and both scheduler modes, the parent, candidate and Clang each reproduced the integer rounding oracle’s bits, MXCSR flags and side effects (1,024,000 checks per binary). A separate spill-pressure oracle checked 786,432 results and 16,384 flag words per binary, including 24 live values across a call. All 1,336 musl objects matched. In Zstandard’s real decode-corpus generator, `writeCompressedBlock` shrank from 8,288 to 8,273 bytes.
+
+On a Ryzen 9 7940HS, rolled array conversion loops shrank from 35 to 32 bytes and retired 10.98% fewer instructions. The eight-way loops shrank from 268 to 241 bytes and retired 13.14% fewer. Timings depended on entry placement and upper-vector state. Across both precisions, rolled cycle medians ranged from 30.62% lower to 1.58% higher, and eight-way medians ranged from 1.90% lower to 12.48% higher. The default compiler target and floating-point evaluation rules carry through unchanged.
+
+The [compiler revisions](revisions.txt), [20 oracle configurations](results.tsv), [ten forced-spill configurations](pressure/checks.tsv), [emitted code](assembly/), [512 loop processes](loops/counters.tsv.gz) and [1,336 musl object comparisons](musl-objects.tsv.gz) identify the exact input and output. Zstandard emitted [288 verified compressed frames](zstd/frames.tsv.gz) across compilers, seeds and four placements. Independent decompression reproduced every original, and all compiler variants agreed on every pair of hashes. The [function size comparison](zstd/functions.tsv) records the change in the generator.
