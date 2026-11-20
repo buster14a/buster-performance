@@ -1,0 +1,748 @@
+From cf047c295cc5fc74320e9719ada455e61e157441 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 20 Nov 2026 14:32:33 +0000
+Subject: [PATCH 1/2] Fault in a static binding's fresh pages in a few calls
+ (#2546)
+
+A static hello world linked by the C driver in a fresh process spends its
+`executable` stage (the binding and link_check) on pages it touches for
+the first time. In a cloud VM, whose arenas are base pages, the stage took
+319 page faults (perf record -e page-faults -d, by address): 314 were the
+binding's own writes, 1,256 KB of fresh anonymous pages (171 for the
+members' atoms' bytes in the program's byte arena, 123 for the link's
+columns and names past their counts, 20 for Bind's arrays), and 3 mapped
+6 MB of the snapshot's 2 MB folios, most of the 7.3 MB the stage added to
+the resident set. With the snapshot on tmpfs (base pages) and the arenas
+in huge pages, as on the 9700X, the stage took the issue's numbers, 100
+faults and 6.1 MB: 63 fault-arounds of the snapshot, 16 for the byte
+arena (one of them its huge page) and 19 other base pages.
+
+bind_populate, once the static closure knows the members, faults in what
+their joins are about to write, a call per arena or column
+(MADV_POPULATE_WRITE): the members' atoms' rooms in the byte arena
+(lane.c's arena_populate, with arena_fault_in), their names' bytes, and
+each column's records past its count (link.c's link_populate). It does so
+only where the byte arena hasn't held that much before, so that a link
+bound again, as the benchmarks bind one, doesn't walk pages it has. A
+fresh base page costs about 1.7 us as a fault in the VM and 1.0 us
+populated among others.
+
+In the VM (Develop builds, medians of 61 interleaved fresh processes of
+`-static hello.c`) the stage took 1.20 ms against 1.37, with 25 faults
+taken for 319, and the whole compile 1,300 for 1,585 (perf stat). With
+huge pages and the snapshot on tmpfs it is unchanged (1.20 against
+1.18 ms). The executables are byte-identical: the static and dynamic hello
+worlds, and Lua 5.4.8 linked -static from its 33 files.
+
+Populating the snapshot doesn't pay: MADV_POPULATE_READ over the 704
+pages a link reads, in 76 ranges, took about what the faults took, and
+over the whole span more. What remains of a fresh link is reading: the
+pieces' hashes' first reads of 11,206 slices, the joins' copies and
+link_check. docs/object-writer-and-linker.md ("The runtime snapshot") has
+the measurements.
+
+test-lanes checks arena_fault_in and arena_populate, test-link
+link_populate's every column, and test-bind bind_populate and that bind_end
+populates (mincore and the arenas' peaks); each of 49 mutants of the new
+code fails one of them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NNmNQvmuGSny2j5d2tWFbo
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/commands/bind.md            |  11 +++-
+ docs/commands/lanes.md           |   7 +-
+ docs/commands/link.md            |   4 ++
+ docs/object-writer-and-linker.md |  44 +++++++++++++
+ src/buster/compiler/bind.c       |  39 ++++++++++--
+ src/buster/compiler/bind_test.c  | 106 +++++++++++++++++++++++++++++++
+ src/buster/compiler/lane.c       |  41 +++++++++++-
+ src/buster/compiler/lane_test.c  |  50 ++++++++++++++-
+ src/buster/compiler/link.c       |  59 ++++++++++++++++-
+ src/buster/compiler/link_test.c  | 105 ++++++++++++++++++++++++++++++
+ 10 files changed, 455 insertions(+), 11 deletions(-)
+
+diff --git a/docs/commands/bind.md b/docs/commands/bind.md
+index d7ae600c9..51ef1c633 100644
+--- a/docs/commands/bind.md
++++ b/docs/commands/bind.md
+@@ -32,7 +32,10 @@ requirements. [Command index](README.md).
+   It binds against the static runtime too (step 6's second part): the
+   archives' members the link needs, found as GNU ld's group finds them, joined
+   in archive order with the COMDAT groups after the first of each signature
+-  discarded, and no name bound to a shared library. And against a shared
++  discarded, and no name bound to a shared library. Before they join, the
++  fresh pages their joins write are faulted in a call per arena or column
++  (`bind_populate`, #2546: `docs/object-writer-and-linker.md`, "The runtime
++  snapshot"). And against a shared
+   library's runtime (step 6's fifth part), as GNU ld and lld bind `-shared`:
+   no start object, a strong reference to a name no library exports left
+   undefined for the loader (but a member's, refused as in a PIE), and every
+@@ -202,6 +205,12 @@ paths, which must make the same link and join the same members:
+   definitions of 4 and of 24 names the members refer to (none thread-local),
+   which the vector path's closure compares with, or past 16 leaves to the
+   exact path's;
++- the pages the members' joins write (`bind_populate`, #2546): with every
++  37th member needed on a link of fresh arenas after `bind_begin`, the
++  members' atoms' rooms and names' bytes committed past the bytes' and name
++  arena's lengths (their peaks moved, their lengths kept) and each table's
++  first column's pages for their records resident; and nothing where the
++  bytes arena has held as much before (both peaks stay);
+ - with `--cross-check`: each static program's own objects linked by
+   `cc -static` with GNU ld (its `--trace` given twice) and with lld
+   (`--why-extract`), which must load the members that joined and no others,
+diff --git a/docs/commands/lanes.md b/docs/commands/lanes.md
+index ad7d9f83e..79983de76 100644
+--- a/docs/commands/lanes.md
++++ b/docs/commands/lanes.md
+@@ -41,7 +41,12 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
+   back; an arena's base pages committed at once and then four times what is
+   committed where commit isn't charged, 64 KB and within twice where it is;
+   and a full half, compact reservations and limits that aren't fixed each
+-  leaving a reservation a mapping of its own;
++  leaving a reservation a mapping of its own; and, in base pages throughout
++  (#2546), `arena_fault_in` faulting in the pages its bytes touch and no
++  other (none for no bytes), and `arena_populate` committing and faulting in
++  the next bytes past the length from the peak's page, the length kept and the
++  peak past them, but nothing (false) for bytes the peak reaches, for none, for
++  borrowed storage and for an arena whose writable extent is unknown;
+ - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
+   seven cost patterns: the parts must cover the items in lane order, and each
+   item must go to the lane whose share of the total cost holds its midpoint;
+diff --git a/docs/commands/link.md b/docs/commands/link.md
+index 015f3785d..325a14696 100644
+--- a/docs/commands/link.md
++++ b/docs/commands/link.md
+@@ -35,6 +35,10 @@ requirements. [Command index](README.md).
+ - every table at its capacity, the side table of wide addends full, a name
+   arena too small, and arenas too small for the tables: each add fails with
+   `LINK_ERROR_FULL` and changes nothing;
++- `link_populate` (#2546): on tables of 60,000 to 65,000 records with 20,000
++  to 25,000 in use, in base pages, every column's pages for the records to
++  come resident (`mincore`), as far as its capacity, and neither the page
++  before them nor two past them;
+ - each rule the adds and `link_check` enforce, with the error it gets;
+ - every fixup kind on the instructions it can patch, with the bytes, field
+   offsets and addends GNU as gives (binutils 2.42), each alone and in streams
+diff --git a/docs/object-writer-and-linker.md b/docs/object-writer-and-linker.md
+index 49fe5b68c..1e68b9eec 100644
+--- a/docs/object-writer-and-linker.md
++++ b/docs/object-writer-and-linker.md
+@@ -941,6 +941,50 @@ runtime's binding against one loaded afresh (3.3) and its pieces' checks
+   (`rcrt1.o` doesn't define `_dl_relocate_static_pie`, as `crt1.o` does), so
+   binding checks one piece more.
+ 
++**A link in a fresh process** (#2546). A compile loads the snapshot and binds
++once, where the measurements above bind again and again in one process. In a
++cloud VM (4 vCPUs, the cache on ext4, the arenas in base pages as on every
++virtual machine: `arena_page_policy`), `-static hello.c`'s `executable` stage
++(`--time-stages`: the binding and `link_check`) took 319 page faults and
++7.3 MB more resident, where a dynamic hello world's took 3. By address
++(`perf record -e page-faults -d`):
++
++- 314 were the binding's writes to fresh anonymous pages, 1,256 KB: 171 for
++  the members' atoms' bytes in the program's byte arena, 123 for the link's
++  columns and names past their counts, 20 for `Bind`'s arrays;
++- 3 were the snapshot's, mapping 6 MB of its 2 MB folios: the link reads
++  1,229 KB of it, 11,206 slices of 429 pieces over 704 pages.
++
++With the snapshot in base pages (on tmpfs) and the arenas in huge pages, as
++on the 9700X, the stage took 100 faults and 6.1 MB, the issue's 103 and
++6.5 MB: 63 for the snapshot, each a fault-around of 64 KB (4 MB in all), 16
++for the byte arena (the rest of its 64 KB of base pages and one huge page)
++and 19 for the other arenas' base pages.
++
++A fresh base page cost about 1.7 µs as a fault in the VM, and 1.0 µs when
++`MADV_POPULATE_WRITE` faults it in among others in one call (328 pages: 515
++to 594 µs touched, 308 to 347 populated). So binding faults in what the
++members' joins are about to write (`bind_populate`) once the closure knows
++the members: their atoms' rooms in the byte arena (`arena_populate`), their
++names' bytes, and each column's records past its count (`link_populate`), a
++call each, where the byte arena hasn't held that much before. A link bound
++again keeps its pages, which the advice would only walk (about 30 µs for
++1.3 MB of them in 32 calls in the VM). In the VM the stage took 1.20 ms
++against 1.37 (medians of 61 interleaved runs), with 25 faults taken for 319
++(`perf`'s `page-faults`; getrusage, which `--time-stages` reads, counts the
++populated pages too: 335), and the whole compile 1,300 for 1,585. With huge
++pages and the snapshot in base pages it is unchanged (1.20 ms against 1.18),
++as it should be on the 9700X.
++
++Populating the snapshot doesn't pay: `MADV_POPULATE_READ` over the 704
++pages a link reads, in 76 ranges, took about what the faults took (medians
++of 7 processes: 242 µs against 206 on tmpfs; of 5: 46 against 22 on ext4's
++large folios), and over the whole span more (398 µs on tmpfs). What remains
++of a fresh link is reading: the pieces' hashes, the first reads of their
++11,206 slices, the joins' copies and `link_check` (0.26 ms of the VM's
++stage, which `benchmark-link`'s link leaves out), in that order of the
++stage's samples (`perf`'s `cpu-clock`).
++
+ **Finding and importing the files** (`runtime.c`, with the readers of
+ `import.c`). GCC's installation is the highest version under
+ `/usr/lib/gcc/<triple>` or `/usr/lib64/gcc/<triple>` that has `crtbeginS.o`,
+diff --git a/src/buster/compiler/bind.c b/src/buster/compiler/bind.c
+index b093099c9..0514feb31 100644
+--- a/src/buster/compiler/bind.c
++++ b/src/buster/compiler/bind.c
+@@ -124,7 +124,7 @@
+ //     bind_library_satisfied_exact, bind_library_satisfied, bind_library_versions, bind_needed_libraries,
+ //     bind_keep_libraries and bind_library_exports.
+ //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
+-//     bind_closure_exact and bind_static_members.
++//     bind_closure_exact, bind_populate and bind_static_members.
+ //   - Entry points: bind_capacity, bind_capacity_piece, bind_capacity_needed, bind_begin and bind_end.
+ 
+ #include <stdint.h>
+@@ -293,6 +293,9 @@ static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime
+ // its join fails as damaged (BIND_ERROR_SNAPSHOT) and the caller opens the runtime again.
+ static __attribute__((unused)) LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes,
+                                                                  uint64_t* atom_bytes);
++// Piece `piece`'s records and its names' and atoms' bytes added to a capacity (bind_capacity_needed's, and
++// bind_populate's), from its marks and its atoms' room alone (RuntimePiece).
++static void bind_capacity_piece(const Runtime* runtime, uint32_t piece, LinkCapacity* capacity, uint64_t* name_bytes, uint64_t* atom_bytes);
+ // Begins binding `link` against `runtime` by `path`: matches the link's global symbols against the runtime's names and
+ // appends Scrt1.o, crti.o and crtbeginS.o (crt1.o, crti.o and crtbeginT.o for a static runtime), numbering the
+ // runtime's units from unit_base and copying atoms' bytes into `bytes`. Bind's arrays come from `arena`. False, with
+@@ -1957,7 +1960,36 @@ static void bind_closure_vector(Bind* bind, const Link* link)
+     }
+ }
+ 
+-// A static runtime's members: the closure by the path's way, then each needed member joined in archive order.
++// The pages the joins of the members the closure needs are about to write, faulted in a few calls rather than a fault
++// at a time (#2546): their atoms' bytes in `bytes`, by the members' rooms, and where those pages were fresh, their names'
++// bytes and the link's columns past their counts, which a process that bound nothing before hasn't touched either. In a
++// cloud VM, whose arenas are base pages, a fresh process's static hello world took 314 faults for them, 1.26 MB, and
++// its `executable` stage 1.37 ms, 1.20 with them populated (docs/object-writer-and-linker.md, "The runtime snapshot").
++// Where `bytes` has held as much before, as when a link is bound again (the benchmarks'), its pages are there, and
++// nothing is faulted in: the advice would only walk them.
++static void bind_populate(Bind* bind, Link* link)
++{
++    const Runtime* runtime = bind->runtime;
++    const uint32_t words = (runtime->member_count + 63) / 64;
++    LinkCapacity added = { 0 };
++    uint64_t name_bytes = 0;
++    uint64_t atom_bytes = 0;
++    for (uint32_t w = 0; w < words; w += 1)
++    {
++        for (uint64_t pending = bind->members_needed[w]; pending != 0; pending &= pending - 1)
++        {
++            bind_capacity_piece(runtime, RUNTIME_OBJECTS + w * 64 + (uint32_t)__builtin_ctzll(pending), &added, &name_bytes, &atom_bytes);
++        }
++    }
++    if (arena_populate(bind->bytes, atom_bytes))
++    {
++        arena_populate(link->name_arena, name_bytes);
++        link_populate(link, added);
++    }
++}
++
++// A static runtime's members: the closure by the path's way, then each needed member joined in archive order, their
++// pages faulted in first (bind_populate).
+ static void bind_static_members(Bind* bind, Link* link)
+ {
+     const Runtime* runtime = bind->runtime;
+@@ -1970,6 +2002,7 @@ static void bind_static_members(Bind* bind, Link* link)
+     {
+         bind_closure_exact(bind, link);
+     }
++    bind_populate(bind, link);
+     for (uint32_t w = 0; bind->error == BIND_ERROR_NONE && w < words; w += 1)
+     {
+         for (uint64_t pending = bind->members_needed[w]; pending != 0 && bind->error == BIND_ERROR_NONE; pending &= pending - 1)
+@@ -2001,8 +2034,6 @@ static LinkCapacity bind_capacity(const Runtime* runtime, uint64_t* name_bytes,
+     return result;
+ }
+ 
+-// Piece `piece`'s records and its names' and atoms' bytes added to a capacity (bind_capacity_needed), from its marks and
+-// its atoms' room alone (RuntimePiece).
+ static void bind_capacity_piece(const Runtime* runtime, uint32_t piece, LinkCapacity* capacity, uint64_t* name_bytes, uint64_t* atom_bytes)
+ {
+     const ImportMark begin = runtime->pieces[piece].begin;
+diff --git a/src/buster/compiler/bind_test.c b/src/buster/compiler/bind_test.c
+index 6e2111097..d58c82d81 100644
+--- a/src/buster/compiler/bind_test.c
++++ b/src/buster/compiler/bind_test.c
+@@ -75,6 +75,10 @@
+ //     with GNU ld and lld); a reference to a name a member defines absolutely; and weak definitions of 4 and of 24 names
+ //     the members refer to (none thread-local), which the vector path's closure compares with, or past
+ //     BUSTER_BIND_BLOCKED leaves to the exact path's.
++//   - Populate (#2546, bind_populate): with every 37th member needed on a link of fresh arenas, the members' atoms'
++//     rooms and names' bytes committed past the arenas' lengths (their peaks) and each table's first column's pages for
++//     their records faulted in; and nothing where the bytes arena has held as much before. And bind_end's: main's
++//     members' rooms committed past the byte arena's length before them, which their atoms' bytes alone don't reach.
+ //   - With --cross-check: each static program's own objects linked by cc -static with GNU ld (its --trace given twice)
+ //     and with lld (--why-extract), which must load the members that joined and no others, and run printing what the
+ //     model predicts. And five C programs that cc compiles (hello, stdio, threads, jumps and weak-puts), each
+@@ -4508,6 +4512,107 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
+     }
+ }
+ 
++// Whether the page at `address` is resident.
++static bool bind_test_resident(const void* address)
++{
++    unsigned char vector = 0;
++    const uintptr_t page = (uintptr_t)address & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    return mincore((void*)page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 && (vector & 1) != 0;
++}
++
++// Whether a column's pages for `added` records past `count`, `element` bytes each, are resident: its first and its last.
++static bool bind_test_column_resident(const void* records, uint64_t element, uint32_t count, uint32_t added)
++{
++    const uint8_t* first = (const uint8_t*)records + count * element;
++    return added == 0 || (bind_test_resident(first) && bind_test_resident(first + added * element - 1));
++}
++
++// bind_populate (#2546), against a static runtime: after bind_begin on a link of fresh arenas, with every 37th member
++// needed as a closure would mark them, the members' atoms' rooms are committed past the bytes' length and their names'
++// bytes past the name arena's (the peaks there, the lengths kept), and each table's first column's pages for their
++// records faulted in; where the bytes arena has held as much before, nothing: both peaks stay.
++static bool bind_test_populate(const Runtime* runtime)
++{
++    BindTestTally tally = {
++        .check = "populate",
++    };
++    for (uint32_t held = 0; held < 2; held += 1)
++    {
++        BindTestLink test;
++        bool result = bind_test_link_begin(&test, runtime, bind_test_room(runtime));
++        const SymbolId main = result ? bind_test_symbol(&test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
++        result = main != 0 && bind_test_define(&test, main) && bind_begin(&test.bind, &test.link, runtime, BIND_PATH_VECTOR, &test.bytes, 1, &test.arena);
++        bind_test_expect(&tally, result, "a link to populate", held);
++        LinkCapacity added = { 0 };
++        uint64_t name_bytes = 0;
++        uint64_t atom_bytes = 0;
++        for (uint32_t m = 0; result && m < runtime->member_count; m += 37)
++        {
++            const RuntimePiece* piece = &runtime->pieces[RUNTIME_OBJECTS + m];
++            test.bind.members_needed[m / 64] |= 1ull << (m % 64);
++            added.names += piece->end.names - piece->begin.names;
++            added.atoms += piece->end.atoms - piece->begin.atoms;
++            added.symbols += piece->end.symbols - piece->begin.symbols;
++            added.fixups += piece->end.fixups - piece->begin.fixups;
++            added.wide_addends += piece->end.wide_addends - piece->begin.wide_addends;
++            added.priorities += piece->end.priorities - piece->begin.priorities;
++            name_bytes += piece->end.name_bytes - piece->begin.name_bytes;
++            atom_bytes += piece->atom_room;
++        }
++        if (result && held != 0)
++        {
++            const uint64_t length = test.bytes.length;
++            result = arena_push(&test.bytes, atom_bytes, 1) != 0;
++            arena_pop_to(&test.bytes, length);
++        }
++        const uint64_t bytes_length = test.bytes.length;
++        const uint64_t bytes_peak = test.bytes.peak;
++        const uint64_t names_length = test.names.length;
++        if (result)
++        {
++            bind_populate(&test.bind, &test.link);
++        }
++        const Link* link = &test.link;
++        const bool columns = bind_test_column_resident(link->names.bytes, sizeof(*link->names.bytes), link->names.count, added.names) &&
++                             bind_test_column_resident(link->atoms.class, sizeof(*link->atoms.class), link->atoms.count, added.atoms) &&
++                             bind_test_column_resident(link->symbols.name, sizeof(*link->symbols.name), link->symbols.count, added.symbols) &&
++                             bind_test_column_resident(link->fixups.offset, sizeof(*link->fixups.offset), link->fixups.count, added.fixups) &&
++                             bind_test_column_resident(link->fixups.wide_addends, sizeof(*link->fixups.wide_addends), link->fixups.wide_count, added.wide_addends) &&
++                             bind_test_column_resident(link->priorities.atom, sizeof(*link->priorities.atom), link->priorities.count, added.priorities);
++        const bool kept = test.bytes.length == bytes_length && test.names.length == names_length;
++        const bool fresh = test.bytes.peak == bytes_length + atom_bytes && test.names.peak == names_length + name_bytes && columns;
++        const bool untouched = test.bytes.peak == bytes_peak && test.names.peak == names_length;
++        bind_test_expect(&tally, result && atom_bytes != 0 && name_bytes != 0 && kept && (held == 0 ? fresh : untouched),
++                         held == 0 ? "the members' pages weren't faulted in, or the arenas' lengths moved" : "pages were faulted in where the bytes had been held",
++                         held);
++        bind_test_link_end(&test);
++    }
++    // bind_end populates main's members so: after it, the byte arena's peak is at least its length before them plus
++    // their atoms' rooms (bind_populate's push), which their bytes alone don't reach: the rooms hold more than a page of
++    // slack for alignments.
++    BindTestLink bound;
++    bool result = bind_test_link_begin(&bound, runtime, bind_test_room(runtime));
++    const SymbolId main = result ? bind_test_symbol(&bound, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
++    result = main != 0 && bind_test_define(&bound, main) && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena);
++    const uint64_t before = bound.bytes.length;
++    result = result && bind_end(&bound.bind, &bound.link);
++    uint64_t rooms = 0;
++    uint64_t actual = 0;
++    for (uint32_t m = 0; result && m < runtime->member_count; m += 1)
++    {
++        const RuntimePiece* piece = &runtime->pieces[RUNTIME_OBJECTS + m];
++        const bool joined = bind_test_has(bound.bind.members_joined, m);
++        rooms += joined ? piece->atom_room : 0;
++        for (AtomId atom = piece->begin.atoms; joined && atom < piece->end.atoms; atom += 1)
++        {
++            actual += runtime_atom_bytes(runtime, atom) != 0 ? runtime->link.atoms.size[atom] : 0;
++        }
++    }
++    bind_test_expect(&tally, result && rooms > actual + BUSTER_ARENA_PAGE_BYTES && bound.bytes.peak >= before + rooms, "a static binding didn't fault its members' pages in", rooms - actual);
++    bind_test_link_end(&bound);
++    return bind_test_report(&tally);
++}
++
+ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
+ {
+     BindTestTally tally = {
+@@ -5411,6 +5516,7 @@ static int run_bind_tests(int argc, char** argv)
+         {
+             passed = bind_test_static_programs(&static_runtime, seed, cross_check, directory, keep, &arena) && passed;
+             passed = bind_test_static_rules(&static_runtime, &arena) && passed;
++            passed = bind_test_populate(&static_runtime) && passed;
+         }
+         if (static_imported == RUNTIME_ERROR_NONE && cross_check)
+         {
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 42f1bdfea..5e496b82d 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -38,7 +38,8 @@
+ //     the arenas it releases for its next reservations, which take them zero-filled, their committed prefixes still
+ //     writable unless commit charge is bounded, and their mappings perhaps larger than the capacity asked for.
+ //     arena_reserve_tables lays out tables of fixed sizes that are reserved and released together in one arena, each
+-//     in the pages an arena of its own would have.
++//     in the pages an arena of its own would have. arena_populate faults in the fresh pages an arena's next pushes will
++//     write, in one call (arena_fault_in), where those writes would fault them in a page at a time.
+ //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
+ //     scratch_end.
+ //   - Lanes: Lane, LaneGroup, LaneSession, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index,
+@@ -318,6 +319,17 @@ static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
+ // were mapped, or discarded by the pool. A push through a copy of the arena doesn't move its peak, so only a caller that
+ // knows no copy pushed past its length may take the answer for its next pushes' bytes (#628: the C driver's arena).
+ static __attribute__((unused)) bool arena_untouched(const Arena* arena);
++// Faults in the pages that [bytes, bytes + size) touches, writable memory, in one call (MADV_POPULATE_WRITE, Linux
++// 5.14): zero where nothing has written them, as the writes about to follow would find them a page fault at a time, each
++// a trap into the kernel (#2546: 1.7 µs a base page in a cloud VM, against 1.0 µs populated). Advice only: where the
++// kernel doesn't take it, those writes fault the pages in.
++static __attribute__((unused)) void arena_fault_in(const void* bytes, uint64_t size);
++// Commits the next `bytes` past the arena's length and faults in (arena_fault_in) the pages among them that no push has
++// taken, those from its peak on: an arena's next pushes of that many bytes, which would otherwise fault their fresh
++// pages in one at a time (#2546). The length stays, and the peak moves past the bytes, as a push of them would move it.
++// Returns whether there were such bytes: false for borrowed storage, an arena whose writable extent is unknown, one whose
++// pushes have reached that far before, or one that can't commit them.
++static __attribute__((unused)) bool arena_populate(Arena* arena, uint64_t bytes);
+ // Gives the kernel back the pages that pushes touched past the arena's length, from the first huge page boundary past it,
+ // which the kernel maps again, zero, wherever a later push touches them: for an arena whose next users touch far fewer
+ // of its pages than its last ones (#628: the C driver's scratch, which the reader and check_program take to 77 MB of
+@@ -1531,6 +1543,33 @@ static bool arena_untouched(const Arena* arena)
+     return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
+ }
+ 
++// Linux's MADV_POPULATE_WRITE (5.14), which the C library's headers may not name.
++#define BUSTER_ARENA_MADV_POPULATE_WRITE 23
++
++// The kernel rounds the advice's length up to whole pages, and its start must be on one.
++static void arena_fault_in(const void* bytes, uint64_t size)
++{
++    const uintptr_t begin = (uintptr_t)bytes & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    if (size != 0)
++    {
++        madvise((void*)begin, (uintptr_t)bytes + size - begin, BUSTER_ARENA_MADV_POPULATE_WRITE);
++    }
++}
++
++// A push moves the peak, and a pop never does, so an owned arena's peak is never below its length.
++static bool arena_populate(Arena* arena, uint64_t bytes)
++{
++    const uint64_t length = arena->length;
++    const uint64_t peak = arena->peak;
++    const bool result = arena->mapping_bytes != 0 && !arena->unaccounted && peak - length < bytes && arena_push(arena, bytes, 1) != 0;
++    if (result)
++    {
++        arena_pop_to(arena, length);
++        arena_fault_in(arena->base + peak, length + bytes - peak);
++    }
++    return result;
++}
++
+ // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
+ // with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
+ static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index e2a70ab84..ec3f25bb4 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -17,7 +17,8 @@
+ //     where 2 MB or more of base pages are mapped MAP_STACK as where they are advised (#1444). An arena of tables
+ //     (#1128): its tables zero, writable, apart and each in the pages an arena of its own would have, and in a pool for
+ //     the same tables alone; for random tables, a layout that maps no more than their own arenas; and tables refused
+-//     for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations.
++//     for their size under RLIMIT_AS, which past 64 MB switch the thread to compact reservations. arena_fault_in and
++//     arena_populate (#2546), in base pages: the pages faulted in, read back with mincore.
+ //   - Ranges: lane_range for every count from 0 to BUSTER_LANE_TEST_MAX_RANGE, and lane_range_by_cost for the same
+ //     counts with each pattern of lane_test_cost: the parts must cover [0, count) in lane order, lane_range's first
+ //     count % lanes parts must be the longer ones, and lane_range_by_cost must give each item to the lane whose share of
+@@ -1041,6 +1042,53 @@ static bool lane_test_arenas(void)
+     }
+     arena_release(&ahead);
+ 
++    // arena_fault_in (#2546): the pages its bytes touch are faulted in, from the first byte's to the last's, and no other;
++    // no bytes, none, even from inside a page. arena_populate: the next bytes past the length that no push took (from the
++    // peak's page), committed and faulted in, the length kept and the peak past them; for bytes the peak reaches, or none,
++    // nothing and false, and false for borrowed storage and an arena whose writable extent is unknown. In base pages
++    // throughout, so that no huge page faults in a neighbour.
++    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
++    Arena faulted = arena_reserve_small(64ull << 20, 64ull << 20);
++    uint8_t* region = faulted.base != 0 ? arena_push(&faulted, 8 * page, 1) : 0;
++    lane_test_expect(&tally, region != 0, "an arena to fault in couldn't be pushed");
++    if (region != 0)
++    {
++        arena_fault_in(region + 100, 0);
++        const bool none = !lane_test_resident(region);
++        arena_fault_in(region + page - 1, 2);
++        const bool straddled = lane_test_resident(region) && lane_test_resident(region + page) && !lane_test_resident(region + 2 * page);
++        arena_fault_in(region + 3 * page + 5, 1);
++        const bool one = lane_test_resident(region + 3 * page) && !lane_test_resident(region + 2 * page) && !lane_test_resident(region + 4 * page);
++        lane_test_expect(&tally, none && straddled && one, "a fault-in missed a page its bytes touch, or faulted in another");
++        // The 8 pages pushed and none written past the fourth: the peak is at their end.
++        arena_pop_to(&faulted, 100);
++        const bool reached = !arena_populate(&faulted, 2 * page) && !arena_populate(&faulted, 8 * page - 100) && !arena_populate(&faulted, 0);
++        lane_test_expect(&tally, reached && faulted.length == 100 && faulted.peak == 8 * page && !lane_test_resident(region + 7 * page),
++                         "a populate of bytes the peak reaches faulted something in, or moved the length or the peak");
++        const bool populated = arena_populate(&faulted, 10 * page - 100);
++        const bool fresh = lane_test_resident(region + 8 * page) && lane_test_resident(region + 9 * page) && !lane_test_resident(region + 10 * page);
++        lane_test_expect(&tally, populated && fresh && !lane_test_resident(region + 7 * page) && faulted.length == 100 && faulted.peak == 10 * page,
++                         "a populate past the peak missed its pages, faulted in others, or left the length or the peak wrong");
++        lane_test_expect(&tally, !arena_populate(&faulted, faulted.capacity) && faulted.length == 100 && faulted.peak == 10 * page,
++                         "a populate past the capacity was taken, or moved the length or the peak");
++    }
++    arena_release(&faulted);
++    uint8_t borrowed_room[2 * BUSTER_ARENA_PAGE_BYTES];
++    Arena borrowed_populate = {
++        .base = borrowed_room,
++        .capacity = sizeof(borrowed_room),
++    };
++    Arena unknown_populate = arena_reserve_small(64ull << 20, 64ull << 20);
++    const bool unknown_pushed = unknown_populate.base != 0 && arena_push(&unknown_populate, page, 1) != 0;
++    if (unknown_pushed)
++    {
++        arena_unaccounted(&unknown_populate, unknown_populate.committed);
++        arena_pop_to(&unknown_populate, 0);
++    }
++    lane_test_expect(&tally, unknown_pushed && !arena_populate(&borrowed_populate, page) && !arena_populate(&unknown_populate, 2 * page),
++                     "borrowed storage or an unaccounted arena was populated");
++    arena_release(&unknown_populate);
++
+     // Filled exactly, then one more byte, which fails without changing the arena.
+     const uint64_t small_capacity = 3 * BUSTER_ARENA_PAGE_BYTES + 100;
+     Arena small = arena_reserve(small_capacity);
+diff --git a/src/buster/compiler/link.c b/src/buster/compiler/link.c
+index e78f96d9e..ad4f0c6c9 100644
+--- a/src/buster/compiler/link.c
++++ b/src/buster/compiler/link.c
+@@ -31,7 +31,8 @@
+ // counts it is given: count, place, fill, so the counts come first, from the front end or the test program's options.
+ // A small program's tables then share a few base pages. Names' bytes go to a name arena of their own. An add past a
+ // table's capacity, or a name the name arena can't hold, fails and returns 0: nothing is truncated, and link->error
+-// keeps the first failure.
++// keeps the first failure. A caller about to add many records to fresh columns faults their pages in first, a call a
++// column (link_populate: binding a static runtime's members, #2546).
+ //
+ // What the adds enforce, so that the object writer and the linker can rely on it:
+ //   - Every id a record holds exists, and every record a table holds was added whole.
+@@ -72,8 +73,8 @@
+ //     their properties (LinkFixupKind and link_fixup_kinds), LinkError, the tables (LinkNames, LinkAtoms, LinkSymbols,
+ //     LinkFixups and LinkPriorities), Link, LinkCapacity, LinkReference and the entry points' prototypes.
+ //   - Names: link_hash, link_hash_rows, link_hash_names, link_add_name and link_add_name_hashed.
+-//   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup,
+-//     link_fixup_addend and link_add_priority.
++//   - Tables: link_capacity_bytes, link_initialize, link_populate_column, link_populate, link_add_atom, link_add_symbol,
++//     link_define_symbol, link_add_fixup, link_fixup_addend and link_add_priority.
+ //   - Code: link_instruction_field, link_kind_fits and link_add_code_fixups.
+ //   - Checks: link_check_fixups, link_check_target and link_check.
+ 
+@@ -563,6 +564,11 @@ static __attribute__((unused)) uint64_t link_capacity_bytes(LinkCapacity capacit
+ // Returns false, with LINK_ERROR_FULL and every table without room, if the arena can't hold them or a capacity is
+ // UINT32_MAX (ids are 32-bit); the arena is then as it was.
+ static __attribute__((unused)) bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCapacity capacity);
++// Faults in (arena_fault_in), a column at a time, the pages of the next `added` records of every table's columns past
++// its count, as far as its capacity: for a caller about to add that many records to a link whose columns no one has
++// written past their counts, whose writes would fault those pages in one at a time (#2546: bind_populate, before a
++// static runtime's members join).
++static __attribute__((unused)) void link_populate(const Link* link, LinkCapacity added);
+ // A copy of the name, with its hash: its id, or 0 if the table or the name arena is full or the name is empty.
+ static __attribute__((unused)) NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length);
+ // The same with the name's hash given, which the caller computed with link_hash or link_hash_names.
+@@ -911,6 +917,53 @@ static bool link_initialize(Link* link, Arena* arena, Arena* name_arena, LinkCap
+     return fits;
+ }
+ 
++// The pages of the `added` records past `count` of a column of `element`-byte records with room for `capacity`, as far
++// as that room, faulted in.
++static void link_populate_column(const void* records, uint64_t element, uint32_t count, uint32_t capacity, uint32_t added)
++{
++    const uint32_t room = capacity - count;
++    const uint32_t taken = added < room ? added : room;
++    arena_fault_in((const uint8_t*)records + count * element, taken * element);
++}
++
++static void link_populate(const Link* link, LinkCapacity added)
++{
++    const LinkNames* names = &link->names;
++    const LinkAtoms* atoms = &link->atoms;
++    const LinkSymbols* symbols = &link->symbols;
++    const LinkFixups* fixups = &link->fixups;
++    const LinkPriorities* priorities = &link->priorities;
++    link_populate_column(names->bytes, sizeof(*names->bytes), names->count, names->capacity, added.names);
++    link_populate_column(names->length, sizeof(*names->length), names->count, names->capacity, added.names);
++    link_populate_column(names->hash, sizeof(*names->hash), names->count, names->capacity, added.names);
++    link_populate_column(atoms->class, sizeof(*atoms->class), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->alignment_log2, sizeof(*atoms->alignment_log2), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->unit, sizeof(*atoms->unit), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->size, sizeof(*atoms->size), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->section, sizeof(*atoms->section), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->bytes, sizeof(*atoms->bytes), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->fixup_begin, sizeof(*atoms->fixup_begin), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->fixup_count, sizeof(*atoms->fixup_count), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(atoms->address, sizeof(*atoms->address), atoms->count, atoms->capacity, added.atoms);
++    link_populate_column(symbols->name, sizeof(*symbols->name), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->atom, sizeof(*symbols->atom), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->value, sizeof(*symbols->value), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->size, sizeof(*symbols->size), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->flags, sizeof(*symbols->flags), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->source, sizeof(*symbols->source), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->got_slot, sizeof(*symbols->got_slot), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->dynamic_index, sizeof(*symbols->dynamic_index), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->version, sizeof(*symbols->version), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(symbols->reference, sizeof(*symbols->reference), symbols->count, symbols->capacity, added.symbols);
++    link_populate_column(fixups->offset, sizeof(*fixups->offset), fixups->count, fixups->capacity, added.fixups);
++    link_populate_column(fixups->target, sizeof(*fixups->target), fixups->count, fixups->capacity, added.fixups);
++    link_populate_column(fixups->addend, sizeof(*fixups->addend), fixups->count, fixups->capacity, added.fixups);
++    link_populate_column(fixups->kind, sizeof(*fixups->kind), fixups->count, fixups->capacity, added.fixups);
++    link_populate_column(fixups->wide_addends, sizeof(*fixups->wide_addends), fixups->wide_count, fixups->wide_capacity, added.wide_addends);
++    link_populate_column(priorities->atom, sizeof(*priorities->atom), priorities->count, priorities->capacity, added.priorities);
++    link_populate_column(priorities->priority, sizeof(*priorities->priority), priorities->count, priorities->capacity, added.priorities);
++}
++
+ // Whether atoms of the class have no bytes.
+ static bool link_class_is_zero_fill(uint8_t class)
+ {
+diff --git a/src/buster/compiler/link_test.c b/src/buster/compiler/link_test.c
+index b4f0f3d56..d26436954 100644
+--- a/src/buster/compiler/link_test.c
++++ b/src/buster/compiler/link_test.c
+@@ -17,6 +17,8 @@
+ //   - Capacity: every table at its capacity, the side table full while the fixups aren't, a name arena too small for a
+ //     name, and arenas too small for the tables: each add fails with LINK_ERROR_FULL and changes nothing, and
+ //     link_capacity_bytes is room enough.
++//   - Populate: link_populate faults in every column's pages for the records to come (mincore), as far as its capacity,
++//     and no other (#2546).
+ //   - Rules: records each rule refuses (link.c's orientation comment), with the error each gets, and what link_check
+ //     finds.
+ //   - Kinds: link_test_known_fixups, instructions of every kind on the fields it can patch, with the bytes, field
+@@ -636,6 +638,108 @@ static bool link_test_capacity(void)
+ }
+ #endif
+ #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
++// Whether the page at `address` is resident.
++static bool link_test_resident(const uint8_t* address)
++{
++    unsigned char vector = 0;
++    const uintptr_t page = (uintptr_t)address & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
++    return mincore((void*)page, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 && (vector & 1) != 0;
++}
++
++// One column after link_populate: its pages from the record at `count` to the last of the `added` past it (as far as its
++// `capacity`) resident, and neither the page before them nor the second page after them, which link_test_populate's
++// counts keep inside the column or past its first page, which link_initialize wrote.
++static void link_test_populated(LinkTestTally* tally, const void* records, uint64_t element, uint32_t count, uint32_t capacity, uint32_t added, uint64_t index)
++{
++    const uint8_t* first = (const uint8_t*)records + count * element;
++    const uint32_t room = capacity - count;
++    const uint8_t* last = first + (added < room ? added : room) * element - 1;
++    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
++    const bool inside = link_test_resident(first) && link_test_resident(first + (last - first) / 2) && link_test_resident(last);
++    const bool outside = !link_test_resident(first - page) && !link_test_resident(last + 2 * page);
++    link_test_expect(tally, inside && outside, "a column's pages for the records to come aren't faulted in, or others are", index);
++}
++
++// link_populate (#2546): tables of 60,000 to 65,000 records, 20,000 to 25,000 of them in use (counts set, nothing
++// written past record 0), in an arena of base pages throughout, so that no huge page faults in a neighbour. Every
++// column's pages for the records added to its table are faulted in, and none before them or past them; the names'
++// 50,000, past their room, as far as their capacity and not into the columns after them.
++static bool link_test_populate(void)
++{
++    LinkTestTally tally = {
++        .check = "populate",
++    };
++    const LinkCapacity capacity = {
++        .names = 60000,
++        .atoms = 61000,
++        .symbols = 62000,
++        .fixups = 63000,
++        .wide_addends = 64000,
++        .priorities = 65000,
++    };
++    const LinkCapacity added = {
++        .names = 50000,
++        .atoms = 7000,
++        .symbols = 9000,
++        .fixups = 11000,
++        .wide_addends = 13000,
++        .priorities = 15000,
++    };
++    Arena tables = arena_reserve_small(16ull << 20, 16ull << 20);
++    Arena names = arena_reserve_small(1ull << 20, 1ull << 20);
++    Link link;
++    const bool initialized = link_capacity_bytes(capacity) <= tables.capacity && names.base != 0 && link_initialize(&link, &tables, &names, capacity);
++    link_test_expect(&tally, initialized, "tables to populate", 0);
++    if (initialized)
++    {
++        link.names.count = 20000;
++        link.atoms.count = 21000;
++        link.symbols.count = 22000;
++        link.fixups.count = 23000;
++        link.fixups.wide_count = 24000;
++        link.priorities.count = 25000;
++        link_populate(&link, added);
++        const LinkNames* n = &link.names;
++        const LinkAtoms* a = &link.atoms;
++        const LinkSymbols* s = &link.symbols;
++        const LinkFixups* f = &link.fixups;
++        const LinkPriorities* p = &link.priorities;
++        link_test_populated(&tally, n->bytes, sizeof(*n->bytes), n->count, n->capacity, added.names, 0);
++        link_test_populated(&tally, n->length, sizeof(*n->length), n->count, n->capacity, added.names, 1);
++        link_test_populated(&tally, n->hash, sizeof(*n->hash), n->count, n->capacity, added.names, 2);
++        link_test_populated(&tally, a->class, sizeof(*a->class), a->count, a->capacity, added.atoms, 3);
++        link_test_populated(&tally, a->alignment_log2, sizeof(*a->alignment_log2), a->count, a->capacity, added.atoms, 4);
++        link_test_populated(&tally, a->unit, sizeof(*a->unit), a->count, a->capacity, added.atoms, 5);
++        link_test_populated(&tally, a->size, sizeof(*a->size), a->count, a->capacity, added.atoms, 6);
++        link_test_populated(&tally, a->section, sizeof(*a->section), a->count, a->capacity, added.atoms, 7);
++        link_test_populated(&tally, a->bytes, sizeof(*a->bytes), a->count, a->capacity, added.atoms, 8);
++        link_test_populated(&tally, a->fixup_begin, sizeof(*a->fixup_begin), a->count, a->capacity, added.atoms, 9);
++        link_test_populated(&tally, a->fixup_count, sizeof(*a->fixup_count), a->count, a->capacity, added.atoms, 10);
++        link_test_populated(&tally, a->address, sizeof(*a->address), a->count, a->capacity, added.atoms, 11);
++        link_test_populated(&tally, s->name, sizeof(*s->name), s->count, s->capacity, added.symbols, 12);
++        link_test_populated(&tally, s->atom, sizeof(*s->atom), s->count, s->capacity, added.symbols, 13);
++        link_test_populated(&tally, s->value, sizeof(*s->value), s->count, s->capacity, added.symbols, 14);
++        link_test_populated(&tally, s->size, sizeof(*s->size), s->count, s->capacity, added.symbols, 15);
++        link_test_populated(&tally, s->flags, sizeof(*s->flags), s->count, s->capacity, added.symbols, 16);
++        link_test_populated(&tally, s->source, sizeof(*s->source), s->count, s->capacity, added.symbols, 17);
++        link_test_populated(&tally, s->got_slot, sizeof(*s->got_slot), s->count, s->capacity, added.symbols, 18);
++        link_test_populated(&tally, s->dynamic_index, sizeof(*s->dynamic_index), s->count, s->capacity, added.symbols, 19);
++        link_test_populated(&tally, s->version, sizeof(*s->version), s->count, s->capacity, added.symbols, 20);
++        link_test_populated(&tally, s->reference, sizeof(*s->reference), s->count, s->capacity, added.symbols, 21);
++        link_test_populated(&tally, f->offset, sizeof(*f->offset), f->count, f->capacity, added.fixups, 22);
++        link_test_populated(&tally, f->target, sizeof(*f->target), f->count, f->capacity, added.fixups, 23);
++        link_test_populated(&tally, f->addend, sizeof(*f->addend), f->count, f->capacity, added.fixups, 24);
++        link_test_populated(&tally, f->kind, sizeof(*f->kind), f->count, f->capacity, added.fixups, 25);
++        link_test_populated(&tally, f->wide_addends, sizeof(*f->wide_addends), f->wide_count, f->wide_capacity, added.wide_addends, 26);
++        link_test_populated(&tally, p->atom, sizeof(*p->atom), p->count, p->capacity, added.priorities, 27);
++        link_test_populated(&tally, p->priority, sizeof(*p->priority), p->count, p->capacity, added.priorities, 28);
++    }
++    arena_release(&tables);
++    arena_release(&names);
++    return link_test_report(&tally);
++}
++#endif
++#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
+ // link_check_lanes against link_check (#87): from the same state, each of 1, 2, 3 and 8 lanes must answer as link_check
+ // does and record the same error. Returns link_check's answer, counting each lane count that differs in `mismatches`.
+ typedef struct LinkTestCheck LinkTestCheck;
+@@ -2976,6 +3080,7 @@ static int run_link_tests(int argc, char** argv)
+         bool passed = link_test_round_trips(seed);
+         passed = link_test_hashes(seed) && passed;
+         passed = link_test_capacity() && passed;
++        passed = link_test_populate() && passed;
+         passed = link_test_rules() && passed;
+         passed = link_test_kinds(seed) && passed;
+         passed = link_test_wide() && passed;
+-- 
+2.43.0
+
