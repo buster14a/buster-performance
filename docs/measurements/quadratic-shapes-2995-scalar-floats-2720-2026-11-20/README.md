@@ -11,7 +11,7 @@ operations and conversions). One 9700X session measured both.
 It built three trees, each under the lock in a hold of its own (`env BUSTER_DEBUG_INFO=0 ./build.sh --config Release`). It
 then ran `time-runs` three times, each in a hold of its own, on CPU 2 (`taskset -c 2`). `COMMITS` has the trees:
 main `8a1b1a03`, #3189's `053eaf71` and #3188's `4cfe6f0f`. #3189's later commit `74f1c97` adds a driver test unit alone.
-The `exclusive.sh: waiting` lines at the top of a file are its wait for another session's hold, not part of the run.
+Each run waited for another session's hold first; the three `exclusive.sh: waiting` lines naming that session were removed from the top of each file.
 
 - `shapes.txt`: #2995's four fixed shapes at 10,000 and 40,000, `-c -w`, 5 runs and 1 warm-up a build. The generator is
   in `run.sh`, the issue's own.
