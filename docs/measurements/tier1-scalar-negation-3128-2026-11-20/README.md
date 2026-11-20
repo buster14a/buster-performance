@@ -1,0 +1,7 @@
+# Scalar negation with a live input
+
+[Compiler PR #3128](https://github.com/buster14a/buster/pull/3128), `fe519acef226da5a3cc8d3fd98e03ea1644af81c`, uses the destination for the sign mask when it differs from the input. Its parent is `5ef1800d267bb9dac1867beed1039925fea33f70`. The PR corresponds to the “legacy” column in this experiment. “Vex” is a private follow-up encoding evaluated on the same parent.
+
+All 1,336 musl units built. Twenty-six object files changed, 25 with smaller text and one with equal-size text. The reduction totals 184 bytes. The 300-unit musl math archive exhibits the same reduction. The matched-entry loops shrink 51 to 47 bytes in single precision and 55 to 51 in double. Across four target architectures, each executable completed 360,480 bit-pattern, sign, input-preservation and MXCSR tests. In the separately linked math archive, all 720,896 output/exception records match between all three Buster variants. Clang differs on 3,234 result patterns and 22,740 flag sets, identically for all three.
+
+The local Ryzen 9 7940HS experiment recorded six measured rounds following a warm-up, four matched absolute addresses per precision, and both clean and dirty upper-vector states. The PR saves one retired instruction per loop element. Its cycle changes cross zero. The experimental VEX sequence reduced cycles with dirty upper state across every layout but had mixed clean-state cycles. The two experimental arms have separate columns. Each measured run checked the full loop output. Direct 9700X results are pending.
