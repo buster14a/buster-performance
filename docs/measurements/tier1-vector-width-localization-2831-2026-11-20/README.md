@@ -2,6 +2,8 @@
 
 On Buster `c8b259413110b1d6f5ff9a005a1c49f48ca01e57` the excess work in [#2831](https://github.com/buster14a/buster/issues/2831) comes chiefly from two loop-invariant values being moved inside `sqlite3VdbeExec` after a sorter loop has been vectorized and inlined. The original comparison changes the generated ISA and the vector width together. Holding the generated ISA at `znver5` shows nearly identical compiler work at 16, 32 and 64 bytes.
 
+The [generated VM and sorter measurements](sqlite-vm-and-sorter/) identify the two constants, their extra register saves, the source-loop trip bound and the cost in real in-memory and disk-backed sorts.
+
 ## Whole compiler
 
 SQLite 3.53.2, Release host build for znver5, Tier 1 at `-O2`, one compiler lane, frozen input, local Ryzen 9 7940HS. Counts are the medians of four measured rounds after a warm-up. The unmodified executable’s base and vectorized counts were 7,852,167,665 and 7,922,816,202 at znver5, and 7,851,269,056 and 7,869,689,243 at x86-64. The difference between those two increases was 52,228,351 instructions.
