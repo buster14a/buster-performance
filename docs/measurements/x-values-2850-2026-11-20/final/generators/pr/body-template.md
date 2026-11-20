@@ -1,6 +1,6 @@
 Part of #2850 (step 2). [The specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7043553775), [the piece before](https://github.com/buster14a/buster/pull/3191), [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x-values-2850-2026-11-20).
 
-> **Four of the five gates are met, and the cost gate (V3) is @@v3@@.** The specification asked at most 1.5 TSC ticks a record swept over the piece before's and set 2.5 as what refutes it. The rows' sweeps read @@e_sqlite3@@ more on `sqlite3.c` and @@e_lua@@ on Lua. [Where the piece stood](https://github.com/buster14a/buster/issues/2850#issuecomment-7045799975) said so before the fault rounds. The counters put a chunk's first run's cost in a cold start a chunk more than in work a record, which every sweep of the window pays: #@@followup@@ has it, and the one build the specification named against the loops that this piece did not make. The values run in the shadow alone, so no compile reads a tick more.
+> **Four of the five gates are met, and the cost gate (V3) is @@v3@@.** The specification asked at most 1.5 TSC ticks a record swept over the piece before's and set 2.5 as what refutes it. The rows' sweeps read @@e_sqlite3@@ more on `sqlite3.c` and @@e_lua@@ on Lua. On musl, which the gate did not name and whose chunks are a quarter the size, they read @@e_musl@@ more, and the window's rows now cost more a record of the taken expressions than X on T's columns does (@@taken_musl@@ ticks for @@reference_musl@@; @@taken_sqlite3@@ for @@reference_sqlite3@@ on `sqlite3.c`). [Where the piece stood](https://github.com/buster14a/buster/issues/2850#issuecomment-7045799975) said so before the fault rounds. The counters put a chunk's first run's cost in a cold start a chunk more than in work a record, which every sweep of the window pays: #@@followup@@ has it, and the one build the specification named against the loops that this piece did not make. The values run in the shadow alone, so no compile reads a tick more.
 
 ## What it is
 
@@ -42,7 +42,7 @@ How it came to its cost, a build a line (ticks a record swept, two or three read
 
 In the cloud container, on the code's commit `@@checks_revision@@`:
 
-- a native Release build; `test-checker`, all eight parts; the shadow with `--window-rows` and `--window-contexts` on `sqlite3.c`, Lua, musl and the compiler's own source, with the default warnings and with `-Wall -Wextra` (@@shadow_runs@@ runs, no difference); the shadow's other modes on `sqlite3.c` and Lua (@@mode_runs@@ runs); the self-check, the self-parse, `test-call-graph` and `check-call-graph`; the ownership check;
+- a native Release build; `test-checker`, all eight parts; the shadow with `--window-rows` and `--window-contexts` on `sqlite3.c`, Lua and musl and with `--window-rows` on the compiler's own source, with the default warnings and with `-Wall -Wextra` (@@shadow_runs@@ runs, no difference); the shadow's other modes on `sqlite3.c` and Lua (@@mode_runs@@ runs); the self-check, the self-parse, `test-call-graph` and `check-call-graph`; the ownership check;
 - @@complete@@
 - @@sanitizers@@
 

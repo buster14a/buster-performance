@@ -9,7 +9,7 @@
 **Where it differs from the specification.**
 
 - **A loop reads a column, not a line.** The specification's loops read each listed record's line, 64 bytes a record. A record's one value is a column now, stored by the tests' sweep as it loads the line, and a pointer's stride one that C's loop keeps: the specification's first alternative, built after the first build's readings.
-- **The tested values' and the updates' lists are the loops' that visit them already**, and the rest's list is smaller: a member's offset and an update's step are not on it.
+- **The tested values' and the updates' lists are the loops' that visit them already.** An update's step and a postfix update's first pair of temporaries are written by a loop over the updates' list, and a member's offset is on the first list, in the record's value's place. The rest's list is what is left: a floating constant, a fold to bool, and an address constant's offset after its object's address.
 - **An expression's later numbered records are found by one subtraction a block**, with no test an expression: the specification counted each expression's marked records in its part.
 - **The by-slots build was not made.** The specification named it as the second thing to measure against the loops over their gate. The counters put a first run's cost in a cold start a chunk and not in the loops' work, and that is #@@followup@@'s to measure, for every sweep of the window.
 - **The cost gate was the wrong shape.** It priced work a record; the window's sweeps pay by the chunk too (@@chunk_sqlite3@@, @@chunk_lua@@ and @@chunk_musl@@ records a chunk). The next piece's gate will state cycles a chunk and work a record apart, and Lua's apart from `sqlite3.c`'s.

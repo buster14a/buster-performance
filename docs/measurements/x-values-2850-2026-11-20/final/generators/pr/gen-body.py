@@ -23,6 +23,8 @@ computed = {
 }
 for c in ('sqlite3', 'lua', 'musl'):
     per = C[c]['swept'] / C[c]['chunks']
+    computed['taken_%s' % c] = '%.2f' % F[c]['a record of the taken']['on']
+    computed['reference_%s' % c] = '%.2f' % F[c]["the reference's X, a record of the taken"]['on']
     computed['chunk_%s' % c] = '%.0f' % per
     computed['chunks_%s' % c] = n(C[c]['chunks'])
     for name, key in ((SUM, 'sum'), (VAL, 'values'), ('the reads', 'reads'), ('the shapes', 'shapes'), ('the updates and the branches', 'lists'), ('the rows', 'write'), ("an expression's part", 'part')):
@@ -34,9 +36,10 @@ for c in ('sqlite3', 'lua', 'musl'):
         computed['%s_chunk_second_%s' % (key, c)] = n(round(second * per))
         computed['%s_cold_%s' % (key, c)] = n(round((first - second) * per))
 computed['lines_kb'] = '%.0f' % (C['sqlite3']['swept'] / C['sqlite3']['chunks'] * 64 / 1024)
-for key in re.findall(r'@@(\w+)@@', text):
-    value = extra.get(key, computed.get(key, V.get(key)))
-    assert isinstance(value, str), key
-    text = text.replace('@@%s@@' % key, value)
+while re.search(r'@@(\w+)@@', text):
+    for key in re.findall(r'@@(\w+)@@', text):
+        value = extra.get(key, computed.get(key, V.get(key)))
+        assert isinstance(value, str), key
+        text = text.replace('@@%s@@' % key, value)
 assert '@@' not in text, re.findall(r'@@\w+@@', text)
 open(sys.argv[3], 'w').write(text)
