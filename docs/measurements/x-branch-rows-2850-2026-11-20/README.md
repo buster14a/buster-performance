@@ -69,4 +69,6 @@ on T's columns, every expression it takes, where the count above is of those C t
 | a branch of kind 36 | 3,911 | 493 | 1,445 | 7,599 |
 | operators evaluated as branches | 5,223 | 621 | 2,260 | 9,646 |
 
-`before/gen-spec.py` made the specification's text of these lines (`before/spec-template.md`).
+`before/gen-spec.py` made [the specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7037879405)'s
+text of these lines (`before/spec-template.md`; `before/specification.md` is the text as posted). What the counts
+found of a `const` bool's read is [buster14a/buster#3185](https://github.com/buster14a/buster/issues/3185).

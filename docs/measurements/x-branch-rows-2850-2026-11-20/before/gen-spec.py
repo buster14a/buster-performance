@@ -35,6 +35,19 @@ for c in ('sqlite3', 'lua', 'musl'):
     values['per_update_' + c] = '%.0f' % per
     values['sum_' + c] = r.group(1)
     values['estimate_' + c] = '%.2f' % (per * int(values['branched_' + c].replace(',', '')) / values['swept_' + c])
+# The update's piece's fourth and fifth builds' lines (gen-notes.py's builds' table: NUMBERS's directory's ../pr/parts, or
+# the record's docs' table beside it).
+builds = None
+for candidate in (os.path.dirname(numbers) + '/../pr/parts/builds-table.md', os.path.dirname(numbers) + '/builds-table.md'):
+    if os.path.exists(candidate):
+        builds = open(candidate).read().splitlines()
+assert builds is not None
+masks = [l for l in builds if "both rows' shapes as masks in the shapes' sweep" in l]
+loop = [l for l in builds if "a sweep and a loop of their own, after the shapes' sweep" in l]
+assert len(masks) == 1 and len(loop) == 1
+cells = lambda l: [c.strip() for c in l.strip('|').split('|')]
+values['masks_sqlite3'] = cells(masks[0])[2]; values['masks_lua'] = cells(masks[0])[4]
+values['loop_sqlite3'] = cells(loop[0])[2]; values['loop_lua'] = cells(loop[0])[4]
 text = open(here + '/spec-template.md').read()
 for key, value in values.items():
     text = text.replace('@@%s@@' % key, str(value))
