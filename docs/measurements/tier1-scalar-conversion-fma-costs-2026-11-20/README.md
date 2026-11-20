@@ -6,6 +6,6 @@ The four indexed integer-to-floating conversions belong to [#3120](https://githu
 
 Local emitted-code checks retain the original scheduled and unscheduled leaves and the previously timed kernel object hashes. The [9700X comparison script](stage/confirm-float-costs.sh) uses short nonblocking leases and alternates form order across rounds. The original four calibrated samples per form were taken from a compiler with unfilled trial rows. The production checks below use --check with the measured rows compiled into the corresponding PR heads.
 
-The production convert hardware check is pending.
+The [production convert runs](convert/production-checks/) passed 8 independent checks on the 9700X.
 
-The production fma hardware check is pending.
+The [production fma runs](fma/production-checks/) passed 16 independent checks on the 9700X.
