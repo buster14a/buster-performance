@@ -1,0 +1,1 @@
+PATH=/root/.cache/buster/toolchain/4444af0bee44de2d/llvm-23.1.4/bin:$PATH flock -n /root/.cache/claude-c7/c12k/mut3/lock python3 /root/.cache/claude-c7/c12k/mut3/run.py > /root/.cache/claude-c7/c12k/mut3/runner.out 2>&1; echo "runner exit $?" >> /root/.cache/claude-c7/c12k/mut3/results.txt
