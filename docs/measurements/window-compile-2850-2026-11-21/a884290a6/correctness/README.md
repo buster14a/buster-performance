@@ -1,0 +1,9 @@
+# Unknown int conditions in the ordinary checker
+
+Native Release a884290a63ab5aac84fd9e29f0501737ddabfb40 was compared with its true mainline parent 9be958d5c61538562177a788a76c8c23dead9694. Their executable SHA-256 values are fe52e0c4a042c3985f2773419c3612db54d7adfb313b39c8f858534e5ad54fb7 and 2f8142feef1edf518c6e9b14ca561769c647be98b0cbe7ebcab538990c73cc50.
+
+The two compilers' ordinary commands produced identical diagnostic streams, typed transcripts and ELF files across 1,753,711 nodes from SQLite, the Lua VM, musl's allocator, Buster on this parent, and the focused conditions fixture. The live debugger witness at the actual check_graph_run return compared every represented checked value column, ordered full payloads and row indices, all four conversions per node, argument conversions, warning and diagnostic fields and all nine ordered type columns. SQLite had 323,623 nodes, 40,302 payloads and 4,740 registered types. Buster had 1,409,696 nodes, 550,766 payloads and 10,875 registered types.
+
+The registered graph contract checks unknown effectful int rvalues, nonzero constants, volatile lvalues and invalid void conditions, comparing fresh outputs against the ordinary action. Its pinned Clang 23.1.4 checker shard completed 305,242 individual checks. The source policy smoke includes 62 tests with the complete ELF and diagnostic hashes. The generated runtime test executes 3,072 calls across 48 distinct effects/short-circuit functions with the same observable result as Clang in both ordinary and debug modes.
+
+Set BUSTER_COMPILER_SOURCE and BUSTER_CORPUS_DIR to the pristine source tree and corpus root, and provide the two executables as native-base and native-condition. Run generate.py before the policy tests. dump.py accepts base condition. The debugger observations use BUSTER_CHECK_IMAGES="base condition" and native-checked.py. Source qualification and full-command performance are recorded separately.
