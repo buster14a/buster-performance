@@ -1,0 +1,134 @@
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index c5b444e41..0cec1384f 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -476,6 +476,8 @@ struct CheckProgramCensus
+ typedef struct CheckProgram CheckProgram;
+ struct CheckProgram
+ {
++    uint16_t* reference_neutral;
++    bool reference_fault;
+     const CheckInput* input;
+     const CheckStream* stream;
+     const TypeTable* types;
+@@ -3716,6 +3718,71 @@ static __attribute__((unused)) bool check_program_call_library(const CheckProgra
+                       check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS);
+ }
+ 
++// Each bit certifies that the reference walker would return from the node without publishing
++// an object, reaching a statement region, visiting a compound initializer, or raising an error.
++static uint16_t check_reference_window_operand(__m512i operand, __m512i base, __m512i previous, __m512i current)
++{
++    const __m512i offset = _mm512_sub_epi32(operand, base);
++    const __mmask16 near = _mm512_cmplt_epu32_mask(offset, _mm512_set1_epi32(32));
++    const __m512i known = _mm512_permutex2var_epi32(previous, offset, current);
++    return _mm512_cmpeq_epi32_mask(operand, _mm512_set1_epi32(-1)) | (near & _mm512_movepi32_mask(known));
++}
++
++static uint16_t* check_reference_windows(const CheckProgram* program, Arena* scratch)
++{
++    const CheckGraph* graph=&program->input->graph;
++    if (!graph->count || !graph->leaf_slots || !program->input->declaration_bits || program->stream->overload_address_count) return NULL;
++    _Static_assert(sizeof(CheckOp)==4,"graph operators are dword lanes");
++    const uint32_t words=graph->count/16+(graph->count%16!=0);
++    uint16_t* bits=BUSTER_ARENA_PUSH_ARRAY(scratch,uint16_t,words);
++    if (!bits) return NULL;
++    __m512i previous=_mm512_setzero_si512();
++    uint64_t proven=0;
++    for(uint32_t at=0;at<graph->count;at+=16)
++    {
++        const uint32_t left=graph->count-at;
++        const __mmask16 valid=left>=16 ? UINT16_MAX : (__mmask16)((1u<<left)-1);
++        const __m512i ops=_mm512_maskz_loadu_epi32(valid,graph->ops+at);
++        const __m512i base=_mm512_set1_epi32((int32_t)(at-16));
++        const __m512i a=_mm512_maskz_loadu_epi32(valid,graph->operand0+at);
++        const __m512i b=_mm512_maskz_loadu_epi32(valid,graph->operand1+at);
++        const __m512i c=_mm512_maskz_loadu_epi32(valid,graph->operand2+at);
++        // Require all operands neutral, even when ordinary C would discard one arm.
++        const __mmask16 pure=valid & (_mm512_cmple_epu32_mask(ops,_mm512_set1_epi32(CHECK_OP_SUBSCRIPT)) |
++             _mm512_cmpeq_epi32_mask(ops,_mm512_set1_epi32(CHECK_OP_MEMBER)) |
++             _mm512_cmpeq_epi32_mask(ops,_mm512_set1_epi32(CHECK_OP_ARROW)) |
++             (_mm512_cmpge_epu32_mask(ops,_mm512_set1_epi32(CHECK_OP_INITIALIZE)) &
++              _mm512_cmple_epu32_mask(ops,_mm512_set1_epi32(CHECK_OP_SELECT))));
++        const __mmask16 leaves=valid & _mm512_cmpeq_epi32_mask(ops,_mm512_set1_epi32(CHECK_OP_VALUE));
++        const __mmask16 derived=pure & ~leaves;
++        __mmask16 safe=valid & (_mm512_cmpeq_epi32_mask(ops,_mm512_set1_epi32(CHECK_OP_SIZEOF)) |
++                          _mm512_cmpeq_epi32_mask(ops,_mm512_set1_epi32(CHECK_OP_ALIGNOF)));
++        for(uint32_t todo=leaves;todo;todo&=todo-1)
++        {
++            const uint32_t lane=(uint32_t)__builtin_ctz(todo),node=at+lane;
++            const uint32_t object=check_graph_leaf_object(graph,node);
++            if (!object || object>=program->object_count ||
++                (!(check_graph_leaf_flags(graph,node)&BUSTER_CHECK_STATIC_OBJECT) &&
++                 !(program->input->declaration_bits[object-1] & (BUSTER_CHECK_BITS_STATIC|BUSTER_CHECK_BITS_COMPOUND))))
++                safe|=(__mmask16)(1u<<lane);
++        }
++        for (uint32_t pass=0;pass<6;++pass)
++        {
++            const __m512i known=_mm512_movm_epi32(safe);
++            const __mmask16 more=derived & check_reference_window_operand(a,base,previous,known) &
++                 check_reference_window_operand(b,base,previous,known) & check_reference_window_operand(c,base,previous,known);
++            if (!(more & ~safe)) break;
++            safe|=more;
++        }
++        if(program->reference_fault) safe |= leaves;
++        bits[at/16]=safe;
++        previous=_mm512_movm_epi32(safe);
++        proven+=__builtin_popcount((unsigned)safe);
++    }
++    if(getenv("NODE_REF_REPORT")) fprintf(stderr,"reference-proof nodes=%u safe=%llu\n",graph->count,(unsigned long long)proven);
++    return bits;
++}
++
+ static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
+                                          uint32_t* seen, uint32_t* nodes, uint32_t* stack, uint64_t* references, uint8_t* needed)
+ {
+@@ -3727,6 +3794,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
+     while (depth != 0)
+     {
+         const uint32_t node = stack[--depth];
++        if (program->reference_neutral && (program->reference_neutral[node>>4] & (1u<<(node&15)))) continue;
+         const CheckOp op = graph->ops[node];
+         if (op == CHECK_OP_VALUE)
+         {
+@@ -6259,6 +6327,9 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+         program->census_pass_ranges = ranges;
+         arena_pop_to(scratch, mark);
+     }
++    program->reference_fault = getenv("NODE_REF_FAULT") != NULL;
++    if (valid && !BUSTER_SCALAR_PATH(options.scalar) && getenv("NODE_REF_WINDOW"))
++        program->reference_neutral=check_reference_windows(program,scratch);
+     *run = (CheckProgramRun){
+         .program = program,
+         .parser = parser,
+@@ -6596,11 +6667,30 @@ static bool check_program_finish(CheckProgramRun* run)
+     {
+         check_program_target_states(program, options.initializer_references, options.initializer_reference_count);
+     }
++    const char* witness=getenv("NODE_REF_ORACLE");
++    if(witness && valid && program->status==CHECK_PROGRAM_OK)
++    {
++        FILE* fp=fopen(witness,"ab");
++        if(!fp) abort();
++        const uint32_t head[]={program->object_count,run->body_count,reference_count,program->region_count};
++        fwrite(head,sizeof(head),1,fp);
++        for (uint32_t body=0;body<run->body_count;++body)
++        {
++            const uint32_t pair[]={program->bodies[body].reference_first,program->bodies[body].reference_count};
++            fwrite(pair,sizeof(pair),1,fp);
++        }
++        if(reference_count) fwrite(program->references,sizeof(*program->references),reference_count,fp);
++        if(program->region_count && program->region_reached) fwrite(program->region_reached,1,program->region_count,fp);
++        if(program->compound_initializers && program->initializers) fwrite(program->compound_initializers,1,program->initializers->count,fp);
++        if(needed) fwrite(needed,1,program->object_count,fp);
++        if(ferror(fp)||fclose(fp)!=0)abort();
++    }
+     valid = run->symbols ? valid && run->symbols_valid : check_program_symbols(run, needed, valid);
+     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_x86_diagnostics(program, stream, scratch))
+     {
+         program->status = CHECK_PROGRAM_RESOURCE;
+     }
++    program->reference_neutral=NULL;
+     if (!valid || program->status != CHECK_PROGRAM_OK)
+     {
+         const CheckProgramStatus status = program->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : program->status;
