@@ -2,6 +2,8 @@
 
 Both experiments start at the already selected file-text run in `pp_copy_file_text_vector`. They retain the ordinary preprocessor's macro admission, history, include processing and diagnostics. The location experiment omits a copied column for eligible complete blocks. The digit experiment publishes a normalized value while the prepared file's token and spelling are available together. It feeds the ordinary checker's literal consumer. [Issue and bounded claim](https://github.com/buster14a/buster/issues/2850#issuecomment-7064809835) · [Earlier three-token return experiment](../pp-return-windows-2850-2026-11-21/README.md)
 
+The fallback reader follow-up measures vector compaction and an eight-lane decoder on the original checked source addresses. [Experimental results and exact patches](CHECKER.md)
+
 ## Measured starting point
 
 The frozen compiler source is `6e9c51b9d238734468dccc03ab1b6c715449804e`. In 100 normal SQLite PP lifetimes within one process, a frame-pointer profile captured 22 thousand user-cycle samples, with zero lost. It attributed 43.67% inclusive to preparation, 23.49% to tokenization, 14.33% to refinement, and 8.26% to the inlined final file-text copy and selection. These are inclusive costs with overlapping callees. The 8.26% includes macro checks and direct replacement handling. The two experiments below leave that selection in place and target duplicated output work. The source had 9,507,037 bytes and produced 716,136 PP and grammar tokens. [Profile, build and command](raw/profile.tar.xz) · [Original focused profile script](scripts/pp-source-profile.sh)

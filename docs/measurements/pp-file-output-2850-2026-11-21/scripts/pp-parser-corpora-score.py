@@ -8,6 +8,8 @@ root = Path(sys.argv[1])
 short = {'tree-driver': [('0','4096')], 'sparse-corpora':[('before','requests')], 'bracket-corpora':[('before','bracket')], 'returnguard-time':[('before','off'),('off','stream'),('off','replay'),('replay','stream')], 'return-time':[('before','off'),('off','stream'),('off','replay'),('replay','stream')], 'identity-time': [('before','off'),('off','on'),('before','on')]}
 short['decode-time'] = [('before','off'),('off','writer'),('writer','physical'),('writer','decode'),('off','decode'),('before','decode')]
 short['digit-time'] = [('before','off'),('off','writer'),('writer','read'),('off','read'),('before','read')]
+short['digit-compact-time'] = [('before','off'),('off','writer'),('writer','read'),('off','compact-only'),('read','compact'),('compact-only','compact'),('off','compact'),('before','compact')]
+short['digits8-time'] = [('before','off'),('off','on'),('before','on')]
 for name, pairs in short.items():
     d = root/name
     if not (d/'status').exists(): continue

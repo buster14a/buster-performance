@@ -1,0 +1,245 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 64248a52a..7c6ad1e3d 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -846,6 +846,8 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+ {
+     const Parser* parser = reader->parser;
+     const Preprocessor* pp = reader->pp;
++    const bool compact = pp->single_digit_mode >= 4;
++    uint32_t packed = 0;
+     const uint32_t literal = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+     // Gathers index by signed 32-bit offsets: the tokens' (the compaction checked them), the preprocessor's tokens' and
+     // the ranges' bytes.
+@@ -860,6 +862,7 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+     uint32_t lengths[BUSTER_CHECK_EXPRESSION_CHUNK];
+     uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK];
+     uint64_t spellings[BUSTER_CHECK_EXPRESSION_CHUNK];
++    __mmask16 supplied[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+     __mmask16 numbers[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+     __mmask16 integers[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+     __mmask16 inside[BUSTER_CHECK_EXPRESSION_CHUNK / 16];
+@@ -881,8 +884,37 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+         const __m512i token = _mm512_maskz_loadu_epi32(lanes, found + at);
+         const __mmask16 unnamed = _mm512_mask_testn_epi32_mask(lanes, _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.names, 4),
+                                                               _mm512_set1_epi32(-1));
+-        _mm512_mask_storeu_epi32(found + at, lanes, _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.sources, 4));
+-        numbers[at / 16] = unnamed;
++        const __m512i source = _mm512_mask_i32gather_epi32(zero, lanes, token, parser->tokens.sources, 4);
++        _mm512_mask_storeu_epi32(found + at, lanes, source);
++        __mmask16 given = 0;
++        if (pp->single_digit_mode >= 2 && pp->single_digits != NULL)
++        {
++            const __mmask16 inside = _mm512_mask_cmplt_epu32_mask(unnamed, source, _mm512_set1_epi32(pp->single_digit_capacity));
++            const __m512i digits = check_input_gather_bytes(inside, source, pp->single_digits);
++            given = _mm512_test_epi32_mask(digits,digits);
++            __m512i values = _mm512_sub_epi32(digits,_mm512_set1_epi32(1));
++            if (given && (pp->single_digit_report || (pp->single_digit_mode == 3 || pp->single_digit_mode == 6)))
++            {
++                Preprocessor* tracked = reader->pp;
++                if ((pp->single_digit_mode == 3 || pp->single_digit_mode == 6))
++                {
++                    const __mmask16 fault = pp->single_digit_fault_at != UINT32_MAX ?
++                        _mm512_mask_cmpeq_epi32_mask(given,source,_mm512_set1_epi32(pp->single_digit_fault_at)) :
++                        tracked->single_digit_consumed == 0 ? (__mmask16)(given & -given) : 0;
++                    values = _mm512_mask_xor_epi32(values,fault,values,_mm512_set1_epi32(1));
++                }
++                tracked->single_digit_consumed += (uint32_t)__builtin_popcount(given);
++                if (pp->single_digit_report)
++                    for (uint32_t bits=given; bits; bits &= bits-1)
++                    {
++                        const uint32_t lane=(uint32_t)__builtin_ctz(bits);
++                        fprintf(stderr,"pp-digit-consumed: source=%u value=%u\n",found[at+lane],pp->single_digits[found[at+lane]]-1);
++                    }
++            }
++            _mm512_mask_storeu_epi32(literals->values + at, given, values);
++        }
++        supplied[at / 16] = given;
++        numbers[at / 16] = unnamed & ~given;
+     }
+     // The sources' kinds, locations and ends: the numbers and the ints.
+     for (uint32_t at = 0; at < count; at += 16)
+@@ -897,18 +929,35 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+                            _mm512_cmplt_epu32_mask(_mm512_sub_epi32(length, _mm512_set1_epi32(1)), _mm512_set1_epi32((int32_t)BUSTER_CHECK_LITERAL_PLAIN_DIGITS));
+         integers[at / 16] = _mm512_mask_cmpeq_epi32_mask(unnamed, kinds, _mm512_set1_epi32(BUSTER_PP_KIND_INTEGER)) &
+                             _mm512_cmple_epu32_mask(end, _mm512_set1_epi32(INT32_MAX));
+-        _mm512_storeu_si512(places + at, location);
+-        _mm512_storeu_si512(lengths + at, length);
+-        _mm512_storeu_si512(ends + at, end);
++        if (compact)
++        {
++            const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at < 16 ? count - at : 16);
++            const __m512i initial = _mm512_mask_mov_epi32(_mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE),integers[at / 16],end);
++            _mm512_mask_storeu_epi32(literals->values + at,lanes & ~supplied[at / 16],initial);
++            const __mmask16 keep = numbers[at / 16];
++            const __m512i ordinal = _mm512_add_epi32(_mm512_set1_epi32((int32_t)at),_mm512_set_epi32(15,14,13,12,11,10,9,8,7,6,5,4,3,2,1,0));
++            // All source indices for this group have been read; its prefix is now available for destination ordinals.
++            _mm512_mask_compressstoreu_epi32(found + packed,keep,ordinal);
++            _mm512_mask_compressstoreu_epi32(places + packed,keep,location);
++            _mm512_mask_compressstoreu_epi32(lengths + packed,keep,length);
++            packed += (uint32_t)__builtin_popcount(keep);
++        }
++        else
++        {
++            _mm512_storeu_si512(places + at, location);
++            _mm512_storeu_si512(lengths + at, length);
++            _mm512_storeu_si512(ends + at, end);
++        }
+     }
++    const uint32_t work_count = compact ? packed : count;
+     // The numbers' ranges: one of the two the last numbers were in, where it holds the location (most of a chunk's numbers
+     // are in one range or two), else the last whose base is at most the location, found by halving the ranges in step,
+     // which is then the first of the two. Where the range holds the location, the spelling's address.
+     const __m512i stride = _mm512_set1_epi32((int32_t)sizeof(PPRange));
+     uint32_t cursors[2] = { BUSTER_PP_NONE, BUSTER_PP_NONE };
+-    for (uint32_t at = 0; at < count; at += 16)
++    for (uint32_t at = 0; at < work_count; at += 16)
+     {
+-        const __mmask16 ranged = pp->range_count != 0 ? numbers[at / 16] : 0;
++        const __mmask16 ranged = pp->range_count == 0 ? 0 : compact ? (__mmask16)_bzhi_u32(UINT32_MAX,work_count - at < 16 ? work_count - at : 16) : numbers[at / 16];
+         const __m512i location = _mm512_loadu_si512(places + at);
+         __m512i addresses[2] = { zero, zero };
+         __mmask16 held = 0;
+@@ -952,11 +1001,11 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+         _mm512_storeu_si512(spellings + at + 8, addresses[1]);
+     }
+     // The spellings' digits.
+-    for (uint32_t at = 0; at < count; at += 16)
++    for (uint32_t at = 0; at < work_count; at += 16)
+     {
+-        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at < 16 ? count - at : 16);
++        const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, work_count - at < 16 ? work_count - at : 16);
+         const __mmask16 held = inside[at / 16];
+-        __m512i values = _mm512_mask_mov_epi32(_mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE), integers[at / 16], _mm512_loadu_si512(ends + at));
++        __m512i values = compact ? _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE) : _mm512_mask_mov_epi32(_mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE), integers[at / 16], _mm512_loadu_si512(ends + at));
+         if (held != 0)
+         {
+             const __m512i addresses[2] = {
+@@ -994,7 +1043,8 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+             const __m512i read = _mm512_permutex2var_epi32(low, _mm512_set_epi32(23, 22, 21, 20, 19, 18, 17, 16, 7, 6, 5, 4, 3, 2, 1, 0), high);
+             values = _mm512_mask_mov_epi32(values, (__mmask16)(held & ~bad), read);
+         }
+-        _mm512_mask_storeu_epi32(literals->values + at, lanes, values);
++        if (compact) _mm512_mask_i32scatter_epi32(literals->values,lanes,_mm512_maskz_loadu_epi32(lanes,found+at),values,4);
++        else _mm512_mask_storeu_epi32(literals->values + at, lanes & ~supplied[at / 16], values);
+     }
+     for (; position < acting; position += 1)
+     {
+@@ -1004,6 +1054,19 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+             count += 1;
+         }
+     }
++    if (pp->single_digit_twin)
++    {
++        uint32_t next = 0, witness_cursor = BUSTER_PP_NONE;
++        for (uint32_t t = 0; t < acting; ++t)
++            if (classes[t] == literal)
++            {
++                const uint32_t expected = check_input_literal_plain(reader,tokens[t],&witness_cursor);
++                if (expected != literals->values[next]) {fprintf(stderr,"literal witness mismatch at %u: %u/%u\n",tokens[t],expected,literals->values[next]);abort();}
++                next++;
++            }
++        if (next != count) abort();
++        fprintf(stderr,"literal-fallback: acting=%u literals=%u work=%u oldgroups=%u newgroups=%u\n",acting,count,work_count,(count+15)/16,(work_count+15)/16);
++    }
+     return count;
+ }
+ 
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 817123c11..7d9a6c3a4 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -1540,6 +1540,11 @@ struct Preprocessor
+     // The output, and the three stacks of buffers. Once released (pp_release_output), the output keeps its count but not
+     // its columns until a replay gives them back (pp_output_ensure).
+     PPTokens output;
++    // One byte per source row up to the last eligible digit. Zero is ordinary lookup, 1..10 are decimal 0..9.
++    uint8_t* single_digits;
++    uint32_t single_digit_capacity, single_digit_count, single_digit_consumed, single_digit_fault_at;
++    uint8_t single_digit_mode;
++    bool single_digit_report, single_digit_twin;
+     bool output_released;
+     PPTokens arguments;
+     // Lazy delimiter links for immutable raw argument slices, indexed through argument_indexed. A write after a
+@@ -6050,6 +6055,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions*
+ 
+ static void pp_release_unit(Preprocessor* pp)
+ {
++    free(pp->single_digits);
++    pp->single_digits = NULL;
+     pp_tokens_release(&pp->output);
+     pp_tokens_release(&pp->arguments);
+     pp_tokens_release(&pp->captures);
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index d956fa69f..e31322862 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -2993,6 +2993,39 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
+     return p;
+ }
+ 
++// A selected span of actual final-output file tokens, after the macro stop and direct replacements are known.
++static void pp_publish_file_digits(Preprocessor* pp, const PPFileData* data, uint32_t p, uint32_t count, uint64_t replaced, __m512i kinds)
++{
++    uint64_t numbers = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_NUMERIC_CONSTANT)) & _bzhi_u64(~replaced,count);
++    const uint32_t at = pp->output.count;
++    if (numbers == 0 || at > INT32_MAX - 64) return;
++    if (at + count > pp->single_digit_capacity)
++    {
++        uint32_t capacity = pp->single_digit_capacity == 0 ? 1024 : pp->single_digit_capacity;
++        while (capacity < at + count) capacity *= 2;
++        // check_input_gather_bytes reads a word at a byte position, including at the last initialized byte.
++        uint8_t* digits = realloc(pp->single_digits, (size_t)capacity + 4);
++        if (digits == NULL) return;
++        memset(digits + pp->single_digit_capacity, 0, (size_t)capacity - pp->single_digit_capacity + 4);
++        pp->single_digits = digits;
++        pp->single_digit_capacity = capacity;
++    }
++    for (; numbers != 0; numbers &= numbers - 1)
++    {
++        const uint32_t lane = (uint32_t)__builtin_ctzll(numbers);
++        const uint32_t begin = data->starts[p + lane], end = data->values[p + lane];
++        if (end - begin == 1 && begin < data->length)
++        {
++            const uint32_t digit = (uint32_t)data->bytes[begin] - '0';
++            if (digit <= 9)
++            {
++                pp->single_digits[at + lane] = (uint8_t)(digit + 1);
++                ++pp->single_digit_count;
++            }
++        }
++    }
++}
++
+ // pp_copy_file_run_vector for a file's text read straight into the output (pp_step_file's `text`), which doesn't stop at
+ // the name of an object-like macro whose body is one token that names no macro: it writes the expansion in the name's
+ // place, as pp_expand_file_direct would after the run stopped there (the expansion's record, its token with the name's
+@@ -3039,6 +3072,7 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
+         }
+         if (take != 0)
+         {
++            if (pp->single_digit_mode != 0 && pp->single_digit_mode != 5) pp_publish_file_digits(pp, data, p, take, replaced, plain);
+             pp_store_file_tokens(out, out->count, data, base, p, available, take, kinds, false);
+         }
+         // Each name replaced, in order, by its body's token, which takes the name's flags as stored (its leading space
+@@ -13599,6 +13633,12 @@ static bool pp_initialize_time(Preprocessor* pp)
+ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, InternTable* table)
+ {
+     *pp = (Preprocessor){ 0 };
++    const char* mode = getenv("BUSTER_TEST_SMALL_DECIMAL");
++    pp->single_digit_mode = mode == NULL ? 0 : strcmp(mode,"writer")==0 ? 1 : strcmp(mode,"read")==0 ? 2 : strcmp(mode,"fault")==0 ? 3 : strcmp(mode,"compact")==0 ? 4 : strcmp(mode,"compact-only")==0 ? 5 : strcmp(mode,"compact-fault")==0 ? 6 : 0;
++    pp->single_digit_twin = getenv("BUSTER_TEST_SMALL_DECIMAL_TWIN") != NULL;
++    pp->single_digit_report = getenv("BUSTER_TEST_SMALL_DECIMAL_REPORT") != NULL;
++    const char* fault_at = getenv("BUSTER_TEST_SMALL_DECIMAL_FAULT_AT");
++    pp->single_digit_fault_at = fault_at == NULL ? UINT32_MAX : (uint32_t)strtoul(fault_at,NULL,10);
+     pp->diagnostic_include_range = BUSTER_PP_NONE;
+     pp->diagnostic_position = BUSTER_PP_NONE;
+     pp->diagnostic_run_first = BUSTER_PP_NONE;
+@@ -14696,6 +14736,7 @@ static void pp_resolve_keywords(Preprocessor* pp)
+ {
+     pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+     pp->keywords_resolved = pp->output.count;
++    if (pp->single_digit_report) fprintf(stderr,"pp-digits: tokens=%u rows=%u capacity=%u\n",pp->output.count,pp->single_digit_count,pp->single_digit_capacity);
+ }
+ 
+ // The markers' state before the first token: the stack is the main file's, at its first line, which the text gives
