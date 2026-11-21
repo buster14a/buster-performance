@@ -1,0 +1,559 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 2aa05a43e..29a2df638 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1674,6 +1674,9 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t
+ // walk makes them, with the preparation's three parts' ticks apart (the lean front reads the compaction's and the
+ // literals', not the identifiers' entries); then the front, where it runs before the walk acts at the chunk, where the
+ // machine would run. Returns the front's ticks.
++#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
++static void node_cross_chunk_prepare(NodeFront* front, CheckInputReader* reader);
++#endif
+ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, uint8_t fronted, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
+                                                               uint32_t acting, CheckInputIdentifiers* identifiers, CheckInputLiterals* literals, uint64_t start)
+ {
+@@ -1692,6 +1695,7 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front,
+         if (front->window)
+         {
+             node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
++            node_cross_chunk_prepare(front, reader);
+             node_window_probe(front);
+         }
+         else
+@@ -1745,6 +1749,17 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
+     {
+         node_front_chunk(front, reader, tokens, classes, acting, identifiers, literals);
+     }
++#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
++    const char* post = getenv("NODE_CROSS_CHUNK");
++    if (post && !strchr(post, 'o'))
++    {
++        if (strchr(post, 'c') || strchr(post, 'b') || strchr(post, 't')) node_front_compare(front, reader);
++        if (strchr(post, 'b')) node_window_probe_bind(front, reader);
++        if (strchr(post, 't')) node_machine_reader_chunk(front->typer, front, reader);
++        front->pending = front->count;
++        return flushed;
++    }
++#endif
+     if (getenv("NODE_SOURCE_COMPACT") || getenv("NODE_SOURCE_ONLY"))
+     {
+         // A source-only run has no old graph identifiers for elided records. Each next chunk retains its
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 9a56b1b2f..e62874243 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -931,6 +931,8 @@ typedef struct NodeWindowNativeTape
+ 
+ struct CheckInput
+ {
++    TypeId* cross_callee_pointees;
++
+     NodeWindowNativeTape** source_native;
+     uint32_t source_candidates;
+     uint32_t source_key_collisions;
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 03cf72894..261760b4d 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -4213,7 +4213,8 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
+         const __m512i at_left = node_window_reach(front->window_left + x, &near_left, &far_left);
+         const __m512i at_right = node_window_reach(front->window_right + x, &near_right, &far_right);
+         // Near shuffles stay within two padded vector loads. Scalar far reads must only visit live records.
+-        const uint64_t active = _bzhi_u64(UINT64_MAX, count - x);
++        const uint32_t remaining = count - x;
++        const uint64_t active = remaining < 64 ? _bzhi_u64(UINT64_MAX, remaining) : UINT64_MAX;
+         far_left &= active;
+         far_right &= active;
+         const __m512i left = node_window_operands(at_left, near_left, previous, property);
+@@ -6107,6 +6108,21 @@ static void node_probe_warning_select(NodeFront* front)
+     }
+ }
+ 
++static NodeFactsRecord node_cross_resolve(const NodeWindowProofItem* item, const TypeTable* types)
++{
++    NodeFactsRecord value = item->value;
++    TypeId ids[] = {value.type,value.converted[0],value.converted[1],(TypeId)value.spare};
++    for (uint32_t k = 0; k < 4; k++)
++    {
++        if (item->pointees[k] == 0) continue;
++        const TypeId pointer = type_find_pointer(types,item->pointees[k]);
++        ids[k] = pointer ? pointer | type_qualifiers(ids[k]) : UINT32_MAX;
++    }
++    value.type=ids[0]; value.converted[0]=ids[1]; value.converted[1]=ids[2];
++    value.spare = (value.spare & ~(uint64_t)UINT32_MAX) | ids[3];
++    return value;
++}
++
+ static void node_window_probe_compare(const CheckProgram* program, const NodeFrontTypes* typed)
+ {
+     const CheckStream* stream = program->stream;
+@@ -6126,7 +6142,8 @@ static void node_window_probe_compare(const CheckProgram* program, const NodeFro
+         for (uint32_t i = 0; i < part->count; i += 1)
+         {
+             const NodeWindowProofItem* item = part->items + i;
+-            const NodeFactsRecord* got = &item->value;
++            const NodeFactsRecord resolved = node_cross_resolve(item,program->types);
++            const NodeFactsRecord* got = &resolved;
+             const uint32_t node = item->node;
+             bool same = node < program->input->graph.count && program->input->graph.tokens[node] == item->token;
+             if (same)
+@@ -6186,12 +6203,13 @@ static void node_window_probe_compare(const CheckProgram* program, const NodeFro
+                     while (j != 0 && part->items[j - 1].node != source) --j;
+                     const CheckConversion want = stream->argument_conversions[at];
+                     const uint64_t packed = (uint64_t)want.type | ((uint64_t)want.flags << 32);
+-                    const bool equal = j != 0 && part->items[j - 1].value.spare == packed;
++                    const uint64_t argument = j ? node_cross_resolve(&part->items[j - 1],program->types).spare : UINT64_MAX;
++                    const bool equal = argument == packed;
+                     args++;
+                     arg_bad += !equal;
+                     if (!equal && arg_bad <= 5)
+                         fprintf(stderr, "node-proof call %u argument %u node %u got %" PRIu64 " expected %" PRIu64 "\n", node, g, source,
+-                                j ? part->items[j-1].value.spare : UINT64_MAX, packed);
++                                argument, packed);
+                     same &= equal;
+                 }
+             }
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 7811fbd0f..5d4aedf21 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -456,6 +456,7 @@ struct NodeFactsOperand
+ typedef struct NodeFacts NodeFacts;
+ struct NodeFacts
+ {
++    bool deferred_direct_callee;
+     NodeMachine* machine;
+     // The unit's reader's columns and its parser: the program's after the pipeline, the reader's own at reader time,
+     // where there is no program yet (node_facts_reader_begin).
+@@ -1381,6 +1382,7 @@ static void node_facts_given(NodeFacts* facts, uint32_t window, uint32_t poison)
+ typedef struct NodeFactsView NodeFactsView;
+ struct NodeFactsView
+ {
++    bool deferred_direct_callee;
+     const uint32_t* inputs;
+     const uint16_t* counts;
+     const uint32_t* positions;
+@@ -1826,7 +1828,19 @@ static inline __attribute__((always_inline)) bool node_facts_call(NodeFacts* fac
+     NodeFactsOperand callee;
+     TypeId converted = 0;
+     uint32_t conversion_flags = 0;
+-    bool taken = (function & BUSTER_NODE_FACTS_FUNCTION) != 0 && node_facts_operand(records, row, a, &callee, &converted, &conversion_flags) &&
++    const bool deferred = view->deferred_direct_callee && (function & BUSTER_NODE_FACTS_DESIGNATOR) && row->decayed[0] == 0;
++    bool fits;
++    if (deferred)
++    {
++        fits = (records[a].word & BUSTER_NODE_MACHINE_WORD_PLAIN) != 0 && (records[a].standing & BUSTER_NODE_MACHINE_WIDE) == 0;
++        callee.flags = records[a].flags & ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL);
++        conversion_flags = BUSTER_CHECK_CONVERT_FUNCTION;
++    }
++    else
++    {
++        fits = node_facts_operand(records, row, a, &callee, &converted, &conversion_flags);
++    }
++    bool taken = (function & BUSTER_NODE_FACTS_FUNCTION) != 0 && fits &&
+                  (function >> 8 & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && count >= parameters && ((function >> 8 & BUSTER_TYPE_FLAG_VARIADIC) != 0 || count == parameters) &&
+                  (function & BUSTER_NODE_FACTS_RETURNS) != 0 && row->returned_ready_at <= view->positions[w];
+     uint32_t flags = taken ? BUSTER_CHECK_SIDE_EFFECT | (callee.flags & BUSTER_CHECK_INHERITED) : 0;
+@@ -3383,7 +3397,7 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
+     const bool designator = (function & BUSTER_NODE_FACTS_DESIGNATOR) != 0;
+     const TypeId pointer = row->decayed[0];
+     const uint32_t lvalue = 0u - (standing & 0x01u);
+-    const uint32_t as_designator = (standing & BUSTER_NODE_MACHINE_WIDE) | (pointer == 0 ? 1u : 0u);
++    const uint32_t as_designator = (standing & BUSTER_NODE_MACHINE_WIDE) | (pointer == 0 && !view->deferred_direct_callee ? 1u : 0u);
+     const uint32_t as_value = node_facts_unfit(type, standing, flags, lvalue, false) | (~row->flags & BUSTER_NODE_FACTS_SCALAR);
+     const uint32_t wanted = BUSTER_NODE_FACTS_FUNCTION | BUSTER_NODE_FACTS_RETURNS | BUSTER_TYPE_FLAG_PROTOTYPE << 8;
+     // Every argument's flags and standing, gathered whether the call is taken or not. A loop of the arguments' count
+@@ -3459,6 +3473,7 @@ static inline __attribute__((always_inline)) bool node_facts_discard_fast(NodeFa
+ static inline __attribute__((always_inline)) NodeFactsView node_facts_view(const NodeFacts* facts, uint32_t first)
+ {
+     return (NodeFactsView){
++        .deferred_direct_callee = facts->deferred_direct_callee,
+         .inputs = facts->inputs + first,
+         .counts = facts->counts + first,
+         .positions = facts->positions + first,
+@@ -4645,6 +4660,10 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
+ 
+ struct NodeFactsReader
+ {
++    TypeId cross_keys[BUSTER_NODE_FRONT_RECORDS + 64][4];
++    NodeFactsRow* cross_rows;
++    NodeFactsSide* cross_sides;
++    uint32_t source_pointer_count;
+     NodeFactsRecord proof_records[BUSTER_NODE_FRONT_RECORDS + 64];
+     bool proof_made[BUSTER_NODE_FRONT_RECORDS + 64];
+     uint8_t proof_select[BUSTER_NODE_FRONT_RECORDS + 64];
+@@ -5176,10 +5195,317 @@ static NodeWindowNativeTape* node_window_compact_candidate(NodeFront* front, uin
+     };
+     return tape;
+ }
++static void node_cross_chunk_prepare(NodeFront* front, CheckInputReader* reader)
++{
++    const char* differential = getenv("NODE_CROSS_CHUNK");
++    if (differential && front->typer && front->typer->facts)
++    {
++        NodeMachineReader* typer = front->typer;
++        struct NodeFactsReader* st = typer->facts;
++        if (strchr(differential, 'm')) node_machine_settle(&typer->machine);
++        if (strchr(differential, 'r')) node_facts_settle(&st->facts);
++        if (strchr(differential, 's')) node_machine_reader_strings(typer, reader->output);
++        fprintf(stderr, "cross-chunk records=%u made=%u types=%u settled=%u rows=%u members=%u lines=%u\n",
++                front->count, front->made, typer->machine.types->types.count, typer->machine.type_count,
++                st->facts.row_count, st->facts.member_count, st->facts.line_count);
++    }
++}
++
++// Derive a direct callee's decay within a temporary type-table view. The native
++// tape keeps no provisional TypeId. A conversion witness keeps the pointee key.
++// Populate address and decay answers from pointer types already interned by the shared source/type reader.
++// Lookup does not allocate a type or change its ID. A missing canonical pointer leaves its expression eligible
++// for ordinary fallback. A newly interned pointee can complete a previously empty array or function answer.
++static void node_source_registered_pointers(struct NodeFactsReader* state)
++{
++    NodeFacts* facts = &state->facts;
++    NodeMachine* machine = facts->machine;
++    node_machine_settle(machine);
++    node_facts_settle(facts);
++    if (state->source_pointer_count != facts->row_count)
++    {
++        const TypeTable* types = machine->types;
++        for (uint32_t i = 1; i < facts->row_count; i += 1)
++        {
++            const TypeId type = (TypeId)i << BUSTER_TYPE_INDEX_SHIFT;
++            const uint8_t kind = type_kind(types, type);
++            NodeFactsRow* row = facts->rows + i;
++            NodeFactsSide* side = facts->sides + i;
++            for (uint32_t q = 0; q <= BUSTER_TYPE_CONST; q += 1)
++            {
++                const TypeId qualified = type | q;
++                const TypeId pointer = type_find_pointer(types, qualified);
++                if (pointer != 0 && type_index(pointer) < facts->row_count)
++                {
++                    side->pointers[q] = pointer;
++                    side->pointer_words[q] = node_machine_word(machine, pointer);
++                }
++                if ((row->word & BUSTER_NODE_MACHINE_WORD_PLAIN) != 0 &&
++                    (kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind)))
++                {
++                    const TypeId pointee = kind == BUSTER_TYPE_KIND_FUNCTION ? type : row->element | q;
++                    const TypeId decayed = type_find_pointer(types, pointee);
++                    if (decayed != 0 && type_index(decayed) < facts->row_count)
++                    {
++                        row->decayed[q] = decayed;
++                    }
++                }
++            }
++        }
++        state->source_pointer_count = facts->row_count;
++    }
++}
++
++// Only an address operand, a direct callee, or a leaf in a value-consuming position can request a
++// missing pointer type. The lookup-only control leaves the table unchanged at the same frontier.
++static void node_source_demand_leaf(NodeFront* front, NodeFacts* facts, uint32_t leaf, bool address, uint32_t counts[3])
++{
++    const uint32_t entry = front->window_entries[leaf];
++    if (front->ops[leaf] != CHECK_OP_VALUE || entry == 0 || entry >= facts->line_capacity ||
++        (front->window_kinds[leaf] != BUSTER_NODE_FACTS_LITERAL_LINE && front->window_kinds[leaf] != BUSTER_NODE_FACTS_IDENTIFIER))
++    {
++        return;
++    }
++    TypeTable* types = facts->machine->types;
++    const TypeId type = (TypeId)facts->lines[4 * (uint64_t)entry];
++    if (!type_is_valid(types,type)) { return; }
++    const uint8_t kind = type_kind(types,type);
++    const TypeId pointee = address ? type : kind == BUSTER_TYPE_KIND_FUNCTION ? type_unqualified(type) :
++                           type_kind_is_array(kind) ? type_element(types,type) | type_qualifiers(type) : 0;
++    if (pointee != 0 && type_find_pointer(types,pointee) == 0)
++    {
++        const uint32_t before = types->types.count;
++        const TypeId pointer = type_pointer(types,pointee);
++        if (pointer != 0 && types->types.count > before)
++        {
++            counts[address ? 0 : kind == BUSTER_TYPE_KIND_FUNCTION ? 1 : 2]++;
++        }
++    }
++}
++
++static void node_source_demand_pointers(NodeFront* front, NodeFacts* facts)
++{
++    uint32_t counts[3] = {0};
++    for (uint32_t x = front->made; x < front->count; x += 1)
++    {
++        const CheckOp op = front->ops[x];
++        const uint32_t left = front->window_left[x], right = front->window_right[x];
++        if (left != 0 && left <= x && (op == CHECK_OP_ADDRESS || op == CHECK_OP_CALL || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST))
++        {
++            node_source_demand_leaf(front,facts,x-left,op==CHECK_OP_ADDRESS,counts);
++        }
++        if (right != 0 && right <= x && op == CHECK_OP_ASSIGN)
++        {
++            node_source_demand_leaf(front,facts,x-right,false,counts);
++        }
++        const uint32_t start = front->window_entries[x], args = front->window_counts[x];
++        if (op == CHECK_OP_CALL && start <= front->window_argument_count && args <= front->window_argument_count-start)
++        {
++            for (uint32_t a = 0; a < args; a += 1)
++            {
++                const uint32_t d = front->window_arguments[start+a];
++                if (d != 0 && d <= x) { node_source_demand_leaf(front,facts,x-d,false,counts); }
++            }
++        }
++    }
++    if ((counts[0] || counts[1] || counts[2]) && getenv("NODE_SOURCE_WINDOW_WATCH") != NULL)
++        fprintf(stderr,"source-intern address=%u function=%u array=%u\n",counts[0],counts[1],counts[2]);
++}
++
++
++typedef struct NodeCrossTypeView
++{
++    TypeViewMark mark;
++    NodeFactsRow* saved_rows;
++    NodeFactsSide* saved_sides;
++    TypeError error;
++    TypeChanges* changes;
++    uint32_t hidden_begin, hidden_end, machine_count, row_count, used;
++    uint32_t indices[BUSTER_NODE_FRONT_RECORDS];
++    TypeId decays[BUSTER_NODE_FRONT_RECORDS];
++} NodeCrossTypeView;
++
++static void node_cross_type_begin(NodeFront* front, NodeCrossTypeView* view)
++{
++    struct NodeFactsReader* st = front->typer->facts;
++    NodeFacts* facts = &st->facts;
++    NodeMachine* machine = facts->machine;
++    TypeTable* tt = machine->types;
++    node_machine_settle(machine);
++    node_facts_settle(facts);
++    view->mark = type_view_mark(tt);
++    view->error = tt->last_error;
++    view->changes = tt->changes;
++    view->hidden_begin = tt->hidden_begin;
++    view->hidden_end = tt->hidden_end;
++    view->machine_count = machine->type_count;
++    view->row_count = facts->row_count;
++    view->used = 0;
++    view->saved_rows = NULL;
++    view->saved_sides = NULL;
++    tt->changes = NULL;
++    memset(st->proof_arg_cache, 0, sizeof(st->proof_arg_cache));
++    if (getenv("NODE_CROSS_TYPE_WIDE") != NULL)
++    {
++        if (st->cross_rows == NULL)
++        {
++            st->cross_rows = arena_push_array(st->reader->arena, (uint64_t)facts->row_capacity + 1, sizeof(NodeFactsRow), 64);
++            st->cross_sides = arena_push_array(st->reader->arena, (uint64_t)facts->row_capacity + 1, sizeof(NodeFactsSide), 64);
++            if (!st->cross_rows || !st->cross_sides) abort();
++        }
++        view->saved_rows = facts->rows;
++        view->saved_sides = facts->sides;
++        memcpy(st->cross_rows, facts->rows, ((size_t)facts->row_count + 1) * sizeof(NodeFactsRow));
++        memcpy(st->cross_sides, facts->sides, ((size_t)facts->row_count + 1) * sizeof(NodeFactsSide));
++        facts->rows = st->cross_rows;
++        facts->sides = st->cross_sides;
++        node_source_demand_pointers(front,facts);
++        st->source_pointer_count = UINT32_MAX;
++        node_source_registered_pointers(st);
++        return;
++    }
++    for (uint32_t r = 0; r < front->count; ++r)
++    {
++        if (front->ops[r] != CHECK_OP_CALL) continue;
++        const uint32_t distance = front->window_left[r];
++        if (!distance || distance > r) continue;
++        const uint32_t child = r - distance;
++        if (front->ops[child] != CHECK_OP_VALUE || front->window_kinds[child] != BUSTER_NODE_FACTS_IDENTIFIER) continue;
++        const uint32_t line = front->window_entries[child];
++        if (!line || line >= facts->line_capacity) continue;
++        const TypeId fn = (TypeId)facts->lines[4 * (uint64_t)line];
++        const uint32_t ix = type_index(fn);
++        if (ix >= facts->row_count || type_kind(tt,fn) != BUSTER_TYPE_KIND_FUNCTION || facts->rows[ix].decayed[0]) continue;
++        const TypeId ptr = type_pointer(tt, fn);
++        if (!ptr || type_index(ptr) >= facts->row_capacity || type_index(ptr) >= machine->type_capacity) continue;
++        view->indices[view->used] = ix;
++        view->decays[view->used++] = facts->rows[ix].decayed[0];
++        facts->rows[ix].decayed[0] = ptr;
++    }
++    node_machine_settle(machine);
++    node_facts_settle(facts);
++}
++static void node_cross_type_end(NodeFront* front, const NodeCrossTypeView* view)
++{
++    struct NodeFactsReader* st = front->typer->facts;
++    NodeFacts* facts = &st->facts;
++    NodeMachine* machine = facts->machine;
++    TypeTable* tt = machine->types;
++    CheckInput* in = st->reader->output;
++    if (!in->cross_callee_pointees)
++    {
++        in->cross_callee_pointees = BUSTER_ARENA_PUSH_ARRAY(st->reader->arena, TypeId, in->token_count + 1u);
++        if (!in->cross_callee_pointees) abort();
++        memset(in->cross_callee_pointees, 0, ((size_t)in->token_count + 1) * sizeof(TypeId));
++    }
++    uint32_t calls = 0, derived = 0, root_private = 0, key_count[4] = {0};
++    for (uint32_t x = 0; x < front->count; x++)
++    {
++        TypeId* keys = st->cross_keys[x];
++        memset(keys, 0, 4 * sizeof(*keys));
++        if (!st->proof_made[x]) continue;
++        const NodeFactsRecord* record = &st->proof_records[x];
++        const TypeId ids[4] = {record->type, record->converted[0], record->converted[1], (TypeId)record->spare};
++        for (uint32_t k = 0; k < 4; k++)
++        {
++            const TypeId id = ids[k];
++            if (type_index(id) < view->mark.types) continue;
++            if (!type_is_valid(tt,id) || type_kind(tt,id) != BUSTER_TYPE_KIND_POINTER ||
++                type_index(type_element(tt,id)) >= view->mark.types)
++            {
++                fprintf(stderr,"cross-unsupported record=%u op=%u slot=%u id=%u mark=%u\n",x,front->ops[x],k,id,view->mark.types);
++                abort();
++            }
++            keys[k] = type_element(tt,id);
++            if (getenv("NODE_CROSS_MUTATE_KEY") != NULL && k == 1) keys[k] = BUSTER_TYPE_INT;
++            key_count[k]++;
++        }
++    }
++    fprintf(stderr,"cross-keys value=%u operand0=%u operand1=%u argument=%u\n",key_count[0],key_count[1],key_count[2],key_count[3]);
++    for (uint32_t r = front->made; r < front->count; ++r)
++    {
++        if (st->proof_source_tapes[r] == NULL) continue;
++        root_private += type_index(st->proof_records[r].type) >= view->mark.types;
++        const uint32_t top = r - front->window_left[r], size = front->sizes[top];
++        for (uint32_t x = top + 1 - size; x <= top; ++x)
++        {
++            if (front->ops[x] != CHECK_OP_CALL || st->window_x_owns[x] != BUSTER_TYPED_CALL) continue;
++            const uint32_t a = x - front->window_left[x], token = front->tokens[x];
++            const NodeFactsRecord* call = st->proof_records + x;
++            const TypeId fn = st->proof_records[a].type, pointer = call->converted[0];
++            if (token >= in->token_count || type_index(fn) >= view->mark.types || !pointer ||
++                type_kind(tt, pointer) != BUSTER_TYPE_KIND_POINTER || type_element(tt,pointer) != type_unqualified(fn) ||
++                call->conversion_flags[0] != BUSTER_CHECK_CONVERT_FUNCTION) abort();
++            if (in->cross_callee_pointees[token] && in->cross_callee_pointees[token] != fn) abort();
++            in->cross_callee_pointees[token] = fn;
++            calls++;
++            derived += type_index(pointer) >= view->mark.types;
++        }
++    }
++    fprintf(stderr,"cross-view rows=%u interned=%u calls=%u provisional=%u root-private=%u\n",
++            view->used,tt->types.count-view->mark.types,calls,derived,root_private);
++    if (root_private && !view->saved_rows) abort();
++    if (view->saved_rows)
++    {
++        facts->rows = view->saved_rows;
++        facts->sides = view->saved_sides;
++    }
++    for (uint32_t i = 0; i < view->used; ++i) facts->rows[view->indices[i]].decayed[0] = view->decays[i];
++    if (!type_view_reset(tt, view->mark)) abort();
++    tt->hidden_begin=view->hidden_begin; tt->hidden_end=view->hidden_end; tt->last_error=view->error; tt->changes=view->changes;
++    machine->type_count=view->machine_count; facts->row_count=view->row_count;
++    memset(facts->rows+facts->row_count,0,sizeof(NodeFactsRow));
++    memset(facts->sides+facts->row_count,0,sizeof(NodeFactsSide));
++}
++
++// The callee conversion is solely a pointer to the source declaration's function
++// type. Store that recipe when the pointer has no ordinary TypeId at this
++// frontier. No temporary TypeId or type-table insertion is required.
++static void node_cross_symbolic_callees(NodeFront* front)
++{
++    struct NodeFactsReader* st = front->typer->facts;
++    CheckInput* in = st->reader->output;
++    TypeTable* types = st->facts.machine->types;
++    memset(st->cross_keys, 0, (size_t)front->count * sizeof(*st->cross_keys));
++    if (!in->cross_callee_pointees)
++    {
++        in->cross_callee_pointees = BUSTER_ARENA_PUSH_ARRAY(st->reader->arena, TypeId, in->token_count + 1u);
++        if (!in->cross_callee_pointees) abort();
++        memset(in->cross_callee_pointees, 0, ((size_t)in->token_count + 1u) * sizeof(TypeId));
++    }
++    uint32_t requests = 0, deferred = 0;
++    for (uint32_t x=0; x<front->count; x++)
++    {
++        if (!st->proof_made[x] || front->ops[x] != CHECK_OP_CALL) continue;
++        const NodeFactsRecord* call = st->proof_records+x;
++        if (call->conversion_flags[0] != BUSTER_CHECK_CONVERT_FUNCTION) continue;
++        if (front->window_left[x] == 0 || front->window_left[x] > x) abort();
++        const TypeId fn = st->proof_records[x-front->window_left[x]].type;
++        if (type_kind(types,fn) != BUSTER_TYPE_KIND_FUNCTION) abort();
++        if (call->converted[0] == 0)
++        {
++            st->cross_keys[x][1] = getenv("NODE_CROSS_MUTATE_KEY") ? BUSTER_TYPE_INT : type_unqualified(fn);
++            deferred++;
++        }
++        else if (type_kind(types,call->converted[0]) != BUSTER_TYPE_KIND_POINTER ||
++                 type_element(types,call->converted[0]) != type_unqualified(fn)) abort();
++        const uint32_t token = front->tokens[x];
++        if (token >= in->token_count) abort();
++        if (in->cross_callee_pointees[token] && in->cross_callee_pointees[token] != type_unqualified(fn)) abort();
++        in->cross_callee_pointees[token] = type_unqualified(fn);
++        requests++;
++    }
++    fprintf(stderr,"cross-symbolic calls=%u deferred=%u\n",requests,deferred);
++}
+ static void node_window_probe(NodeFront* front)
+ {
+     struct NodeFactsReader* state = front->typer->facts;
++    const bool temporary_types = getenv("NODE_CROSS_TYPE_VIEW") != NULL;
++    NodeCrossTypeView transaction;
++    if (temporary_types) node_cross_type_begin(front,&transaction);
+     NodeFacts run = state->facts;
++    run.deferred_direct_callee = getenv("NODE_CROSS_SYMBOLIC_CALLEE") != NULL;
++    if (run.deferred_direct_callee && temporary_types) abort();
+     const CheckGraph environment = { .extensions = run.machine->graph->extensions };
+     NodeMachine machine = {
+         .types = run.machine->types, .graph = &environment, .type_words = run.machine->type_words,
+@@ -5334,6 +5660,8 @@ static void node_window_probe(NodeFront* front)
+         }
+     }
+     node_probe_warning_select(front);
++    if (temporary_types) node_cross_type_end(front,&transaction);
++    if (run.deferred_direct_callee) node_cross_symbolic_callees(front);
+     for (uint32_t v = 0; v < 3; v += 1)
+     {
+         if (voids[v][0])
+@@ -5364,6 +5692,7 @@ struct NodeWindowProofItem
+     uint32_t node;
+     uint32_t token;
+     NodeFactsRecord value;
++    TypeId pointees[4];
+ };
+ 
+ typedef struct NodeWindowProofPart NodeWindowProofPart;
+@@ -5429,6 +5758,7 @@ static void node_window_probe_bind(NodeFront* front, CheckInputReader* reader)
+             {
+                 const uint32_t x = i == size ? r : operand + 1 - size + i;
+                 part->items[i] = (NodeWindowProofItem){ .node = front->nodes[x], .token = front->tokens[x], .value = state->proof_records[x] };
++                memcpy(part->items[i].pointees, state->cross_keys[x], sizeof(part->items[i].pointees));
+             }
+         }
+     }
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index a8a2339b0..82b3426b3 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12558,6 +12558,27 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                 };
+                 CheckStream stream;
+                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
++                if (ready && input.cross_callee_pointees)
++                {
++                    uint32_t checked = 0, missing = 0, wrong = 0;
++                    const CheckGraph* cg = &input.graph;
++                    for (uint32_t n = 0; n < cg->count; ++n)
++                    {
++                        if (cg->ops[n] != CHECK_OP_CALL || cg->tokens[n] >= input.token_count) continue;
++                        const uint32_t t = cg->tokens[n];
++                        const TypeId fn = input.cross_callee_pointees[t];
++                        if (!fn) continue;
++                        const CheckConversion conversion = stream.conversions[n].operands[0];
++                        const TypeId canonical = type_find_pointer(&types,fn);
++                        const bool same = canonical && conversion.type == canonical && conversion.flags == BUSTER_CHECK_CONVERT_FUNCTION &&
++                                          type_kind(&types,conversion.type) == BUSTER_TYPE_KIND_POINTER && type_element(&types,conversion.type) == fn;
++                        if (!same && wrong < 4) fprintf(stderr,"cross-invalid token=%u function=%u candidate=%u ordinary=%u flags=%u\n",
++                                                        t,fn,canonical,conversion.type,conversion.flags);
++                        wrong += !same; checked++; input.cross_callee_pointees[t]=0;
++                    }
++                    for (uint32_t t=0; t<input.token_count; ++t) missing += input.cross_callee_pointees[t] != 0;
++                    fprintf(stderr,"cross-canonical checked=%u missing=%u wrong=%u\n",checked,missing,wrong);
++                }
+                 const char* graph_log = getenv("NODE_SOURCE_GRAPH_ORACLE");
+                 if (ready && graph_log != NULL)
+                 {
