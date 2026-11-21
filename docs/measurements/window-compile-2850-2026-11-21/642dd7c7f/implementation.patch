@@ -1,0 +1,141 @@
+diff --git a/src/buster/compiler/c_check_common_warnings.c b/src/buster/compiler/c_check_common_warnings.c
+index fa1885090..03be7dd8b 100644
+--- a/src/buster/compiler/c_check_common_warnings.c
++++ b/src/buster/compiler/c_check_common_warnings.c
+@@ -4645,6 +4645,27 @@ static void check_common_emit_root(CheckCommonEmission* emission, uint32_t node)
+     check_common_emit_run(emission);
+ }
+ 
++// Only the emitted statement events suppress the synthetic void cast. The operand remains at the
++// same position among the natural roots, including where a call has an unused-result diagnostic.
++static bool check_common_discard_statement(const CheckInput* input, uint32_t node)
++{
++    uint32_t first = 0;
++    uint32_t end = input->discard_statement_count;
++    while (first < end)
++    {
++        const uint32_t middle = first + (end - first) / 2;
++        if ((uint32_t)input->discard_statements[middle] < node)
++        {
++            first = middle + 1;
++        }
++        else
++        {
++            end = middle;
++        }
++    }
++    return first < input->discard_statement_count && (uint32_t)input->discard_statements[first] == node;
++}
++
+ // A root's visit in the roots' order, its walks' frames pushed to run next (#1447): a discarded call's result at once, an
+ // unevaluated statement's comma's, conditional's or selection's call, then its walks, or its statement's unused-value
+ // marker alone where it reaches nothing, or a dead root's detached static-selection arms.
+@@ -4658,8 +4679,9 @@ static inline __attribute__((always_inline)) void check_common_root_frames(Check
+     const uint8_t* evaluated = emission->evaluated;
+     uint8_t* emitted = emission->emitted;
+     const uint32_t expr = check_common_discarded(parser, graph, node);
+-    const CheckOp expr_op = expr != node && expr < graph->count && parents[node] == BUSTER_CHECK_NONE &&
+-                            stream->diagnostics[node] == CHECK_DIAG_NONE ? graph->ops[expr] : CHECK_OP_COUNT;
++    const bool clean_root = expr < graph->count && parents[node] == BUSTER_CHECK_NONE && stream->diagnostics[node] == CHECK_DIAG_NONE;
++    const CheckOp expr_op = clean_root && (expr != node || (graph->ops[node] == CHECK_OP_CALL && check_common_discard_statement(emission->input, node))) ?
++                                graph->ops[expr] : CHECK_OP_COUNT;
+     if (expr_op != CHECK_OP_COUNT && check_common_ignored_op(expr_op))
+     {
+         check_common_ignored_statement(emission, expr);
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 60bd42a86..2b11503e7 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1280,6 +1280,26 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
+     {
+         region->result = values.first;
+     }
++    if (!condition && region == NULL && values.count == 1 && batch->count != 0 && values.first == batch->base + batch->count - 1 &&
++        input->discard_statement_count < input->discard_statement_capacity && input->overload_heads == NULL && input->graph.fp_environments == NULL)
++    {
++        const uint32_t place = batch->count - 1;
++        const CheckOp op = batch->ops[place];
++        const Parser* parser = reader->parser;
++        const uint32_t owner = parser->tree.parents[token];
++        const bool block = owner < input->token_count && (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_BODY || parser->tree.roles[owner] == PARSE_ROLE_CLOSE_BLOCK);
++        if (block && parser->tree.roles[token] == PARSE_ROLE_TERMINATOR &&
++            (op == CHECK_OP_CALL || op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
++             (op == CHECK_OP_CAST && reader->query_types[batch->tokens[place]] == BUSTER_TYPE_VOID)))
++        {
++            input->discard_statements[input->discard_statement_count++] = (uint64_t)token << 32 | values.first;
++            if (reader->region_roots != NULL)
++            {
++                reader->region_roots[token] = values.first;
++            }
++            return true;
++        }
++    }
+     uint32_t last = BUSTER_CHECK_NONE;
+     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+     {
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..2fb3a1949 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -919,6 +919,11 @@ struct CheckInputWindowSummary
+ struct CheckInput
+ {
+     CheckGraph graph;
++    // The statement terminator that owns a complete discarded expression, packed above its operand node.
++    // These entries increase in node order. The operand retains its own source and checked value.
++    uint64_t* discard_statements;
++    uint32_t discard_statement_count;
++    uint32_t discard_statement_capacity;
+     CheckEnvironment environment;
+     CheckInputDiagnosticPragmas* diagnostic_pragmas;
+     CheckInputNonnullPragmas* nonnull_pragmas;
+@@ -17306,6 +17311,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
+     input->graph.recorded_pure = valid ? recorded_pure : NULL;
+     input->graph.extensions = check_input_expression_extensions(parser);
++    if (valid && fresh_output && complete_translation_unit && deferred == NULL && deferred_tokens == NULL && attested == NULL &&
++        !pp->options.node_window && !pp->options.predefines.debug && !pp->options.predefines.debug_modules)
++    {
++        const uint32_t capacity = count / 12 + 1;
++        input->discard_statements = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity);
++        input->discard_statement_capacity = input->discard_statements != NULL ? capacity : 0;
++    }
+     reader.const_values.declarations = (CheckObjectDeclarations)
+     {
+         .objects = input->objects,
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 4aa93ef49..f0dadca35 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -6295,11 +6295,29 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+             kept += check_cpu_dispatch_kind(check_input_attributes_at(input, declaration)) != CHECK_CPU_DISPATCH_DISPATCH;
+         }
+         body_count = input->cpu_dispatch ? kept : body_count;
+-        for (uint32_t node = node_count; node-- > 0;)
++        // Group the ordinary nodes up to the next discarded root. That root belongs to its semicolon
++        // for control construction, and keeps its expression token for diagnostics and lowering.
++        uint32_t end = node_count;
++        for (uint32_t i = input->discard_statement_count;;)
+         {
+-            const uint32_t token = input->graph.tokens[node];
++            const uint64_t event = i != 0 ? input->discard_statements[i - 1] : 0;
++            const uint32_t begin = i != 0 ? (uint32_t)event + 1 : 0;
++            while (end > begin)
++            {
++                const uint32_t node = --end;
++                const uint32_t token = input->graph.tokens[node];
++                node_next[node] = token_first[token];
++                token_first[token] = node;
++            }
++            if (i == 0)
++            {
++                break;
++            }
++            const uint32_t node = --end;
++            const uint32_t token = (uint32_t)(event >> 32);
+             node_next[node] = token_first[token];
+             token_first[token] = node;
++            i -= 1;
+         }
+         const bool compound_initializers = check_program_plans(program, parser, options.initializers, plan_first, planned, plan_next, seen);
+         memset(seen, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
