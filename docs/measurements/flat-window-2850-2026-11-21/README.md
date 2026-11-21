@@ -50,3 +50,16 @@ The locked A/A stage-control series provides an ordinary-compile reference for t
 ## Native acceptance
 
 The private-declaration producer ran the full shadow campaign. All 8,009 directed probes exited zero. Six generator seeds produced 90,000 programs, with 73,203 accepted, 16,797 rejected and zero findings. Of 93 warning sources, 92 had a trigger and all 92 agreed under their tested policies. In each of three warning policies, 13,889 extracted inline programs gave 6,639 clean and 7,250 rejected. For 1,246 repository files the counts per policy were 416 clean, 829 rejected and one existing difference on the conditional pointer initializer in `tests/checker/sources/pointer-constant-equality.c`. The reference window also reports that difference on the base. The checker shard containing the mask and boundary fixtures passed 210,478 checks on every variant. Raw campaign results are in `native/declarations-campaign.tar.gz`.
+
+## Writing columns during class processing
+
+The sixth variant writes identifier and literal contents, source positions, operator kinds, codes and immediate entries in the existing flat class passes. Slots include provisional records until downstream operand classification decides which ones survive. The postorder pass then maps these sparse slots to compact geometry, computes parent and operand distances and the data-dependent kernel rounds, and batches name lookup. The kernel consumed all resulting inputs at the same coverage as the preceding five variants. [Signed source](https://github.com/buster14a/buster/commit/90adeda7f263d42ac8877a5cd447703c9086c2d8)
+
+All 30 additional locked runs exited zero. On SQLite the median flat-after postorder pass fell from 12.98M to 8.88M TSC ticks, but the structural class passes grew from 11.58M to 16.25M. With flat-first the postorder pass fell from 12.89M to 8.97M while the class passes grew from 13.71M to 19.16M. Excluding the common kernel, the direct producer consumed 36.63 / 41.00 TSC ticks per preprocessed token, or approximately 53.02 / 59.35 core cycles. The paired SQLite range was −4.76% to −3.57% flat-after and +5.46% to +7.93% flat-first. The direct producer exceeds Step 3's budget under either execution order before charging the upstream work.
+
+| Direct variant cost boundary | SQLite after / before | Lua after / before | musl after / before |
+| --- | ---: | ---: | ---: |
+| With coded-walk identifier preparation in the lean cost | −4.21% / +6.06% | −2.25% / +4.35% | +21.36% / +28.05% |
+| Lean cost excludes coded-walk identifier preparation | +4.92% / +16.32% | +2.25% / +9.10% | +27.41% / +34.97% |
+
+The second row charges each producer only the inputs it requires. The coded walk fills a separate identifier table, but the lean front reads the declaration at the token directly. Removing the walk's identifier preparation also makes the previous batched-name variant slower in both orders on all three corpora (SQLite +4.26% / +12.20%, Lua +1.55% / +7.12%, musl +26.21% / +33.71%). Both cost boundaries exclude the shared upstream stages quantified above. The sixth run’s full logs and native binary digest are in `9700x/direct.tar.gz` and `9700x/direct-build.txt`. The `direct` rows in `stages.tsv` provide the costs for either boundary.
