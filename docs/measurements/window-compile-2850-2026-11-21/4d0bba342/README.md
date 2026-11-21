@@ -23,3 +23,5 @@ Every one of the 90 observed non-warm-up compiles produced the same 2,061,192-by
 The candidate is 4d0bba342eb2d9eebf149bd3bd67b82023406a7b (Release binary SHA-256 7cb1d94d0155c36182a289be2c1693c86a7aeecb1e4e154f28ff2d9af0c657f7). The control is 39cd1b6ce77f2289a56ec0d1de2f5044e1607979 (Release binary SHA-256 87ba92c216cb2aa2762acbc36a591c9cc850bd102cf1f675621850869752eced). The included source patch applies to the control source.
 
 [Method and scripts](../paired-driver/README.md) · [PMU samples](pmu.tsv) · [Elapsed samples](wall.tsv) · [Wall faults](wall-faults.tsv) · [Raw counters and stage reports](process-counters.tar.xz) · [Child time reports](wall-reports.tar.xz) · [Warning digests](warnings.tsv)
+
+The [independently rotated comparison](cumulative/README.md) measures the same candidate alongside ordinary main, the returns and reads stages, and a duplicate-executable control.
