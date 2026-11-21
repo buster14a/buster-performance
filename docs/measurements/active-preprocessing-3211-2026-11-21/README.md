@@ -45,3 +45,18 @@ Frozen SQLite ordinary raw-source throughput is 78.08 → 76.99 MB/s for the mas
 Both patches passed identical status, marker-bearing preprocessed stdout, complete stderr including diagnostic locations, and successful complete object hashes on the nine detailed inputs. They cover frozen SQLite, its feature variant, its shell, the all-active control, both sides of include-driven conditionals, malformed skipped structure, a deliberately rejected input, and a macro argument crossing conditional directives. Each input was exercised with ordinary `-E`, `-E -C`, `-E -CC`, warning syntax, and object modes. The frozen parent refuses `-C/-CC` before executing the preprocessor. In a private application of the identifier patch to the separate [#2925](https://github.com/buster14a/buster/pull/2925) publication head `616174e3e0833af48af542be833b5ba0fc8889bb`, the real comment-preserving modes also agree, including markers, comments and diagnostics. That branch deliberately prepares comment-bearing files as whole files with the scalar lexer, so the comment-preserving modes use the existing eager preparation.
 
 The extracted [study scripts](scripts) record exact corpus flags, fixtures, command ordering, native lease, builds, checks, and analysis. [Identifier PMU and child wall data](native/pilot2.tar.xz), [block PMU and child wall data](native/blocks512.tar.xz), and [real comment-mode parity](native/comments.tar.xz) contain per-invocation records. Successful preprocessed streams and ELF objects are retained by their paired SHA-256. [Identifier summaries](native/pilot2-stats.txt) and [block summaries](native/blocks512-stats.txt) show the full process including parse, user/kernel cycles and faults. Full compiler binaries and generated corpora are reproducible from the pinned revisions, patches, build receipts, immutable benchmark corpus and fixture generator.
+
+## Preprocessor PMU per emitted token
+
+Two calls per arm run the production vector preprocessor under the native lease. Each call reports the median of 21 passes using a new intern table, preprocessor and include scan per translation unit. The denominator is the benchmark’s own number of emitted tokens. Its base SQLite invocation produces 716,157 tokens. Whole-driver object timing above uses its final ordinary compile boundary. The numbers below are user-space PMU cycles for preprocessing per benchmark output token. All eight comparisons preserve input and output token counts across both arms. The archives include phase detail and the additional printer measurements. [Raw standalone data](native/standard.tar.xz) · [Exact reproduction script](scripts/bench-standard.sh)
+
+| Experiment | Primary | Output tokens | First pair off → on | Second pair off → on |
+|---|---|---:|---:|---:|
+| pilot2 | sqlite | 716157 | 64.43 → 71.94 | 64.32 → 69.06 |
+| pilot2 | features | 980321 | 49.92 → 55.73 | 49.97 → 55.85 |
+| pilot2 | shell | 199666 | 74.56 → 76.36 | 74.64 → 76.51 |
+| pilot2 | all-active | 66510 | 19.17 → 18.71 | 19.06 → 18.68 |
+| blocks512 | sqlite | 716157 | 64.33 → 65.15 | 63.95 → 64.56 |
+| blocks512 | features | 980321 | 49.61 → 51.92 | 49.84 → 51.89 |
+| blocks512 | shell | 199666 | 74.77 → 75.66 | 75.10 → 76.19 |
+| blocks512 | all-active | 66510 | 18.99 → 17.94 | 18.90 → 18.22 |
