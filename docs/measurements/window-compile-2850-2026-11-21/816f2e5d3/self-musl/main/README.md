@@ -1,0 +1,3 @@
+# main input and measurements
+
+One fresh process compiled 1 source file(s) containing 2,433,922 preprocessed tokens. Every one of 33 recorded compilation commands produced the identical [per-file object manifest](objects.tsv). The default and `-Wall -Wextra` batch invocations checked ordinary and option output on all inputs. Each input also ran alone in the enabled mode with stage counters. Its [per-source ELF and token receipts](per-source-qualification.tsv.gz) and [independent admission counts](admissions.tsv) preserve that second check. [Checks](checks.tsv) · [Run order](order.tsv) · [Samples](samples.tsv) · [Paired differences](paired.tsv) · [Raw reports](reports.tar.xz).

@@ -1,0 +1,7 @@
+# Constant operands after resolving the driver option order
+
+Public [PR #3247](https://github.com/buster14a/buster/pull/3247) moved a checker test and changed the order of two option assignments in 816f2e5d3. The source and its independent b86eadcbd base were built with the same native Ryzen 7 9700X configuration as the [seven-round a60859270 study](../a60859270/README.md). The [compiled sections and functions](release-machine-code.tsv) retain their addresses and sizes. Both production constant-discovery functions have identical machine bytes. The driver option function changed bytes.
+
+The source owner stopped the final two wall rounds after finding that subsequent mainline #3242 requires the hexadecimal decoder to map parser tokens with parse_source_index. These b86-based results are historical. The [three-PMU-round, one-wall-round Buster and full musl comparison](self-musl/README.md) measured an independent pristine compiler, the corrected binary with ordinary flags and the same binary with `--node-window-constants`. Each whole-corpus compile and all per-source receipts confirmed the native object bytes. The [machine-code verifier](constant-release-code.py) and [full source against the pristine compiler](implementation.patch) retain the two distinct verification steps.
+
+The [native build receipts](builds.tsv) include the prior measured release, the requalified candidate and the independent mainline compiler. The option-driver disassembly changed in a [single instruction region](driver-instruction.diff).
