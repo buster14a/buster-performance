@@ -1,0 +1,129 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 1bf7ca3a1..ed674694e 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -3259,9 +3259,10 @@ static void node_census_mark_controls(NodeCensusScratch* s, const CheckProgramBo
+     {
+         const CheckControl* control = program->controls + c;
+         const uint32_t value = mark ? c : BUSTER_CHECK_NONE;
+-        if (control->node < count)
++        const uint32_t node = check_control_expression_node(control);
++        if (node < count)
+         {
+-            s->node_controls[control->node] = value;
++            s->node_controls[node] = value;
+         }
+         if (control->kind == CHECK_CONTROL_INITIALIZE && initializers != NULL && control->target < initializers->count)
+         {
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 6fb7f5017..62c77862c 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -119,6 +119,12 @@ struct CheckControl
+     CheckControlKind kind;
+ };
+ 
++// Lifetime controls use node for their start/end bit. All other controls without an expression already carry NONE.
++static uint32_t check_control_expression_node(const CheckControl* control)
++{
++    return control->kind == CHECK_CONTROL_LIFETIME ? BUSTER_CHECK_NONE : control->node;
++}
++
+ typedef struct CheckProgramBody CheckProgramBody;
+ struct CheckProgramBody
+ {
+@@ -3472,7 +3478,7 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
+         // Each entry's node pushed without a branch (#892): an entry without one marks the marks' last slot, which names no
+         // node, and a node marked already is stored past the stack's top, which has room for one more. Tested an entry at a
+         // time, the push was missed at most of the entries it took on the 9700X.
+-        const uint32_t node = controls[i].node;
++        const uint32_t node = check_control_expression_node(controls + i);
+         const uint32_t mark = node != BUSTER_CHECK_NONE ? node : graph->count;
+         const bool fresh = (node != BUSTER_CHECK_NONE) & (nodes[mark] != epoch);
+         nodes[mark] = epoch;
+diff --git a/src/buster/compiler/c_check_tier1_driver_test.c b/src/buster/compiler/c_check_tier1_driver_test.c
+index 4868874df..5ba9b8b3b 100644
+--- a/src/buster/compiler/c_check_tier1_driver_test.c
++++ b/src/buster/compiler/c_check_tier1_driver_test.c
+@@ -3206,8 +3206,43 @@ static bool check_test_tier1_lifetime_build(const char* executable, const char*
+     return status == 0 && reported && taken;
+ }
+ 
++// A lifetime start and end in live must not refer to the first two graph nodes, which belong to unused.
++static void check_test_tier1_lifetime_references(CheckTest* test, const char* executable, const char* directory)
++{
++    char source[PATH_MAX];
++    char object[PATH_MAX];
++    snprintf(source, sizeof(source), "%s/checker/lifetime-reference-roots.c", check_test_fixture_root);
++    snprintf(object, sizeof(object), "%s/lifetime-reference-roots.o", directory);
++    char* arguments[] = { (char*)executable, "--tier1", "-c", source, "-o", object, NULL };
++    char* text = NULL;
++    const int status = check_test_driver_spawn(arguments, &text);
++    uint64_t length = 0;
++    uint8_t* bytes = status == 0 ? check_test_driver_read_aligned(object, &length) : NULL;
++    CheckTestElf elf;
++    const bool opened = bytes != NULL && check_test_elf_open(&elf, (String8){ .pointer = (char*)bytes, .length = length });
++    bool live = false;
++    bool kept = false;
++    bool unused = false;
++    for (uint64_t i = 1; opened && i < elf.symbol_count; i += 1)
++    {
++        const Elf64_Sym* symbol = elf.symbols + i;
++        const char* name = check_test_elf_string(elf.symbol_names, elf.symbol_names_size, symbol->st_name);
++        if (name != NULL && symbol->st_shndx != SHN_UNDEF)
++        {
++            live |= strcmp(name, "live") == 0;
++            kept |= strcmp(name, "kept") == 0;
++            unused |= strcmp(name, "first") == 0 || strcmp(name, "second") == 0 || strcmp(name, "unused") == 0;
++        }
++    }
++    check_test_expect(test, opened && live && kept && !unused, "Tier 1 lifetime controls preserve only the live body's symbol references");
++    free(bytes);
++    free(text);
++    unlink(object);
++}
++
+ static void check_test_driver_tier1_lifetimes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+ {
++    check_test_tier1_lifetime_references(test, executable, directory);
+     char source[512];
+     char reference[512];
+     snprintf(source, sizeof(source), "%s/tier1-lifetimes.c", directory);
+diff --git a/src/buster/compiler/c_check_x86_diagnostic.c b/src/buster/compiler/c_check_x86_diagnostic.c
+index 2568a91cb..ae13fd30d 100644
+--- a/src/buster/compiler/c_check_x86_diagnostic.c
++++ b/src/buster/compiler/c_check_x86_diagnostic.c
+@@ -131,11 +131,7 @@ static void check_x86_diagnostic_control(CheckX86DiagnosticWalk* walk, uint32_t
+     const CheckProgram* program = walk->program;
+     const CheckInput* input = program->input;
+     const CheckControl* entry = program->controls + walk->body->first + index;
+-    // A LIFETIME's `node` is whether it starts or ends its block's objects' lifetimes (#177), no expression's.
+-    if (entry->kind != CHECK_CONTROL_LIFETIME)
+-    {
+-        check_x86_diagnostic_push(walk, entry->node, false);
+-    }
++    check_x86_diagnostic_push(walk, check_control_expression_node(entry), false);
+     if (entry->kind == CHECK_CONTROL_CLEANUP && walk->cleanup_tags != NULL)
+     {
+         check_x86_diagnostic_cleanup(walk, index);
+diff --git a/tests/checker/lifetime-reference-roots.c b/tests/checker/lifetime-reference-roots.c
+new file mode 100644
+index 000000000..2228e3d52
+--- /dev/null
++++ b/tests/checker/lifetime-reference-roots.c
+@@ -0,0 +1,15 @@
++static int first, second, kept;
++
++static int unused(void)
++{
++    return first + second;
++}
++
++int live(int value)
++{
++    {
++        int local = value;
++        kept = local;
++        return kept;
++    }
++}
