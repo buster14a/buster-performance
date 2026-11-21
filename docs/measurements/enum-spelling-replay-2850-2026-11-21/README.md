@@ -48,3 +48,5 @@ Complete object manifests, diagnostic bytes and status matched for every one of 
 The initial Develop head ran 90,000 generated programs and 8,009 directed probes with no new findings. In each of three warning policies the tracked pile had 448 clean and 865 rejected programs. The 13,944 extracted snippets included 6,661 clean, 7,280 rejected and the same three pre-existing findings. The sweep found 92 of 93 warning IDs, with the separate fixture exercising the remaining availability ID. [Initial standing shadow suite](raw/initial-shadows.tar.xz)
 
 All eight independent final-source checker shards and eight checker-driver shards passed against pinned Clang. [Final local shard logs](raw/final-normal-shards.tar.xz)
+
+The final Develop source passed all six 15,000-program seeds and all 8,009 probes. Its updated tracked corpus had 449 clean and 865 rejected sources under each warning policy. The extracted corpus retained 6,661 clean, 7,280 rejected and the three verified pre-existing findings, with all 93 warning IDs covered by the suite and supplemental availability fixture. [Final standing shadow suite](raw/final-shadows.tar.xz)
