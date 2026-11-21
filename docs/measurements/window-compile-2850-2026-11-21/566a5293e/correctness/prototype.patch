@@ -1,0 +1,260 @@
+From 566a5293e85c8463a4c60dfeacf8ccf5cd9c9e05 Mon Sep 17 00:00:00 2001
+From: David Gonzalez Martin <davidgmbb@gmail.com>
+Date: Sat, 21 Nov 2026 13:07:51 +0100
+Subject: [PATCH] Experiment with native rows for direct integer return calls
+
+Private #2850 qualification prototype. Check the bound prototype, integer
+literal, paid native call descriptor and per-object declarations before
+retaining a call. The BUSTER_CALL_* switches support paired controls
+and side-fact mutations for the evidence run.
+
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ .../compiler/c_check_expression_input.c       | 111 +++++++++++++++++-
+ src/buster/compiler/c_check_input.c           |   7 ++
+ .../compiler/c_check_node_machine_rows.c      |   6 +
+ src/buster/compiler/c_check_program.c         |  15 +++
+ src/buster/compiler/c_check_program_lower.c   |   9 ++
+ 5 files changed, 147 insertions(+), 1 deletion(-)
+
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 9d0949d60..da05b13a2 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1808,6 +1808,7 @@ bool check_node_window_prepare(void);
+ bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
+ void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uint32_t token, bool local);
+ void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token);
++void check_node_window_call_entry(CheckInputWindowRow* row, uint32_t object, uint32_t token, uint32_t count);
+ 
+ static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
+ {
+@@ -1846,7 +1847,18 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
+     else if (reader->return_types[token] == BUSTER_TYPE_INT && token < parser->tokens.count && parser->tokens.count - token >= 3 &&
+         parser->tokens.kinds[token] == PARSE_KIND_RETURN)
+     {
+-        if (end - start >= 1 && tokens[end - 1] == token + 1 &&
++        const bool one = token + 5 < parser->tokens.count && parser->tokens.kinds[token + 3] == PARSE_KIND_NUMBER;
++        const uint32_t close = token + (one ? 4u : 3u);
++        if (reader->window_call_proto && close + 1 < parser->tokens.count && end - start >= 2u + one &&
++            parser->tokens.kinds[token + 1] == PARSE_KIND_IDENTIFIER && parser->tokens.kinds[token + 2] == PARSE_KIND_L_PAREN &&
++            parser->tokens.kinds[close] == PARSE_KIND_R_PAREN && parser->tokens.kinds[close + 1] == PARSE_KIND_SEMI &&
++            tokens[end - 2 - one] == token + 1 && check_input_window_code(classes, end - 2 - one) == CHECK_INPUT_CODE_IDENTIFIER &&
++            (!one || (tokens[end - 2] == token + 3 && check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL)) &&
++            tokens[end - 1] == close && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_CALL)
++        {
++            first = end - 2 - one;
++        }
++        else if (end - start >= 1 && tokens[end - 1] == token + 1 &&
+             (check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL || check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_IDENTIFIER) &&
+             parser->tokens.kinds[token + 2] == PARSE_KIND_SEMI)
+         {
+@@ -1942,6 +1954,49 @@ static bool check_input_window_local(const CheckInputReader* reader, const Check
+            check_sparse_get(input->declaration_bodies, declaration) < input->token_count;
+ }
+ 
++static bool check_input_window_call_attributes(CheckInputReader* reader, uint32_t declaration, uint32_t object)
++{
++    const CheckInput* input = reader->output;
++    if (declaration >= input->token_count || (input->function_flags[declaration] & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_NORETURN)) != 0)
++    {
++        return true;
++    }
++    const CheckSparseWide attributes = input->attributes;
++    if (!check_sparse_wide_present(attributes))
++    {
++        return false;
++    }
++    if (object > input->token_count)
++    {
++        return true;
++    }
++    if (reader->window_attributed_objects == NULL)
++    {
++        const uint32_t words = (input->token_count >> 6) + 1;
++        uint64_t* bits = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
++        if (bits == NULL)
++        {
++            return true;
++        }
++        memset(bits, 0, (size_t)words * sizeof(*bits));
++        for (uint32_t first = check_input_attributed_next(attributes, 0, input->token_count); first < input->token_count;
++             first = check_input_attributed_next(attributes, first + 16, input->token_count))
++        {
++            for (uint32_t selected = check_input_attributed_group(attributes, first, input->token_count); selected != 0; selected &= selected - 1)
++            {
++                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
++                const uint32_t attributed = input->objects[token];
++                if (attributed <= input->token_count)
++                {
++                    bits[attributed >> 6] |= UINT64_C(1) << (attributed & 63);
++                }
++            }
++        }
++        reader->window_attributed_objects = bits;
++    }
++    return (reader->window_attributed_objects[object >> 6] >> (object & 63) & 1u) != 0;
++}
++
+ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, uint32_t first, uint32_t end,
+                                     const CheckInputLiterals* literals, uint32_t* literal, const CheckInputIdentifiers* identifiers, uint32_t* identifier)
+ {
+@@ -1949,6 +2004,52 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
+     const uint32_t operands = end - first;
+     const bool binary = operands == 3;
+     const bool name = reader->parser->tokens.kinds[tokens[first]] == PARSE_KIND_IDENTIFIER;
++    if (name && operands >= 2 && reader->parser->tokens.kinds[tokens[first] + 1] == PARSE_KIND_L_PAREN)
++    {
++        const uint32_t args = operands - 2;
++        const uint32_t id = *identifier;
++        const TypeTable* types = reader->types;
++        const TypeId function = (TypeId)identifiers->types[id];
++        const uint32_t object = (uint32_t)identifiers->objects[id];
++        if (identifiers->status[id] != (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) ||
++            identifiers->types[id] >> 32 != CHECK_FUNCTION || object == 0 || (identifiers->objects[id] >> 32) != 0 ||
++            type_kind(types, function) != BUSTER_TYPE_KIND_FUNCTION || type_return(types, function) != BUSTER_TYPE_INT ||
++            (types->types.flags[type_index(function)] & (BUSTER_TYPE_FLAG_PROTOTYPE | BUSTER_TYPE_FLAG_VARIADIC)) != BUSTER_TYPE_FLAG_PROTOTYPE ||
++            check_input_library_call(reader, tokens[first]) != 0 ||
++            (reader->window_call_guard && (type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV ||
++                                                     check_input_window_call_attributes(reader, identifiers->declarations[id], object))))
++        {
++            return false;
++        }
++        uint32_t parameters = 0;
++        const TypeId* formal = type_parameters(types, function, &parameters);
++        if (parameters != args || (args != 0 && (formal[0] != BUSTER_TYPE_INT || literals->values[*literal] == BUSTER_CHECK_NONE)))
++        {
++            return false;
++        }
++        CheckInputWindowRow rows[2];
++        if (args != 0)
++        {
++            check_node_window_int_entry(rows, literals->values[*literal], tokens[first + 1], false);
++        }
++        check_node_window_call_entry(rows + args, object, tokens[first], args);
++        if (!reader->window_call_omit_reference)
++        {
++            rows[args].flags |= BUSTER_CHECK_WINDOW_CALL_REFERENCE;
++        }
++        const CheckValue value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT };
++        const uint32_t made = check_input_window_publish(reader, batch, returned, value, rows, args + 1, operands + 1);
++        if (made != BUSTER_CHECK_NONE)
++        {
++            reader->output->token_nodes[returned] = made;
++            reader->query_types[returned] = BUSTER_TYPE_INT;
++            reader->first_value[returned] = BUSTER_CHECK_NONE;
++            *identifier += 1;
++            *literal += args;
++            if (reader->window_call_log) fprintf(stderr, "call-row: token=%u argc=%u object=%u\n", returned, args, object);
++        }
++        return made != BUSTER_CHECK_NONE;
++    }
+     uint32_t value = 0;
+     bool admitted;
+     if (name)
+@@ -2180,6 +2281,14 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
+     const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
+                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
++    if (window)
++    {
++        reader->window_attributed_objects = NULL;
++        reader->window_call_proto = getenv("BUSTER_CALL_PROTO") != NULL;
++        reader->window_call_guard = getenv("BUSTER_CALL_GUARD") != NULL;
++        reader->window_call_log = getenv("BUSTER_CALL_LOG") != NULL;
++        reader->window_call_omit_reference = getenv("BUSTER_CALL_OMIT_REFERENCE") != NULL;
++    }
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
+     {
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 0122d114f..6d3955f30 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -896,6 +896,8 @@ struct CheckInputMusttail
+ #define BUSTER_CHECK_WINDOW_LOCAL 0x01u
+ #define BUSTER_CHECK_WINDOW_READ 0x02u
+ #define BUSTER_CHECK_WINDOW_WRITE 0x04u
++#define BUSTER_CHECK_WINDOW_CALL 0x08u
++#define BUSTER_CHECK_WINDOW_CALL_REFERENCE 0x10u
+ 
+ typedef struct CheckInputWindowRow CheckInputWindowRow;
+ struct CheckInputWindowRow
+@@ -2336,6 +2338,11 @@ struct CheckInputReader
+     bool deprecated_attributes;
+     // Whether a diagnose_if or enable_if attribute was read, for its conditions (#1447, c_check_condition.c).
+     bool condition_attributes;
++    bool window_call_proto;
++    bool window_call_guard;
++    bool window_call_log;
++    bool window_call_omit_reference;
++    uint64_t* window_attributed_objects;
+     // Whether an enforce_tcb or enforce_tcb_leaf attribute was read, for its calls' warnings (#1447, check_input_tcb_calls),
+     // and whether one of them or a modular_format was, for its redeclarations' checks (check_input_attribute_merge_checks).
+     bool tcb_attributes;
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index 86a2457d5..9c479962a 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -1396,6 +1396,12 @@ void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uin
+     };
+ }
+ 
++void check_node_window_call_entry(CheckInputWindowRow* row, uint32_t object, uint32_t token, uint32_t count)
++{
++    *row = (CheckInputWindowRow){ .value = object | (uint64_t)count << 32, .token = token, .kind = BUSTER_TYPED_CALL,
++                                 .class = BUSTER_TYPED_CLASS_I32, .flags = BUSTER_CHECK_WINDOW_CALL };
++}
++
+ // A discarded plain int assignment: store the RHS (the preceding row), then discard the stored value.
+ void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token)
+ {
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index a2f327241..e41d1e766 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -3676,6 +3676,21 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
+         if (op == CHECK_OP_VALUE)
+         {
+             const CheckValue value = check_graph_leaf_value(graph, node);
++            if (program->input->window_count != 0 && value.flags == BUSTER_CHECK_SIDE_EFFECT && value.type == BUSTER_TYPE_INT)
++            {
++                const CheckInputWindowSummary* summary = check_input_window_summary(program->input, node);
++                if (summary != NULL && summary->count != 0)
++                {
++                    const CheckInputWindowRow* row = program->input->window_rows + summary->first + summary->count - 1;
++                    const uint32_t target = (uint32_t)row->value;
++                    if ((row->flags & BUSTER_CHECK_WINDOW_CALL_REFERENCE) != 0 && target != 0 && target < program->object_count && seen[target] != epoch)
++                    {
++                        seen[target] = epoch;
++                        needed[target] = 1;
++                        references[reference_count++] = (uint64_t)target << 32;
++                    }
++                }
++            }
+             if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
+                 ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC)) && seen[value.object] != epoch)
+             {
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index b2d070c31..1d06f6282 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -15645,6 +15645,15 @@ static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* write
+     {
+         const CheckInputWindowRow* row = program->input->window_rows + summary->first + i;
+         uint64_t native_value = row->value;
++        if ((row->flags & BUSTER_CHECK_WINDOW_CALL) != 0)
++        {
++            const uint32_t target = (uint32_t)row->value;
++            const TypeId parameter = BUSTER_TYPE_INT;
++            const uint32_t count = (uint32_t)(row->value >> 32);
++            native_value = check_lower_native_call(writer, target < program->object_count ? program->object_symbols[target] : 0,
++                                                   BUSTER_TYPE_INT, &parameter, count);
++            if (native_value == BUSTER_CHECK_NONE) break;
++        }
+         if ((row->flags & BUSTER_CHECK_WINDOW_LOCAL) != 0)
+         {
+             native_value = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
+-- 
+2.56.1
+
