@@ -1,0 +1,7 @@
+# Cost of graph removal for combined predicates
+
+Three standalone Release compilers built from Buster `84a7d3d76` produced identical SQLite ELF bytes, native instructions, ABI witnesses, stdout and diagnostics. With graph retention, the source producer preserved all 323,623 checker nodes. The replacement image removed 12,466 nodes and 498 argument records. This build confines the producer to eligible chunks, which changes its coverage relative to the [full oracle](../combined-predicates/). [Hashes and graph sizes](checks.tsv)
+
+On the Ryzen 9 7940HS, enabling the producer while retaining the graph added 143.09 million user instructions and 169.29 million total cycles. Enabling replacement on that producer added a further 15.58 million user instructions in all five rounds. Its paired median wall change was −0.36 ms, with individual differences between −3.44 and +11.14 ms. Against the disabled image the replacement took 48.81 ms longer and retired 158.66 million more instructions. [Paired changes](paired.tsv)
+
+Each of five rounds ran every image twice in symmetric order on the real frozen SQLite source. PMU measurements and wall timings came from separate fresh processes with object verification. These measurements identify costs in the prototype. The issue's whole-compile throughput target uses a locked Ryzen 7 9700X. [PMU samples](pmu.tsv) · [Wall samples](fresh-process-wall.tsv) · [Three complete patches and receipts](source-and-receipts.tar.gz)
