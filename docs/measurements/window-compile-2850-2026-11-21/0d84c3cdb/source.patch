@@ -1,0 +1,246 @@
+diff --git a/docs/commands/lowering.md b/docs/commands/lowering.md
+index 69e43e722..ca7f831c2 100644
+--- a/docs/commands/lowering.md
++++ b/docs/commands/lowering.md
+@@ -2718,6 +2718,13 @@ uninitialized variable, including its source position and note. An
+ unreachable read still counts as a syntactic use of a written parameter.
+ Other storage classes, special registers and qualified types keep their graph.
+ 
++`--node-window-assignments` enables the same returns and also scans for complete
++discarded assignments such as `x = 24;` and `x = y;`, with distinct ordinary
++automatic or parameter `int` objects. An admitted assignment retains three
++entries for its right operand, local store and discard, each with its own
++source token. The read and write events feed the existing warning passes.
++The base `--node-window` mode skips assignment discovery.
++
+ Admission requires the entire expression in the same coded chunk. Other types,
+ operators and spellings, debug information, deferred parts, and units requiring
+ musttail validation use the existing graph. The window checks the coded tokens
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 9d0949d60..64248a52a 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2032,32 +2032,50 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
+     return node != BUSTER_CHECK_NONE;
+ }
+ 
+-// List complete returns and potentially assignable statements 16 actions at a time. The ordinary action loop runs unchanged between admitted spans, including a
+-// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
+-static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+-                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
+-                                                                     uint64_t* visited)
++// Collect candidate ends in one pass over the action classes. Each caller selects its scan once per chunk.
++static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
+ {
+-    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+     uint32_t candidates = 0;
+-    __m512i previous = _mm512_setzero_si512();
++    uint32_t previous_names = 0;
++    uint32_t previous_rhs = 0;
++    uint32_t previous_binary = 0;
+     for (uint32_t i = 0; i < acting; i += 16)
+     {
+         const uint32_t run = acting - i < 16 ? acting - i : 16;
+         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, run);
+         const __m512i bytes = _mm512_maskz_loadu_epi32(lanes, classes + i);
+         const __m512i codes = _mm512_and_si512(bytes, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
+-        const __m512i before = _mm512_alignr_epi32(codes, previous, 15);
+-        const __mmask16 terminated = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+-        const __mmask16 assignments = _mm512_mask_cmpeq_epi32_mask(terminated, before, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+-        const __mmask16 found = assignments | _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
+-        previous = codes;
++        __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++        if (assignments)
++        {
++            // Match the four postorder actions even when they straddle adjacent groups of 16.
++            const uint32_t names = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            const uint32_t rhs = names | _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            const uint32_t binary = _mm512_cmpeq_epi32_mask(codes, _mm512_set1_epi32(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            const uint32_t ended = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            found |= ended & (((names << 16) | previous_names) >> 13) & (((rhs << 16) | previous_rhs) >> 14) & (((binary << 16) | previous_binary) >> 15);
++            previous_names = names;
++            previous_rhs = rhs;
++            previous_binary = binary;
++        }
+         for (uint32_t bits = found; bits != 0; bits &= bits - 1)
+         {
+             ends[candidates++] = i + (uint32_t)__builtin_ctz(bits);
+         }
+     }
+     ends[candidates] = acting;
++    return candidates;
++}
++
++// List complete returns and potentially assignable statements 16 actions at a time. The ordinary action loop runs unchanged between admitted spans, including a
++// return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
++static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
++                                                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
++                                                                     uint64_t* visited)
++{
++    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
++    const uint32_t candidates = reader->pp->options.node_window_assignments ? check_input_window_ends(ends, classes, acting, true) :
++                                check_input_window_ends(ends, classes, acting, false);
+     uint32_t identifier = 0;
+     uint32_t literal = 0;
+     uint32_t cursor = 0;
+diff --git a/src/buster/compiler/c_check_lower_inventory.c b/src/buster/compiler/c_check_lower_inventory.c
+index fe396088d..09f268005 100644
+--- a/src/buster/compiler/c_check_lower_inventory.c
++++ b/src/buster/compiler/c_check_lower_inventory.c
+@@ -621,9 +621,11 @@ static uint8_t lower_source_node_front;
+ // PPOptions.node_reader for them (measure-node-machine --shadow --front-tests); 0 for none.
+ static uint16_t lower_source_node_reader;
+ 
++#define BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS 4u
++
+ // Opens `file`, read with `options`, into `source`, with the backend's tables built: whether its options could be read
+ // (source->prepared says whether it reached its selected program).
+-static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count, bool window)
++static bool lower_source_open(LowerSource* source, const char* file, char** options, uint32_t option_count, uint32_t window)
+ {
+     source->option_arena = arena_reserve(UINT64_C(1) << 24);
+     char** own = BUSTER_ARENA_PUSH_ARRAY(&source->option_arena, char*, (uint64_t)option_count + 2);
+@@ -642,7 +644,8 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
+     }
+     valid = valid && pp_parse_options((int)option_count + 1, own, &pp_options, &source->option_arena, &input, &output_file, &markers) && output_file == 0 && input != 0;
+     pp_options.semantic_pragmas = true;
+-    pp_options.node_window = window;
++    pp_options.node_window = window != 0;
++    pp_options.node_window_assignments = (window & BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS) != 0;
+     pp_options.node_front = lower_source_node_front;
+     pp_options.node_reader = lower_source_node_reader;
+     source->path = (CheckCorpusPath){ 0 };
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index 3acd75f70..5a453cc7b 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -6115,7 +6115,7 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
+ 
+ // Compile the source independently both ways. Change the retained first row after checking and lower it again:
+ // only a lowering that actually splices the reader's tape can emit the changed value.
+-static void node_window_test_compile(CheckTest* test)
++static void node_window_test_compile(CheckTest* test, bool assignments)
+ {
+     char file[PATH_MAX];
+     snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
+@@ -6123,17 +6123,17 @@ static void node_window_test_compile(CheckTest* test)
+     static LowerSource plain;
+     static LowerSource window;
+     const bool opened_plain = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false);
+-    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true);
++    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), assignments ? BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS : 1u);
+     const bool prepared = opened_plain && opened_window && plain.prepared && window.prepared;
+     check_test_expect(test, prepared, "node-window prepares its mixed ordinary and taken returns");
+     if (prepared)
+     {
+         const CheckInput* reference = &plain.path.input;
+         CheckInput* input = &window.path.input;
+-        check_test_expect(test, reference->window_count == 0 && input->window_count == 13 && input->window_nodes == 40,
+-                          "node-window admits 13 complete expressions on baked and runtime-initialized transition tables");
++        check_test_expect(test, reference->window_count == 0 && input->window_count == (assignments ? 13u : 11u) && input->window_nodes == (assignments ? 40u : 32u),
++                          "node-window takes two additional complete assignments only with assignment discovery enabled");
+         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
+-                          "node-window replaces 40 ordinary nodes by 13 checked expression roots");
++                          "node-window replaces complete expressions by single checked roots");
+         bool same = true;
+         uint32_t reads = 0;
+         uint32_t writes = 0;
+@@ -6183,7 +6183,8 @@ static void node_window_test_compile(CheckTest* test)
+                         regular.flags, value.flags, summary->count, rows[0].kind, rows[0].value);
+             }
+         }
+-        check_test_expect(test, same && reads == 5 && writes == 2, "node-window publishes the complete ordinary checked values, exact native rows, five local reads and two local writes");
++        check_test_expect(test, same && reads == (assignments ? 5u : 4u) && writes == (assignments ? 2u : 0u),
++                          "node-window publishes the complete ordinary checked values, exact native rows and ordered reads and writes");
+         CheckProgramLowered original = { 0 };
+         CheckProgramLowered first = { 0 };
+         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+@@ -6233,7 +6234,8 @@ static void node_window_test_compile(CheckTest* test)
+ 
+ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+ {
+-    node_window_test_compile(test);
++    node_window_test_compile(test, false);
++    node_window_test_compile(test, true);
+     char directory[] = "/tmp/buster-node-census-XXXXXX";
+     const bool ready = mkdtemp(directory) != 0;
+     check_test_expect(test, ready, "node-census fixtures' directory is made");
+diff --git a/src/buster/compiler/c_check_warning_driver_test.c b/src/buster/compiler/c_check_warning_driver_test.c
+index c0f0d6ab4..fa744f8a6 100644
+--- a/src/buster/compiler/c_check_warning_driver_test.c
++++ b/src/buster/compiler/c_check_warning_driver_test.c
+@@ -3063,7 +3063,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
+                 check_test_expect(test, oracle_matches, description);
+                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
+                 {
+-                    const char* alternate = fixture->compare_node_window ? "--node-window" : "--scalar";
++                    const char* alternate = fixture->compare_node_window ? "--node-window-assignments" : "--scalar";
+                     for (uint32_t route = 0; route < 2; route += 1)
+                     {
+                         arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 56890b57f..f9acd5974 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -13838,6 +13838,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
+     bool check_transitions = false;
+     bool node_window = false;
++    bool node_window_assignments = false;
+     bool dump = false;
+     bool dump_static = false;
+     bool emit_object = false;
+@@ -14124,6 +14125,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         {
+             verify = true;
+         }
++        else if (match.exact == C_OPTION_NODE_WINDOW_ASSIGNMENTS)
++        {
++            node_window = true;
++            node_window_assignments = true;
++        }
+         else if (match.exact == C_OPTION_NODE_WINDOW)
+         {
+             node_window = true;
+@@ -14499,6 +14505,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     }
+     options.semantic_pragmas = true;
+     options.timing = time_stages;
++    options.node_window_assignments = node_window_assignments;
+     options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
+     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
+     // The preprocessor's phases' ticks in pp_run, for the report.
+@@ -14614,7 +14621,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     }
+     else if (!parsed)
+     {
+-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
++        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
+     }
+diff --git a/src/buster/compiler/c_option_table.c b/src/buster/compiler/c_option_table.c
+index 83e6379a1..86ece6f51 100644
+--- a/src/buster/compiler/c_option_table.c
++++ b/src/buster/compiler/c_option_table.c
+@@ -62,6 +62,7 @@
+     ENTRY(LOWER_ALL, "--lower-all") \
+     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
+     ENTRY(NODE_WINDOW, "--node-window") \
++    ENTRY(NODE_WINDOW_ASSIGNMENTS, "--node-window-assignments") \
+     ENTRY(POISON_ARENAS, "--poison-arenas") \
+     ENTRY(PREDEFINES, "--predefines") \
+     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 24b4e574c..52f7ce169 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -392,6 +392,8 @@ struct PPOptions
+     bool expression_numbering;
+     // --node-window takes eligible full expressions before the coded walk.
+     bool node_window;
++    // --node-window-assignments also considers discarded local assignments.
++    bool node_window_assignments;
+     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
