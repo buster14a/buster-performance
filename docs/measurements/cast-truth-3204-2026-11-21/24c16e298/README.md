@@ -26,3 +26,5 @@ python3 ../intermediate/c-loop.py refcast24c cast24c -cast24c
 ## Exact-head semantic checks
 
 The [direct checker and driver campaigns](direct/README.md) record the original 805 cast cases, 3,600 mixed casts, 4,200 address cases, 4,800 object-size queries and 7,636 supplemental cases on this production head. Seven rebuilt single-term branch mutations gave the same observability as the predecessor. Four produced a source-level diagnostic difference, one more was distinguished by replaying the implicit representation, and two had no observed source-level effect. A separate test poisons all eight scratch rows inside the real C sweep. Each of two mutations that skips a needed far-lane write was detected. The export includes the generators, per-case results, compiler and Clang provenance and a SHA-256 manifest.
+
+A separate first-order mutation inverted the exact result-kind predicate, changing `== NONE` to `!= NONE`. It produced ten diagnostics under GNU17 and ten under C23, with clean unmodified controls. The original deletion of that predicate still had no observed effect in the source-level matrix. [Inversion, fixture and results](inversion/README.md)
