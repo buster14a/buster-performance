@@ -1,0 +1,7 @@
+# Local production control qualification
+
+Both compilers were built from the recorded source with the Develop configuration. The three comparison groups share their working directory and compare actual compile status, complete object SHA-256, stdout and stderr for each source. The 36 focused cases apply six policies to six translation units covering lifetime exits, GNU statement expressions, VLA, cleanup, goto and asm goto. The 54 direct cases include SQLite, compiler main, Lua and musl, warnings, deferred bodies, and the scalar and explicit node-window controls. The 158 broad cases comprise every Lua source and up to three representative sources per musl directory. Every one of the 248 pairs produced an object and matched across all four fields. The focused body/program assertions independently poison unused source-label and loop slots, then verify both vector/scalar discoveries.
+
+The eight checker shards ran seed 133, and the eight driver shards ran in-process against the exact candidate binary. All 848,420 checker and 211,029 driver assertions passed. The compiler itself compiled with ordinary selected lowering, full lowering, and scalar full lowering under --verify, and complete full-lowering scalar/vector objects matched. The 5,744 focused checks also passed separately.
+
+The shell runner used LLVM 23.1.4. Put that toolchain on PATH or set BUSTER_CLANG_BIN to its bin directory when reproducing these shards.
