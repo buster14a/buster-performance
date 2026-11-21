@@ -7,3 +7,5 @@ The [complete filtered source](implementation.patch) adds an explicit `--node-wi
 Across all 34 Lua files and 1,336 musl files, the option increased elapsed time in all three same-binary rounds. The median increase was 0.2695 ms for Lua and 1.3950 ms for musl. Both corpora retired fewer user instructions and emitted identical objects. The [full-corpus record](lua-musl/README.md) includes per-source admissions, digests, both warning policies and the pristine compiler control.
 
 The [corrected source qualification](correctness/README.md) covers 64,422 compiler invocations, 5,488 comparisons of native output and source positions, the static assertion regression, and the checked-in and memory-sanitized checker suites.
+
+The [verification appendix](appendix/README.md) adds full checker and driver shard totals, additional Tier 1 and builtin-immediate cases, and local measurements on five disjoint musl groups. Two alternative sparse-discovery implementations are included with their independent controls.
