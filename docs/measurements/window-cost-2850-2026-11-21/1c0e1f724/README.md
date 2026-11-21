@@ -22,3 +22,5 @@ tar -xJf runs.tar.xz
 python3 ../../tests-holes-2850-2026-11-21/9700x/xh-table.py refcost2 costv2 -costv2 7 reproduced.json
 cmp summary.json reproduced.json
 ```
+
+The candidate's diagnostic and shadow campaign exercised 93 warnings, 8,009 targeted probes, 90,000 generated programs, and 15,108 source fixtures or extracted programs under each of three warning policies. The campaign had zero shadow disagreements. The checker shard passed all 210,477 assertions. The separate distance-bound fixture includes six genuine out-of-range refusals. Its [acceptance receipts and reproduction scripts](acceptance/) are archived with the timings.
