@@ -134,10 +134,13 @@ MB first touched (2^20 bytes), huge pages as on the 9700X, and base pages:
 ### What the counts say
 
 - **Huge pages' rounding is 58.7 MB** (277.4 against 218.7), the largest part the reader's output arena (25.2 MB: the
-  graph's columns start on a 2 MB boundary each, which the graph fills
-  to less than half on `sqlite3.c`, #1076). It is not a lever: a 2 MB page costs about a third
-  of what the same bytes cost in base pages (#2873's census: 210 K kernel cycles a MB against 642 K), so base pages pay
-  only for a block of which less than a third is used.
+  graph's columns start on a 2 MB boundary each, which the graph fills to less than half on `sqlite3.c`, #1076). It is
+  barely a lever: a 2 MB page costs about a third of what the same bytes cost in base pages (#2873's census: 210 K
+  kernel cycles a MB against 642 K), so base pages pay only for a block of which less than a third is used. Block by
+  block (`results/census/blocks.txt`, `scripts/census/blocks.py`; the two runs map the same addresses): of the 127
+  faults of 2 MB, 65 blocks have all 512 of their 4 KB pages touched in the base-page run and 31 more at least half;
+  28 would be cheaper in base pages, for 6.6 M kernel cycles together (about 1% of the compile), and only if those
+  blocks could be told apart before their first touch.
 - **Discarding and touching again is gone:** 2.0 MB, where #2873's census of 2026-11-16 had the scratch's 74 MB.
 - **`check-input` holds the peak by itself.** It first touches 116 MB on top of the parse's scratch, which it reuses:
   its scratch, its output and its sparse columns take 140.9 MB in base pages (173.9 in huge pages) at once,
@@ -158,8 +161,11 @@ MB first touched (2^20 bytes), huge pages as on the 9700X, and base pages:
 ## What it means for #1701
 
 - **The kernel's row is the bytes a token the compile writes, not how it takes pages.** About 219 MB are genuinely
-  touched; a 2 MB page is already the cheapest way to take them; nothing is touched twice. Of the 277 MB, the bounded
-  pieces reach the fill-only columns and the sparse arena's base pages: about 2 to 4% of the compile together.
+  touched; a 2 MB page is already the cheapest way to take most of them; nothing is touched twice. What bounded pieces
+  can reach: the 28 sparse 2 MB blocks (about 1%), the fill-only columns' pages and fills (most of `memset`'s first
+  touches are fills of columns written densely afterwards, so their faults would come anyway), the sparse arena's
+  base-page faults (which a huge-page layout doesn't make cheaper: its columns are written sparsely, and the binding
+  table's prefixes are about 0.6 MB each). About 1 to 2% of the compile together.
 - **The rest goes with fewer bytes a token:** the node machine's records in place of the reader's columns and the
   graph (#2850's step 2), or the same columns a window long (#2536's steps 3 to 5).
 
