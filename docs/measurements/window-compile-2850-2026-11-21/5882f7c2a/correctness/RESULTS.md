@@ -1,0 +1,7 @@
+# Interim measurements on 5882f7c2a
+
+The 5,488 frozen corpus/mode triples and 4,160 generated triples match. The 11,826 tracked triples include 24 option-specific differences on three source files. The ordinary static assertion diagnostic walks the original comparison beneath a comma to decide which operand-values notes to print. Folding the marked comparison adds a note. `differing-diagnostics/` preserves the exact ordinary and affected texts for all eight relevant policies. The ordinary compiler reports those three files identically to its pristine parent. The signed follow-up `a60859270` retains the original arithmetic throughout static assertions.
+
+All 24 linked executables from the 144-function deterministic run returned the expected result. The LLVM, Buster pristine, Buster plain and source-window paths were exercised under six policies. The opt-in emitted 324 compressed children and removed 1,484 graph nodes in that suite.
+
+Excluding the generated sample, the four workload corpus counts per ordinary and debugging policy match the verified historical profile. The local single-lane complete compiles retire 1.952 million fewer user instructions on SQLite and 90.304 million fewer on compiler-self than the candidate's ordinary path. The same comparison adds 95 thousand on Lua and 10.353 million on all musl inputs. Every multi-input build checks the complete set of ELF files. Results for the frozen snapshot are intermediate while the new diagnostic boundary is being qualified.
