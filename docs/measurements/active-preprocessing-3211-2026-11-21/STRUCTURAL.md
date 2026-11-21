@@ -28,6 +28,10 @@ Each experiment has six rotating, mirrored three-arm rounds with a separate unto
 | cond6 | features | 40,857 | 16,562 | 60 / 94 | 9.845 → 11.133 | +13.04% | 57.09 → 56.48 |
 | cond6 | shell | 15,727 | 6,142 | 0 / 5 | 3.842 → 4.121 | +7.09% | 33.88 → 33.65 |
 | cond6 | all-active | 0 | 0 | 0 / 0 | 0.808 → 0.841 | +1.25% | 40.78 → 40.79 |
+| cursor7 | sqlite | 201,466 | 81,151 | 2 / 94 | 9.500 → 9.874 | +3.35% | 78.46 → 78.11 |
+| cursor7 | features | 40,857 | 16,562 | 60 / 94 | 9.772 → 10.921 | +11.56% | 57.26 → 56.88 |
+| cursor7 | shell | 15,727 | 6,142 | 0 / 5 | 3.830 → 3.921 | +1.61% | 33.96 → 33.93 |
+| cursor7 | all-active | 0 | 0 | 0 / 0 | 0.859 → 0.828 | -1.78% | 41.09 → 41.01 |
 
 ## Source scanning and storage
 
@@ -49,5 +53,25 @@ The user PMU measurements below come from two standalone `benchmark-preprocessor
 | file4 | features | 980,321 | 49.86 → 64.22 | 49.84 → 64.40 |
 | file4 | shell | 199,666 | 74.55 → 81.73 | 74.64 → 81.63 |
 | file4 | all-active | 66,510 | 19.01 → 18.94 | 18.99 → 18.85 |
+| direct5 | sqlite | 716,157 | 63.77 → 74.90 | 63.89 → 72.52 |
+| direct5 | features | 980,321 | 50.34 → 58.54 | 49.68 → 58.50 |
+| direct5 | shell | 199,666 | 74.45 → 79.70 | 74.85 → 79.37 |
+| direct5 | all-active | 66,510 | 18.75 → 19.05 | 19.21 → 18.95 |
+| cond6 | sqlite | 716,157 | 63.58 → 68.67 | 63.93 → 68.73 |
+| cond6 | features | 980,321 | 49.78 → 55.61 | 49.90 → 55.70 |
+| cond6 | shell | 199,666 | 74.78 → 76.64 | 74.49 → 76.94 |
+| cond6 | all-active | 66,510 | 18.94 → 19.93 | 18.67 → 20.39 |
+| cursor7 | sqlite | 716,157 | 64.07 → 67.59 | 64.61 → 68.07 |
+| cursor7 | features | 980,321 | 49.90 → 55.28 | 49.86 → 55.42 |
+| cursor7 | shell | 199,666 | 75.06 → 76.34 | 74.67 → 76.38 |
+| cursor7 | all-active | 66,510 | 18.76 → 19.63 | 18.80 → 19.90 |
+
+## Final range cursor
+
+Cursor7 stores the raw index of the next deferred position in each file context and advances it only when a genuine conditional jump or ordinary run reaches that position. This removes the full per-directive pointer table from the previous candidates. The primary uses private mutable columns from the ordinary cache lane, leaving the shared source record immutable. Carriage-return detection is folded into the mandatory physical scan. The opt-in counters time planning separately using the native TSC. They execute in correctness runs outside the paired performance panel.
+
+During the instrumented marker, warnings and object checks the directional planner took 0.932–0.958 ms on default SQLite and 0.932–1.072 ms with extra features, calibrated against a median invariant TSC rate of 3.792833 ticks/ns. The shell took 0.121–0.123 ms and all-active 0.018–0.026 ms. Some driver modes invoke the preprocessor twice. These standalone counts include initial access to the source and were collected outside the timed performance process. Subtracting them from whole compile times would mix different measurements.
+
+[Range-cursor patch](source/cursor7.patch) · [Complete native timings and correctness](native/cursor7.tar.xz) · [Source scan extents](native/cursor7-scan-extents.txt) · [TSC calibration](native/tsc-rate.txt)
 
 [Masked-source experiment](source/file4.patch) · [Direct source jumps](source/direct5.patch) · [Optional-scope scheduling](source/cond6.patch) · [Raw file4 samples](native/file4.tar.xz) · [Raw direct5 samples](native/direct5.tar.xz) · [Raw cond6 samples](native/cond6.tar.xz)
