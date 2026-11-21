@@ -1,0 +1,153 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 1faef5600..d877dce72 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2293,7 +2293,8 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     // Deferred parts publish their graphs separately; they do not own a unit's tape. A musttail check needs the
+     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
+     const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed && front == NULL &&
+-                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
++                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare() && (!reader->pp->options.node_window_constants ||
++                        (reader->pp->options.integer_window_screen_min == 0 && !reader->pp->options.integer_window_screen_report) || check_integer_window_unit(reader));
+     const bool profile = !reader->pp->options.skip_expression_profile;
+     uint64_t* visit_ticks = profile ? &visited : NULL;
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+diff --git a/src/buster/compiler/c_check_integer_window_input.c b/src/buster/compiler/c_check_integer_window_input.c
+index 714bdb521..b0cd67fa7 100644
+--- a/src/buster/compiler/c_check_integer_window_input.c
++++ b/src/buster/compiler/c_check_integer_window_input.c
+@@ -121,6 +121,102 @@ static uint32_t check_integer_window_literal(CheckInputReader* reader, uint32_t
+     return value;
+ }
+ 
++// A unit-level discovery control. The reader already classified these bytes in written source order.
++static bool check_integer_window_unit(CheckInputReader* reader)
++{
++    const uint32_t limit = reader->pp->options.integer_window_screen_min;
++    const bool trace = reader->pp->options.integer_window_screen_report;
++    const bool grouped = reader->pp->options.integer_window_grouped;
++    const Parser* parser = reader->parser;
++    uint32_t cursor = BUSTER_PP_NONE;
++    const uint32_t count = reader->parser->tokens.count;
++    uint32_t seeds = 0;
++    for (uint32_t at = 1; at + 1 < count && (trace || seeds < limit); at += 64)
++    {
++        const uint32_t remaining = count - 1 - at;
++        const uint64_t lanes = _bzhi_u64(UINT64_MAX, remaining < 64 ? remaining : 64);
++        const __m512i mask = _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_CODE_MASK);
++        const __m512i literal = _mm512_set1_epi8(CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++        const __m512i prior = _mm512_and_si512(mask, _mm512_maskz_loadu_epi8(lanes, reader->visits + at - 1));
++        const __m512i here = _mm512_and_si512(mask, _mm512_maskz_loadu_epi8(lanes, reader->visits + at));
++        const __m512i next = _mm512_and_si512(mask, _mm512_maskz_loadu_epi8(lanes, reader->visits + at + 1));
++        const uint64_t left = _mm512_cmpeq_epi8_mask(literal, prior);
++        const uint64_t right = _mm512_cmpeq_epi8_mask(literal, next);
++        const uint64_t unary = _mm512_cmpeq_epi8_mask(here, _mm512_set1_epi8(CHECK_INPUT_CODE_PREFIX << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++        const uint64_t binary = _mm512_cmpeq_epi8_mask(here, _mm512_set1_epi8(CHECK_INPUT_CODE_BINARY << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++        uint64_t left_kinds = left;
++        uint64_t right_kinds = right;
++        if (grouped)
++        {
++            const __m512i before = _mm512_maskz_loadu_epi8(lanes, parser->tokens.kinds + at - 1);
++            const __m512i after = _mm512_maskz_loadu_epi8(lanes, parser->tokens.kinds + at + 1);
++            left_kinds |= _mm512_cmpeq_epi8_mask(before, _mm512_set1_epi8((char)PARSE_KIND_R_PAREN));
++            right_kinds |= _mm512_cmpeq_epi8_mask(after, _mm512_set1_epi8((char)PARSE_KIND_L_PAREN));
++        }
++        uint64_t bits = lanes & right_kinds & (unary | (binary & left_kinds));
++        for (; bits != 0 && (trace || seeds < limit); bits &= bits - 1)
++        {
++            const uint32_t i = (uint32_t)__builtin_ctzll(bits);
++            const uint32_t token = at + i;
++            uint32_t r = token + 1;
++            const bool two = ((binary >> i) & 1) != 0;
++            uint32_t l = two ? token - 1 : r;
++            if (grouped)
++            {
++                while (r < count && parser->tokens.kinds[r] == PARSE_KIND_L_PAREN)
++                {
++                    ++r;
++                }
++                while (two && l != 0 && parser->tokens.kinds[l] == PARSE_KIND_R_PAREN)
++                {
++                    --l;
++                }
++                if (!two)
++                {
++                    l = r;
++                }
++            }
++            if (r >= count || parser->tokens.kinds[r] != PARSE_KIND_NUMBER || parser->tokens.kinds[l] != PARSE_KIND_NUMBER ||
++                (reader->constant_contexts[token] & BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT) != 0)
++            {
++                continue;
++            }
++            uint32_t left_parent = parser->tree.parents[l];
++            uint32_t right_parent = parser->tree.parents[r];
++            if (grouped)
++            {
++                while (left_parent < count && parser->tree.roles[left_parent] == PARSE_ROLE_CLOSE_GROUP)
++                {
++                    left_parent = parser->tree.parents[left_parent];
++                }
++                while (right_parent < count && parser->tree.roles[right_parent] == PARSE_ROLE_CLOSE_GROUP)
++                {
++                    right_parent = parser->tree.parents[right_parent];
++                }
++            }
++            if (left_parent != token || right_parent != token)
++            {
++                continue;
++            }
++            const uint8_t kind = parser->tokens.kinds[token];
++            const CheckOp op = two ? check_input_binary(kind) : kind == PARSE_KIND_PLUS ? CHECK_OP_POSITIVE :
++                               kind == PARSE_KIND_MINUS ? CHECK_OP_NEGATIVE : kind == PARSE_KIND_TILDE ? CHECK_OP_BIT_NOT : CHECK_OP_COUNT;
++            if (op < CHECK_OP_COUNT && !check_integer_window_observed(parser, token, op))
++            {
++                const uint32_t x = check_integer_window_literal(reader, l, check_input_literal_plain(reader, l, &cursor));
++                const uint32_t y = l == r ? x : check_integer_window_literal(reader, r, check_input_literal_plain(reader, r, &cursor));
++                uint32_t result;
++                seeds += x != BUSTER_CHECK_NONE && y != BUSTER_CHECK_NONE && check_node_window_fold_int(op, x, y, two, &result);
++            }
++        }
++    }
++    if (trace)
++    {
++        fprintf(stderr, "integer-window-unit: token-count=%u seeds=%u limit=%u\n", count, seeds, limit);
++    }
++    return seeds >= limit;
++}
++
+ static __attribute__((noinline)) uint32_t check_integer_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens,
+     const uint32_t* classes, uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals, uint64_t* visited)
+ {
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index b0bd4b919..df8613dbd 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -14887,6 +14887,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         parsed = driver_cache_streams(&arena, inputs, input_kinds, input_count, &options);
+     }
+     options.node_window_constants = node_window_constants;
++    if (node_window_constants)
++    {
++        const char* threshold = getenv("BUSTER_WINDOW_UNIT_SEEDS");
++        options.integer_window_screen_min = threshold != NULL ? (uint32_t)strtoul(threshold, NULL, 10) : 0;
++        options.integer_window_screen_report = getenv("BUSTER_WINDOW_UNIT_SEEDS_REPORT") != NULL;
++        options.integer_window_grouped = getenv("BUSTER_WINDOW_UNIT_GROUPS") != NULL;
++    }
+     options.skip_expression_profile = !time_stages;
+     options.semantic_pragmas = true;
+     options.timing = time_stages;
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 3c2a3c686..582e60093 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -397,6 +397,9 @@ struct PPOptions
+     // --node-window-assignments also considers discarded local assignments.
+     bool node_window_assignments;
+     bool node_window_constants;
++    bool integer_window_screen_report;
++    bool integer_window_grouped;
++    uint32_t integer_window_screen_min;
+     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
