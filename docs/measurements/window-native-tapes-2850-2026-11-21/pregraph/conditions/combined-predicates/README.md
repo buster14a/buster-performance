@@ -1,0 +1,9 @@
+# Combined source-owned predicates
+
+The source producer admits fixed-ABI calls, memory comparisons, and short-circuit branches in the same compilation. A second treatment also admits scalar comparisons that need no memory access or call. The narrower union removes 9,943 SQLite graph nodes at 2,199 predicates. With scalar comparisons enabled, SQLite removes **13,759 nodes** at **4,214 predicates**, with **4,211** emitted by the ordinary native lowerer. The separate checks for every surviving record and edge pass in ordinary and debug modes. The warning policy keeps the full graph.
+
+Across SQLite, all Lua and musl units, and Buster, all 4,116 ordinary, debug and warning comparisons matched on native ABI records, object bytes, stdout, diagnostics and status. Ordinary compilation physically removed 30,178 graph nodes at 9,207 predicates. Of those, 7,231 source tapes reached native lowering. The other predicates have no matching source root requested by ordinary native lowering. Nine fixture comparisons also passed. [Per-workload coverage](coverage.tsv)
+
+All 1,388 diagnostic and declaration-policy comparisons matched. The short-circuit runtime matched the independent Clang executable on 3,120 combinations, including branches with null operands on unevaluated arms. Deliberately reversing branch sense changed the ordinary checksum. The fixed-call runtime matched Clang on 2,100 invocations and all three independent call counters. This experiment measures semantic equivalence and eliminated work. [Diagnostic matrix](diagnostic-matrix.tsv) · [Branch execution and sensitivity controls](branch-execution.tsv)
+
+The full patch applies to Buster `84a7d3d76`. The archive includes build and driver details, per-unit hashes and retained-graph comparisons for both treatments. [Source and recorded checks](reproduction.tar.gz)
