@@ -27,3 +27,5 @@ Each of the 60 successful compiles yielded a 2,061,192-byte object with SHA-256 
 | candidate | `98c66f15b1dc3ab3aa5f5b3116fe3c9f7de0ac36` | `a389011a63e49d4bda1d94cb285aabbd8b9797dcaa6f110ca3448070f3c8e465` |
 
 The [frozen driver method](../paired-driver/README.md), [mode selectors](unused-study-config.sh), [command and object checks](unused-study-one.sh), [native build receipts](builds.tsv), [full order](order.tsv), [PMU and wall records](samples.tsv), [original reports](reports.tar.xz), [object receipts](objects.tsv) and [warning receipts](diagnostics.tsv) identify the exact inputs, command lines and outputs.
+
+The [complete correctness packet](correctness/README.md) includes 208,884 pinned-Clang driver checks, 210,487 focused checker checks, 59 same-image warning-policy comparisons and a 200-pair source/CLI differential.
