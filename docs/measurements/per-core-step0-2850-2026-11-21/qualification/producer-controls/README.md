@@ -1,0 +1,7 @@
+# Template inputs, operand reach and window boundaries
+
+Six symmetric three-mode comparisons covered both frozen streams under repeated passes and after 200 ms of scalar work. All 432 processes matched the scalar twin's taken sets, facts, contexts, templates and emitted entries. Each process ran seven timed passes. Each comparison has three round means from two positions per mode.
+
+Writing the packed template bytes during the type sweep saved a median 0.35 cycles per taken SQLite node on repeated passes and 1.40 after scalar work, relative to packing them during template selection. Musl saved 0.40 and 0.65 cycles. A single multiply in the lookup had mixed effects. Keeping just the rows that emit entries also had mixed effects and cost SQLite 0.65 cycles per taken node after scalar work with the streamed list.
+
+On the repaired-facts path, reducing a window from 4,096 records to 1,024 raised its after-scalar cost by 3.65 cycles per SQLite node and 1.80 per musl node. The 2,048-record window also lost. Locating the last complete expression with a binary search instead of scanning the root list saved 0.35 cycles per SQLite node after scalar work. The [paired table](paired.tsv) identifies the control for every comparison and lists the ranges. Use the [per-process table](samples.tsv), [native logs](native-receipts.tar.xz) and [exact C sources and commands](exact-sources.tar.xz) to inspect each condition.
