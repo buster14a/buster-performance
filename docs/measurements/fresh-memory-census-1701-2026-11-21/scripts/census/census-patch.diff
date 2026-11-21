@@ -1,0 +1,213 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index fc65220f..84831420 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -18,6 +18,9 @@
+ // docs/compile-time.md has the stages and the 9700X's numbers.
+ 
+ #include <sys/prctl.h>
++#include <fcntl.h>
++#include <sys/mman.h>
++#include <unistd.h>
+ #include <sys/resource.h>
+ 
+ #include "c_check_clock_rss.c"
+@@ -304,8 +307,38 @@ static void check_clock_start(CheckClock* stage_clock)
+ }
+ 
+ // Charges the time since the last lap to `stage`; nothing without a clock.
++static void check_clock_census_scan(FILE* stream);
++// EXPERIMENT (#1701 census, not for main): each change of the lapped stage, with CLOCK_MONOTONIC at the lap's start.
++static uint32_t check_clock_census_count;
++static uint32_t check_clock_census_last = UINT32_MAX;
++static uint32_t check_clock_census_stage[65536];
++static uint64_t check_clock_census_ns[65536];
+ static inline void check_clock_lap(CheckClock* stage_clock, CheckStage stage)
+ {
++    if (stage_clock != NULL)
++    {
++        // Each entry is a run of laps of one stage, with the time its last lap ended: the stage's time up to there.
++        struct timespec ts;
++        clock_gettime(CLOCK_MONOTONIC, &ts);
++        const uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
++        if ((uint32_t)stage == check_clock_census_last && check_clock_census_count != 0)
++        {
++            check_clock_census_ns[check_clock_census_count - 1] = ns;
++        }
++        else if (check_clock_census_count < 65536)
++        {
++            if (check_clock_census_last == (uint32_t)CHECK_STAGE_CHECK_INPUT)
++            {
++                fprintf(stderr, "census-scan-at\tcheck-input-end\n");
++                check_clock_census_scan(stderr);
++                fprintf(stderr, "census-scan-at\tend\n");
++            }
++            check_clock_census_stage[check_clock_census_count] = (uint32_t)stage;
++            check_clock_census_ns[check_clock_census_count] = ns;
++            check_clock_census_count += 1;
++            check_clock_census_last = (uint32_t)stage;
++        }
++    }
+     if (stage_clock != NULL)
+     {
+         const uint64_t now = __rdtsc();
+@@ -360,8 +393,74 @@ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ // `time-check expressions MILLISECONDS PERCENT`, and the process's
+ // resource use so far as `time-process NAME VALUE` lines. `pp_ticks` are the preprocessor's phases'
+ // ticks (PP_PHASE_READ to PP_PHASE_DIRECTIVES, in their order), or null. Call it after the last lap.
++
++// EXPERIMENT (#1701 census, not for main): at the report, every large push of the census log, its 4 KB pages present
++// (/proc/self/pagemap) and how many of them hold one repeated byte (a fill's or a default's alone).
++static void check_clock_census_scan(FILE* stream)
++{
++    const char* path = getenv("BUSTER_ARENA_LOG");
++    FILE* log = path != NULL ? fopen(path, "r") : NULL;
++    const int pagemap = log != NULL ? open("/proc/self/pagemap", O_RDONLY) : -1;
++    char kind[32];
++    unsigned long long t, a, b, c, d, e;
++    // The zero page's frame: a fresh mapping's page, read and never written.
++    uint64_t zero_frame = UINT64_MAX;
++    volatile uint8_t* probe = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (probe != MAP_FAILED && pagemap >= 0)
++    {
++        uint64_t entry = probe[0];
++        if (pread(pagemap, &entry, 8, (off_t)((uintptr_t)probe / 4096 * 8)) == 8)
++        {
++            zero_frame = entry & ((UINT64_C(1) << 55) - 1);
++        }
++    }
++    while (log != NULL && pagemap >= 0 && fscanf(log, "%31s %llu %llx %llx %llx %llx %llx", kind, &t, &a, &b, &c, &d, &e) == 7)
++    {
++        if (strcmp(kind, "push") == 0)
++        {
++            const uint64_t from = (a + b + 4095) & ~4095ull;
++            const uint64_t to = (a + b + c) & ~4095ull;
++            uint64_t present = 0;
++            uint64_t uniform = 0;
++            uint64_t zero = 0;
++            for (uint64_t page = from; page < to; page += 4096)
++            {
++                uint64_t entry = 0;
++                if (pread(pagemap, &entry, 8, (off_t)(page / 4096 * 8)) == 8 && (entry >> 63) != 0 &&
++                    (entry & ((UINT64_C(1) << 55) - 1)) != zero_frame)
++                {
++                    present += 1;
++                    const uint8_t* bytes = (const uint8_t*)(uintptr_t)page;
++                    bool same = true;
++                    for (uint32_t i = 1; i < 4096 && same; i += 1)
++                    {
++                        same = bytes[i] == bytes[0];
++                    }
++                    uniform += same;
++                    zero += same && bytes[0] == 0;
++                }
++            }
++            fprintf(stream, "census-scan\t%llx\t%llx\t%llu\t%llu\t%llu\t%llu\t%llx\t%llx\n", a, b, c, (unsigned long long)present,
++                    (unsigned long long)uniform, (unsigned long long)zero, d, e);
++        }
++    }
++    if (pagemap >= 0)
++    {
++        close(pagemap);
++    }
++    if (log != NULL)
++    {
++        fclose(log);
++    }
++}
++
+ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp_ticks, uint32_t pp_phase_count, FILE* stream)
+ {
++    check_clock_census_scan(stream);
++    for (uint32_t i = 0; i < check_clock_census_count; i += 1)
++    {
++        fprintf(stream, "census-lap\t%s\t%llu\n", check_stage_names[check_clock_census_stage[i]], (unsigned long long)check_clock_census_ns[i]);
++    }
+     struct timespec now = { 0 };
+     clock_gettime(CLOCK_MONOTONIC, &now);
+     const double nanoseconds = (double)(now.tv_sec - stage_clock->monotonic.tv_sec) * 1e9 + (double)(now.tv_nsec - stage_clock->monotonic.tv_nsec);
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 42f1bdfe..c846c535 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -894,6 +894,31 @@ static bool arena_grow(Arena* arena, uint64_t end)
+ // (arena_commit), which a host whose transparent huge pages are `madvise` needs. An arena that stays in its base pages,
+ // as most of a small unit's 70 do, takes one mmap and one mprotect, without the two madvise calls, which also split its
+ // mapping in three, that each reservation made before.
++
++// EXPERIMENT (#1701 census, not for main): BUSTER_ARENA_LOG=FILE appends a line per reservation, discard and release.
++static int arena_census_fd = -2;
++static __attribute__((noinline, unused)) void arena_census(const char* kind, uint64_t a, uint64_t b, uint64_t c, uint64_t d, const void* caller)
++{
++    if (arena_census_fd == -2)
++    {
++        const char* path = getenv("BUSTER_ARENA_LOG");
++        arena_census_fd = path != 0 ? open(path, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
++    }
++    if (arena_census_fd >= 0)
++    {
++        char line[256];
++        struct timespec now;
++        clock_gettime(CLOCK_MONOTONIC, &now);
++        const int n = snprintf(line, sizeof line, "%s %llu %llx %llx %llx %llx %llx\n", kind, (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec,
++                               (unsigned long long)a, (unsigned long long)b, (unsigned long long)c, (unsigned long long)d, (unsigned long long)(uintptr_t)caller);
++        if (n > 0)
++        {
++            ssize_t ignored = write(arena_census_fd, line, (size_t)n);
++            (void)ignored;
++        }
++    }
++}
++
+ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounded)
+ {
+     Arena result = { 0 };
+@@ -973,6 +998,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+             arena_failure = (ArenaFailure){ .bytes = requested, .error = errno };
+         }
+     }
++    arena_census("reserve", (uint64_t)(uintptr_t)result.base, result.capacity, result.small, result.huge, __builtin_return_address(0));
+     return result;
+ }
+ 
+@@ -1128,6 +1154,11 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+     {
+         tables[i].base = base != 0 ? base + starts[i] : 0;
+     }
++    arena_census("tables", (uint64_t)(uintptr_t)result.base, result.capacity, count, 0, __builtin_return_address(0));
++    for (uint32_t i = 0; i < count; i += 1)
++    {
++        arena_census("table", (uint64_t)(uintptr_t)result.base, (uint64_t)(uintptr_t)tables[i].base, tables[i].bytes, tables[i].small, (const void*)(uintptr_t)i);
++    }
+     return result;
+ }
+ 
+@@ -1277,6 +1308,7 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+ 
+ static void arena_release(Arena* arena)
+ {
++    arena_census("release", (uint64_t)(uintptr_t)arena->base, arena->mapping_bytes, arena->peak, arena->length, __builtin_return_address(0));
+     if (arena->base != 0 && arena->grows)
+     {
+         // Its mapping as far as its slot says a copy of it may have grown it, unmapped whole, and its slot freed: under the
+@@ -1500,6 +1532,12 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            if (size >= 65536)
++            {
++                uintptr_t ip;
++                __asm__ volatile("lea 0(%%rip), %0" : "=r"(ip));
++                arena_census("push", base, begin, size, ip, __builtin_return_address(0));
++            }
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+@@ -1547,6 +1585,7 @@ static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
+         if (end > begin)
+         {
+             madvise((void*)begin, end - begin, MADV_DONTNEED);
++            arena_census("discard", (uint64_t)base, begin, end, arena->peak, __builtin_return_address(0));
+         }
+     }
+ }
