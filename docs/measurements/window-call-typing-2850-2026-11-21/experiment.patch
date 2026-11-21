@@ -1,0 +1,507 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 70485d118..40f7001ab 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1692,6 +1692,7 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front,
+         if (front->window)
+         {
+             node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
++            node_window_probe(front);
+         }
+         else
+ #endif
+@@ -1749,6 +1750,10 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
+     if (front->typer != NULL)
+     {
+         // T at reader time, on the chunk's roots whose expressions the comparison has just given their nodes.
++        if (front->window && (fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_BEFORE)
++        {
++            node_window_probe_bind(front, reader);
++        }
+         node_machine_reader_chunk(front->typer, front, reader);
+     }
+ #endif
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index c4a233e8d..af12072fd 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -5620,6 +5620,135 @@ static void node_shadow_tested(NodeShadow* shadow, const NodeCensusScratch* s, c
+ // With the control (BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT) reader time kept each expression's facts with one of
+ // them changed, and every root's references or fact must differ; and its truth and its fold are asked of every root
+ // reader time typed, kept or not, so that the two are seen to count the expressions the window lists for them.
++static void node_window_probe_compare(const CheckProgram* program, const NodeFrontTypes* typed)
++{
++    const CheckStream* stream = program->stream;
++    uint32_t roots = 0, records = 0, mismatched = 0, bad_roots = 0, warning_roots = 0;
++    uint32_t call_roots = 0, calls = 0, args = 0, arg_bad = 0, affected = 0;
++    uint32_t noncanonical = 0, full_bad_roots = 0, full_bad_call_roots = 0;
++    uint32_t bad_by_op[CHECK_OP_COUNT] = { 0 };
++    for (const NodeWindowProofPart* part = typed->proof_parts; part != NULL; part = part->next)
++    {
++        roots += 1;
++        records += part->count;
++        bool any = false;
++        bool warnings = false;
++        bool has_call = false;
++        bool different_value = false;
++        for (uint32_t i = 0; i < part->count; i += 1)
++        {
++            const NodeWindowProofItem* item = part->items + i;
++            const NodeFactsRecord* got = &item->value;
++            const uint32_t node = item->node;
++            bool same = node < program->input->graph.count && program->input->graph.tokens[node] == item->token;
++            if (same)
++            {
++                const CheckValue want = check_stream_value(stream, node);
++                warnings |= stream->warnings != NULL && (stream->warnings[node] & 0x01ffffffu) != 0;
++                const uint8_t field = got->standing & BUSTER_NODE_MACHINE_FIELD;
++                const bool floating = field == BUSTER_NODE_MACHINE_FLOATING;
++                const int64_t offset = field == BUSTER_NODE_MACHINE_OFFSET ? (int64_t)got->payload : 0;
++                const unsigned __int128 integer = field == 0 ? got->payload : 0;
++                const CheckValue decoded = {
++                    .type = got->type, .category = (CheckCategory)(got->standing & 3u), .flags = got->flags,
++                    .constant_kind = (CheckConstantKind)((got->standing >> 2) & 7u), .integer = integer,
++                    .floating_storage = { floating ? got->payload : 0, floating ? got->exponent : 0 },
++                    .object = got->object, .offset = offset
++                };
++                if (memcmp(&want, &decoded, sizeof(want)) != 0)
++                {
++                    const CheckOp op = (CheckOp)program->input->graph.ops[node];
++                    if (op < CHECK_OP_COUNT && bad_by_op[op]++ == 0)
++                    {
++                        const unsigned char* a = (const unsigned char*)&want;
++                        const unsigned char* b = (const unsigned char*)&decoded;
++                        for (uint32_t byte = 0; byte < sizeof(want); ++byte)
++                        {
++                            if (a[byte] != b[byte])
++                            {
++                                fprintf(stderr, "probe-full first difference op=%u node=%u token=%u byte=%u expected=%u actual=%u\n", (unsigned)op, node, item->token, byte, a[byte], b[byte]);
++                                break;
++                            }
++                        }
++                    }
++                    noncanonical += 1;
++                    different_value = true;
++                }
++                same = got->type == want.type && (got->standing & 3u) == (uint32_t)want.category && got->flags == want.flags &&
++                       ((got->standing >> 2) & 7u) == (uint32_t)want.constant_kind && got->object == want.object && offset == want.offset &&
++                       want.fault == 0 && want.overload_head == 0 && want.bit_width == 0 && (want.constant_kind == CHECK_CONSTANT_NONE || integer == want.integer) &&
++                       (want.constant_kind != CHECK_CONSTANT_FLOATING || (want.floating_storage[0] == (floating ? got->payload : 0) && (uint16_t)want.floating_storage[1] == (floating ? got->exponent : 0))) &&
++                       got->member_offset == stream->member_offsets[node];
++                for (uint32_t k = 0; k < 2; k += 1)
++                {
++                    const CheckConversion conversion = stream->conversions[node].operands[k];
++                    same = same && got->converted[k] == conversion.type && got->conversion_flags[k] == conversion.flags;
++                }
++            }
++            if (node < program->input->graph.count && program->input->graph.ops[node] == CHECK_OP_CALL)
++            {
++                const CheckGraph* graph = &program->input->graph;
++                has_call = true;
++                calls++;
++                for (uint32_t g = 0; g < graph->argument_counts[node]; ++g)
++                {
++                    const uint32_t at = graph->argument_offsets[node] + g;
++                    const uint32_t source = graph->argument_nodes[at];
++                    uint32_t j = i;
++                    while (j != 0 && part->items[j - 1].node != source) --j;
++                    const CheckConversion want = stream->argument_conversions[at];
++                    const uint64_t packed = (uint64_t)want.type | ((uint64_t)want.flags << 32);
++                    const bool equal = j != 0 && part->items[j - 1].value.spare == packed;
++                    args++;
++                    arg_bad += !equal;
++                    if (!equal && arg_bad <= 5)
++                        fprintf(stderr, "node-proof call %u argument %u node %u got %" PRIu64 " expected %" PRIu64 "\n", node, g, source,
++                                j ? part->items[j-1].value.spare : UINT64_MAX, packed);
++                    same &= equal;
++                }
++            }
++            if (!same && mismatched < 5)
++            {
++                fprintf(stderr, "node-proof stream difference root=%u node=%u token=%u op=%u\n", part->root, node, item->token,
++                        node < program->input->graph.count ? (uint32_t)program->input->graph.ops[node] : UINT32_MAX);
++                if (node < program->input->graph.count && item->token < program->parser->tokens.count)
++                {
++                    const Parser* parser = program->parser;
++                    const Preprocessor* pp = parser->preprocessor;
++                    const uint32_t source = parser->tokens.sources[item->token];
++                    const uint32_t location = pp->output.locations[source];
++                    const uint32_t range = pp_find_range(pp, location);
++                    if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
++                    {
++                        const PPFile* file = pp->files + pp->ranges[range].file;
++                        const PPRange* source_range = pp->ranges + range;
++                        const uint32_t offset = location - source_range->base;
++                        fprintf(stderr, "node-proof source %.*s byte=%u\n", (int)file->path_length, file->path, offset);
++                    }
++                    const CheckValue want = check_stream_value(stream, node);
++                    fprintf(stderr, "node-proof stream-fields type=%u/%u flags=%u/%u category=%u/%u kind=%u/%u object=%u/%u payload=%" PRIu64 " integer=%" PRIu64 " offset=%" PRId64 " floating=%" PRIu64 " fault=%u overload=%u width=%u c0=%u/%u c1=%u/%u cf0=%u/%u cf1=%u/%u member=%" PRIu64 "/%" PRIu64 "\n",
++                            got->type, want.type, got->flags, want.flags, got->standing & 3u, (uint32_t)want.category, got->standing >> 2 & 7u, (uint32_t)want.constant_kind,
++                            got->object, want.object, got->payload, (uint64_t)want.integer, want.offset, want.floating_storage[0], want.fault, want.overload_head, want.bit_width,
++                            got->converted[0], stream->conversions[node].operands[0].type, got->converted[1], stream->conversions[node].operands[1].type,
++                            got->conversion_flags[0], stream->conversions[node].operands[0].flags, got->conversion_flags[1], stream->conversions[node].operands[1].flags,
++                            got->member_offset, stream->member_offsets[node]);
++                }
++            }
++            any |= !same;
++            mismatched += !same;
++        }
++        bad_roots += any;
++        warning_roots += warnings;
++        call_roots += has_call;
++        affected += has_call && any;
++        full_bad_roots += different_value;
++        full_bad_call_roots += has_call && different_value;
++    }
++    fprintf(stderr, "probe-full different-values=%u different-roots=%u different-call-roots=%u\n", noncanonical, full_bad_roots, full_bad_call_roots);
++    fprintf(stderr, "node-proof call-roots=%u calls=%u arguments=%u argument-differences=%u affected-roots=%u\n", call_roots, calls, args, arg_bad, affected);
++    fprintf(stderr, "node-proof stream roots=%u records=%u bad-roots=%u differences=%u warning-bit-roots=%u\n", roots, records, bad_roots, mismatched, warning_roots);
++}
++
+ static void node_shadow_summaries(NodeShadow* shadow, const NodeCensusScratch* s, CheckProgram* program, const NodeFrontTypes* typed, Arena* scratch)
+ {
+     const CheckGraph* graph = &program->input->graph;
+@@ -7768,6 +7897,10 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                                    (facts & BUSTER_NODE_MACHINE_OBJECT_LABELLED) != 0, labelled);
+                         }
+                     }
++                    if (typed->proof_parts != NULL)
++                    {
++                        node_window_probe_compare(&selected.program, typed);
++                    }
+                     if (typed->summary_firsts != NULL)
+                     {
+                         // The side facts reader time kept, against the program's own walks. (Last: the references'
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index e331b53c5..80fa98946 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -3159,7 +3159,7 @@ static inline __attribute__((always_inline)) void node_facts_distribute(uint32_t
+ // A record the kernel leaves, the window's record `w` (the unit's `at`): T's record of it, as the rule would make it.
+ static __attribute__((noinline)) void node_facts_leave(NodeFacts* facts, uint64_t at, uint32_t w)
+ {
+-    facts->records[w] = node_facts_expected(facts, at);
++    facts->records[w] = facts->expected_types != NULL ? node_facts_expected(facts, at) : (NodeFactsRecord){ 0 };
+     facts->records[w].taken = BUSTER_NODE_FACTS_LEFT;
+ }
+ 
+@@ -4645,6 +4645,9 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
+ 
+ struct NodeFactsReader
+ {
++    NodeFactsRecord proof_records[BUSTER_NODE_FRONT_RECORDS + 64];
++    bool proof_made[BUSTER_NODE_FRONT_RECORDS + 64];
++    NodeFactsArgumentSlot proof_arg_cache[1u << BUSTER_NODE_FACTS_ARGUMENT_BITS];
+     NodeFacts facts;
+     NodeFrontTypes* types;
+     CheckInputReader* reader;
+@@ -4866,6 +4869,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
+     bool room = state != NULL;
+     if (room)
+     {
++        memset(state->proof_arg_cache, 0, sizeof(state->proof_arg_cache));
+         *state = (struct NodeFactsReader){
+             .types = types,
+             .reader = reader,
+@@ -5138,6 +5142,249 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
+     return room ? state : NULL;
+ }
+ 
++// Exploration: T on the actual front's columns, before the ordinary reader has emitted this chunk's graph.
++// The kernel reads declaration lines, type rows and available operand records. The comparison after ordinary checking
++// reports which named calls and arguments actually had a derivation, including their retained payload fields.
++static void node_window_probe(NodeFront* front)
++{
++    struct NodeFactsReader* state = front->typer->facts;
++    NodeFacts run = state->facts;
++    const CheckGraph environment = { .extensions = run.machine->graph->extensions };
++    NodeMachine machine = {
++        .types = run.machine->types, .graph = &environment, .type_words = run.machine->type_words,
++        .type_count = run.machine->type_count, .overloads = run.machine->overloads,
++    };
++    run.machine = &machine;
++    const bool mutate_argument = getenv("NODE_PROOF_FAULT_ARGUMENT") != NULL;
++    const bool trace_calls = getenv("NODE_PROOF_TRACE_CALL") != NULL;
++    run.argument_slots = state->proof_arg_cache;
++    run.input = NULL;
++    run.nodes = NULL;
++    const bool pointers = getenv("NODE_PROOF_POINTERS") != NULL;
++    const bool no_floating = getenv("NODE_PROOF_NO_FP") != NULL;
++    const bool calls = getenv("NODE_PROOF_CALLS") != NULL;
++    const uint32_t count = front->count;
++    uint8_t kinds[BUSTER_NODE_FRONT_RECORDS + 64] = { 0 };
++    uint32_t bounds[2] = { 0, count };
++    memset(state->proof_records, 0, (size_t)count * sizeof(NodeFactsRecord));
++    for (uint32_t x = 0; x < count; x += 1)
++    {
++        const CheckOp op = (CheckOp)front->ops[x];
++        const uint8_t kind = front->window_kinds[x];
++        const uint32_t entry = front->window_entries[x];
++        bool chosen = false;
++        if (op == CHECK_OP_VALUE && (kind == BUSTER_NODE_FACTS_LITERAL_LINE || kind == BUSTER_NODE_FACTS_IDENTIFIER) && entry != 0 && entry < run.line_capacity)
++        {
++            const TypeId type = (TypeId)run.lines[4 * (uint64_t)entry];
++            const uint32_t index = type_index(type);
++            chosen = pointers || (type == type_unqualified(type) && index < BUSTER_NODE_MACHINE_KINDS && node_machine_integer_widths[index] != 0);
++        }
++        else if ((kind == BUSTER_NODE_FACTS_OPERATOR || kind == BUSTER_NODE_FACTS_LOOKUP) && front->window_classes[x] != BUSTER_NODE_FACTS_CLASS_CUT)
++        {
++            const uint32_t left = front->window_left[x], right = front->window_right[x];
++            const bool operands = left != 0 && left <= x && kinds[x - left] != 0 && (!right || (right <= x && kinds[x - right] != 0));
++            const bool cast = op == CHECK_OP_CONVERT || op == CHECK_OP_CAST;
++            const bool arithmetic = (op >= CHECK_OP_POSITIVE && op <= CHECK_OP_LOGICAL_OR) || op == CHECK_OP_ASSIGN || op == CHECK_OP_COMMA ||
++                                    op == CHECK_OP_CONDITION || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
++            const bool destination = type_index(entry) < BUSTER_NODE_MACHINE_KINDS && (entry == BUSTER_TYPE_VOID || node_machine_integer_widths[type_index(entry)] != 0);
++            const bool pointer = pointers && (op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW);
++            bool direct = calls && op == CHECK_OP_CALL && operands && front->ops[x - left] == CHECK_OP_VALUE &&
++                          front->leaf_categories[x - left] == BUSTER_NODE_FRONT_LEAF_IDENTIFIER &&
++                          entry <= front->window_argument_count && front->window_counts[x] <= front->window_argument_count - entry;
++            if (direct)
++            {
++                const uint32_t callee = front->window_entries[x - left];
++                direct = callee != 0 && callee < run.line_capacity &&
++                         type_kind(run.machine->types, (TypeId)run.lines[4 * (uint64_t)callee]) == BUSTER_TYPE_KIND_FUNCTION;
++            }
++            for (uint32_t i = 0; direct && i < front->window_counts[x]; ++i)
++            {
++                const uint32_t distance = front->window_arguments[entry + i];
++                direct = distance != 0 && distance <= x && kinds[x - distance] != BUSTER_NODE_FACTS_GIVEN;
++            }
++            chosen = operands && (arithmetic || (cast && (destination || pointers)) || pointer || direct);
++        }
++        kinds[x] = chosen ? kind : BUSTER_NODE_FACTS_GIVEN;
++    }
++    run.expected_types = NULL;
++    run.expected_flags = NULL;
++    run.expected_objects = NULL;
++    run.expected_payloads = NULL;
++    run.expected_standings = NULL;
++    run.expected_exponents = NULL;
++    run.expected_words = NULL;
++    run.expected_converted = NULL;
++    run.expected_conversion_flags = NULL;
++    run.expected_member_offsets = NULL;
++    run.expected_arguments = NULL;
++    run.records = state->proof_records;
++    run.windows = bounds;
++    run.ops = front->ops;
++    run.kinds = kinds;
++    run.classes = front->window_classes;
++    run.left = front->window_left;
++    run.right = front->window_right;
++    run.inputs = front->window_entries;
++    run.counts = front->window_counts;
++    run.positions = front->window_positions;
++    run.arguments = front->window_arguments;
++    run.argument_count = front->window_argument_count;
++    run.fits = state->place_fits;
++    node_facts_window(&run, 0, BUSTER_NODE_FACTS_WHOLE, false);
++    uint32_t tally[5][3] = { 0 };
++    uint32_t refused[5][CHECK_OP_COUNT + 5] = { 0 };
++    uint32_t accepted[5][CHECK_OP_COUNT][2] = { 0 };
++    uint32_t voids[3][2] = { 0 };
++    uint16_t reason[BUSTER_NODE_FRONT_RECORDS] = { 0 };
++    for (uint32_t x = 0; x < count; x += 1)
++    {
++        const uint32_t left = front->window_left[x], right = front->window_right[x];
++        const bool floating = ((run.records[x].word >> 16) & 0xffu) == BUSTER_TYPE_KIND_FLOATING;
++        bool made = (!no_floating || !floating) && kinds[x] != 0 && run.records[x].taken != BUSTER_NODE_FACTS_LEFT &&
++                          (front->ops[x] == CHECK_OP_VALUE || (state->proof_made[x - left] && (!right || state->proof_made[x - right])));
++        if (made && front->ops[x] == CHECK_OP_CALL)
++        {
++            made = (run.records[x].exponent & BUSTER_NODE_FACTS_CONVERTED_CALL) != 0;
++            for (uint32_t i = 0; made && i < front->window_counts[x]; ++i)
++            {
++                made = state->proof_made[x - front->window_arguments[front->window_entries[x] + i]];
++            }
++        }
++        if (front->ops[x] == CHECK_OP_CALL && left != 0 && left <= x && trace_calls)
++        {
++            const TypeId callee = run.records[x - left].type;
++            const uint32_t row = type_index(callee);
++            const NodeFactsRow* answer = run.rows + (row < run.row_count ? row : run.row_count);
++            fprintf(stderr, "probe-trace token=%u selected-kind=%u callee-kind=%u callee-type=%u available-rows=%u prototype=%u returned=%u admitted=%u\n",
++                    front->tokens[x], kinds[x], kinds[x - left], row, run.row_count, answer->function, answer->returned, (unsigned)made);
++        }
++        if (made && front->ops[x] == CHECK_OP_CALL && mutate_argument && front->window_counts[x] != 0)
++        {
++            const uint32_t index = front->window_entries[x] + (x % front->window_counts[x]);
++            const uint32_t argument = x - front->window_arguments[index];
++            run.records[argument].spare ^= (x & 1) ? UINT64_C(1) : (UINT64_C(1) << 32);
++        }
++        state->proof_made[x] = made;
++        if (!made)
++        {
++            const bool leaf = front->ops[x] == CHECK_OP_VALUE;
++            const bool cut = front->window_classes[x] == BUSTER_NODE_FACTS_CLASS_CUT;
++            reason[x] = cut ? CHECK_OP_COUNT : left && left <= x && reason[x-left] ? reason[x-left] :
++                        right && right <= x && reason[x-right] ? reason[x-right] :
++                        leaf ? CHECK_OP_COUNT + (front->leaf_categories[x] == BUSTER_NODE_FRONT_LEAF_IDENTIFIER ? 1 :
++                                                 front->leaf_categories[x] == BUSTER_NODE_FRONT_LEAF_LITERAL ? 2 : 3) : front->ops[x];
++        }
++        if (x >= front->made && front->roots[x])
++        {
++            const CheckOp op = (CheckOp)front->ops[x];
++            const bool data = left != 0 && left <= x && node_machine_reader_discard(state->reader, front, x, x - left);
++            const uint32_t bucket = data ? 4 : op == CHECK_OP_CAST ? 0 : op == CHECK_OP_CONDITION ? 1 : op == CHECK_OP_CONVERT ? 2 : 3;
++            tally[bucket][0]++;
++            tally[bucket][1] += made;
++            tally[bucket][2] += made ? front->sizes[x] : 0;
++            refused[bucket][reason[x]] += !made;
++            if (made && left <= x)
++            {
++                const uint32_t operand_op = front->ops[x - left];
++                accepted[bucket][operand_op][0] += 1;
++                accepted[bucket][operand_op][1] += front->sizes[x];
++                const uint32_t child = x - left;
++                if (bucket == 0 && operand_op == CHECK_OP_CAST && front->window_entries[child] == BUSTER_TYPE_VOID)
++                {
++                    const uint32_t payload = child - front->window_left[child];
++                    const uint32_t group = front->ops[payload] != CHECK_OP_VALUE ? 2 :
++                                           front->leaf_categories[payload] == BUSTER_NODE_FRONT_LEAF_LITERAL ? 0 : 1;
++                    voids[group][0] += 1;
++                    voids[group][1] += front->sizes[x];
++                }
++            }
++        }
++    }
++    for (uint32_t v = 0; v < 3; v += 1)
++    {
++        if (voids[v][0])
++        {
++            fprintf(stderr, "node-proof void group=%u roots=%u records=%u\n", v, voids[v][0], voids[v][1]);
++        }
++    }
++    for (uint32_t b = 0; b < 5; b += 1)
++    {
++        fprintf(stderr, "node-proof bucket=%u roots=%u made=%u records=%u\n", b, tally[b][0], tally[b][1], tally[b][2]);
++        for (uint32_t r = 0; r < CHECK_OP_COUNT + 5; r += 1)
++        {
++            if (r < CHECK_OP_COUNT && accepted[b][r][0])
++            {
++                fprintf(stderr, "node-proof accepted bucket=%u operand=%u roots=%u records=%u\n", b, r, accepted[b][r][0], accepted[b][r][1]);
++            }
++            if (refused[b][r])
++            {
++                fprintf(stderr, "node-proof refusal bucket=%u reason=%u roots=%u\n", b, r, refused[b][r]);
++            }
++        }
++    }
++}
++
++typedef struct NodeWindowProofItem NodeWindowProofItem;
++struct NodeWindowProofItem
++{
++    uint32_t node;
++    uint32_t token;
++    NodeFactsRecord value;
++};
++
++typedef struct NodeWindowProofPart NodeWindowProofPart;
++struct NodeWindowProofPart
++{
++    NodeWindowProofPart* next;
++    uint32_t count;
++    uint32_t root;
++    uint32_t op;
++    NodeWindowProofItem items[];
++};
++
++// The graph has now numbered the front's records. Bind the independent results to their nodes for a comparison
++// with the actual checked stream after compilation, including roots the other shadow refuses for any reason.
++static void node_window_probe_bind(NodeFront* front, CheckInputReader* reader)
++{
++    struct NodeFactsReader* state = front->typer->facts;
++    for (uint32_t r = front->made; r < front->count; r += 1)
++    {
++        if (front->roots[r] && state->proof_made[r])
++        {
++            const uint32_t left = front->window_left[r];
++            const uint32_t operand = left <= r ? r - left : r;
++            const uint32_t size = front->sizes[operand];
++            if (left == 0 || left > r || size == 0 || size > operand + 1)
++            {
++                fprintf(stderr, "node-proof missing region at token %u\n", front->tokens[r]);
++                continue;
++            }
++            if (node_machine_reader_discard(reader, front, r, operand))
++            {
++                continue;
++            }
++            const uint32_t count = size + 1;
++            const uint64_t bytes = sizeof(NodeWindowProofPart) + (uint64_t)count * sizeof(NodeWindowProofItem);
++            NodeWindowProofPart* part = arena_push_array(reader->arena, bytes, 1, _Alignof(NodeWindowProofPart));
++            if (part == NULL)
++            {
++                fprintf(stderr, "node-proof no space at token %u\n", front->tokens[r]);
++                continue;
++            }
++            part->count = count;
++            part->root = front->nodes[r];
++            part->op = front->ops[r];
++            part->next = state->types->proof_parts;
++            state->types->proof_parts = part;
++            for (uint32_t i = 0; i < count; i += 1)
++            {
++                const uint32_t x = i == size ? r : operand + 1 - size + i;
++                part->items[i] = (NodeWindowProofItem){ .node = front->nodes[x], .token = front->tokens[x], .value = state->proof_records[x] };
++            }
++        }
++    }
++}
++
+ // The windows' inputs exchanged with `other`'s: the kernel then reads the other making's.
+ static void node_facts_inputs_exchange(NodeFacts* facts, NodeFactsInputs* other)
+ {
+@@ -5942,6 +6189,30 @@ static void node_facts_window_expression(struct NodeFactsReader* state, const No
+     {
+         const uint32_t x = r < size ? start + r : record;
+         const uint64_t w = (uint64_t)base + r;
++        if ((state->reader->pp->options.node_front & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_BEFORE && state->proof_made[record])
++        {
++            const NodeFactsRecord* made = state->proof_records + x;
++            const NodeFactsRecord expected = node_facts_expected(facts, w);
++            const bool floating = (expected.standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_FLOATING;
++            const bool same = (!floating || made->exponent == expected.exponent) && made->type == expected.type && made->word == expected.word && made->flags == expected.flags &&
++                              made->object == expected.object && made->standing == expected.standing && made->payload == expected.payload &&
++                              made->converted[0] == expected.converted[0] && made->converted[1] == expected.converted[1] &&
++                              made->conversion_flags[0] == expected.conversion_flags[0] && made->conversion_flags[1] == expected.conversion_flags[1] &&
++                              made->member_offset == expected.member_offset;
++            if (!same)
++            {
++                fprintf(stderr, "node-proof difference x=%u op=%u token=%u type=%u/%u flags=%u/%u value=%" PRIu64 "/%" PRIu64 "\n", x, front->ops[x],
++                        front->tokens[x], made->type, expected.type, made->flags, expected.flags, made->payload, expected.payload);
++                fprintf(stderr, "node-proof components word=%u/%u object=%u/%u standing=%u/%u c0=%u/%u c1=%u/%u cf0=%u/%u cf1=%u/%u member=%" PRIu64 "/%" PRIu64 "\n",
++                        made->word, expected.word, made->object, expected.object, made->standing, expected.standing, made->converted[0], expected.converted[0],
++                        made->converted[1], expected.converted[1], made->conversion_flags[0], expected.conversion_flags[0], made->conversion_flags[1],
++                        expected.conversion_flags[1], made->member_offset, expected.member_offset);
++            }
++            if (r == 0)
++            {
++                fprintf(stderr, "node-proof compared records=%u\n", count);
++            }
++        }
+         state->place_taken[x] = 1;
+         state->place_types[x] = facts->expected_types[w];
+         state->place_flags[x] = facts->expected_flags[w];
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+index 1262a256c..fd42fc02c 100644
+--- a/src/buster/compiler/c_check_node_machine_front.c
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -384,6 +384,7 @@ typedef enum NodeFactsCount
+ typedef struct NodeFrontTypes NodeFrontTypes;
+ struct NodeFrontTypes
+ {
++    struct NodeWindowProofPart* proof_parts;
+     // By root node: a digest of T's records (node_machine_digest), the expression's first node and its records (0: T
+     // wasn't run on it), and T's refusal (BUSTER_NODE_FRONT_TYPED_REFUSAL) with, after the pipeline, whether the
+     // lowering popped the root (_POPPED) and whether the shadow compared it (_COMPARED).
+@@ -899,6 +900,8 @@ static inline __attribute__((always_inline)) void node_facts_window_call(NodeFro
+                                                                          const uint32_t* values, uint32_t count);
+ static void node_facts_window_begin(NodeFront* front, CheckInputReader* reader);
+ static void node_facts_window_names(NodeFront* front);
++static void node_window_probe(NodeFront* front);
++static void node_window_probe_bind(NodeFront* front, CheckInputReader* reader);
+ static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_t from, uint32_t* arguments);
+ #endif
+ 
