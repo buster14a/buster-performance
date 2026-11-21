@@ -1,0 +1,389 @@
+diff --git a/src/buster/compiler/c_check_attested_test.c b/src/buster/compiler/c_check_attested_test.c
+index 89418942f..4b0657aee 100644
+--- a/src/buster/compiler/c_check_attested_test.c
++++ b/src/buster/compiler/c_check_attested_test.c
+@@ -1112,6 +1112,9 @@ static const CheckAttestedField check_attested_reader_fields[] =
+     { "first_child", CHECK_ATTESTED_FIELD_AMBIENT },
+     { "next_child", CHECK_ATTESTED_FIELD_AMBIENT },
+     { "first_value", CHECK_ATTESTED_FIELD_OWN },
++    { "multiple_chains", CHECK_ATTESTED_FIELD_OWN },
++    { "multiple_chain_count", CHECK_ATTESTED_FIELD_OWN },
++    { "multiple_chain_capacity", CHECK_ATTESTED_FIELD_OWN },
+     { "last_value", CHECK_ATTESTED_FIELD_OWN },
+     { "value_counts", CHECK_ATTESTED_FIELD_OWN },
+     { "value_next", CHECK_ATTESTED_FIELD_OWN },
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 64248a52a..bc1d7deb3 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -58,14 +58,6 @@ static uint32_t check_input_expression_compact(const CheckInputReader* reader, u
+     return result;
+ }
+ 
+-typedef struct CheckInputValues CheckInputValues;
+-struct CheckInputValues
+-{
+-    uint32_t first;
+-    uint32_t last;
+-    uint32_t count;
+-};
+-
+ // The values of `token`'s children, chained as the walk's action chains them: each child's chain after the one before
+ // it, through value_next, and their counts added (CheckInputReader.value_counts).
+ // Its branches stay: a branch-free splice (each child's last value and count taken by selects, the link stored into a
+@@ -77,9 +69,11 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
+     CheckInputValues values = { .first = BUSTER_CHECK_NONE, .last = BUSTER_CHECK_NONE, .count = 0 };
+     for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+     {
+-        const uint32_t begin = reader->first_value[child];
+-        if (begin != BUSTER_CHECK_NONE)
++        const uint32_t entry = reader->first_value[child];
++        if (entry != BUSTER_CHECK_NONE)
+         {
++            const CheckInputValues child_values = check_input_chain_read(reader, child, entry);
++            const uint32_t begin = child_values.first;
+             if (values.last != BUSTER_CHECK_NONE)
+             {
+                 reader->value_next[values.last] = begin;
+@@ -88,8 +82,8 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
+             {
+                 values.first = begin;
+             }
+-            values.last = reader->last_value[child];
+-            values.count += reader->value_counts[child];
++            values.last = child_values.last;
++            values.count += child_values.count;
+         }
+     }
+     return values;
+@@ -493,9 +487,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
+     if (node != BUSTER_CHECK_NONE)
+     {
+         reader->output->token_nodes[token] = node;
+-        reader->first_value[token] = node;
+-        reader->last_value[token] = node;
+-        reader->value_counts[token] = 1;
++        check_input_chain_single(reader, token, node);
+     }
+ }
+ 
+@@ -503,9 +495,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
+ static void check_input_expression_list(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+ {
+     reader->output->token_nodes[token] = values.count == 1 ? values.first : BUSTER_CHECK_NONE;
+-    reader->first_value[token] = values.first;
+-    reader->last_value[token] = values.last;
+-    reader->value_counts[token] = values.count;
++    check_input_chain_list(reader, token, values);
+     if (BUSTER_CHECK_RARE(reader, static_initializers, token))
+     {
+         // A braced static initializer's elements are constant expressions, which initializer planning diagnoses:
+@@ -1603,8 +1593,10 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t
+                     if (barrier)
+                     {
+                         id += made[token];
+-                        chain = reader->first_value[token];
+-                        chained = reader->value_counts[token];
++                        const uint32_t entry = reader->first_value[token];
++                        const CheckInputValues values = check_input_chain_read(reader, token, entry);
++                        chain = values.first;
++                        chained = values.count;
+                     }
+                     else if (code == CHECK_INPUT_CODE_TERMINATOR)
+                     {
+@@ -2095,6 +2087,12 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
+                                check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
+             if (taken)
+             {
++                // The skipped actions have no child value chains. A surrounding statement expression can still
++                // visit their terminator, including one under a label. Publish the same empty heads as the walk.
++                for (uint32_t i = first; i <= end; i += 1)
++                {
++                    reader->first_value[tokens[i]] = BUSTER_CHECK_NONE;
++                }
+                 cursor = end + 1;
+             }
+         }
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 21cc2bb2f..7a3722ce9 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1920,6 +1920,14 @@ struct CheckInputGnuRows
+ 
+ #define BUSTER_CHECK_GNU_ROW_BITS 7u
+ 
++typedef struct CheckInputValues CheckInputValues;
++struct CheckInputValues
++{
++    uint32_t first;
++    uint32_t last;
++    uint32_t count;
++};
++
+ struct CheckInputReader
+ {
+     CheckInput* output;
+@@ -2273,7 +2281,12 @@ struct CheckInputReader
+     const uint32_t* ends;
+     const uint32_t* first_child;
+     const uint32_t* next_child;
++    // A singleton is its node. A complete unit tags multi-value list indices in first_value's high bit.
++    // Deferred parts and units exceeding the tag's range keep the literal head, tail and count per token.
+     uint32_t* first_value;
++    CheckInputValues* multiple_chains;
++    uint32_t multiple_chain_count;
++    uint32_t multiple_chain_capacity;
+     uint32_t* last_value;
+     // The length of each token's chain of values, from first_value to last_value, written with them: a parent adds its
+     // children's rather than walking their chains, which an initializer's separators, each a child of the next, made
+@@ -15239,6 +15252,68 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const
+ 
+ #include "c_check_region_input.c"
+ 
++// A packed list's entry indexes immutable head/tail/count data. The all-ones sentinel means empty in both formats.
++#define BUSTER_CHECK_CHAIN_MULTIPLE UINT32_C(0x80000000)
++static inline __attribute__((always_inline)) CheckInputValues check_input_chain_read(const CheckInputReader* reader, uint32_t token, uint32_t entry)
++{
++    if (entry == BUSTER_CHECK_NONE)
++    {
++        return (CheckInputValues){ BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0 };
++    }
++    if (reader->last_value != NULL)
++    {
++        return (CheckInputValues){ entry, reader->last_value[token], reader->value_counts[token] };
++    }
++    if ((entry & BUSTER_CHECK_CHAIN_MULTIPLE) == 0)
++    {
++        return (CheckInputValues){ entry, entry, 1 };
++    }
++    const uint32_t index = entry & ~BUSTER_CHECK_CHAIN_MULTIPLE;
++    assert(index < reader->multiple_chain_count);
++    return reader->multiple_chains[index];
++}
++
++static void check_input_chain_list(CheckInputReader* reader, uint32_t token, CheckInputValues values)
++{
++    reader->first_value[token] = values.first;
++    if (reader->last_value != NULL)
++    {
++        reader->last_value[token] = values.last;
++        reader->value_counts[token] = values.count;
++    }
++    else if (values.count > 1)
++    {
++        if (reader->multiple_chain_count == reader->multiple_chain_capacity)
++        {
++            const uint64_t capacity = reader->multiple_chain_capacity == 0 ? 256 : (uint64_t)reader->multiple_chain_capacity * 2;
++            CheckInputValues* rows = capacity < BUSTER_CHECK_CHAIN_MULTIPLE ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckInputValues, capacity) : NULL;
++            if (rows == NULL)
++            {
++                reader->output->resource = true;
++                return;
++            }
++            if (reader->multiple_chain_count != 0)
++            {
++                memcpy(rows, reader->multiple_chains, (size_t)reader->multiple_chain_count * sizeof(*rows));
++            }
++            reader->multiple_chains = rows;
++            reader->multiple_chain_capacity = (uint32_t)capacity;
++        }
++        const uint32_t index = reader->multiple_chain_count++;
++        reader->multiple_chains[index] = values;
++        reader->first_value[token] = BUSTER_CHECK_CHAIN_MULTIPLE | index;
++    }
++}
++
++static inline __attribute__((always_inline)) void check_input_chain_single(CheckInputReader* reader, uint32_t token, uint32_t node)
++{
++    reader->first_value[token] = node;
++    if (reader->last_value != NULL)
++    {
++        reader->last_value[token] = node;
++        reader->value_counts[token] = 1;
++    }
++}
+ 
+ // The expressions' walk's classes of every token, into CheckInputReader.visits: 64 tokens' roles and kinds looked up in
+ // the tables (check_input_role_tests, check_input_role_codes) and their sparse entries in a word of marks
+@@ -15319,7 +15394,6 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+             const uint32_t at = token + part;
+             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
+             const __mmask16 part_acts = (__mmask16)((children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part)) & ~(__mmask16)(passed >> part));
+-            _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
+             // The type queries that finish at the tokens, 8 pointers at a time.
+             const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, check_input_rare_line(reader, reader->specifier_finishes + at));
+             const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), check_input_rare_line(reader, reader->specifier_finishes + at + 8));
+@@ -15341,6 +15415,13 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+         const uint64_t declined = _mm512_test_epi8_mask(declines, declines) & builtin;
+         const uint64_t called = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_CALL)) & intrinsic;
+         codes = _mm512_mask_mov_epi8(codes, grouped | declined | called | sparse | specified, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
++        // Only inactive tokens and final DROP actions go unvisited. Give their parents an empty chain
++        // even when the page contains old scratch data. All other actions write their own heads.
++        const uint64_t empty = lanes & (~acts | _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP)));
++        for (uint32_t part = 0; part < length; part += 16)
++        {
++            _mm512_mask_storeu_epi32(reader->first_value + token + part, (__mmask16)(empty >> part), none);
++        }
+         // Every class is below 32, so each byte's shift stays in its byte.
+         const __m512i classes = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(acts, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_ACTS)),
+                                                                 _mm512_maskz_mov_epi8(sparse, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_SPARSE))),
+@@ -15381,9 +15462,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+             // A fixed-type query keeps its region checked; its value is not a runtime declaration operand.
+             continue;
+         }
+-        const uint32_t begin = reader->first_value[child];
+-        if (begin != BUSTER_CHECK_NONE)
++        const uint32_t entry = reader->first_value[child];
++        if (entry != BUSTER_CHECK_NONE)
+         {
++            const CheckInputValues values = check_input_chain_read(reader, child, entry);
++            const uint32_t begin = values.first;
+             if (last != BUSTER_CHECK_NONE)
+             {
+                 reader->value_next[last] = begin;
+@@ -15392,8 +15475,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+             {
+                 first = begin;
+             }
+-            last = reader->last_value[child];
+-            count += reader->value_counts[child];
++            last = values.last;
++            count += values.count;
+         }
+     }
+     uint32_t a = first;
+@@ -16190,17 +16273,13 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+         reader->output->token_nodes[token] = node;
+         if (role != PARSE_ROLE_CLOSE_CONDITION && role != PARSE_ROLE_RETURN)
+         {
+-            reader->first_value[token] = node;
+-            reader->last_value[token] = node;
+-            reader->value_counts[token] = 1;
++            check_input_chain_single(reader, token, node);
+         }
+     }
+     else if (list)
+     {
+         reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
+-        reader->first_value[token] = first;
+-        reader->last_value[token] = last;
+-        reader->value_counts[token] = count;
++        check_input_chain_list(reader, token, (CheckInputValues){first,last,count});
+         if (BUSTER_CHECK_RARE(reader, static_initializers, token))
+         {
+             // A braced static initializer's elements are constant expressions, which initializer
+@@ -16844,8 +16923,16 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
+     memset(reader->initializer_finish_heads, 0xff, bytes);
+     memset(reader->selected_tokens, 0xff, bytes);
+     memset(reader->activate, 0xff, bytes);
+-    memset(reader->first_value, 0xff, bytes);
+-    memset(reader->last_value, 0xff, bytes);
++    if (reader->last_value != NULL)
++    {
++        memset(reader->first_value, 0xff, bytes);
++        memset(reader->last_value, 0xff, bytes);
++    }
++    else
++    {
++        // Class preparation initializes inactive tokens; each action initializes its own head.
++        reader->first_value[count] = BUSTER_CHECK_NONE;
++    }
+ }
+ 
+ #include "c_check_comma_input.c"
+@@ -17299,8 +17386,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     BUSTER_CHECK_INPUT_ARRAY(parameter_previous, uint32_t);
+     BUSTER_CHECK_INPUT_ARRAY(parameter_declarations, uint32_t);
+     BUSTER_CHECK_INPUT_ARRAY(first_value, uint32_t);
+-    BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
+-    BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
++    if (deferred != NULL || graph_capacity >= BUSTER_CHECK_CHAIN_MULTIPLE)
++    {
++        BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
++        BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
++    }
+ #undef BUSTER_CHECK_INPUT_ARRAY
+     reader.warning_index_base = 1;
+     while ((uint64_t)reader.warning_index_base * BUSTER_CHECK_WARNING_BLOCK < count)
+diff --git a/src/buster/compiler/c_check_input_scan_test.c b/src/buster/compiler/c_check_input_scan_test.c
+index 413b2664d..a665f0456 100644
+--- a/src/buster/compiler/c_check_input_scan_test.c
++++ b/src/buster/compiler/c_check_input_scan_test.c
+@@ -171,6 +171,34 @@ static void check_test_output_none_columns(uint32_t* const* columns, uint32_t co
+     };
+ }
+ 
++// A parent may still refer to earlier list entries after the packed pool grows. Reuse one token for
++// singletons, empty chains and lists, then read every retained list after crossing two growth points.
++static void check_test_expression_chains(CheckTest* test)
++{
++    Arena scratch = arena_reserve(UINT64_C(1) << 17);
++    CheckInput input = { 0 };
++    uint32_t heads[601];
++    CheckInputReader reader = { .output = &input, .scratch = &scratch, .first_value = heads };
++    bool exact = scratch.base != NULL;
++    for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(heads); ++i)
++    {
++        check_input_chain_single(&reader, i, i + 3);
++        const CheckInputValues single = check_input_chain_read(&reader, i, heads[i]);
++        check_input_chain_list(&reader, i, (CheckInputValues){ BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0 });
++        const CheckInputValues empty = check_input_chain_read(&reader, i, heads[i]);
++        check_input_chain_list(&reader, i, (CheckInputValues){ i, i + 5, 6 });
++        exact = !input.resource && single.first == i + 3 && single.last == i + 3 && single.count == 1 &&
++                empty.first == BUSTER_CHECK_NONE && empty.last == BUSTER_CHECK_NONE && empty.count == 0;
++    }
++    for (uint32_t i = 0; exact && i < BUSTER_ARRAY_LENGTH(heads); ++i)
++    {
++        const CheckInputValues list = check_input_chain_read(&reader, i, heads[i]);
++        exact = list.first == i && list.last == i + 5 && list.count == 6;
++    }
++    check_test_expect(test, exact, "packed value chains preserve singletons, empty chains and retained lists across pool growth");
++    arena_release(&scratch);
++}
++
+ static void check_test_output_none(CheckTest* test)
+ {
+     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+@@ -765,6 +793,7 @@ static __attribute__((noinline)) void check_test_sparse_next(CheckTest* test)
+ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+ {
+     check_test_output_none(test);
++    check_test_expression_chains(test);
+     check_test_sparse_columns(test);
+     check_test_sparse_next(test);
+     check_test_sparse_wide(test);
+@@ -1078,7 +1107,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+         for (uint32_t i = 0; i < count; i += 1)
+         {
+             const uint8_t classes = check_test_expression_class(&reader, i);
+-            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
++            const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 || code == CHECK_INPUT_CODE_DROP ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+             class_differences += visits[i] != classes || reader.first_value[i] != first_value;
+             expected_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
+         }
+@@ -1102,7 +1132,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+         for (uint32_t i = 0; i < count; i += 1)
+         {
+             const uint8_t classes = expected_empty[i];
+-            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
++            const uint32_t code = (classes & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++            const uint32_t first_value = (classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 || code == CHECK_INPUT_CODE_DROP ? BUSTER_CHECK_NONE : UINT32_C(0x5a5a5a5a);
+             class_differences += visits[i] != classes || reader.first_value[i] != first_value;
+             class_differences += check_input_asm_id(&input, i) != 0;
+             expected_empty_acting += (classes & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
+diff --git a/tests/driver/operand_diagnostics/node_window_warnings.c b/tests/driver/operand_diagnostics/node_window_warnings.c
+index fc21de946..bc65ca2ed 100644
+--- a/tests/driver/operand_diagnostics/node_window_warnings.c
++++ b/tests/driver/operand_diagnostics/node_window_warnings.c
+@@ -114,3 +114,10 @@ int braced_after_write(void)
+     int value = { ({ value = 2; value; }) };
+     return value;
+ }
++
++int labeled_statement_results(int parameter)
++{
++#define BUSTER_LABELED_RESULT(condition) ({ __label__ done; int x = 0; if (condition) goto done; x = 1; done: x; })
++    return BUSTER_LABELED_RESULT(parameter) + BUSTER_LABELED_RESULT(parameter > 1);
++#undef BUSTER_LABELED_RESULT
++}
