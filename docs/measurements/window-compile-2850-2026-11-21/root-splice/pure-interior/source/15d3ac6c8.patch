@@ -1,0 +1,152 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index eea6cb501..8820b1781 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2123,18 +2123,78 @@ static bool check_input_interior_observed(const Parser* parser, uint32_t token,
+     return role == PARSE_ROLE_SHIFT || role == PARSE_ROLE_MULTIPLICATIVE || role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY;
+ }
+ 
++typedef struct CheckInteriorRange {
++    uint16_t first, end, literal;
++} CheckInteriorRange;
++
++// A closed literal tree starts with a literal followed by another literal, a sign or a group.
++// Screen 16 parser actions together and only visit uninterrupted arithmetic runs that contain such a pair.
++static uint32_t check_input_interior_ranges(const uint32_t* classes, uint32_t acting, CheckInteriorRange* ranges)
++{
++    uint16_t literals[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1], continuation[BUSTER_CHECK_EXPRESSION_CHUNK/16+1];
++    uint16_t kept[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1], ranks[BUSTER_CHECK_EXPRESSION_CHUNK/16+1];
++    const uint32_t tiles = (acting + 15) / 16;
++    uint32_t literal = 0;
++    for (uint32_t t = 0; t < tiles; ++t)
++    {
++        const uint32_t first = 16*t;
++        const uint16_t valid = (uint16_t)_bzhi_u32(UINT32_MAX, acting-first < 16 ? acting-first : 16);
++        const __m512i ids = _mm512_and_si512(_mm512_maskz_loadu_epi32(valid, classes+first),_mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
++#define BUSTER_INTERIOR_MATCH(k) _mm512_mask_cmpeq_epi32_mask(valid, ids, _mm512_set1_epi32((k) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT))
++        literals[t] = BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_LITERAL);
++        continuation[t] = literals[t] | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_PREFIX) | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_GROUP);
++        kept[t] = continuation[t] | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_BINARY);
++#undef BUSTER_INTERIOR_MATCH
++        ranks[t] = (uint16_t)literal;
++        literal += (uint32_t)__builtin_popcount(literals[t]);
++    }
++    continuation[tiles] = 0;
++    uint32_t count = 0, after = 0;
++    for (uint32_t t = 0; t < tiles; ++t)
++    {
++        const uint32_t following = continuation[t] | ((uint32_t)continuation[t+1] << 16);
++        uint32_t seeds = literals[t] & (following>>1);
++        while (seeds)
++        {
++            const uint32_t bit = (uint32_t)__builtin_ctz(seeds);
++            const uint32_t begin = 16*t + bit;
++            if (begin >= after)
++            {
++                uint32_t group = t;
++                uint32_t outside = (uint16_t)(~kept[group] & (UINT32_MAX << bit));
++                while (outside == 0 && ++group < tiles) outside = (uint16_t)~kept[group];
++                after = outside != 0 ? 16*group + (uint32_t)__builtin_ctz(outside) : acting;
++                ranges[count++] = (CheckInteriorRange){ (uint16_t)begin,(uint16_t)after,
++                    (uint16_t)(ranks[t] + (uint32_t)__builtin_popcount(literals[t] & ((1u << bit) - 1))) };
++            }
++            if (after >= 16*t+16) break;
++            seeds &= UINT32_MAX << (after - 16*t);
++        }
++    }
++    return count;
++}
++
+ // Discover maximal, closed subexpressions of plain integer literals in parser postorder.
+ // A retained parent uses the same token and checked arithmetic value as its ordinary operand.
+ static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInputReader* reader, CheckInputBatch* batch,
+     const uint32_t* tokens, const uint32_t* classes, uint32_t acting, const CheckInputIdentifiers* identifiers,
+-    const CheckInputLiterals* literals, uint64_t* visited, bool dry, bool report, bool guarded, uint32_t mutate)
++    const CheckInputLiterals* literals, uint64_t* visited, bool dry, bool report, bool guarded, uint32_t mutate, bool masked)
+ {
+     struct IntegerSpan { uint32_t first, value, literals, nodes; } span[BUSTER_CHECK_EXPRESSION_CHUNK];
+     uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK] = {0};
+     const Parser* parser = reader->parser;
+-    uint32_t literal = 0;
+-    for (uint32_t i = 0; i < acting; ++i)
+-    {
++    CheckInteriorRange ranges[BUSTER_CHECK_EXPRESSION_CHUNK/2+1];
++    uint16_t selected[BUSTER_CHECK_EXPRESSION_CHUNK/2+1];
++    uint32_t selections = 0;
++    uint32_t ranges_count = 1;
++    if (masked) ranges_count = check_input_interior_ranges(classes, acting, ranges);
++    else ranges[0] = (CheckInteriorRange){0,(uint16_t)acting,0};
++    for (uint32_t r = 0; r < ranges_count; ++r)
++    {
++        const CheckInteriorRange range = ranges[r];
++        uint32_t literal = range.literal;
++        for (uint32_t i = range.first; i < range.end; ++i)
++        {
+         const uint32_t code = check_input_window_code(classes, i);
+         const uint32_t token = tokens[i];
+         const uint32_t kind = parser->tokens.kinds[token];
+@@ -2149,7 +2209,7 @@ static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInpu
+             continue;
+         }
+         const bool binary = code == CHECK_INPUT_CODE_BINARY;
+-        if (i == 0 || span[i - 1].nodes == 0 || (!binary && code != CHECK_INPUT_CODE_PREFIX && code != CHECK_INPUT_CODE_GROUP) ||
++        if (i == range.first || span[i - 1].nodes == 0 || (!binary && code != CHECK_INPUT_CODE_PREFIX && code != CHECK_INPUT_CODE_GROUP) ||
+             parser->tree.parents[tokens[i - 1]] != token)
+             continue;
+         const struct IntegerSpan rhs = span[i - 1];
+@@ -2161,7 +2221,7 @@ static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInpu
+         struct IntegerSpan lhs = rhs;
+         if (binary)
+         {
+-            if (rhs.first == 0 || span[rhs.first - 1].nodes == 0 || parser->tree.parents[tokens[rhs.first - 1]] != token)
++            if (rhs.first == range.first || span[rhs.first - 1].nodes == 0 || parser->tree.parents[tokens[rhs.first - 1]] != token)
+                 continue;
+             lhs = span[rhs.first - 1];
+         }
+@@ -2172,14 +2232,27 @@ static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInpu
+             !check_node_window_fold_int(op, lhs.value, rhs.value, binary, &value)) continue;
+         span[i] = (struct IntegerSpan){lhs.first, value, lhs.literals + (binary ? rhs.literals : 0), 1 + lhs.nodes + (binary ? rhs.nodes : 0)};
+         ends[lhs.first] = i + 1;
++        }
++        for (uint32_t i = range.first; i < range.end;)
++        {
++            if (ends[i] > i) { selected[selections++] = (uint16_t)i; i = ends[i]; }
++            else ++i;
++        }
+     }
++    selected[selections] = (uint16_t)acting;
++    uint32_t selection = 0;
+     uint32_t identifier = 0;
+-    literal = 0;
++    uint32_t literal = 0;
+     uint32_t i = 0;
+     while (i < acting && !reader->output->resource)
+     {
++        const uint32_t first = dry ? acting : selected[selection];
++        for (; i < first && !reader->output->resource; ++i)
++            check_input_expression_coded(reader,batch,tokens[i],(uint8_t)classes[i],true,identifiers,&identifier,literals,&literal,visited);
++        if (i >= acting || reader->output->resource) break;
+         const uint32_t end = ends[i];
+-        if (end > i && !dry && check_input_expression_room(reader, batch, 1))
++        ++selection;
++        if (check_input_expression_room(reader, batch, 1))
+         {
+             const struct IntegerSpan s = span[end - 1];
+             const uint32_t token = tokens[end - 1];
+@@ -2419,6 +2492,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     const bool interior_dry = interiors && getenv("NODE_PURE_INTERIOR_DRY") != NULL;
+     const bool interior_report = interiors && getenv("NODE_PURE_INTERIOR_REPORT") != NULL;
+     const bool interior_guard = interiors && getenv("NODE_PURE_INTERIOR_UNGUARDED") == NULL;
++    const bool interior_mask = interiors && getenv("NODE_PURE_INTERIOR_MASK") != NULL;
+     const char* mutation = interiors ? getenv("NODE_PURE_INTERIOR_MUTATE") : NULL;
+     const uint32_t interior_mutation = mutation != NULL ? (uint32_t)atoi(mutation) : 0;
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+@@ -2453,7 +2527,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+ #endif
+         if (interiors)
+         {
+-            i = check_input_interior_actions(reader,batch,tokens,classes,acting,&identifiers,&literals,&visited,interior_dry,interior_report,interior_guard,interior_mutation);
++            i = check_input_interior_actions(reader,batch,tokens,classes,acting,&identifiers,&literals,&visited,interior_dry,interior_report,interior_guard,interior_mutation,interior_mask);
+         }
+         else if (window)
+         {

@@ -1,0 +1,168 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index ec12ac0ae..7ef88fee7 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -763,6 +763,25 @@ struct CheckInputLiterals
+     uint32_t values[BUSTER_CHECK_EXPRESSION_CHUNK];
+ };
+ 
++// Classification receipts for the scanner that already extracts the chunk's numeric literals.
++typedef struct CheckInteriorMasks {
++    uint16_t literals[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1], continuation[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1];
++    uint16_t kept[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1], ranks[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1];
++    bool prepared;
++} CheckInteriorMasks;
++
++static inline void check_input_interior_mask_tile(CheckInteriorMasks* masks, uint32_t t, uint16_t valid, __m512i fields,
++                                                  uint16_t literal, uint32_t rank)
++{
++    const __m512i ids = _mm512_and_si512(fields,_mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
++#define BUSTER_INTERIOR_MATCH(k) _mm512_mask_cmpeq_epi32_mask(valid, ids, _mm512_set1_epi32((k) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT))
++    masks->literals[t] = literal;
++    masks->continuation[t] = literal | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_PREFIX) | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_GROUP);
++    masks->kept[t] = masks->continuation[t] | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_BINARY);
++    masks->ranks[t] = (uint16_t)rank;
++#undef BUSTER_INTERIOR_MATCH
++}
++
+ // The most digits a plain decimal has here: nine, whose largest value is an int.
+ #define BUSTER_CHECK_LITERAL_PLAIN_DIGITS 9u
+ 
+@@ -841,8 +860,8 @@ static inline __m512i check_input_literal_digits(__m512i words, __m512i offsets,
+ // (check_input_literal_digits). The preprocessor's ints take their values. A unit past the gathers' signed 32-bit
+ // offsets takes check_input_literal_plain for every literal. An aligned word holds a byte of the spelling, so is on its
+ // page.
+-static uint32_t check_input_expression_literals(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
+-                                                CheckInputLiterals* literals)
++static uint32_t check_input_expression_literal_masks(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t acting,
++                                                CheckInputLiterals* literals, CheckInteriorMasks* masks)
+ {
+     const Parser* parser = reader->parser;
+     const Preprocessor* pp = reader->pp;
+@@ -866,6 +885,20 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+     uint32_t count = 0;
+     uint32_t position = 0;
+     uint32_t cursor = BUSTER_PP_NONE;
++    if (masks != NULL)
++    {
++        masks->prepared = indexed;
++        if (indexed) masks->continuation[(acting + 15) / 16] = 0;
++        for (; indexed && position < acting; position += 16)
++        {
++            const uint16_t lanes = (uint16_t)_bzhi_u32(UINT32_MAX, acting-position < 16 ? acting-position : 16);
++            const __m512i fields = _mm512_maskz_loadu_epi32(lanes, classes+position);
++            const uint16_t matched = _mm512_mask_cmpeq_epi32_mask(lanes,fields,_mm512_set1_epi32((int32_t)literal));
++            check_input_interior_mask_tile(masks,position/16,lanes,fields,matched,count);
++            _mm512_mask_compressstoreu_epi32(found+count,matched,_mm512_maskz_loadu_epi32(lanes,tokens+position));
++            count += (uint32_t)__builtin_popcount(matched);
++        }
++    }
+     for (; indexed && position < acting; position += 16)
+     {
+         const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, acting - position < 16 ? acting - position : 16);
+@@ -1007,6 +1040,12 @@ static uint32_t check_input_expression_literals(const CheckInputReader* reader,
+     return count;
+ }
+ 
++static uint32_t check_input_expression_literals(const CheckInputReader* reader, const uint32_t* tokens,
++    const uint32_t* classes, uint32_t acting, CheckInputLiterals* literals)
++{
++    return check_input_expression_literal_masks(reader,tokens,classes,acting,literals,NULL);
++}
++
+ // An identifier operand, the chunk's identifier `at`: a VALUE node of its declaration and its leaf, or nothing for one
+ // without a declared type. In a unit with overload tables the leaf holds the use's overload head, which the reader's run
+ // wrote at the token, and which the walk's action writes back there unchanged. A K&R unit's identifiers, whose types a
+@@ -2129,26 +2168,30 @@ typedef struct CheckInteriorRange {
+ 
+ // A closed literal tree starts with a literal followed by another literal, a sign or a group.
+ // Screen 16 parser actions together and only visit uninterrupted arithmetic runs that contain such a pair.
+-static uint32_t check_input_interior_ranges(const uint32_t* classes, uint32_t acting, CheckInteriorRange* ranges)
++static uint32_t check_input_interior_ranges(const uint32_t* classes, uint32_t acting, CheckInteriorRange* ranges, const CheckInteriorMasks* supplied)
+ {
+-    uint16_t literals[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1], continuation[BUSTER_CHECK_EXPRESSION_CHUNK/16+1];
+-    uint16_t kept[BUSTER_CHECK_EXPRESSION_CHUNK/16 + 1], ranks[BUSTER_CHECK_EXPRESSION_CHUNK/16+1];
++    CheckInteriorMasks storage;
+     const uint32_t tiles = (acting + 15) / 16;
+-    uint32_t literal = 0;
+-    for (uint32_t t = 0; t < tiles; ++t)
++    if (supplied == NULL || !supplied->prepared)
+     {
+-        const uint32_t first = 16*t;
+-        const uint16_t valid = (uint16_t)_bzhi_u32(UINT32_MAX, acting-first < 16 ? acting-first : 16);
+-        const __m512i ids = _mm512_and_si512(_mm512_maskz_loadu_epi32(valid, classes+first),_mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
+-#define BUSTER_INTERIOR_MATCH(k) _mm512_mask_cmpeq_epi32_mask(valid, ids, _mm512_set1_epi32((k) << BUSTER_CHECK_EXPRESSION_CODE_SHIFT))
+-        literals[t] = BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_LITERAL);
+-        continuation[t] = literals[t] | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_PREFIX) | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_GROUP);
+-        kept[t] = continuation[t] | BUSTER_INTERIOR_MATCH(CHECK_INPUT_CODE_BINARY);
+-#undef BUSTER_INTERIOR_MATCH
+-        ranks[t] = (uint16_t)literal;
+-        literal += (uint32_t)__builtin_popcount(literals[t]);
+-    }
+-    continuation[tiles] = 0;
++        uint32_t literal = 0;
++        for (uint32_t t = 0; t < tiles; ++t)
++        {
++            const uint32_t first = 16*t;
++            const uint16_t valid = (uint16_t)_bzhi_u32(UINT32_MAX, acting-first < 16 ? acting-first : 16);
++            const __m512i fields = _mm512_maskz_loadu_epi32(valid, classes+first);
++            const uint16_t matched = _mm512_mask_cmpeq_epi32_mask(valid,fields,
++                _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            check_input_interior_mask_tile(&storage,t,valid,fields,matched,literal);
++            literal += (uint32_t)__builtin_popcount(matched);
++        }
++        storage.continuation[tiles] = 0;
++        supplied = &storage;
++    }
++    const uint16_t* literals = supplied->literals;
++    const uint16_t* ranks = supplied->ranks;
++    const uint16_t* continuation = supplied->continuation;
++    const uint16_t* kept = supplied->kept;
+     uint32_t count = 0, after = 0;
+     for (uint32_t t = 0; t < tiles; ++t)
+     {
+@@ -2199,7 +2242,7 @@ static uint32_t check_input_interior_integer(CheckInputReader* reader, uint32_t
+ // A retained parent uses the same token and checked arithmetic value as its ordinary operand.
+ static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInputReader* reader, CheckInputBatch* batch,
+     const uint32_t* tokens, const uint32_t* classes, uint32_t acting, const CheckInputIdentifiers* identifiers,
+-    const CheckInputLiterals* literals, uint64_t* visited, bool dry, bool report, bool guarded, uint32_t mutate, bool masked, bool spellings)
++    const CheckInputLiterals* literals, uint64_t* visited, bool dry, bool report, bool guarded, uint32_t mutate, bool masked, bool spellings, const CheckInteriorMasks* masks)
+ {
+     struct IntegerSpan { uint32_t first, value, literals, nodes; } span[BUSTER_CHECK_EXPRESSION_CHUNK];
+     uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK] = {0};
+@@ -2208,7 +2251,7 @@ static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInpu
+     uint16_t selected[BUSTER_CHECK_EXPRESSION_CHUNK/2+1];
+     uint32_t selections = 0;
+     uint32_t ranges_count = 1;
+-    if (masked) ranges_count = check_input_interior_ranges(classes, acting, ranges);
++    if (masked) ranges_count = check_input_interior_ranges(classes, acting, ranges, masks);
+     else ranges[0] = (CheckInteriorRange){0,(uint16_t)acting,0};
+     for (uint32_t r = 0; r < ranges_count; ++r)
+     {
+@@ -2517,6 +2560,8 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     const bool interior_guard = interiors && getenv("NODE_PURE_INTERIOR_UNGUARDED") == NULL;
+     const bool interior_mask = interiors && getenv("NODE_PURE_INTERIOR_MASK") != NULL;
+     const bool interior_spellings = interiors && getenv("NODE_PURE_INTERIOR_SPELLINGS") != NULL;
++    CheckInteriorMasks interior_masks;
++    CheckInteriorMasks* gathered = interior_mask && getenv("NODE_PURE_INTERIOR_FUSE") != NULL ? &interior_masks : NULL;
+     const char* mutation = interiors ? getenv("NODE_PURE_INTERIOR_MUTATE") : NULL;
+     const uint32_t interior_mutation = mutation != NULL ? (uint32_t)atoi(mutation) : 0;
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+@@ -2535,7 +2580,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         else if (coded)
+         {
+             check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers);
+-            check_input_expression_literals(reader, tokens, classes, acting, &literals);
++            check_input_expression_literal_masks(reader, tokens, classes, acting, &literals, gathered);
+         }
+         const uint64_t ready = __rdtsc();
+         uint32_t identifier = 0;
+@@ -2551,7 +2596,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+ #endif
+         if (interiors)
+         {
+-            i = check_input_interior_actions(reader,batch,tokens,classes,acting,&identifiers,&literals,&visited,interior_dry,interior_report,interior_guard,interior_mutation,interior_mask,interior_spellings);
++            i = check_input_interior_actions(reader,batch,tokens,classes,acting,&identifiers,&literals,&visited,interior_dry,interior_report,interior_guard,interior_mutation,interior_mask,interior_spellings,gathered);
+         }
+         else if (window)
+         {

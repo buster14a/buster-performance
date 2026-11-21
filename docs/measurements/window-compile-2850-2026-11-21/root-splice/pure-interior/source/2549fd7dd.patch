@@ -1,0 +1,117 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 8eb4626a0..63fa30e8e 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2108,6 +2108,88 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+ }
+ #endif
+ 
++// Discover maximal, closed subexpressions of plain integer literals in parser postorder.
++// A retained parent uses the same token and checked arithmetic value as its ordinary operand.
++static __attribute__((noinline)) uint32_t check_input_interior_actions(CheckInputReader* reader, CheckInputBatch* batch,
++    const uint32_t* tokens, const uint32_t* classes, uint32_t acting, const CheckInputIdentifiers* identifiers,
++    const CheckInputLiterals* literals, uint64_t* visited, bool dry, bool report)
++{
++    struct IntegerSpan { uint32_t first, value, literals, nodes; } span[BUSTER_CHECK_EXPRESSION_CHUNK];
++    uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK] = {0};
++    const Parser* parser = reader->parser;
++    uint32_t literal = 0;
++    for (uint32_t i = 0; i < acting; ++i)
++    {
++        const uint32_t code = check_input_window_code(classes, i);
++        const uint32_t token = tokens[i];
++        const uint32_t kind = parser->tokens.kinds[token];
++        span[i].nodes = 0;
++        if (code == CHECK_INPUT_CODE_LITERAL)
++        {
++            const uint32_t value = literals->values[literal++];
++            if (value != BUSTER_CHECK_NONE && kind == PARSE_KIND_NUMBER)
++            {
++                span[i] = (struct IntegerSpan){i, value, 1, 1};
++            }
++            continue;
++        }
++        const bool binary = code == CHECK_INPUT_CODE_BINARY;
++        if (i == 0 || span[i - 1].nodes == 0 || (!binary && code != CHECK_INPUT_CODE_PREFIX && code != CHECK_INPUT_CODE_GROUP) ||
++            parser->tree.parents[tokens[i - 1]] != token)
++            continue;
++        const struct IntegerSpan rhs = span[i - 1];
++        if (code == CHECK_INPUT_CODE_GROUP)
++        {
++            span[i] = rhs;
++            continue;
++        }
++        struct IntegerSpan lhs = rhs;
++        if (binary)
++        {
++            if (rhs.first == 0 || span[rhs.first - 1].nodes == 0 || parser->tree.parents[tokens[rhs.first - 1]] != token)
++                continue;
++            lhs = span[rhs.first - 1];
++        }
++        const CheckOp op = binary ? check_input_binary(kind) : kind == PARSE_KIND_PLUS ? CHECK_OP_POSITIVE :
++            kind == PARSE_KIND_MINUS ? CHECK_OP_NEGATIVE : kind == PARSE_KIND_TILDE ? CHECK_OP_BIT_NOT : CHECK_OP_COUNT;
++        uint32_t value;
++        if (op >= CHECK_OP_COUNT || !check_node_window_fold_int(op, lhs.value, rhs.value, binary, &value)) continue;
++        span[i] = (struct IntegerSpan){lhs.first, value, lhs.literals + (binary ? rhs.literals : 0), 1 + lhs.nodes + (binary ? rhs.nodes : 0)};
++        ends[lhs.first] = i + 1;
++    }
++    uint32_t identifier = 0;
++    literal = 0;
++    uint32_t i = 0;
++    while (i < acting && !reader->output->resource)
++    {
++        const uint32_t end = ends[i];
++        if (end > i && !dry && check_input_expression_room(reader, batch, 1))
++        {
++            const struct IntegerSpan s = span[end - 1];
++            const uint32_t token = tokens[end - 1];
++            const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE,
++                                                        BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
++            if (node == BUSTER_CHECK_NONE) break;
++            for (uint32_t k = i; k < end; ++k) reader->first_value[tokens[k]] = BUSTER_CHECK_NONE;
++            const CheckValue v = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE,
++                                   .constant_kind = CHECK_CONSTANT_INTEGER, .integer = s.value };
++            check_input_batch_set_leaf(reader, batch, node, &v);
++            check_input_expression_value(reader, token, node);
++            if (report)
++                fprintf(stderr, "interior-taken: token=%u node=%u removed=%u op=%u parent=%u\n",token,node,s.nodes-1,
++                        parser->tokens.kinds[token],parser->tree.parents[token]);
++            literal += s.literals;
++            i = end;
++        }
++        else
++        {
++            check_input_expression_coded(reader,batch,tokens[i],(uint8_t)classes[i],true,identifiers,&identifier,literals,&literal,visited);
++            ++i;
++        }
++    }
++    return i;
++}
++
+ // Keep a durable tape entry only after admission. A refusal to grow this optional tape leaves the graph path available.
+ static CheckInputWindowEntry* check_input_window_entry(CheckInputReader* reader)
+ {
+@@ -2315,6 +2397,10 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
+     const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
+                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0;
++    const bool interiors = coded && begin == 0 && stop == count && !timed && front == NULL && reader->expression_declined == NULL &&
++        reader->parser->errors == 0 && input->musttail_count == 0 && getenv("NODE_PURE_INTERIOR") != NULL;
++    const bool interior_dry = interiors && getenv("NODE_PURE_INTERIOR_DRY") != NULL;
++    const bool interior_report = interiors && getenv("NODE_PURE_INTERIOR_REPORT") != NULL;
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
+     {
+@@ -2345,7 +2431,11 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         }
+         else
+ #endif
+-        if (window)
++        if (interiors)
++        {
++            i = check_input_interior_actions(reader,batch,tokens,classes,acting,&identifiers,&literals,&visited,interior_dry,interior_report);
++        }
++        else if (window)
+         {
+             i = check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited);
+         }
