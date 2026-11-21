@@ -15,9 +15,9 @@ Release builds used Clang 23.1.4. All 84 shadow invocations ran under the shared
 
 The two static backedge spans in node_facts_window_run enclose 207 instructions with summaries and 194 without, at 0x1f809d0–0x1f80eff and 0x1f81130–0x1f81602. Their baseline spans enclose 190 and 178 instructions. The addresses delimit the contiguous disassembly. Branches can skip instructions within them. `loops.tar.xz` also contains the candidate and both earlier builds' disassemblies of the front-input function and its caller.
 
-The local shadow campaign checked 8,009 probes, 90,000 generated programs, 15,108 fixture files under three warning policies, and 92 triggered warnings. It reported zero shadow disagreements. The 6,790 ordered-operator diagnostic comparisons against the frozen PR also matched. The campaign inputs, commands and logs are in `operators.py`, `campaign.sh` and `shadow-logs.tar.xz`.
+The local shadow campaign checked 8,009 probes, 90,000 generated programs, 15,108 fixture files under three warning policies, and 92 triggered warnings. It reported zero shadow disagreements. A follow-up source with an unknown platform in an availability attribute exercised warning 93 under each policy and also had zero unsound takes. Its three reports are in `availability.log`. The 6,790 ordered-operator diagnostic comparisons against the frozen PR also matched. The campaign inputs, commands and logs are in `operators.py`, `campaign.sh` and `shadow-logs.tar.xz`.
 
-From this directory the seven-reading table can be reproduced with:
+From this directory the seven-reading table can be reproduced with these commands.
 
 ```sh
 tar -xJf runs.tar.xz
