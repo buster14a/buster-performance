@@ -1,0 +1,562 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 2aa05a43e..cbe97f1fc 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1692,6 +1692,12 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front,
+         if (front->window)
+         {
+             node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
++            if (getenv("NODE_SOURCE_STRINGS") != NULL)
++            {
++                // The source front has interned this chunk's string objects. X needs their static storage
++                // before deciding which row loads their addresses. No expression node or type result is involved.
++                node_machine_reader_strings(front->typer, reader->output);
++            }
+             node_window_probe(front);
+         }
+         else
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 9a56b1b2f..c62f9de72 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -911,6 +911,8 @@ typedef struct NodeWindowNativeEntry
+ typedef struct NodeWindowNativeCall
+ {
+     uint32_t object, arguments;
++    TypeId function;
++    TypeId* argument_types;
+     bool variadic;
+     uint8_t classes[];
+ } NodeWindowNativeCall;
+@@ -931,6 +933,8 @@ typedef struct NodeWindowNativeTape
+ 
+ struct CheckInput
+ {
++    TypeId* cross_callee_pointees;
++
+     NodeWindowNativeTape** source_native;
+     uint32_t source_candidates;
+     uint32_t source_key_collisions;
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 7811fbd0f..e752e0382 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -4649,6 +4649,7 @@ struct NodeFactsReader
+     bool proof_made[BUSTER_NODE_FRONT_RECORDS + 64];
+     uint8_t proof_select[BUSTER_NODE_FRONT_RECORDS + 64];
+     NodeWindowNativeTape* proof_source_tapes[BUSTER_NODE_FRONT_RECORDS + 64];
++    uint32_t source_pointer_count;
+     uint32_t proof_tokens[BUSTER_NODE_FRONT_RECORDS + 64];
+     uint8_t proof_ops[BUSTER_NODE_FRONT_RECORDS + 64];
+     NodeFactsArgumentSlot proof_arg_cache[1u << BUSTER_NODE_FACTS_ARGUMENT_BITS];
+@@ -5176,9 +5177,168 @@ static NodeWindowNativeTape* node_window_compact_candidate(NodeFront* front, uin
+     };
+     return tape;
+ }
++// Populate address and decay answers from pointer types already interned by the shared source/type reader.
++// Lookup does not allocate a type or change its ID. A missing canonical pointer leaves its expression eligible
++// for ordinary fallback. A newly interned pointee can complete a previously empty array or function answer.
++static void node_source_registered_pointers(struct NodeFactsReader* state)
++{
++    NodeFacts* facts = &state->facts;
++    NodeMachine* machine = facts->machine;
++    node_machine_settle(machine);
++    node_facts_settle(facts);
++    if (state->source_pointer_count != facts->row_count)
++    {
++        const TypeTable* types = machine->types;
++        for (uint32_t i = 1; i < facts->row_count; i += 1)
++        {
++            const TypeId type = (TypeId)i << BUSTER_TYPE_INDEX_SHIFT;
++            const uint8_t kind = type_kind(types, type);
++            NodeFactsRow* row = facts->rows + i;
++            NodeFactsSide* side = facts->sides + i;
++            for (uint32_t q = 0; q <= BUSTER_TYPE_CONST; q += 1)
++            {
++                const TypeId qualified = type | q;
++                const TypeId pointer = type_find_pointer(types, qualified);
++                if (pointer != 0 && type_index(pointer) < facts->row_count)
++                {
++                    side->pointers[q] = pointer;
++                    side->pointer_words[q] = node_machine_word(machine, pointer);
++                }
++                if ((row->word & BUSTER_NODE_MACHINE_WORD_PLAIN) != 0 &&
++                    (kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind)))
++                {
++                    const TypeId pointee = kind == BUSTER_TYPE_KIND_FUNCTION ? type : row->element | q;
++                    const TypeId decayed = type_find_pointer(types, pointee);
++                    if (decayed != 0 && type_index(decayed) < facts->row_count)
++                    {
++                        row->decayed[q] = decayed;
++                    }
++                }
++            }
++        }
++        state->source_pointer_count = facts->row_count;
++    }
++}
++
++// Derive a direct callee's decay within a temporary type-table view. The native
++// tape keeps no provisional TypeId. A conversion witness keeps the pointee key.
++typedef struct NodeCrossTypeView
++{
++    TypeViewMark mark;
++    TypeError error;
++    TypeChanges* changes;
++    uint32_t hidden_begin, hidden_end, machine_count, row_count, used;
++    uint32_t indices[BUSTER_NODE_FRONT_RECORDS];
++    TypeId decays[BUSTER_NODE_FRONT_RECORDS];
++} NodeCrossTypeView;
++
++static void node_cross_type_begin(NodeFront* front, NodeCrossTypeView* view)
++{
++    struct NodeFactsReader* st = front->typer->facts;
++    NodeFacts* facts = &st->facts;
++    NodeMachine* machine = facts->machine;
++    TypeTable* tt = machine->types;
++    node_machine_settle(machine);
++    node_facts_settle(facts);
++    view->mark = type_view_mark(tt);
++    view->error = tt->last_error;
++    view->changes = tt->changes;
++    view->hidden_begin = tt->hidden_begin;
++    view->hidden_end = tt->hidden_end;
++    view->machine_count = machine->type_count;
++    view->row_count = facts->row_count;
++    view->used = 0;
++    tt->changes = NULL;
++    memset(st->proof_arg_cache, 0, sizeof(st->proof_arg_cache));
++    for (uint32_t r = 0; r < front->count; ++r)
++    {
++        if (front->ops[r] != CHECK_OP_CALL) continue;
++        const uint32_t distance = front->window_left[r];
++        if (!distance || distance > r) continue;
++        const uint32_t child = r - distance;
++        if (front->ops[child] != CHECK_OP_VALUE || front->window_kinds[child] != BUSTER_NODE_FACTS_IDENTIFIER) continue;
++        const uint32_t line = front->window_entries[child];
++        if (!line || line >= facts->line_capacity) continue;
++        const TypeId fn = (TypeId)facts->lines[4 * (uint64_t)line];
++        const uint32_t ix = type_index(fn);
++        if (ix >= facts->row_count || type_kind(tt,fn) != BUSTER_TYPE_KIND_FUNCTION || facts->rows[ix].decayed[0]) continue;
++        const TypeId ptr = type_pointer(tt, fn);
++        if (!ptr || type_index(ptr) >= facts->row_capacity || type_index(ptr) >= machine->type_capacity) continue;
++        view->indices[view->used] = ix;
++        view->decays[view->used++] = facts->rows[ix].decayed[0];
++        facts->rows[ix].decayed[0] = ptr;
++    }
++    node_machine_settle(machine);
++    node_facts_settle(facts);
++}
++static void node_cross_type_end(NodeFront* front, const NodeCrossTypeView* view)
++{
++    struct NodeFactsReader* st = front->typer->facts;
++    NodeFacts* facts = &st->facts;
++    NodeMachine* machine = facts->machine;
++    TypeTable* tt = machine->types;
++    CheckInput* in = st->reader->output;
++    if (!in->cross_callee_pointees)
++    {
++        in->cross_callee_pointees = BUSTER_ARENA_PUSH_ARRAY(st->reader->arena, TypeId, in->token_count + 1u);
++        if (!in->cross_callee_pointees) abort();
++        memset(in->cross_callee_pointees, 0, ((size_t)in->token_count + 1) * sizeof(TypeId));
++    }
++    uint32_t calls = 0, derived = 0, root_private = 0;
++    for (uint32_t r = front->made; r < front->count; ++r)
++    {
++        if (st->proof_source_tapes[r] == NULL) continue;
++        NodeWindowNativeTape* tape = st->proof_source_tapes[r];
++        // Only original (non-view) types may reach the later normal ABI classifier. The function designator's
++        // temporary pointer is observed symbolically by pointee and is not an ABI argument itself.
++        for (uint32_t c = 0; c < tape->calls; ++c)
++        {
++            NodeWindowNativeCall* call = tape->rows[c];
++            bool stable = call != NULL && type_index(call->function) < view->mark.types;
++            for (uint32_t a = 0; stable && a < call->arguments; ++a)
++                stable = type_index(call->argument_types[a]) < view->mark.types;
++            if (call != NULL && !stable)
++            {
++                call->function = 0;
++                fprintf(stderr,"cross-call-private token=%u row=%u\n",tape->root_token,c);
++            }
++        }
++        root_private += type_index(st->proof_records[r].type) >= view->mark.types;
++        const uint32_t top = r - front->window_left[r], size = front->sizes[top];
++        for (uint32_t x = top + 1 - size; x <= top; ++x)
++        {
++            if (front->ops[x] != CHECK_OP_CALL || st->window_x_owns[x] != BUSTER_TYPED_CALL) continue;
++            const uint32_t a = x - front->window_left[x], token = front->tokens[x];
++            const NodeFactsRecord* call = st->proof_records + x;
++            const TypeId fn = st->proof_records[a].type, pointer = call->converted[0];
++            if (token >= in->token_count || type_index(fn) >= view->mark.types || !pointer ||
++                type_kind(tt, pointer) != BUSTER_TYPE_KIND_POINTER || type_element(tt,pointer) != type_unqualified(fn) ||
++                call->conversion_flags[0] != BUSTER_CHECK_CONVERT_FUNCTION) abort();
++            if (in->cross_callee_pointees[token] && in->cross_callee_pointees[token] != fn) abort();
++            in->cross_callee_pointees[token] = fn;
++            calls++;
++            derived += type_index(pointer) >= view->mark.types;
++        }
++    }
++    fprintf(stderr,"cross-view rows=%u interned=%u calls=%u provisional=%u root-private=%u\n",
++            view->used,tt->types.count-view->mark.types,calls,derived,root_private);
++    if (root_private) abort();
++    for (uint32_t i = 0; i < view->used; ++i) facts->rows[view->indices[i]].decayed[0] = view->decays[i];
++    if (!type_view_reset(tt, view->mark)) abort();
++    tt->hidden_begin=view->hidden_begin; tt->hidden_end=view->hidden_end; tt->last_error=view->error; tt->changes=view->changes;
++    machine->type_count=view->machine_count; facts->row_count=view->row_count;
++    memset(facts->rows+facts->row_count,0,sizeof(NodeFactsRow));
++    memset(facts->sides+facts->row_count,0,sizeof(NodeFactsSide));
++}
++
++
+ static void node_window_probe(NodeFront* front)
+ {
+     struct NodeFactsReader* state = front->typer->facts;
++    if (getenv("NODE_SOURCE_REFRESH_POINTERS") != NULL) { node_source_registered_pointers(state); }
++    const bool temporary_types = getenv("NODE_CROSS_TYPE_VIEW") != NULL;
++    NodeCrossTypeView transaction;
++    if (temporary_types) node_cross_type_begin(front,&transaction);
+     NodeFacts run = state->facts;
+     const CheckGraph environment = { .extensions = run.machine->graph->extensions };
+     NodeMachine machine = {
+@@ -5334,6 +5494,7 @@ static void node_window_probe(NodeFront* front)
+         }
+     }
+     node_probe_warning_select(front);
++    if (temporary_types) node_cross_type_end(front,&transaction);
+     for (uint32_t v = 0; v < 3; v += 1)
+     {
+         if (voids[v][0])
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+index 2db291286..dee89fd59 100644
+--- a/src/buster/compiler/c_check_node_machine_front.c
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -913,6 +913,7 @@ static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_
+ // consumers (the complete driver's) have the front without it.
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+ static struct NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow, bool sweeps);
++static void node_machine_reader_strings(struct NodeMachineReader* typer, const CheckInput* input);
+ static void node_machine_reader_chunk(struct NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader);
+ static void node_machine_reader_finish(struct NodeMachineReader* typer);
+ #endif
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index 5d138221f..b3e718cbe 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -2301,12 +2301,16 @@ static NodeWindowNativeTape* node_probe_keep_tape(struct NodeFactsReader* state,
+                                                           _Alignof(NodeWindowNativeCall));
+         if (call_record == NULL) abort();
+         call_record->object = fn->object;
++        call_record->function = fn->type;
++        call_record->argument_types = n != 0 ? BUSTER_ARENA_PUSH_ARRAY(state->reader->arena, TypeId, n) : NULL;
++        if (n != 0 && call_record->argument_types == NULL) abort();
+         call_record->variadic = (state->reader->types->types.flags[index] & BUSTER_TYPE_FLAG_VARIADIC) != 0;
+         call_record->arguments = n;
+         for (uint32_t a = 0; a < n; ++a)
+         {
+             const uint32_t distance = front->window_arguments[front->window_entries[x] + a];
+             const TypeId target = (TypeId)state->proof_records[x - distance].spare;
++            call_record->argument_types[a] = target;
+             call_record->classes[a] = node_machine_class(state->facts.machine, target);
+         }
+         const char* fault = getenv("NODE_PROOF_CALL_ROW_FAULT");
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 454a43c96..22b67ed2c 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -2005,6 +2005,8 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
+         _Static_assert(BUSTER_PREDEFINES_FRAME_POINTER_ALL == BUSTER_TIER0_FRAME_POINTER_ALL && BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF == BUSTER_TIER0_FRAME_POINTER_NON_LEAF &&
+                            BUSTER_PREDEFINES_FRAME_POINTER_NONE == BUSTER_TIER0_FRAME_POINTER_NONE, "the options' frame pointer is Tier 0's");
+         function->frame_pointer = run->program->frame_pointer;
++        if (run->lowered->witness_rows != NULL)
++            check_source_witness_body(run->lowered,b,run->program->bodies[b].declaration,function,run->sources ? run->lowered->entry_tokens[b] : NULL);
+         // Stack-clash protection's probes (#177), which Tier 0's frame and allocations take, and Tier 1's.
+         function->probe_stack = run->program->probe_stack;
+         if (run->inline_table != NULL)
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 84e261ded..1b3692c6b 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -356,6 +356,8 @@ struct CheckProgramLowered
+     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
+     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
+     uint32_t** entry_tokens;
++    char** witness_rows;
++    size_t* witness_sizes;
+     CheckDebugBinding** debug_bindings;
+     uint32_t runtime_symbol_count;
+     uint32_t count;
+@@ -16550,6 +16552,107 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
+     writer->source = token;
+ }
+ 
++// Source object addresses stay symbolic until lowering. A VLA's actual address already lives in its slot.
++static void check_lower_source_entry(CheckLowerWriter* writer, const NodeWindowNativeEntry* row, uint64_t value)
++{
++    const bool address = row->kind == BUSTER_TYPED_LOCAL_ADDRESS || row->kind == BUSTER_TYPED_GLOBAL_ADDRESS;
++    if (address && (writer->source_native_probes & 8u) == 0)
++    {
++        check_lower_address(writer,(uint32_t)row->value,0);
++    }
++    else
++    {
++        check_lower_emit(writer,row->kind,row->class,value);
++    }
++}
++
++static bool check_lower_source_call_type(const CheckLowerWriter* writer, TypeId type, bool void_ok)
++{
++    const TypeTable* types = writer->program->types;
++    if (type == 0 || type_index(type) >= types->types.count) return false;
++    const uint8_t kind = type_kind(types, type_strip_aligned(types, type));
++    const uint8_t class = check_lower_class(writer, type);
++    return ((kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_POINTER) && class >= BUSTER_TYPED_CLASS_I8 &&
++            class <= BUSTER_TYPED_CLASS_U64) || (void_ok && kind == BUSTER_TYPE_KIND_VOID && class == BUSTER_TYPED_CLASS_VOID);
++}
++
++// This optional subset retains the graph for diagnostics and object discovery. Direct fixed prototypes with
++// scalar arguments, no ABI conversion entries and one call can reserve their ordinary call row before replay.
++static bool check_lower_source_call(CheckLowerWriter* writer, const NodeWindowNativeTape* tape, uint32_t flags)
++{
++    const CheckProgram* program = writer->program;
++    const TypeTable* types = program->types;
++    if (tape->rows == NULL || tape->calls != 1 || writer->chain != BUSTER_CHECK_NONE || writer->tail != BUSTER_CHECK_NONE ||
++        (tape->root_op != CHECK_OP_CONVERT && tape->root_op != CHECK_OP_CAST) ||
++        (tape->root_op == CHECK_OP_CONVERT && flags != 0)) return false;
++    const NodeWindowNativeCall* call = tape->rows[0];
++    if (call == NULL || call->object == 0 || call->object >= program->object_count ||
++        program->object_symbols[call->object] == 0 || call->function == 0 || type_index(call->function) >= types->types.count ||
++        type_kind(types, call->function) != BUSTER_TYPE_KIND_FUNCTION || call->variadic ||
++        (types->types.flags[type_index(call->function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
++        type_function_abi_kind(types, call->function) != TYPE_FUNCTION_ABI_SYSV || type_function_keeps_registers(types, call->function) ||
++        check_lower_convention_call(types, call->function, writer->target.features) != NULL) return false;
++    uint32_t parameters = 0;
++    const TypeId* formal = type_parameters(types, call->function, &parameters);
++    const TypeId result = type_return(types, call->function);
++    if (parameters != call->arguments || parameters > BUSTER_TIER0_MAX_CALL_ARGUMENTS ||
++        !check_lower_source_call_type(writer,result,true))
++        return false;
++    for (uint32_t i = 0; i < parameters; ++i)
++    {
++        const TypeId argument = call->argument_types[i];
++        if (type_unqualified(argument) != type_unqualified(formal[i]) ||
++            !check_lower_source_call_type(writer,argument,false) ||
++            call->classes[i] > BUSTER_TYPED_CLASS_U64 || call->classes[i] != check_lower_class(writer,argument)) return false;
++    }
++    const bool discard = tape->entries[tape->count-1].kind == BUSTER_TYPED_DISCARD;
++    if (tape->count < 1u + discard || tape->count - 1u - discard != parameters) return false;
++    const NodeWindowNativeEntry* end = tape->entries + parameters;
++    if (end->kind != BUSTER_TYPED_CALL || end->class != check_lower_class(writer,result) || end->value != 0 ||
++        end->left_token >= program->input->token_count || (discard && tape->entries[parameters+1].cast_token >= program->input->token_count))
++        return false;
++    uint64_t values[32];
++    for (uint32_t i = 0; i < parameters; ++i)
++    {
++        const NodeWindowNativeEntry* entry = tape->entries+i;
++        const uint8_t kind = entry->kind;
++        if (entry->op != CHECK_OP_VALUE || kind < BUSTER_TYPED_CONST || kind > BUSTER_TYPED_GLOBAL_ADDRESS ||
++            entry->class == BUSTER_TYPED_CLASS_VOID || entry->class != call->classes[i]) return false;
++        values[i] = entry->value;
++        if (kind == BUSTER_TYPED_CONST) continue;
++        if (entry->value >= program->object_count) return false;
++        const bool local = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS;
++        values[i] = local ? check_lower_local_of(writer, (uint32_t)entry->value) : program->object_symbols[entry->value];
++        if ((local && values[i] >= writer->local_count) || (!local && values[i] == 0) ||
++            (kind == BUSTER_TYPED_LOCAL && writer->local_classes[values[i]] != entry->class)) return false;
++    }
++    const char* fault = getenv("NODE_SOURCE_CALL_FAULT");
++    const SymbolId symbol = program->object_symbols[call->object] ^ (fault != NULL && fault[0] == 's' ? 1u : 0u);
++    const uint32_t dest = check_lower_native_call(writer,symbol,result,call->argument_types,parameters);
++    if (dest == BUSTER_CHECK_NONE) return true;
++    writer->calls_returns_twice |= writer->twice && check_lower_calls_twice(writer,call->object);
++    const uint32_t outer = writer->source;
++    for (uint32_t i = 0; i < parameters; ++i)
++    {
++        const NodeWindowNativeEntry* entry = tape->entries+i;
++        check_lower_source(writer,entry->token);
++        const bool wrong_constant = fault != NULL && fault[0] == 'v' && entry->kind == BUSTER_TYPED_CONST;
++        check_lower_source_entry(writer,entry,values[i] ^ (uint64_t)wrong_constant);
++    }
++    check_lower_source(writer,fault != NULL && fault[0] == 't' ? end->token : end->left_token);
++    check_lower_emit(writer,BUSTER_TYPED_CALL,end->class,dest);
++    if (discard)
++    {
++        const NodeWindowNativeEntry* drop = end+1;
++        check_lower_source(writer,drop->cast_token);
++        check_lower_emit(writer,drop->kind,drop->class,drop->value);
++    }
++    check_lower_source(writer,outer);
++    if ((writer->source_native_probes & 1u) != 0)
++        fprintf(stderr,"splice-direct: token=%u call=%u rows=%u args=%u\n",tape->root_token,dest,tape->count,parameters);
++    return true;
++}
++
+ static bool check_lower_source_splice(CheckLowerWriter* writer, uint32_t node, uint32_t flags)
+ {
+     const CheckProgram* program = writer->program;
+@@ -16557,8 +16660,9 @@ static bool check_lower_source_splice(CheckLowerWriter* writer, uint32_t node, u
+     if ((flags & ~4u) != 0 || writer->owners != NULL || writer->track || writer->segments) return false;
+     const uint32_t token = input->graph.tokens[node];
+     const NodeWindowNativeTape* tape = token < input->token_count ? writer->source_native[token] : NULL;
+-    if ((uintptr_t)tape <= 1 || tape->root_token != token || tape->root_op != input->graph.ops[node] || tape->calls != 0 || tape->count == 0 || tape->count > 32) return false;
++    if ((uintptr_t)tape <= 1 || tape->root_token != token || tape->root_op != input->graph.ops[node] || tape->count == 0 || tape->count > 32) return false;
+     if (tape->compact_node == 0 && (writer->source_native_probes & 32u) == 0) return false;
++    if (tape->calls != 0) return (writer->source_native_probes & 64u) != 0 && check_lower_source_call(writer,tape,flags);
+     const bool returned = tape->root_op == CHECK_OP_CONVERT && flags == 0;
+     const bool stored = tape->root_op == CHECK_OP_CAST && tape->count == 3 && tape->entries[2].kind == BUSTER_TYPED_DISCARD &&
+                         (tape->entries[1].kind == BUSTER_TYPED_STORE_LOCAL || tape->entries[1].kind == BUSTER_TYPED_STORE_GLOBAL);
+@@ -16596,10 +16700,8 @@ static bool check_lower_source_splice(CheckLowerWriter* writer, uint32_t node, u
+     {
+         const NodeWindowNativeEntry* row=tape->entries+i;
+         const uint32_t source=stored && i==2 ? token : row->token;
+-        if (row->kind == BUSTER_TYPED_LOCAL_ADDRESS && (writer->source_native_probes & 8u) == 0)
+-            writer->local_flags[values[i]] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+         check_lower_source(writer, fault_source ? token : source);
+-        check_lower_emit(writer,row->kind,row->class,values[i] ^ (uint64_t)(fault_value && row->kind == BUSTER_TYPED_CONST));
++        check_lower_source_entry(writer,row,values[i] ^ (uint64_t)(fault_value && row->kind == BUSTER_TYPED_CONST));
+     }
+     check_lower_source(writer,outer);
+     if (returned && tape->count == 1 && tape->entries[0].kind == BUSTER_TYPED_CONST && writer->count == before + 1)
+@@ -19909,6 +20011,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
+     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
+     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
++    if (valid && program->body_count != 0 && getenv("NODE_SOURCE_NATIVE_ORACLE") != NULL)
++    {
++        lowered->witness_rows = BUSTER_ARENA_PUSH_ARRAY(output, char*, program->body_count);
++        lowered->witness_sizes = BUSTER_ARENA_PUSH_ARRAY(output, size_t, program->body_count);
++        if (!lowered->witness_rows || !lowered->witness_sizes) abort();
++        memset(lowered->witness_rows, 0, program->body_count * sizeof(char*));
++    }
+     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
+     lowered->debug_bindings = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding*, program->body_count) : 0;
+     valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
+@@ -20128,7 +20237,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
+         .source_native_probes = program->input == NULL || program->input->source_native == NULL ? 0u :
+             (getenv("NODE_SPLICE_REPORT") != NULL ? 1u : 0u) | (getenv("NODE_SPLICE_SOURCE_FAULT") != NULL ? 2u : 0u) |
+             (getenv("NODE_SPLICE_VALUE_FAULT") != NULL ? 4u : 0u) | (getenv("NODE_SPLICE_OMIT_ADDRESS") != NULL ? 8u : 0u) |
+-            (getenv("NODE_SPLICE_UNCHECKED_LOCAL") != NULL ? 16u : 0u) | (getenv("NODE_SPLICE_ENABLE") != NULL ? 32u : 0u),
++            (getenv("NODE_SPLICE_UNCHECKED_LOCAL") != NULL ? 16u : 0u) | (getenv("NODE_SPLICE_ENABLE") != NULL ? 32u : 0u) | (getenv("NODE_SPLICE_CALLS") != NULL ? 64u : 0u),
+         .x87_constant_capacity = shared->x87_constant_capacity,
+         .atomic_room = shared->atomic_capacity + 1,
+         .label_symbol_capacity = shared->label_symbol_capacity,
+@@ -21152,33 +21261,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+         function->local_count = writer->local_count;
+         function->call_count = writer->call_count;
+         function->argument_count = writer->argument_count;
+-        // Differential-only export from the actual driver build, after all body-local rewrites.
+-        // Single-lane invocations write capacity-free columns in body order.
+-        const char* witness_path = getenv("NODE_SOURCE_NATIVE_ORACLE");
+-        if (witness_path != NULL && status->status == CHECK_PROGRAM_OK)
+-        {
+-            FILE* witness = fopen(witness_path, "ab");
+-            if (witness == NULL) abort();
+-            const uint32_t counts[] = {body.declaration, writer->count, writer->local_count, writer->call_count,
+-                                       writer->argument_count, sources};
+-            fwrite(counts, sizeof(counts), 1, witness);
+-#define BUSTER_SOURCE_WITNESS(column, length) do { \
+-            if ((length) != 0) fwrite(writer->column, sizeof(*writer->column), (length), witness); \
+-        } while (0)
+-            BUSTER_SOURCE_WITNESS(kinds, writer->count);
+-            BUSTER_SOURCE_WITNESS(classes, writer->count);
+-            BUSTER_SOURCE_WITNESS(values, writer->count);
+-            if (sources) BUSTER_SOURCE_WITNESS(tokens, writer->count);
+-            BUSTER_SOURCE_WITNESS(local_classes, writer->local_count);
+-            BUSTER_SOURCE_WITNESS(local_flags, writer->local_count);
+-            BUSTER_SOURCE_WITNESS(call_targets, writer->call_count);
+-            BUSTER_SOURCE_WITNESS(call_first, writer->call_count);
+-            BUSTER_SOURCE_WITNESS(call_counts, writer->call_count);
+-            BUSTER_SOURCE_WITNESS(call_variadic, writer->call_count);
+-            BUSTER_SOURCE_WITNESS(argument_classes, writer->argument_count);
+-#undef BUSTER_SOURCE_WITNESS
+-            if (ferror(witness) || fclose(witness) != 0) abort();
+-        }
+         part->entries += writer->count;
+         for (uint32_t slot = shared->local_start[locals + 1]; slot < shared->local_start[locals + 2]; slot += 1)
+         {
+@@ -21333,6 +21415,35 @@ static __attribute__((noinline)) void check_lower_part_sources(CheckLowerWriter*
+ // every label symbol's place), into `lowered`; and without one, the label symbols, the runtime functions' symbols
+ // numbered in the order the bodies first call them and every call of one its symbol, and the entries. A failure at the
+ // label symbols or the convention is at the token source order's writer had after the last body, the last part's.
++// The ordinary object driver compiles some parts before the next part is lowered. Record the exact
++// native columns where they are handed to code generation, before those arenas are recycled.
++static void check_source_witness_body(CheckProgramLowered* lowered, uint32_t b, uint32_t declaration,
++                                      const Tier0Function* f, const uint32_t* tokens)
++{
++    FILE* witness = open_memstream(lowered->witness_rows + b, lowered->witness_sizes + b);
++    if (witness == NULL) abort();
++    const bool sources = tokens != NULL;
++    const uint32_t counts[] = {declaration, f->count, f->local_count, f->call_count,
++                               f->argument_count, sources};
++    fwrite(counts, sizeof(counts), 1, witness);
++#define BUSTER_SOURCE_WITNESS(column, length) do { \
++    if ((length) != 0) fwrite((column), sizeof(*(column)), (length), witness); \
++} while (0)
++    BUSTER_SOURCE_WITNESS(f->kinds, f->count);
++    BUSTER_SOURCE_WITNESS(f->classes, f->count);
++    BUSTER_SOURCE_WITNESS(f->values, f->count);
++    if (sources) BUSTER_SOURCE_WITNESS(tokens, f->count);
++    BUSTER_SOURCE_WITNESS(f->local_classes, f->local_count);
++    BUSTER_SOURCE_WITNESS(f->local_flags, f->local_count);
++    BUSTER_SOURCE_WITNESS(f->call_targets, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->call_first, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->call_argument_counts, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->call_variadic, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->argument_classes, f->argument_count);
++#undef BUSTER_SOURCE_WITNESS
++    if (ferror(witness) || fclose(witness) != 0) abort();
++}
++
+ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerShared* shared, const CheckLowerPart* parts, uint32_t count)
+ {
+     const CheckProgram* program = shared->program;
+@@ -21467,6 +21578,18 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
+             values[table->address] = lowered->case_symbol_base + t;
+         }
+     }
++    if (lowered->witness_rows != NULL)
++    {
++        FILE* witness = fopen(getenv("NODE_SOURCE_NATIVE_ORACLE"), "wb");
++        if (witness == NULL) abort();
++        for (uint32_t b = 0; b < program->body_count; ++b)
++        {
++            if (valid && lowered->witness_rows[b] != NULL)
++                fwrite(lowered->witness_rows[b], 1, lowered->witness_sizes[b], witness);
++            free(lowered->witness_rows[b]);
++        }
++        if (ferror(witness) || fclose(witness) != 0) abort();
++    }
+     return valid;
+ }
+ 
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index a8a2339b0..82b3426b3 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12558,6 +12558,27 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                 };
+                 CheckStream stream;
+                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
++                if (ready && input.cross_callee_pointees)
++                {
++                    uint32_t checked = 0, missing = 0, wrong = 0;
++                    const CheckGraph* cg = &input.graph;
++                    for (uint32_t n = 0; n < cg->count; ++n)
++                    {
++                        if (cg->ops[n] != CHECK_OP_CALL || cg->tokens[n] >= input.token_count) continue;
++                        const uint32_t t = cg->tokens[n];
++                        const TypeId fn = input.cross_callee_pointees[t];
++                        if (!fn) continue;
++                        const CheckConversion conversion = stream.conversions[n].operands[0];
++                        const TypeId canonical = type_find_pointer(&types,fn);
++                        const bool same = canonical && conversion.type == canonical && conversion.flags == BUSTER_CHECK_CONVERT_FUNCTION &&
++                                          type_kind(&types,conversion.type) == BUSTER_TYPE_KIND_POINTER && type_element(&types,conversion.type) == fn;
++                        if (!same && wrong < 4) fprintf(stderr,"cross-invalid token=%u function=%u candidate=%u ordinary=%u flags=%u\n",
++                                                        t,fn,canonical,conversion.type,conversion.flags);
++                        wrong += !same; checked++; input.cross_callee_pointees[t]=0;
++                    }
++                    for (uint32_t t=0; t<input.token_count; ++t) missing += input.cross_callee_pointees[t] != 0;
++                    fprintf(stderr,"cross-canonical checked=%u missing=%u wrong=%u\n",checked,missing,wrong);
++                }
+                 const char* graph_log = getenv("NODE_SOURCE_GRAPH_ORACLE");
+                 if (ready && graph_log != NULL)
+                 {
