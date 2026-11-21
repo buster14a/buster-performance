@@ -1,0 +1,9 @@
+# Diagnostic switch spelling across all Lua sources
+
+All 34 Lua 5.4.8 C translation units were compiled separately with ordinary `-c` on the development machine. The two modes of the same private compiler binary differ only in the environment switch controlling lazy enum type spelling. Its source and the diagnostic patch are documented in the parent production comparison. These figures use the local developer CPU and the diagnostic parent f0a204a9c. The seven locked 9700X production rounds apply to lvm.c in the separate 1eba19ba4 record.
+
+For each translation unit, each series rotates three baseline/candidate pairs, comparing the entire output file and both process streams. Across 34 units, the first series lowered the sum of per-unit median user instructions from 1,323,896,133 to 1,170,658,756, a reduction of 153,237,377 (11.57%). The independent repeat lowered it from 1,323,914,003 to 1,170,673,629, a reduction of 153,240,374 (11.57%). The repeat's 204 individual raw samples include complete-file and diagnostic digests. Seven units each saved more than 100,000 instructions, including lvm.c, lcode.c, lstrlib.c, luac.c, lparser.c, ldebug.c and ltm.c.
+
+The separate production-source differential matched all 68 complete object files on these same 34 units with bare flags and with `-Wall -Wextra`. That run compared the pristine 6e9c51b9d binary against the 1eba19ba4 proposal integrated with main dca705662. The source qualification directory contains the exact-parent generated-diagnostic cases too.
+
+Reproduce the local diagnostic counter series using `python3 measure.py /path/to/same-image-compiler /path/to/lua-5.4.8/src raw.tsv`. Build the diagnostic image from f0a204a9c with the switch-lazy probe patch. The counters require Linux perf events for user instructions, user cycles and minor faults.
