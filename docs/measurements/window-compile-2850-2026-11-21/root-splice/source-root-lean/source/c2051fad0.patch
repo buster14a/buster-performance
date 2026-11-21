@@ -1,0 +1,185 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index ecdd17cc6..fcbf89410 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2013,6 +2013,18 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+             ++end;
+         }
+         if (!publish) continue;
++        CheckInput* output = reader->output;
++        if (reader->pp->options.node_source_window && output->source_compacted == output->source_physical_room)
++        {
++            const uint32_t old = output->source_physical_room;
++            const uint32_t room = old != 0 && old <= UINT32_MAX / 2 ? 2 * old : 32;
++            if (room <= old) continue;
++            NodeWindowNativeTape** entries = BUSTER_ARENA_PUSH_ARRAY(reader->arena, NodeWindowNativeTape*, room);
++            if (entries == NULL) continue;
++            if (old != 0) memcpy(entries, output->source_physical, (size_t)old * sizeof(*entries));
++            output->source_physical = entries;
++            output->source_physical_room = room;
++        }
+         while (pos < begin && !reader->output->resource)
+         {
+             check_input_expression_coded(reader, batch, tokens[pos], (uint8_t)classes[pos], true, identifiers, &identifier, literals, &literal, visited);
+@@ -2032,6 +2044,11 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+         }
+         else check_input_expression_value(reader, token, node);
+         tape->compact_node = node + 1;
++        if (reader->pp->options.node_source_window)
++        {
++            output->source_physical[output->source_compacted] = tape;
++            batch->members[node - batch->base] = output->source_compacted + 1;
++        }
+         reader->output->source_compacted += 1;
+         reader->output->source_removed += size - (whole ? 0u : 1u);
+         if (tape->access_count != 0)
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 879e9a247..c505dc84c 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -946,6 +946,8 @@ struct CheckInput
+     NodeWindowNativeTape** source_native;
+     NodeWindowNativeTape* source_access_tapes;
+     uint32_t source_candidates;
++    NodeWindowNativeTape** source_physical;
++    uint32_t source_physical_room;
+     uint32_t source_compacted;
+     uint32_t source_removed;
+     uint32_t source_key_collisions;
+@@ -1344,6 +1346,19 @@ static __attribute__((unused)) bool check_source_window_compactable(const CheckI
+ 
+ static __attribute__((unused)) const NodeWindowNativeTape* check_source_window_required(const CheckInput* input, uint32_t node)
+ {
++    if (input->source_physical != NULL && node < input->graph.count)
++    {
++        const CheckGraph* graph = &input->graph;
++        const CheckOp op = graph->ops[node];
++        if (op != CHECK_OP_VALUE && op != CHECK_OP_CONVERT && op != CHECK_OP_CAST) return NULL;
++        const uint32_t leaf = op == CHECK_OP_VALUE ? node : graph->operand0[node];
++        if (leaf >= graph->count || graph->ops[leaf] != CHECK_OP_VALUE) return NULL;
++        const uint32_t index = graph->members[leaf];
++        if (index == 0 || index > input->source_compacted) return NULL;
++        const NodeWindowNativeTape* tape = input->source_physical[index - 1];
++        return tape->compact_node == leaf + 1 && tape->root_token == graph->tokens[node] &&
++               (tape->compact_whole ? node == leaf : op == tape->root_op) ? tape : NULL;
++    }
+     if (input->source_native == NULL || node >= input->graph.count) return NULL;
+     const uint32_t token = input->graph.tokens[node];
+     const NodeWindowNativeTape* tape = token < input->token_count ? input->source_native[token] : NULL;
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index ad6a40a82..b502b471b 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -3343,6 +3343,8 @@ struct NodeCensusReader
+     uint8_t* probe_tracked_body;
+     uint64_t* probe_events;
+     bool probe_terminal_unit;
++    uint32_t source_segment_count;
++    bool source_segment_types;
+     // By root node (`node_capacity` of them), the span of tokens the census's code gave the expression at reader time:
+     // the tests on the window have the same.
+     uint32_t* span_lows;
+@@ -6235,7 +6237,20 @@ static void node_probe_warning_select(NodeFront* front)
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER,false) ||
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_PARAMETER,false) ||
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_VARIABLE,false));
+-            const bool segmented = compact && check_lower_segment_types(state->reader->types);
++            bool segmented;
++            if (reader->pp->options.node_source_window)
++            {
++                // Qualified type identities are immutable; ordinary reading can append more between chunks.
++                const TypeTable* table = reader->types;
++                for (uint32_t t = tests->source_segment_count; !tests->source_segment_types && t < table->types.count; ++t)
++                {
++                    tests->source_segment_types = table->types.kind[t] == BUSTER_TYPE_KIND_QUALIFIED &&
++                                                  check_lower_segment(table, (TypeId)t << BUSTER_TYPE_INDEX_SHIFT);
++                }
++                tests->source_segment_count = table->types.count;
++                segmented = tests->source_segment_types;
++            }
++            else segmented = compact && check_lower_segment_types(state->reader->types);
+ 
+             for (uint32_t r = front->made; r < count; ++r)
+             {
+@@ -6252,6 +6267,15 @@ static void node_probe_warning_select(NodeFront* front)
+                         part->root_token,part->reference_count,part->count);
+                 }
+                 state->proof_source_tapes[r] = part;
++                if (reader->pp->options.node_source_window)
++                {
++                    // A parser action can create several discard roots at one token. Only a unique complete
++                    // action may own a physical row. Every record of that action is made in the same chunk.
++                    if ((r != front->made && front->roots[r - 1] && front->tokens[r - 1] == part->root_token) ||
++                        (r + 1 < count && front->roots[r + 1] && front->tokens[r + 1] == part->root_token))
++                        state->proof_source_tapes[r] = NULL;
++                    continue;
++                }
+                 CheckInput* input = state->reader->output;
+                 if (input->source_native == NULL)
+                 {
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index cea98d2d9..b1677843c 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -5156,13 +5156,14 @@ static NodeWindowNativeTape* node_window_compact_candidate(NodeFront* front, uin
+     struct NodeFactsReader* state = front->typer->facts;
+     CheckInput* input = state->reader->output;
+     const uint32_t token = front->tokens[root];
+-    if (input->source_native == NULL || !state->proof_made[root] || !state->proof_made[top] ||
+-        (state->proof_select[root] & 48u) != 48u || !check_source_window_compactable(input, token))
++    NodeWindowNativeTape* tape = state->proof_source_tapes[root];
++    if (tape == NULL || !tape->compactable || !state->proof_made[root] || !state->proof_made[top] ||
++        (state->proof_select[root] & 48u) != 48u ||
++        (!state->reader->pp->options.node_source_window && !check_source_window_compactable(input, token)))
+     {
+         return NULL;
+     }
+-    NodeWindowNativeTape* tape = input->source_native[token];
+-    if (tape != state->proof_source_tapes[root] || tape->root_op != front->ops[root] || tape->compact_node != 0) return NULL;
++    if (tape->root_token != token || tape->root_op != front->ops[root] || tape->compact_node != 0) return NULL;
+     const NodeFactsRecord* converted = state->proof_records + root;
+     const NodeFactsRecord* operand = state->proof_records + top;
+     const bool constant = tape->entries[0].kind == BUSTER_TYPED_CONST && tape->reference_count == 0 &&
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index fc95ac93e..25c846f5d 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -702,6 +702,7 @@ struct CheckLowerWriter
+ {
+     const CheckProgram* program;
+     NodeWindowNativeTape* const* source_native;
++    bool source_physical;
+     uint8_t source_native_probes;
+     CheckProgramLowered* output;
+     CheckLowerAbi* abi;
+@@ -16655,7 +16656,12 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
+         {
+             const NodeWindowNativeTape* tape = NULL;
+             const NodeWindowNativeTape* required = NULL;
+-            if (kind == CHECK_LOWER_EXPRESSION && writer->source_native != NULL)
++            if (kind == CHECK_LOWER_EXPRESSION && writer->source_physical)
++            {
++                required = check_source_window_required(writer->program->input, node);
++                tape = required;
++            }
++            else if (kind == CHECK_LOWER_EXPRESSION && writer->source_native != NULL)
+             {
+                 const CheckInput* input = writer->program->input;
+                 const uint32_t token = input->graph.tokens[node];
+@@ -19705,7 +19711,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+ 
+     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
+     *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = BUSTER_SCALAR_PATH(scalar), .deferred = deferred };
+-    if (program->input != NULL && program->input->source_native != NULL)
++    if (program->input != NULL && (program->input->source_native != NULL || program->input->source_physical != NULL))
+     {
+         shared->source_native_probes = (getenv("NODE_SPLICE_REPORT") != NULL ? 1u : 0u) |
+             (getenv("NODE_SPLICE_SOURCE_FAULT") != NULL ? 2u : 0u) | (getenv("NODE_SPLICE_VALUE_FAULT") != NULL ? 4u : 0u) |
+@@ -20165,6 +20171,7 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
+         .scalar = BUSTER_SCALAR_PATH(shared->scalar),
+         .sources = sources,
+         .source_native = program->input != NULL ? program->input->source_native : NULL,
++        .source_physical = program->input != NULL && program->input->source_physical != NULL,
+         .source_native_probes = shared->source_native_probes,
+         .x87_constant_capacity = shared->x87_constant_capacity,
+         .atomic_room = shared->atomic_capacity + 1,

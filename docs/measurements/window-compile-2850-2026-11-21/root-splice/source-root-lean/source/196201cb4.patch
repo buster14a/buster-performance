@@ -1,0 +1,155 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index fc7aca1d4..9746b4453 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -3507,7 +3507,7 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
+         tests->program.parser = reader->parser;
+         tests->program.types = reader->types;
+         tests->program.object_symbols = (SymbolId*)machine->object_symbols;
+-        tests->program.object_count = machine->object_count;
++        tests->program.object_count = machine->source_static_objects == NULL ? machine->object_count : 0;
+         s->program = &tests->program;
+         s->pp = reader->pp;
+         s->records = machine;
+@@ -3960,7 +3960,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
+                     const uint32_t number = front->window_entries[r];
+                     const NodeFactsRecord* record = (const NodeFactsRecord*)(const void*)(records + 64 * (uint64_t)r);
+                     const bool calls = (node_tests_window_row(&state->facts, record->type)->function & BUSTER_NODE_FACTS_FUNCTION) != 0;
+-                    const bool symbol = contexts && record->object != 0 && record->object < machine->object_count && machine->object_symbols[record->object] != 0;
++                    const bool symbol = contexts && record->object != 0 && node_machine_symbolled(machine, record->object);
+                     lines_made += tests->line_bytes[number] == 0;
+                     tests->line_bytes[number] = (uint8_t)(BUSTER_NODE_TESTS_LINE_KNOWN | (symbol ? BUSTER_NODE_TESTS_LINE_SYMBOL : 0) |
+                                                           node_tests_window_line(s, front->tokens[r], calls) | (rows ? node_tests_window_returns(s, front->tokens[r]) : 0));
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index e4ba27832..0a7c6761e 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -459,6 +459,7 @@ struct NodeMachine
+     // static declaration has itself there, which stands for its symbol (X writes it where it writes a symbol, and a
+     // splice patches it), and the bits are the reader's input's.
+     const SymbolId* object_symbols;
++    uint64_t* source_static_objects;
+     const uint8_t* declaration_bits;
+     uint32_t object_count;
+     // At reader time (node_machine_begin_reader; `program` is null then, and T alone runs): what T asks of the program,
+@@ -1013,9 +1014,20 @@ static inline void node_machine_record_set_update(NodeMachine* machine, uint32_t
+ // Whether `object` is a local of the function: an object without a symbol (a parameter's, an automatic object's), which
+ // the function's local numbers; one with a symbol is a global's (NodeMachine.object_symbols: at reader time, one with a
+ // static declaration).
++static inline SymbolId node_machine_storage_symbol(const NodeMachine* machine, uint32_t object)
++{
++    if (object >= machine->object_count) return 0;
++    if (machine->source_static_objects != NULL)
++    {
++        const uint64_t word = machine->source_static_objects[object >> 6];
++        return ((word >> (object & 63)) & 1u) != 0 ? object : 0;
++    }
++    return machine->object_symbols[object];
++}
++
+ static bool node_machine_local(const NodeMachine* machine, uint32_t object)
+ {
+-    return object != 0 && object < machine->object_count && machine->object_symbols[object] == 0;
++    return object != 0 && object < machine->object_count && node_machine_storage_symbol(machine, object) == 0;
+ }
+ 
+ // Whether an object's address is a template's (check_lower_template_address_takes): none's, a local's or a global's.
+@@ -1042,7 +1054,7 @@ static TypeId node_machine_callee_function(const NodeMachine* machine, uint32_t
+ // comes from.
+ static inline bool node_machine_symbolled(const NodeMachine* machine, uint32_t object)
+ {
+-    return object < machine->object_count && machine->object_symbols[object] != 0;
++    return node_machine_storage_symbol(machine, object) != 0;
+ }
+ 
+ // What T's callee refusal asks of a directly called object (node_machine_callee_refused): its declaration's name, and
+@@ -1051,7 +1063,7 @@ static inline IdentId node_machine_object_name(const NodeMachine* machine, uint3
+ {
+     const CheckProgram* program = machine->program;
+     const uint32_t declaration = program != NULL ? (program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE) :
+-                                                   machine->reader_declarations[object];
++                                                   object < machine->reader_objects ? machine->reader_declarations[object] : BUSTER_CHECK_NONE;
+     const Parser* parser = program != NULL ? program->parser : machine->parser;
+     const uint32_t token_count = program != NULL ? program->input->token_count : machine->input->token_count;
+     return parser != NULL && declaration < token_count ? parser->tokens.names[declaration] : 0;
+@@ -1089,7 +1101,7 @@ static uint32_t node_machine_direct_callee(const NodeMachine* machine, uint32_t
+ static SymbolId node_machine_call_target(const NodeMachine* machine, uint32_t r)
+ {
+     const uint32_t object = node_machine_direct_callee(machine, node_machine_record_left(machine, r));
+-    return object != 0 ? machine->object_symbols[object] : 0;
++    return object != 0 ? node_machine_storage_symbol(machine, object) : 0;
+ }
+ 
+ static bool node_machine_call_variadic(const NodeMachine* machine, uint32_t r)
+diff --git a/src/buster/compiler/c_check_node_machine_reader.c b/src/buster/compiler/c_check_node_machine_reader.c
+index d2f66db80..e948cc2a0 100644
+--- a/src/buster/compiler/c_check_node_machine_reader.c
++++ b/src/buster/compiler/c_check_node_machine_reader.c
+@@ -201,10 +201,20 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+     machine->reader_facts = facts;
+     if (room)
+     {
+-        machine->reader_objects = count + 1;
+-        memset(machine->reader_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+-        memset(machine->reader_facts, 0, (uint64_t)count + 1);
+-        memset(symbols, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
++        const uint64_t stored = integer_window ? 1 : (uint64_t)count + 1;
++        machine->reader_objects = (uint32_t)stored;
++        memset(machine->reader_declarations, 0xff, stored * sizeof(uint32_t));
++        memset(machine->reader_facts, 0, stored);
++        memset(symbols, 0, stored * sizeof(uint32_t));
++        if (integer_window)
++        {
++            // The checked integer source grammar does not admit calls, labels or string objects. C and X
++            // need only the local/global distinction until actual object relocation in the normal backend.
++            const uint64_t words = ((uint64_t)count + 64) / 64;
++            machine->source_static_objects = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
++            if (machine->source_static_objects == NULL) return false;
++            memset(machine->source_static_objects, 0, words * sizeof(uint64_t));
++        }
+         const __m512i offsets = _mm512_setr_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
+         for (uint64_t group = 0; group < count; group += 16)
+         {
+@@ -219,6 +229,12 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+                 const uint32_t object = input->objects[token];
+                 if (object != 0 && object <= count)
+                 {
++                    if (integer_window)
++                    {
++                        if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
++                            machine->source_static_objects[object >> 6] |= UINT64_C(1) << (object & 63);
++                        continue;
++                    }
+                     const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+                     machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_DECLARED;
+                     if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
+@@ -241,6 +257,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+                 }
+             }
+         }
++        if (integer_window) return true;
+         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+         {
+             const BuiltinIntrinsicName* entry = check_lower_twice_entries + k;
+@@ -359,7 +376,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
+     uint32_t* counts = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+     uint8_t* refusals = arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1);
+     uint8_t* library = arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1);
+-    const uint32_t objects = reader->output->token_count + 1;
++    const uint32_t objects = reader->pp->options.node_source_window ? 1 : reader->output->token_count + 1;
+     uint32_t* declarations = arena_push_array(reader->arena, objects, sizeof(uint32_t), _Alignof(uint32_t));
+     uint8_t* facts = arena_push_array(reader->arena, objects, sizeof(uint8_t), 1);
+     uint32_t* symbols = arena_push_array(reader->arena, objects, sizeof(uint32_t), _Alignof(uint32_t));
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index b344f0857..b7cee3323 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -797,7 +797,7 @@ static __attribute__((noinline)) void node_rows_window_reads(struct NodeFactsRea
+         const uint32_t x = lines[i];
+         const NodeFactsRecord* record = records + x;
+         const uint32_t object = record->object;
+-        const bool local = machine->object_symbols[object < machine->object_count ? object : 0] == 0;
++        const bool local = !node_machine_symbolled(machine, object);
+         state->window_x_bits[x] = (uint8_t)((record->member_offset != 0 ? BUSTER_NODE_ROWS_BIT_FAR : 0u) | (local ? BUSTER_NODE_ROWS_BIT_LOCAL : 0u));
+         state->window_x_operands[x] = node_machine_class(machine, record->converted[0]);
+         // A member's offset in bytes, its row's CONST's value, in its record's value's place: the values' loop reads
