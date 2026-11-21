@@ -1,0 +1,17 @@
+# Ordinary CHECK source validation
+
+These are three independent experiments on exact main 325883abf9607ac726966a0af2097377832d53ac. Each ran through normal single-lane compilation with its own uninstrumented native Release. Their patches are relative to the same parent.
+
+| Variant | Production source | Action |
+| --- | --- | --- |
+| blocks | e39bc958801e42ee3977cb233a73cd19481c9b4f | Publish already-valid, payload-free VALUE records in each sixteen-node block. Complete all other nodes and append payload rows in the original order. |
+| arity | 59c93aa11944c5d81c8bfcedd36b57e32115acc6 | Preserve fresh zero trailing conversion fields if all six fields in an action result are zero. All other records use the original layout and contents. |
+| condition | 69e2eea8da782b189a20a0fd6ec31da004aaf4f0 | Publish an unknown unqualified int condition from an already checked rvalue with no payload and only inherited flags. All exceptional and floating-environment cases still take the ordinary action. |
+
+The ordinary printed typed-node stream, diagnostics and entire ELF object matched for all 1,753,438 nodes across five translation units. The two typed TSVs include the exact hashes. The largest were current compiler main.c with 1,409,423 nodes and SQLite with 323,623. The SQLite graph had 144,755 VALUE nodes, with 96,287 in runs of two or more and 33,568 in runs of four or more. Native source eligibility at the actual block function entry gives 120,670 completed simple leaves in SQLite and 407,594 in Buster, when the tail outside full blocks is excluded. Every source leaf type was already valid on entry in the four corpus units.
+
+A debugger attached to each exact compiler at the genuine check_graph_run entry and read its outputs upon return. It compared each checked value column, full live payloads and their ordered row ids, all four node conversions, argument nodes and conversions, diagnostic locations, warnings, member offsets, constant-evaluation masks when present, and all nine ordered type-slot fields. Only the unused six high padding bytes of each x87 component in CheckValue were normalized. Every recorded column matched on each source. SQLite included 4,740 ordered types, 40,302 payloads and 34,220 arguments. The focused fixture additionally passed these comparisons under poisoned arenas, memoized transitions, debug emission and deferred bodies. All-compilers source evidence is in native-columns*. Transcripts and source eligibility exclude timing.
+
+The effects generator executes 3,072 calls to 48 functions with unknown integer conditions, local updates, calls, volatile reads and short circuiting. Clang and all four Buster builds produced the same observable state in ordinary and debug modes. The condition-specific native test has 62 additional source/policy pairs including rejected inputs. Existing baseline diagnostics are compared byte-for-byte.
+
+To reproduce, provide BUSTER_COMPILER_SOURCE at the exact frozen source and BUSTER_CORPUS_DIR containing the recorded sqlite, inputs and libc directories. Place the four native executable images beside the scripts as native-base, native-blocks, native-arity and native-condition. Run generate.py before source checks. dump.py accepts base blocks arity condition. native-checked.py takes corpus or fixture names. Its BUSTER_CHECK_COLUMN_POLICY can select poison, transitions, debug or deferred. gdb-census.py observes leaf eligibility on the clean blocks binary. No debugger changes are needed in the measured compiler.
