@@ -1,0 +1,119 @@
+diff --git a/src/buster/compiler/c_parser.c b/src/buster/compiler/c_parser.c
+index d5736dbec..8a973fa06 100644
+--- a/src/buster/compiler/c_parser.c
++++ b/src/buster/compiler/c_parser.c
+@@ -2595,18 +2595,18 @@ static uint32_t parse_postorder(const uint32_t* parents, uint32_t count, uint32_
+ // prefix sum in registers, the positions a vector store) and the counts kept in the positions column were each slower
+ // on the 9700X, and so was one fused backward pass, which leaves each end at its parent through a select's address:
+ // docs/c-parser.md's "The tree's columns" has the numbers.
+-static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before, uint32_t* postorder, uint32_t* positions,
++static void parse_tree_window(const uint32_t* parents, uint32_t count, uint32_t begin, uint32_t end, uint32_t* last_children, uint32_t* before, uint32_t* postorder, uint32_t* positions,
+                                uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
+ {
+     // 0: no child after the token, as a child at 0 comes after none.
+-    memset(last_children, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+-    memset(first_children, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+-    memset(before, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+-    for (uint32_t i = 0; i < count; i += 1)
++    memset(last_children + begin, 0, (uint64_t)(end - begin) * sizeof(uint32_t));
++    memset(first_children + begin, 0xff, (uint64_t)(end - begin) * sizeof(uint32_t));
++    memset(before + begin, 0, (uint64_t)(end - begin) * sizeof(uint32_t));
++    for (uint32_t i = begin; i < end; i += 1)
+     {
+         last_children[parents[i] == BUSTER_PARSE_NONE ? count : parents[i]] = i;
+     }
+-    for (uint32_t v = count; v-- > 0;)
++    for (uint32_t v = end; v-- > begin;)
+     {
+         const uint32_t parent = parents[v];
+         const uint32_t slot = parent != BUSTER_PARSE_NONE ? parent : count;
+@@ -2621,13 +2621,10 @@ static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t
+         ends[v] = own;
+         before[own] += 1;
+     }
+-    first_children[count] = BUSTER_PARSE_NONE;
+-    next_siblings[count] = BUSTER_PARSE_NONE;
+-    ends[count] = count;
+-    uint32_t sum = 0;
++    uint32_t sum = begin;
+     if (sizes == 0)
+     {
+-        for (uint32_t v = 0; v < count; v += 1)
++        for (uint32_t v = begin; v < end; v += 1)
+         {
+             const uint32_t position = sum + ends[v] - v;
+             positions[v] = position;
+@@ -2637,7 +2634,7 @@ static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t
+     }
+     else
+     {
+-        for (uint32_t v = 0; v < count; v += 1)
++        for (uint32_t v = begin; v < end; v += 1)
+         {
+             const uint32_t position = sum + ends[v] - v;
+             positions[v] = position;
+@@ -2651,7 +2648,64 @@ static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t
+             sizes[position] = ends[v] - starts[v] + 1;
+         }
+     }
++}
++
++// The first root at or beyond the requested cache window. File-scope declarations in a valid C tree
++// have their root at their last token. Other ordered forests may put a root before its children.
++static uint32_t parse_tree_window_end(const uint32_t* parents, uint32_t count, uint32_t first)
++{
++    for (uint32_t t = first; t < count; t += 16)
++    {
++        const uint32_t n = count - t < 16 ? count - t : 16;
++        const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, n);
++        const __mmask16 roots = _mm512_mask_cmpeq_epi32_mask(live, _mm512_maskz_loadu_epi32(live, parents + t), _mm512_set1_epi32(-1));
++        if (roots != 0)
++        {
++            return t + (uint32_t)__builtin_ctz(roots) + 1;
++        }
++    }
++    return count;
++}
++
++// Prove that a window's parents are all in the window or are roots, before deriving any column from them.
++static bool parse_tree_window_closed(const uint32_t* parents, uint32_t begin, uint32_t end)
++{
++    const __m512i lower = _mm512_set1_epi32((int)begin);
++    const __m512i length = _mm512_set1_epi32((int)(end - begin));
++    const __m512i none = _mm512_set1_epi32(-1);
++    __mmask16 outside = 0;
++    for (uint32_t t = begin; t < end; t += 16)
++    {
++        const __mmask16 live = (__mmask16)_bzhi_u32(UINT16_MAX, end - t < 16 ? end - t : 16);
++        const __m512i p = _mm512_maskz_loadu_epi32(live, parents + t);
++        const __mmask16 some = _mm512_mask_cmpneq_epi32_mask(live, p, none);
++        outside |= _mm512_mask_cmpge_epu32_mask(some, _mm512_sub_epi32(p, lower), length);
++    }
++    return outside == 0;
++}
++
++static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before, uint32_t* postorder, uint32_t* positions,
++                               uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
++{
++    const char* setting = getenv("BUSTER_TEST_PARSE_TREE_TILE");
++    const uint32_t width = setting != NULL ? (uint32_t)strtoul(setting, NULL, 10) : 4096;
++    uint32_t begin = 0;
++    first_children[count] = BUSTER_PARSE_NONE;
++    while (begin < count)
++    {
++        const uint32_t end = width != 0 && count - begin > width ? parse_tree_window_end(parents, count, begin + width - 1) : count;
++        if ((begin != 0 || end != count) && !parse_tree_window_closed(parents, begin, end))
++        {
++            parse_tree_window(parents, count, 0, count, last_children, before, postorder, positions, ends, first_children, next_siblings, starts, sizes);
++            break;
++        }
++        parse_tree_window(parents, count, begin, end, last_children, before, postorder, positions, ends, first_children, next_siblings, starts, sizes);
++        begin = end;
++    }
+     positions[count] = count;
++    first_children[count] = BUSTER_PARSE_NONE;
++    next_siblings[count] = BUSTER_PARSE_NONE;
++    ends[count] = count;
+ }
+ 
+ // The tree's columns but the postorder, from the parents and their postorder, as the checker's reader derived them
