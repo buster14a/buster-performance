@@ -16,7 +16,7 @@ case $group in
 esac
 case $label in
  expr74f|nodes39b|conversion59c|condition69e|cursorb6b) parent=main32588 ;;
- warnrootd2e) parent=main9be ;;
+ warnrootd2e|conda884) parent=main9be ;;
  *) parent=constbaseb86 ;;
 esac
 case "$m" in

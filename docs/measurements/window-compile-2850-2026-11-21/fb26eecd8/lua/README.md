@@ -27,3 +27,5 @@ The [frozen driver method](../../paired-driver/README.md), [mode selectors](prod
 The [first three Lua rounds](https://github.com/buster14a/buster-performance/tree/87ff749714d4d6770e48df43969301f63c8c9efb/docs/measurements/window-compile-2850-2026-11-21/fb26eecd8/lua) were retained. The [extension](production-markers-extend.sh) added four rounds in each series on the same two binaries after elapsed time had increased in each of the first three pairs.
 
 The [scheduler receipt](scheduling.tsv) records the completion time of each process output and whether the hardware lease was busy before that process. The largest interval between adjacent positions within one round was 258.937 s (pmu), 5.877 s (wall). These intervals also include other jobs that obtained the hardware lease between compiler invocations. All measured commands themselves ran with exclusive access.
+
+In PMU round four the production compiler incurred 1,937 additional faults per paired process mean, alongside +381.127 kernel cycles per token and +415.352 total cycles per token. The independent wall process timings for the seven pairs span both directions.
