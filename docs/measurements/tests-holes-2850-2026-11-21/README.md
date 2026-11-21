@@ -100,7 +100,7 @@ for the next round. Each round's list is its `faults.py`. The last round's survi
 
 ## 7. The 9700X (`9700x/`)
 
-**Not read.** `job-xh.sh BEFORE AFTER PATCH REVISION RUNS SUFFIX` is the job written for it: two Release builds
+[The completed H4 and O3 readings, thresholds and disassemblies](9700x/observed/README.md) are available for the frozen PR. `job-xh.sh BEFORE AFTER PATCH REVISION RUNS SUFFIX` is the job written for it: two Release builds
 (`build-label.sh`: main `e77b3eba4` as it is, and `final.patch` on it), and in each of seven readings
 the build before, the build here twice, and the build before again, on `sqlite3.c`, Lua and musl, CPU 2, each run
 its own hold of the lock; `xh-table.py BEFORE_DIR AFTER_DIR SUFFIX RUNS [JSON]` makes its table. It was queued behind
