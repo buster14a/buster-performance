@@ -1,0 +1,71 @@
+"""Verify the body-window list, record and decoy oracles and collect paired PMU measurements."""
+import csv
+import hashlib
+import io
+import re
+import shutil
+import statistics as st
+import sys
+import tarfile
+from collections import defaultdict
+from pathlib import Path
+
+here=Path(__file__).resolve().parent
+series=sys.argv[1]
+experiments={
+    'leafmasks':('step1-leaf-masks','leaf-masks','facts-leaf-mask-pair.sh',4,['factscombined','factsmasks','factsinleaf','factsleafcopy']),
+    'shared':('step1-shared-lines','shared-declaration-lines','facts-shared-pair.sh',3,['factsseparated','factsshared','factsmaterial']),
+    'inputs':('step1-direct-inputs', 'direct-inputs', 'facts-inputs-pair.sh', 4, ['factsoperands', 'factsinputs', 'factsnames', 'factsarrows']),
+    'combined':('step1-combined-kernels', 'combined-kernels', 'facts-combined-pair.sh', 4, ['factsoperands', 'factscombined', 'factssmall', 'factsseparated']),
+    'layouts':('step1-layouts','lookup-list-layouts','facts-layout-pair.sh',5,['factsdispatch','factsoperands','factsgroups','factsconflicts','factshalf']),
+    'calls':('step1-call-postorder','call-conversions','facts-call-pair.sh',4,['factsdispatch','factscallonce','factsfoldargs','factspost']),
+}
+dataset,directory,runner,rounds,labels=experiments[series]
+raw=here/'raw/results'
+out=here.parent/'perf/docs/measurements/per-core-step1-2850-2026-11-21'/directory
+out.mkdir(parents=True,exist_ok=True)
+reference='f4f8dd9a1663adbdcd1c222e7375f3517d9e47ae'
+def write(name,head,rows):
+    with (out/name).open('w') as f:
+        t=csv.writer(f,delimiter='\t',lineterminator='\n');t.writerow(head);t.writerows(rows)
+builds=[]
+for label in labels:
+    patch=here/(label+'.patch')
+    rev=(raw/label/'revision.txt').read_text().splitlines()
+    digest=hashlib.sha256(patch.read_bytes()).hexdigest()
+    assert rev[0]==reference and rev[1].split()[0]==digest
+    builds.append([label,reference,digest,(raw/label/'compiler.sha256').read_text().split()[0]])
+    shutil.copy(patch,out)
+write('builds.tsv',['build','source','applied patch sha256','compiler sha256'],builds)
+samples=[];summary=[];vals=defaultdict(list);coverage=defaultdict(set)
+with tarfile.open(out/'measurements.tar.xz','w:xz') as t:
+    for g in ('sqlite','lua','musl'):
+        for mode in ('whole','lean'):
+            for n in range(1,rounds+1):
+                half=labels[n-1:]+labels[:n-1]
+                for pos,l in enumerate(half+half[::-1]):
+                    f=raw/dataset/f'{g}-{mode}-{n}-{pos}-{l}.txt'
+                    log=f.read_text()
+                    m=re.search(r'^node-facts: taken identifiers=(\d+) \([\d.]+%\) lookups=(\d+) \([\d.]+%\) differences=0 list-differences=0 failures=0 \(differences over decoys 0\)',log,re.M)
+                    metrics=re.search(r'^node-facts: the kernel a taken leaf or lookup: cycles=([\d.]+) instructions=([\d.]+) mispredicted-branches=([\d.]+)',log,re.M)
+                    passes=re.search(r'^node-facts: the two passes, a record of the windows: the given records put in place and the kernel: cycles=([\d.]+) instructions=([\d.]+) ticks=([\d.]+); the given records alone: cycles=([\d.]+) instructions=([\d.]+) ticks=([\d.]+)',log,re.M)
+                    assert m and metrics and passes,f
+                    coverage[g,mode].add(m.groups())
+                    data=tuple(map(float,metrics.groups()+passes.groups()))
+                    vals[g,mode,n,l].append(data)
+                    samples.append([g,mode,n,pos,l,*m.groups(),*data])
+                    blob=('\n'.join(line for line in log.splitlines() if line.startswith(('node-','measure-node-machine:')))+'\n').encode()
+                    item=tarfile.TarInfo(f.name);item.size=len(blob);t.addfile(item,io.BytesIO(blob))
+assert all(len(v)==1 for v in coverage.values())
+write('samples.tsv',['input','mode','round','position','build','taken identifiers','taken lookups','cycles/taken','instructions/taken','branch misses/taken','full cycles/window record','full instructions/window record','full ticks/window record','given cycles/window record','given instructions/window record','given ticks/window record'],samples)
+for (g,mode) in coverage:
+    for l in labels:
+        for i,k in enumerate(('cycles','instructions','branch misses','full cycles/window record','full instructions/window record','full ticks/window record','given cycles/window record','given instructions/window record','given ticks/window record')):
+            v=[st.mean(x[i] for x in vals[g,mode,n,l]) for n in range(1,rounds+1)]
+            ref=[st.mean(x[i] for x in vals[g,mode,n,labels[0]]) for n in range(1,rounds+1)]
+            delta=[x-y for x,y in zip(v,ref)]
+            row=[g,mode,l,k,st.median(v),st.median(delta),min(delta),max(delta),sum(x<0 for x in delta)]
+            summary.append(row)
+            if k=='cycles':print(g,mode,l,round(row[4],3),round(row[5],3))
+write('paired.tsv',['input','mode','build','metric (per taken record unless indicated)','median','paired median difference','minimum difference','maximum difference','lower rounds'],summary)
+for f in [here/runner,Path(__file__),here/'raw/corpora.sh']:shutil.copy(f,out)

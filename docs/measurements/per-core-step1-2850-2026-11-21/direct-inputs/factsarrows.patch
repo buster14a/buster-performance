@@ -1,0 +1,569 @@
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 2d7ed85f4..bc3dc828e 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -313,6 +313,25 @@ struct NodeFactsMember
+     uint32_t result_flags;
+ };
+ 
++// Every field that can change an ordinary successful arrow result belongs to the
++// key. Completeness is monotonic in source position and is tested on every hit.
++enum { NODE_FACTS_ARROW_SLOTS = 512 };
++typedef struct NodeFactsArrowResult
++{
++    uint64_t type_name;
++    uint32_t operand_flags;
++    uint32_t operand_standing;
++    uint32_t complete_at;
++    uint32_t generation;
++    uint64_t type_word;
++    uint64_t offset;
++    uint32_t flags;
++    TypeId converted;
++    uint32_t converted_flags;
++    uint32_t padding[3];
++} NodeFactsArrowResult;
++_Static_assert(sizeof(NodeFactsArrowResult) == 64, "one arrow proof per line");
++
+ _Static_assert(sizeof(NodeFactsMember) == 32, "a member's slot is half a line of the cache");
+ 
+ // A type's side row, the operators' kernel's (by type index): the pointer types to it, unqualified and const
+@@ -471,6 +490,8 @@ struct NodeFacts
+     // made again at every use (node_facts_front_line).
+     uint32_t* numbers;
+     NodeFactsMember* members;
++    NodeFactsArrowResult* arrow_results;
++    uint32_t arrow_generation;
+     NodeFactsMember no_member;
+     uint32_t row_count;
+     // The rows' room: the unit's types after the pipeline; at reader time the machine's room for the types made as it
+@@ -889,6 +910,15 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
+     facts->expected_conversion_flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * records);
+     facts->expected_member_offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, records);
+     facts->expected_arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, records);
++    if (!operators)
++    {
++        facts->arrow_results = arena_push_array(arena, NODE_FACTS_ARROW_SLOTS, sizeof(NodeFactsArrowResult), 64);
++        if (facts->arrow_results == NULL)
++        {
++            return false;
++        }
++        memset(facts->arrow_results, 0, NODE_FACTS_ARROW_SLOTS * sizeof(NodeFactsArrowResult));
++    }
+     facts->records = arena_push_array(arena, BUSTER_NODE_FACTS_WINDOW, sizeof(NodeFactsRecord), 64);
+     facts->leaf_list = arena_push_array(arena, BUSTER_NODE_FACTS_WINDOW + 16, sizeof(uint32_t), 64);
+     facts->lookup_list = arena_push_array(arena, BUSTER_NODE_FACTS_WINDOW + 16, sizeof(uint32_t), 64);
+@@ -1388,6 +1418,8 @@ struct NodeFactsView
+     const uint64_t* lines;
+     const NodeFactsRow* rows;
+     NodeFactsMember* members;
++    NodeFactsArrowResult* arrow_results;
++    uint32_t arrow_generation;
+     const NodeFactsSide* sides;
+     const NodeFactsPair* pairs;
+     const uint64_t* targets;
+@@ -3105,7 +3137,7 @@ static inline __attribute__((always_inline)) bool node_facts_store_fast(NodeFact
+ // compressed to the front of a vector and the vector stored whole at the list's end (compress to a register and a plain
+ // store: Zen 5's compress to memory is 8 uops), with no branch a record. On a host without the vectors, a record at a
+ // time: the same lists (node_facts_lists_same is the twin's check on either).
+-static inline __attribute__((always_inline)) void node_facts_list(uint32_t* leaf_list, uint32_t* lookup_list, uint8_t* keys, const uint8_t* kinds, const uint8_t* classes,
++static inline __attribute__((always_inline)) void node_facts_list(uint32_t* leaf_list, uint32_t* lookup_list, const uint16_t* left, uint8_t* keys, const uint8_t* kinds, const uint8_t* classes,
+                                                                    uint32_t count, uint32_t* leaf_count, uint32_t* lookup_count, uint32_t* rounds)
+ {
+     uint32_t leaves = 0;
+@@ -3123,7 +3155,13 @@ static inline __attribute__((always_inline)) void node_facts_list(uint32_t* leaf
+         const __mmask16 lookup = _mm_mask_cmpeq_epi8_mask(mask, block, _mm_set1_epi8(0x03));
+         const __m128i own = _mm_maskz_loadu_epi8(lookup, classes + w);
+         _mm512_storeu_si512(leaf_list + leaves, _mm512_maskz_compress_epi32(leaf, places));
+-        _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, places));
++        // Both places belong to this window. The class loop can start fetching the
++        // operand as soon as it reads its list, without an intermediate distance load.
++        _Static_assert(BUSTER_NODE_FACTS_WINDOW <= 65536, "window places fit in 16 bits");
++        const __m256i distances = _mm256_maskz_loadu_epi16(lookup, left + w);
++        const __m512i operands = _mm512_sub_epi32(places, _mm512_cvtepu16_epi32(distances));
++        const __m512i pairs = _mm512_or_si512(places, _mm512_slli_epi32(operands, 16));
++        _mm512_storeu_si512(lookup_list + lookups, _mm512_maskz_compress_epi32(lookup, pairs));
+         _mm_storeu_si128((__m128i*)(void*)(keys + lookups), _mm_maskz_compress_epi8(lookup, own));
+         seen = _mm512_or_si512(seen, _mm512_maskz_sllv_epi32(lookup, _mm512_set1_epi32(1), _mm512_srli_epi32(_mm512_cvtepu8_epi32(own), 4)));
+         leaves += (uint32_t)__builtin_popcount((uint32_t)leaf);
+@@ -3183,7 +3221,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_unfit(TypeId ty
+ 
+ // `->`'s short path: a pointer value, no constant, to a struct or union complete at the node, and a member that is no
+ // bit-field.
+-static inline __attribute__((always_inline)) bool node_facts_arrow_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
++static inline __attribute__((always_inline)) bool node_facts_arrow_uncached(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
+ {
+     const TypeId type = records[a].type;
+     const uint32_t standing = records[a].standing;
+@@ -3217,6 +3255,58 @@ static inline __attribute__((always_inline)) bool node_facts_arrow_fast(NodeFact
+     return fast;
+ }
+ 
++// A miss executes the full rule on the current operand. A successful answer is
++// reusable for exactly that type, member, standing and flags until the pass ends.
++static __attribute__((noinline)) bool node_facts_arrow_fill(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, NodeFactsArrowResult* slot, uint64_t key)
++{
++    if (!node_facts_arrow_uncached(records, view, w, a, false))
++    {
++        return false;
++    }
++    const NodeFactsRecord* result = records + w;
++    *slot = (NodeFactsArrowResult) {
++        .type_name = key,
++        .operand_flags = records[a].flags,
++        .operand_standing = records[a].standing,
++        .complete_at = node_facts_row_of(view, records[a].type)->element_complete_at,
++        .generation = view->arrow_generation,
++        .type_word = (uint64_t)result->type | (uint64_t)result->word << 32,
++        .offset = result->member_offset,
++        .flags = result->flags,
++        .converted = result->converted[0],
++        .converted_flags = result->conversion_flags[0],
++    };
++    return true;
++}
++
++static inline __attribute__((always_inline)) bool node_facts_arrow_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
++{
++    if (view->arrow_results == NULL)
++    {
++        return node_facts_arrow_uncached(records, view, w, a, lean);
++    }
++    const uint32_t name = view->inputs[w];
++    const uint64_t key = (uint64_t)records[a].type << 32 | name;
++    NodeFactsArrowResult* slot = view->arrow_results + (name & (NODE_FACTS_ARROW_SLOTS - 1));
++    if (slot->generation != view->arrow_generation || slot->type_name != key ||
++        slot->operand_flags != records[a].flags || slot->operand_standing != records[a].standing ||
++        slot->complete_at > view->positions[w])
++    {
++        return node_facts_arrow_fill(records, view, w, a, slot, key);
++    }
++    node_facts_record(records, w, (TypeId)slot->type_word, (uint32_t)(slot->type_word >> 32),
++                      BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_NONE), slot->flags, 0, 0);
++    if (lean)
++    {
++        node_facts_store(records + w, 48, slot->offset);
++    }
++    else
++    {
++        node_facts_conversions(records, w, slot->converted, slot->converted_flags, 0, 0, slot->offset);
++    }
++    return true;
++}
++
+ // `.`'s short path: a struct or union complete at the node, no constant or an address constant, and a member that is no
+ // bit-field, an address constant's at a whole byte.
+ static inline __attribute__((always_inline)) bool node_facts_dot_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
+@@ -3471,6 +3561,8 @@ static inline __attribute__((always_inline)) NodeFactsView node_facts_view(const
+         .targets = facts->targets,
+         .argued = facts->argued,
+         .argument_slots = facts->argument_slots,
++        .arrow_results = facts->arrow_results,
++        .arrow_generation = facts->arrow_generation,
+         .stands = facts->stands,
+         .row_count = facts->row_count,
+         .member_bits = facts->member_bits,
+@@ -3707,7 +3799,7 @@ static __attribute__((noinline)) void node_facts_slow_list(NodeFacts* facts, uin
+ {
+     for (uint32_t i = 0; i < count; i += 1)
+     {
+-        node_facts_slow(facts, first, list[i]);
++        node_facts_slow(facts, first, (uint16_t)list[i]);
+     }
+ }
+ 
+@@ -3747,13 +3839,12 @@ static inline __attribute__((always_inline)) void node_facts_arrows_of(NodeFacts
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint8_t* const fits = facts->fits + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_arrow_load(records, &view, w, a)
+                                                            : node_facts_arrow_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
+         if (__builtin_expect(!taken, 0))
+@@ -3774,13 +3865,12 @@ static inline __attribute__((always_inline)) void node_facts_dots_of(NodeFacts*
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint8_t* const fits = facts->fits + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_dot_load(records, &view, w, a)
+                                                            : node_facts_dot_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
+         if (__builtin_expect(!taken, 0))
+@@ -3801,13 +3891,12 @@ static inline __attribute__((always_inline)) void node_facts_dereferences_of(Nod
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint8_t* const fits = facts->fits + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_dereference_load(records, &view, w, a)
+                                                            : node_facts_dereference_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
+         if (__builtin_expect(!taken, 0))
+@@ -3828,14 +3917,13 @@ static inline __attribute__((always_inline)) void node_facts_subscripts_of(NodeF
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint16_t* const right = facts->right + first;
+     const uint8_t* const fits = facts->fits + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         const bool taken = right[w] != 0 && (mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_subscript_load(records, &view, w, a)
+                                                                              : node_facts_subscript_fast(records, &view, w, a, w - right[w], mode == BUSTER_NODE_FACTS_LEAN));
+         if (__builtin_expect(!taken, 0))
+@@ -3856,13 +3944,12 @@ static inline __attribute__((always_inline)) void node_facts_calls_of(NodeFacts*
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint8_t* const fits = facts->fits + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_call_load(records, &view, w, a)
+                                                            : node_facts_call_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
+         if (__builtin_expect(!taken, 0))
+@@ -3884,10 +3971,10 @@ static inline __attribute__((always_inline)) void node_facts_calls_of(NodeFacts*
+         const uint32_t left_before = rare_count;
+         for (uint32_t i = 0; i < batched; i += 1)
+         {
+-            const uint32_t w = batch[i];
++            const uint32_t w = (uint16_t)batch[i];
+             if ((records[w].standing & BUSTER_NODE_MACHINE_WIDE) == 0)
+             {
+-                const NodeFactsRow* row = node_facts_row_of(&view, records[w - left[w]].type);
++                const NodeFactsRow* row = node_facts_row_of(&view, records[(batch[i] >> 16)].type);
+                 const uint32_t outcome = node_facts_call_arguments(facts, records, &view, w, row, lean);
+                 if (__builtin_expect((outcome & BUSTER_NODE_FACTS_ARGUMENT_KEPT) == 0, 0))
+                 {
+@@ -3997,13 +4084,12 @@ static __attribute__((noinline)) void node_facts_discards(NodeFacts* facts, uint
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const bool plain = !facts->machine->overloads;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        if (__builtin_expect(!node_facts_discard_fast(records, &view, plain, w, w - left[w]), 0))
++        const uint32_t w = (uint16_t)batch[i];
++        if (__builtin_expect(!node_facts_discard_fast(records, &view, plain, w, (batch[i] >> 16)), 0))
+         {
+             rare[rare_count] = w;
+             rare_count += 1;
+@@ -4025,7 +4111,6 @@ static __attribute__((noinline)) void node_facts_rows_rest(NodeFacts* facts, uin
+ {
+     NodeFactsRecord* const records = facts->records;
+     const uint32_t* const rare = facts->rare;
+-    const uint16_t* const left = facts->left + first;
+     const uint16_t* const right = facts->right + first;
+     const uint8_t* const ops = facts->ops + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+@@ -4034,7 +4119,7 @@ static __attribute__((noinline)) void node_facts_rows_rest(NodeFacts* facts, uin
+         const uint32_t w = rare[i];
+         const CheckOp op = (CheckOp)ops[w];
+         const bool binary = right[w] != 0;
+-        const uint32_t a = w - left[w];
++        const uint32_t a = w - facts->left[first + w];
+         const uint32_t b = binary ? w - right[w] : a;
+         // Integer constants' operands are the fold's and nothing else's: no row takes two constants, and no pointer's
+         // rule an integer's pair. The others: the row again, then the pointer's rules.
+@@ -4076,17 +4161,16 @@ static __attribute__((noinline)) void node_facts_rows_made(NodeFacts* facts, uin
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint16_t* const right = facts->right + first;
+     const uint8_t* const ops = facts->ops + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+         // A unary operator's second operand is its first, read and masked away.
+-        const uint32_t w = batch[i];
++        const uint32_t w = (uint16_t)batch[i];
+         const uint32_t second = right[w];
+-        const uint32_t a = w - left[w];
+-        const uint32_t b = w - (second != 0 ? second : left[w]);
++        const uint32_t a = (batch[i] >> 16);
++        const uint32_t b = second != 0 ? w - second : a;
+         const bool taken = node_facts_row_made(records, &view, w, a, b, second != 0 ? 1u : 0u, (CheckOp)ops[w], lean, true);
+         rare[rare_count] = w;
+         rare_count += taken ? 0u : 1u;
+@@ -4103,13 +4187,12 @@ static __attribute__((noinline)) void node_facts_stores(NodeFacts* facts, uint32
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint16_t* const right = facts->right + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         if (__builtin_expect(!(right[w] != 0 && node_facts_store_fast(records, &view, w, a, w - right[w], true, lean)), 0))
+         {
+             rare[rare_count] = w;
+@@ -4129,12 +4212,11 @@ static __attribute__((noinline)) void node_facts_converts(NodeFacts* facts, uint
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         if (__builtin_expect(!(node_facts_store_fast(records, &view, w, a, a, false, lean)), 0))
+         {
+             rare[rare_count] = w;
+@@ -4154,12 +4236,11 @@ static __attribute__((noinline)) void node_facts_truths(NodeFacts* facts, uint32
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         if (__builtin_expect(!(node_facts_truth_fast(records, &view, w, a, lean)), 0))
+         {
+             rare[rare_count] = w;
+@@ -4179,12 +4260,11 @@ static __attribute__((noinline)) void node_facts_addresses_made(NodeFacts* facts
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         if (__builtin_expect(!(node_facts_address(records, &view, w, a, lean)), 0))
+         {
+             rare[rare_count] = w;
+@@ -4204,12 +4284,11 @@ static __attribute__((noinline)) void node_facts_casts(NodeFacts* facts, uint32_
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         if (__builtin_expect(!(node_facts_cast(NULL, records, &view, w, a, lean)), 0))
+         {
+             rare[rare_count] = w;
+@@ -4229,13 +4308,12 @@ static __attribute__((noinline)) void node_facts_logics(NodeFacts* facts, uint32
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint16_t* const right = facts->right + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
+         if (__builtin_expect(!(right[w] != 0 && node_facts_logic_fast(records, &view, w, a, w - right[w], lean)), 0))
+         {
+             rare[rare_count] = w;
+@@ -4255,15 +4333,14 @@ static __attribute__((noinline)) void node_facts_updates(NodeFacts* facts, uint3
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+-    const uint16_t* const left = facts->left + first;
+     const uint16_t* const right = facts->right + first;
+     const uint8_t* const ops = facts->ops + first;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+-        const uint32_t w = batch[i];
+-        const uint32_t a = w - left[w];
+-        if (__builtin_expect(!(node_facts_update(records, &view, w, a, w - (right[w] != 0 ? right[w] : left[w]), right[w] != 0, (CheckOp)ops[w], lean)), 0))
++        const uint32_t w = (uint16_t)batch[i];
++        const uint32_t a = (batch[i] >> 16);
++        if (__builtin_expect(!(node_facts_update(records, &view, w, a, right[w] != 0 ? w - right[w] : a, right[w] != 0, (CheckOp)ops[w], lean)), 0))
+         {
+             rare[rare_count] = w;
+             rare_count += 1;
+@@ -4292,7 +4369,7 @@ static __attribute__((noinline)) void node_facts_updates(NodeFacts* facts, uint3
+ // instructions read 16.4 to 16.5 ticks a record on `sqlite3.c` in a build that had it 48 bytes into a line, and 16.0 in
+ // that build's sources with this attribute, as in two builds that had it at a line's start unasked (the 9700X; the
+ // measurement record's c-on-the-window-2850).
+-static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts* facts, uint32_t window, uint32_t mode, bool split)
++static inline __attribute__((always_inline)) void node_facts_window_of(NodeFacts* facts, uint32_t window, uint32_t mode, bool split, bool operators)
+ {
+     const uint32_t first = facts->windows[window];
+     const uint32_t count = facts->windows[window + 1] - first;
+@@ -4302,7 +4379,7 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+     uint32_t lookups = 0;
+     uint32_t rounds = 0;
+     const uint64_t t0 = split ? __rdtsc() : 0;
+-    node_facts_list(facts->leaf_list, facts->lookup_list, facts->keys, facts->kinds + first, facts->classes + first, count, &leaves, &lookups, &rounds);
++    node_facts_list(facts->leaf_list, facts->lookup_list, facts->left + first, facts->keys, facts->kinds + first, facts->classes + first, count, &leaves, &lookups, &rounds);
+     memset(facts->sizes, 0, sizeof(facts->sizes));
+     node_facts_distribute(facts->batches, facts->sizes, facts->lookup_list, facts->keys, lookups);
+     if (whole)
+@@ -4319,11 +4396,7 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+         const uint32_t* const lists = facts->batches + (uint64_t)16 * round * BUSTER_NODE_FACTS_WINDOW;
+         const uint32_t* const sizes = facts->sizes + 16 * round;
+         // The round's classes that have an operator.
+-        uint32_t present = 0;
+-        for (uint32_t code = 0; code < BUSTER_NODE_FACTS_CODES; code += 1)
+-        {
+-            present |= (sizes[code] != 0 ? 1u : 0u) << code;
+-        }
++        const uint32_t present = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(sizes), _mm512_setzero_si512());
+         if ((present >> BUSTER_NODE_FACTS_CODE_ARROW & 1) != 0)
+         {
+             const uint32_t* const batch = lists + (uint64_t)BUSTER_NODE_FACTS_CODE_ARROW * BUSTER_NODE_FACTS_WINDOW;
+@@ -4375,19 +4448,19 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+                 node_facts_dots_loads(facts, first, batch, batched);
+             }
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_ADDRESS & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_ADDRESS & 1) != 0)
+         {
+             node_facts_addresses_made(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_ADDRESS * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_ADDRESS], !whole);
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_CAST & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_CAST & 1) != 0)
+         {
+             node_facts_casts(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_CAST * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_CAST], !whole);
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_OTHER & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_OTHER & 1) != 0)
+         {
+             node_facts_slow_list(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_OTHER * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_OTHER]);
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_ROW & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_ROW & 1) != 0)
+         {
+             node_facts_rows_made(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_ROW * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_ROW], !whole);
+         }
+@@ -4408,11 +4481,11 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+                 node_facts_calls_loads(facts, first, batch, batched);
+             }
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_LOGIC & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_LOGIC & 1) != 0)
+         {
+             node_facts_logics(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_LOGIC * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_LOGIC], !whole);
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_UPDATE & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_UPDATE & 1) != 0)
+         {
+             node_facts_updates(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_UPDATE * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_UPDATE], !whole);
+         }
+@@ -4433,11 +4506,11 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+                 node_facts_dereferences_loads(facts, first, batch, batched);
+             }
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_STORE & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_STORE & 1) != 0)
+         {
+             node_facts_stores(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_STORE * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_STORE], !whole);
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_CONVERT & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_CONVERT & 1) != 0)
+         {
+             node_facts_converts(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_CONVERT * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_CONVERT], !whole);
+         }
+@@ -4445,7 +4518,7 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+         {
+             node_facts_discards(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_DISCARD * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_DISCARD]);
+         }
+-        if ((present >> BUSTER_NODE_FACTS_CODE_TRUTH & 1) != 0)
++        if (operators && (present >> BUSTER_NODE_FACTS_CODE_TRUTH & 1) != 0)
+         {
+             node_facts_truths(facts, first, lists + (uint64_t)BUSTER_NODE_FACTS_CODE_TRUTH * BUSTER_NODE_FACTS_WINDOW, sizes[BUSTER_NODE_FACTS_CODE_TRUTH], !whole);
+         }
+@@ -4461,6 +4534,31 @@ static __attribute__((noinline, aligned(64))) void node_facts_window(NodeFacts*
+     facts->lookup_count = lookups;
+ }
+ 
++
++static __attribute__((noinline,aligned(64))) void node_facts_lookup_whole(NodeFacts* facts, uint32_t window, bool split)
++{
++    node_facts_window_of(facts, window, BUSTER_NODE_FACTS_WHOLE, split, false);
++}
++
++static __attribute__((noinline,aligned(64))) void node_facts_lookup_lean(NodeFacts* facts, uint32_t window, bool split)
++{
++    node_facts_window_of(facts, window, BUSTER_NODE_FACTS_LEAN, split, false);
++}
++
++static __attribute__((noinline,aligned(64))) void node_facts_window(NodeFacts* facts, uint32_t window, uint32_t mode, bool split)
++{
++    // The first body starts a new pass. The first actual lookup of each key must
++    // pay for its proof again, including in the measured pass after the oracles.
++    if (window == 0 && facts->arrow_results != NULL && ++facts->arrow_generation == 0)
++    {
++        memset(facts->arrow_results, 0, NODE_FACTS_ARROW_SLOTS * sizeof(NodeFactsArrowResult));
++        facts->arrow_generation = 1;
++    }
++    if (!facts->operators && mode == BUSTER_NODE_FACTS_WHOLE) node_facts_lookup_whole(facts, window, split);
++    else if (!facts->operators && mode == BUSTER_NODE_FACTS_LEAN) node_facts_lookup_lean(facts, window, split);
++    else node_facts_window_of(facts,window,mode,split,true);
++}
++
+ // Whether the lists the kernel made of window `window`, which it ran last, are its records' of each kind in their
+ // order; each made operator's class its round's and its code's, the rounds made again from the operands' classes here;
+ // and each class's list its operators in their order: the listing's and the distribution's twin, a record at a time.
+@@ -4508,8 +4606,9 @@ static bool node_facts_lists_same(const NodeFacts* facts, uint32_t window)
+             // than this operator's, a round's earlier class or this one, where it is before in the window's order. A
+             // decoy doesn't show an operand read too early by an operator that sets the decoy's flag itself (`=`, a
+             // call, an update).
+-            same = lookups < facts->lookup_count && facts->lookup_list[lookups] == w && facts->keys[lookups] == key && cursors[list] < facts->sizes[list] &&
+-                   facts->batches[(uint64_t)list * BUSTER_NODE_FACTS_WINDOW + cursors[list]] == w && latest <= list;
++            const uint32_t expected = w | ((w - facts->left[first + w]) << 16);
++            same = lookups < facts->lookup_count && facts->lookup_list[lookups] == expected && facts->keys[lookups] == key && cursors[list] < facts->sizes[list] &&
++                   facts->batches[(uint64_t)list * BUSTER_NODE_FACTS_WINDOW + cursors[list]] == expected && latest <= list;
+             cursors[list] += 1;
+             lookups += 1;
+         }
