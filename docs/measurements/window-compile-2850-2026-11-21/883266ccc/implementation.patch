@@ -1,0 +1,238 @@
+diff --git a/src/buster/compiler/c_parser.c b/src/buster/compiler/c_parser.c
+index 591c48399..ca866f78d 100644
+--- a/src/buster/compiler/c_parser.c
++++ b/src/buster/compiler/c_parser.c
+@@ -1501,6 +1501,9 @@ struct ParseBracketBlock
+     // Absolute depth at lane zero. A scalar block clamps a closer at zero; the bit marks that closer.
+     uint32_t base_depth;
+     uint64_t clamps;
++    bool dense_enclosing;
++    _Alignas(64) uint32_t preceding[16];
++
+ } __attribute__((aligned(64)));
+ 
+ // What K2's rules read of each lane's kind and its neighbors' kinds, the same in every round, for a block
+@@ -1529,6 +1532,7 @@ struct ParseKernels
+     const ParseBlockWork* depth_work;
+     bool deep_node_depths;
+     uint32_t* enclosing;
++    bool block_enclosing;
+     // K1's view of each block of 64 tokens, and what K2's rules read of each block's kinds.
+     ParseBracketBlock* bracket_blocks;
+     ParseRoleStatics* role_statics;
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index 15e597e3c..43becceb4 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -5821,6 +5821,23 @@ static uint32_t parse_after_group(const ParseKernels* kernels, const uint8_t* ki
+ // declarator, not at its name: a bound in `typedef int T[sizeof(T)]` still sees the outer T. A block declaration's
+ // interval ends at its enclosing brace. Other scopes, or specifiers this pass cannot read, leave the unit to the
+ // scalar parser. The bracket matching uses K4's not-yet-live waiting array and never walks nested scopes per token.
++// A block carries only its sixteen external openers. K1 already computes the
++// local opener lane and relative depth. Deep blocks keep their scalar edges.
++BUSTER_INLINE uint32_t parse_enclosing(const ParseKernels* kernels, uint32_t token)
++{
++    if (kernels->block_enclosing)
++    {
++        const ParseBracketBlock* block = kernels->bracket_blocks + token / 64;
++        if (!block->dense_enclosing)
++        {
++            const uint32_t lane = token % 64;
++            const uint32_t opener = block->opener_lanes[lane];
++            return opener < 64 ? (token & ~63u) + opener : block->preceding[(uint32_t)(15 + block->relative_depths[lane]) & 15u];
++        }
++    }
++    return kernels->enclosing[token];
++}
++
+ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const uint32_t* names, uint32_t count)
+ {
+     kernels->typedef_count = 0;
+@@ -5838,7 +5855,7 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
+         {
+             const uint32_t closer = block + (uint32_t)__builtin_ctzll(closers);
+             closers &= closers - 1;
+-            const uint32_t opener = kernels->enclosing[closer];
++            const uint32_t opener = parse_enclosing(kernels, closer);
+             if (opener != BUSTER_PARSE_NONE)
+             {
+                 kernels->waiting[opener] = closer;
+@@ -5854,7 +5871,7 @@ static void parse_typedefs(ParseKernels* kernels, const uint8_t* kinds, const ui
+             {
+                 const uint32_t depth = parse_bracket_depth(kernels, t);
+                 const uint8_t scope = depth == 0 ? BUSTER_PARSE_TYPEDEF_FILE : BUSTER_PARSE_TYPEDEF_SCOPED;
+-                const uint32_t opener = kernels->enclosing[t];
++                const uint32_t opener = parse_enclosing(kernels, t);
+                 const bool block_scope = opener != BUSTER_PARSE_NONE && kinds[opener] == PARSE_KIND_L_BRACE;
+                 kernels->unsupported |= depth != 0 && !block_scope;
+                 // What may come before `typedef` in its specifiers: no type specifier.
+@@ -6078,7 +6095,7 @@ static bool parse_role_propagates_typed(uint8_t role)
+ // The closer's role for the opener `opener` (whose role is final), and for a cast candidate the opener's final role.
+ static uint8_t parse_closer_role(ParseKernels* kernels, uint32_t closer)
+ {
+-    const uint32_t opener = kernels->enclosing[closer];
++    const uint32_t opener = parse_enclosing(kernels, closer);
+     uint8_t result = PARSE_ROLE_ERROR;
+     if (opener != BUSTER_PARSE_NONE)
+     {
+@@ -6109,7 +6126,7 @@ static uint8_t parse_tag_keyword(const ParseKernels* kernels, uint32_t token)
+     while (searching)
+     {
+         const uint8_t kind = kernels->vkinds[t];
+-        const uint32_t opener = kind == PARSE_KIND_R_PAREN ? kernels->enclosing[t] : BUSTER_PARSE_NONE;
++        const uint32_t opener = kind == PARSE_KIND_R_PAREN ? parse_enclosing(kernels, t) : BUSTER_PARSE_NONE;
+         if (opener != BUSTER_PARSE_NONE && opener >= 2 && kernels->vkinds[opener - 1] == PARSE_KIND_ATTRIBUTE)
+         {
+             t = opener - 2;
+@@ -6147,7 +6164,7 @@ static uint8_t parse_role_rule(ParseKernels* kernels, uint32_t i, bool typed, bo
+     const uint8_t previous_role = i > 0 ? kernels->roles[i - 1] : PARSE_ROLE_NONE;
+     const uint8_t pred = i > 0 ? parse_pred_of(previous_role, previous) : PARSE_PRED_ITEM;
+     const uint8_t before_pred = i > 1 ? parse_pred_of(kernels->roles[i - 2], before) : PARSE_PRED_ITEM;
+-    const uint32_t opener = kernels->enclosing[i];
++    const uint32_t opener = parse_enclosing(kernels, i);
+     const uint8_t group = opener != BUSTER_PARSE_NONE ? kernels->roles[opener] : PARSE_ROLE_NONE;
+     const bool operand = pred == PARSE_PRED_OPERAND;
+     const bool after_asm = previous == PARSE_KIND_ASM || (previous_role == PARSE_ROLE_LEAF_RIGHT && (previous == PARSE_KIND_QUALIFIER || previous == PARSE_KIND_STORAGE ||
+@@ -6542,11 +6559,11 @@ static bool parse_statement_event(ParseKernels* kernels, ParseStatementStack* st
+ {
+     bool result = true;
+     const uint8_t role = kernels->roles[i];
+-    const uint32_t opener = kernels->enclosing[i];
++    const uint32_t opener = parse_enclosing(kernels, i);
+     const uint8_t group = opener != BUSTER_PARSE_NONE ? kernels->roles[opener] : PARSE_ROLE_NONE;
+     // A closer's statement context is its opener's; the enclosing groups are those of ( [ { only, since no statement is
+     // inside a ? : or case group.
+-    const uint32_t outer = opener != BUSTER_PARSE_NONE ? kernels->enclosing[opener] : BUSTER_PARSE_NONE;
++    const uint32_t outer = opener != BUSTER_PARSE_NONE ? parse_enclosing(kernels, opener) : BUSTER_PARSE_NONE;
+     const uint8_t outer_group = outer != BUSTER_PARSE_NONE ? kernels->roles[outer] : PARSE_ROLE_NONE;
+     const bool in_block = group == PARSE_ROLE_OPEN_BLOCK || group == PARSE_ROLE_OPEN_BODY;
+     const bool closer_in_block = outer_group == PARSE_ROLE_OPEN_BLOCK || outer_group == PARSE_ROLE_OPEN_BODY;
+@@ -7809,6 +7826,7 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
+         .vkinds = vkinds != 0 ? vkinds + BUSTER_PARSE_TOKEN_PADDING : 0,
+         .node_depths = node_depths != 0 ? node_depths + BUSTER_PARSE_TOKEN_PADDING : 0,
+         .enclosing = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
++        .block_enclosing = tree != NULL,
+         .bracket_blocks = BUSTER_ARENA_PUSH_ARRAY(arena, ParseBracketBlock, slots / 64 + 1),
+         .role_statics = BUSTER_ARENA_PUSH_ARRAY(arena, ParseRoleStatics, slots / 64 + 1),
+         .roles = roles != 0 ? roles + BUSTER_PARSE_TOKEN_PADDING : 0,
+@@ -8041,8 +8059,8 @@ __attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t*
+ // vpermd away. `open_stack` needs an entry per depth the input reaches, and 16 of BUSTER_PARSE_NONE below depth 0. Each
+ // block's view goes to `blocks` (ParseBracketBlock), for K2. Returns false if a closer has no opener or a group is still
+ // open at the end.
+-static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
+-                                  ParseBracketBlock* blocks)
++static bool parse_brackets_layout(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
++                                  ParseBracketBlock* blocks, bool compact)
+ {
+     const __m512i delta_low = _mm512_loadu_si512(deltas);
+     const __m512i delta_high = _mm512_loadu_si512(deltas + 64);
+@@ -8081,6 +8099,7 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
+         // Tokens whose opener is before the block are at or below its starting depth; at most 15 depths below it the
+         // vector path handles them.
+         const __mmask64 deep = _mm512_mask_cmplt_epi8_mask(~found & live_mask, before, _mm512_set1_epi8(-15));
++        view->dense_enclosing = deep != 0;
+         if (deep != 0)
+         {
+             balanced &= parse_brackets_block_scalar(codes, deltas, block, block + live, &view->clamps, enclosing, open_stack, &base);
+@@ -8091,17 +8110,24 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
+             // of no opener below depth 0).
+             const __m512i below_vector = _mm512_loadu_si512(open_stack + base - 16);
+             const __m512i block_vector = _mm512_set1_epi32((int)block);
+-            for (uint32_t q = 0; q < 4; q += 1)
++            if (compact)
+             {
+-                const __m128i p_quarter = q == 0 ? _mm512_extracti32x4_epi32(p, 0) : q == 1 ? _mm512_extracti32x4_epi32(p, 1) :
+-                                          q == 2 ? _mm512_extracti32x4_epi32(p, 2) : _mm512_extracti32x4_epi32(p, 3);
+-                const __m128i before_quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
+-                                               q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
+-                const __m512i relative = _mm512_cvtepi8_epi32(before_quarter);
+-                const __m512i inside = _mm512_add_epi32(block_vector, _mm512_cvtepu8_epi32(p_quarter));
+-                const __m512i outside = _mm512_permutexvar_epi32(_mm512_add_epi32(relative, _mm512_set1_epi32(15)), below_vector);
+-                const __mmask16 found_quarter = (__mmask16)(found >> (16 * q));
+-                _mm512_storeu_si512(enclosing + block + 16 * q, _mm512_mask_blend_epi32(found_quarter, outside, inside));
++                _mm512_store_si512(view->preceding, below_vector);
++            }
++            else
++            {
++                for (uint32_t q = 0; q < 4; q += 1)
++                {
++                    const __m128i p_quarter = q == 0 ? _mm512_extracti32x4_epi32(p, 0) : q == 1 ? _mm512_extracti32x4_epi32(p, 1) :
++                                              q == 2 ? _mm512_extracti32x4_epi32(p, 2) : _mm512_extracti32x4_epi32(p, 3);
++                    const __m128i before_quarter = q == 0 ? _mm512_extracti32x4_epi32(before, 0) : q == 1 ? _mm512_extracti32x4_epi32(before, 1) :
++                                                   q == 2 ? _mm512_extracti32x4_epi32(before, 2) : _mm512_extracti32x4_epi32(before, 3);
++                    const __m512i relative = _mm512_cvtepi8_epi32(before_quarter);
++                    const __m512i inside = _mm512_add_epi32(block_vector, _mm512_cvtepu8_epi32(p_quarter));
++                    const __m512i outside = _mm512_permutexvar_epi32(_mm512_add_epi32(relative, _mm512_set1_epi32(15)), below_vector);
++                    const __mmask16 found_quarter = (__mmask16)(found >> (16 * q));
++                    _mm512_storeu_si512(enclosing + block + 16 * q, _mm512_mask_blend_epi32(found_quarter, outside, inside));
++                }
+             }
+             (void)none;
+             // The openers still open at the block's end, onto open_stack, each at its depth before it (#892). A delta is
+@@ -8136,6 +8162,12 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
+     return balanced && base == 0;
+ }
+ 
++static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
++                                  ParseBracketBlock* blocks)
++{
++    return parse_brackets_layout(codes, deltas, count, enclosing, open_stack, blocks, false);
++}
++
+ static BUSTER_BAKED_FRONTEND ParseParentTables parse_parent_tables;
+ 
+ static void parse_parent_tables_init(void)
+@@ -8772,7 +8804,7 @@ BUSTER_INLINE uint32_t parse_roles_block_avx512(ParseKernels* kernels, uint32_t
+         {
+             const uint32_t lane = (uint32_t)__builtin_ctzll(copy_lanes);
+             copy_lanes &= copy_lanes - 1;
+-            const uint32_t opener = kernels->enclosing[block + lane];
++            const uint32_t opener = parse_enclosing(kernels, block + lane);
+             bool value = false;
+             if (opener != BUSTER_PARSE_NONE && opener >= 2 && opener - 2 >= block)
+             {
+@@ -8917,7 +8949,7 @@ __attribute__((noinline)) static uint64_t parse_roles_twin_block(ParseKernels* k
+         const uint8_t role = parse_role_rule(kernels, i, typed_before, &flag);
+         kernels->roles[i] = role;
+         kernels->flags[i] |= flag;
+-        const uint32_t opener = kernels->enclosing[i];
++        const uint32_t opener = parse_enclosing(kernels, i);
+         if (role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER && opener != BUSTER_PARSE_NONE && opener >= 2)
+         {
+             typed[i] = typed[opener - 2];
+@@ -8957,7 +8989,7 @@ BUSTER_INLINE void parse_roles_settled(ParseKernels* kernels, uint8_t* typed, Pa
+     {
+         const uint32_t lane = (uint32_t)__builtin_ctzll(casts);
+         casts &= casts - 1;
+-        const uint32_t opener = kernels->enclosing[block + lane];
++        const uint32_t opener = parse_enclosing(kernels, block + lane);
+         if (opener != BUSTER_PARSE_NONE && kernels->roles[opener] == PARSE_ROLE_OPEN_CAST)
+         {
+             const uint8_t closer_role = kernels->roles[block + lane];
+@@ -10550,7 +10582,7 @@ static bool parse_check_after_body_walk(const ParseKernels* kernels, uint32_t bl
+         const bool closer = c == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || c == PARSE_CLASS_TYPED_ATTRIBUTE;
+         const bool transparent = closer || c == PARSE_CLASS_ATTRIBUTE_KEYWORD || c == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER;
+         result = c == PARSE_ROLE_CLOSE_STRUCT || c == PARSE_ROLE_CLOSE_ENUM;
+-        uint32_t previous = closer ? kernels->enclosing[token] : token;
++        uint32_t previous = closer ? parse_enclosing(kernels, token) : token;
+         walking = transparent && previous != BUSTER_PARSE_NONE && previous > 0;
+         previous = walking ? previous - 1 : previous;
+         // A walk past the block's start takes the frame's state there.
+@@ -10734,7 +10766,7 @@ static bool parse_check_block_avx512(ParseKernels* kernels, const uint32_t* name
+             {
+                 const uint32_t lane = (uint32_t)__builtin_ctzll(alignas);
+                 alignas &= alignas - 1;
+-                const uint32_t opener = kernels->enclosing[block + lane];
++                const uint32_t opener = parse_enclosing(kernels, block + lane);
+                 state.classes[lane] = opener >= 2 && typed[opener - 2] != 0 ? PARSE_CLASS_TYPED_ALIGNAS_CLOSE : PARSE_CLASS_ALIGNAS_CLOSE;
+             }
+             c = _mm512_load_si512(state.classes);
+@@ -11115,7 +11147,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+     kernels->unsupported = false;
+     parse_kernels_predeclared(kernels, predeclared, true);
+     // K1, on ( [ {.
+-    kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
++    kernels->unbalanced = !parse_brackets_layout(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks, kernels->block_enclosing);
+     // K3.
+     if (!kernels->unbalanced)
+     {

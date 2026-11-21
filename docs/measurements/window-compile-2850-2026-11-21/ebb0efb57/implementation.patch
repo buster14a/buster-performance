@@ -1,0 +1,263 @@
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index 15e597e3c..c6d559fd7 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -171,12 +171,26 @@ static void parse_tokens_pad(ParseTokens* tokens)
+     }
+ }
+ 
++typedef struct ParseInputBrackets ParseInputBrackets;
++struct ParseInputBrackets
++{
++    uint32_t* enclosing;
++    uint32_t* stack;
++    ParseBracketBlock* blocks;
++    uint32_t room;
++    uint32_t processed;
++    int64_t depth;
++    bool valid;
++};
++
++static void parse_input_brackets(ParseInputBrackets* brackets, const uint8_t* codes, uint32_t stop);
++
+ // The output's tokens as the parser's: kinds through parse_kind_table, names for identifiers and each token's index in
+ // the output, 64 tokens at a time. A run of tokens without a '#', a PRAGMA_END or a `::` is stored as it is, with one
+ // table lookup (two vpermi2b for the table's halves, picked by the kind's bit 7) and masked stores; each of those
+ // three goes through parse_convert_token. `tokens` has room for twice the output's tokens (every one a `::`) and its
+ // pragmas, with the padding on both sides.
+-static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
++static void parse_tokens_from_output_blocks(const PPTokens* output, ParseTokens* tokens, ParseInputBrackets* brackets)
+ {
+     const __m512i table0 = _mm512_load_si512(parse_kind_table);
+     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
+@@ -235,10 +249,24 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
+             }
+             i = parse_convert_token(output, i, tokens, &written);
+         }
++        if (brackets != NULL && written <= brackets->room && written - brackets->processed >= 1024)
++        {
++            parse_input_brackets(brackets, tokens->kinds, written & ~63u);
++        }
+     }
+     tokens->count = written;
+     tokens->identity_sources = identity;
+     parse_tokens_pad(tokens);
++    if (brackets != NULL && written <= brackets->room)
++    {
++        parse_input_brackets(brackets, tokens->kinds, written);
++        brackets->blocks[(written + 63) / 64].base_depth = 0;
++    }
++}
++
++static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
++{
++    parse_tokens_from_output_blocks(output, tokens, NULL);
+ }
+ 
+ static const char* const parse_role_names[PARSE_ROLE_COUNT] =
+@@ -7797,7 +7825,7 @@ static void parse_statement_tables_init(void);
+ // `name_capacity` names, in `arena`, but for the tree's roles, node depths and parents with `tree`: its columns (each of
+ // capacity + 2 * BUSTER_PARSE_TOKEN_PADDING entries, the first token's at the padding's end), which outlive the others,
+ // a parse's temporaries.
+-static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity, const ParseTree* tree)
++static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity, const ParseTree* tree, const ParseInputBrackets* brackets)
+ {
+     const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
+     uint8_t* vkinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
+@@ -7808,8 +7836,8 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
+     *kernels = (ParseKernels){
+         .vkinds = vkinds != 0 ? vkinds + BUSTER_PARSE_TOKEN_PADDING : 0,
+         .node_depths = node_depths != 0 ? node_depths + BUSTER_PARSE_TOKEN_PADDING : 0,
+-        .enclosing = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
+-        .bracket_blocks = BUSTER_ARENA_PUSH_ARRAY(arena, ParseBracketBlock, slots / 64 + 1),
++        .enclosing = brackets != NULL ? brackets->enclosing : BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
++        .bracket_blocks = brackets != NULL ? brackets->blocks : BUSTER_ARENA_PUSH_ARRAY(arena, ParseBracketBlock, slots / 64 + 1),
+         .role_statics = BUSTER_ARENA_PUSH_ARRAY(arena, ParseRoleStatics, slots / 64 + 1),
+         .roles = roles != 0 ? roles + BUSTER_PARSE_TOKEN_PADDING : 0,
+         .parents = parents != 0 ? parents + BUSTER_PARSE_TOKEN_PADDING : 0,
+@@ -7863,7 +7891,7 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
+ // parse_kernels_reserve_tree with the tree's arrays in `arena` too.
+ static bool parse_kernels_reserve(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity)
+ {
+-    return parse_kernels_reserve_tree(kernels, arena, capacity, name_capacity, 0);
++    return parse_kernels_reserve_tree(kernels, arena, capacity, name_capacity, 0, NULL);
+ }
+ 
+ // Marks clang's predeclared typedef names (parse_predeclared_typedefs, by their IdentIds in `predeclared`) as file-scope
+@@ -8041,17 +8069,17 @@ __attribute__((noinline)) static bool parse_brackets_block_scalar(const uint8_t*
+ // vpermd away. `open_stack` needs an entry per depth the input reaches, and 16 of BUSTER_PARSE_NONE below depth 0. Each
+ // block's view goes to `blocks` (ParseBracketBlock), for K2. Returns false if a closer has no opener or a group is still
+ // open at the end.
+-static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
+-                                  ParseBracketBlock* blocks)
++static bool parse_brackets_between(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
++                                  ParseBracketBlock* blocks, uint32_t begin, int64_t* depth)
+ {
+     const __m512i delta_low = _mm512_loadu_si512(deltas);
+     const __m512i delta_high = _mm512_loadu_si512(deltas + 64);
+     const __m512i bias = _mm512_set1_epi8(64);
+     const __m512i fill = _mm512_set1_epi8(0x7F);
+     const __m512i none = _mm512_set1_epi32((int)BUSTER_PARSE_NONE);
+-    int64_t base = 0;
++    int64_t base = *depth;
+     bool balanced = true;
+-    for (uint32_t block = 0; block < count; block += 64)
++    for (uint32_t block = begin; block < count; block += 64)
+     {
+         const __m512i code = _mm512_loadu_si512(codes + block);
+         const __m512i delta = _mm512_permutex2var_epi8(delta_low, code, delta_high);
+@@ -8132,8 +8160,23 @@ static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, ui
+             base = base < 0 ? 0 : base;
+         }
+     }
++    *depth = base;
++    return balanced;
++}
++static bool parse_brackets_avx512(const uint8_t* codes, const int8_t* deltas, uint32_t count, uint32_t* enclosing, uint32_t* open_stack,
++                                  ParseBracketBlock* blocks)
++{
++    int64_t depth = 0;
++    bool balanced = parse_brackets_between(codes, deltas, count, enclosing, open_stack, blocks, 0, &depth);
+     blocks[(count + 63) / 64].base_depth = 0;
+-    return balanced && base == 0;
++    return balanced && depth == 0;
++}
++
++static void parse_input_brackets(ParseInputBrackets* brackets, const uint8_t* codes, uint32_t stop)
++{
++    brackets->valid &= parse_brackets_between(codes, parse_kind_deltas, stop, brackets->enclosing, brackets->stack + BUSTER_PARSE_DEPTH_PADDING,
++                                               brackets->blocks, brackets->processed, &brackets->depth);
++    brackets->processed = stop;
+ }
+ 
+ static BUSTER_BAKED_FRONTEND ParseParentTables parse_parent_tables;
+@@ -10946,12 +10989,12 @@ static uint8_t* parse_depth_stack_reserve(Arena* arena, uint64_t slots, uint64_t
+ // statement pass's levels, touched from their start by level, then the twin statements' records, which the vector path
+ // touches only when K5 leaves a unit to the twin. Last of the buffers, K4's slots kept three huge pages at 90 to 96 MB
+ // of sqlite3.c's scratch, and the levels one at 82 MB, past the reader's 77 MB (#628).
+-static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity)
++static bool parse_vector_buffers_reserve_stack(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity, uint32_t* previous)
+ {
+     const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
+     ParseSlots stack = { 0 };
+     const bool stack_reserved = parse_slots_reserve(&stack, arena, capacity);
+-    uint32_t* open_stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots + BUSTER_PARSE_DEPTH_PADDING);
++    uint32_t* open_stack = previous != NULL ? previous : BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots + BUSTER_PARSE_DEPTH_PADDING);
+     uint8_t* group_roles = parse_depth_stack_reserve(arena, slots, 0);
+     uint8_t* group_typed = parse_depth_stack_reserve(arena, slots, 1);
+     uint8_t* group_keywords = parse_depth_stack_reserve(arena, slots, 2);
+@@ -11007,6 +11050,12 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
+     return result;
+ }
+ 
++static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity)
++{
++    return parse_vector_buffers_reserve_stack(buffers, arena, capacity, NULL);
++}
++
++
+ // The benchmark runs traversal kernels while retaining its workspace. Production does not: reserving these nine
+ // unused columns there separated K4's active slots and fallback scratch from the prefix reused by checking (#628).
+ static bool parse_vector_postorder_reserve(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity)
+@@ -11105,7 +11154,7 @@ static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput
+ }
+ 
+ // Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
+-static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
++static ParseKernelResult parse_vector_after_input(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers, const ParseInputBrackets* brackets)
+ {
+     ParseKernelResult result = { .flagged_tokens = 0, .everything = false };
+     const uint8_t* kinds = input->kinds;
+@@ -11115,7 +11164,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+     kernels->unsupported = false;
+     parse_kernels_predeclared(kernels, predeclared, true);
+     // K1, on ( [ {.
+-    kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
++    kernels->unbalanced = brackets != NULL ? !brackets->valid || brackets->depth != 0 : !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
+     // K3.
+     if (!kernels->unbalanced)
+     {
+@@ -11152,6 +11201,12 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+     return result;
+ }
+ 
++static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
++{
++    return parse_vector_after_input(kernels, input, predeclared, buffers, NULL);
++}
++
++
+ static BUSTER_BAKED_FRONTEND bool parse_tables_ready;
+ 
+ // The tables every parse reads, built once, and baked into the executable (baked.h): a compile of the C driver's starts
+@@ -11413,9 +11468,38 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+         tokens->capacity = (uint32_t)capacity;
+         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
+     }
++    Arena* temporary = parser->options.scratch != 0 ? parser->options.scratch : &parser->scratch;
++    const uint64_t temporary_mark = temporary->length;
++    ParseInputBrackets prepared = { .valid = true };
++    ParseInputBrackets* brackets = NULL;
+     if (result)
+     {
+-        parse_tokens_from_output(output, &parser->tokens);
++        // The usual output needs at most one grammar token per PP token. A
++        // stream with many split :: tokens can outgrow this reservation; the
++        // regular bracket pass then runs on the fully converted tokens.
++        if (output->count >= 1024)
++        {
++            prepared.room = output->count + 64;
++            const uint64_t slots = (uint64_t)prepared.room + 2 * BUSTER_PARSE_TOKEN_PADDING;
++            prepared.enclosing = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, slots);
++            prepared.blocks = BUSTER_ARENA_PUSH_ARRAY(temporary, ParseBracketBlock, slots / 64 + 1);
++            prepared.stack = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, slots + BUSTER_PARSE_DEPTH_PADDING);
++            if (prepared.enclosing != NULL && prepared.blocks != NULL && prepared.stack != NULL)
++            {
++                memset(prepared.stack, 0xff, BUSTER_PARSE_DEPTH_PADDING * sizeof(uint32_t));
++                brackets = &prepared;
++            }
++            else
++            {
++                arena_pop_to(temporary, temporary_mark);
++            }
++        }
++        parse_tokens_from_output_blocks(output, &parser->tokens, brackets);
++        if (brackets != NULL && parser->tokens.count > brackets->room)
++        {
++            arena_pop_to(temporary, temporary_mark);
++            brackets = NULL;
++        }
+         parse_mark_pragma_packs(pp, &parser->tokens);
+         const bool normalized = parse_clang_scope_numbers(parser, pp);
+         const uint32_t count = parser->tokens.count;
+@@ -11426,8 +11510,8 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+         parser->fatal = result ? PARSE_MESSAGE_NONE : PARSE_MESSAGE_OUT_OF_MEMORY;
+     }
+     // The parse's temporaries, each step's popped after it (ParseOptions.scratch).
+-    Arena* temporary = parser->options.scratch != 0 ? parser->options.scratch : &parser->scratch;
+-    const uint64_t temporary_mark = temporary->length;
++
++    if (!result && brackets != NULL) arena_pop_to(temporary, temporary_mark);
+     bool scalar = false;
+     if (result)
+     {
+@@ -11436,8 +11520,8 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+         // sqlite3.c's took 63 MB, which the C driver's checker takes again (#528).
+         const uint32_t count = parser->tokens.count;
+         ParseTree tree = { 0 };
+-        const bool reserved = parse_tree_columns_reserve(parser, &tree) && parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree) &&
+-                              parse_vector_buffers_reserve(&parser->buffers, temporary, count);
++        const bool reserved = parse_tree_columns_reserve(parser, &tree) && parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree, brackets) &&
++                              parse_vector_buffers_reserve_stack(&parser->buffers, temporary, count, brackets != NULL ? brackets->stack : NULL);
+         if (reserved)
+         {
+             const ParseInput input = {
+@@ -11451,7 +11535,7 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+                 .diagnostics = parser->diagnostics,
+                 .diagnostic_capacity = parser->diagnostic_capacity,
+             };
+-            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
++            const ParseKernelResult vector = parse_vector_after_input(&parser->kernels, &input, parser->predeclared, &parser->buffers, brackets);
+             parser->statistics.fallback_items = vector.fallback.items;
+             parser->statistics.fallback_tokens = vector.fallback.tokens;
+             parser->statistics.flagged_tokens = vector.flagged_tokens;
