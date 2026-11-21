@@ -17,3 +17,5 @@ The signed candidate is a7c300f3ae627ffed2dee744835ce03886a72892 at base 4dd0f0b
 The warning control includes fall-through, noreturn, an indirect call, switch, aggregate return, a GNU statement expression and a 180-operand addition that exercises the depth fallback. A dense fallback computes the remaining whole graph and reuses it for later requests. The demanded-node column counts individually memoized nodes.
 
 The reproduction compares exit status, object SHA-256, stdout and stderr with only its separately enabled counter line removed. The counts and all hashes are in objects-and-counts.json.
+
+The [eight driver shards](driver-shards.txt) passed 208,352 assertions on the exact verifier binary. The [generated 448-function control matrix](control-matrix.py) agreed across three checker modes and three warning policies, including complete object and diagnostic bytes. The [per-mode receipts](control-matrix.json) record 189, 317 and 226 warnings for the three policies.
