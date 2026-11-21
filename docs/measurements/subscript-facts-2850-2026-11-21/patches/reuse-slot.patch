@@ -1,0 +1,225 @@
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 1bf7ca3a1..c32c9a243 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -5170,6 +5170,7 @@ struct NodeShadow
+     uint64_t facts_given_cycles;
+     uint64_t facts_given_instructions;
+     uint64_t facts_given_ticks;
++    uint64_t subscript_producer_ticks;
+     uint64_t facts_mispredicts;
+     uint64_t facts_given_mispredicts;
+     uint64_t facts_ticks;
+@@ -5985,7 +5986,9 @@ static void node_shadow_expression(NodeShadow* shadow, NodeCensusScratch* s, con
+         }
+         if (s->facts != NULL)
+         {
++            const uint64_t before = s->facts->subscript_cost ? __rdtsc() : 0;
+             node_facts_append(s->facts, s->body_stamp);
++            if (s->facts->subscript_cost) s->facts->subscript_producer_ticks += __rdtsc() - before;
+         }
+     }
+     // The one sweep, for every expression T typed: C and X took it or refused it.
+@@ -6421,6 +6424,7 @@ static void node_shadow_facts(NodeShadow* shadow, NodeCensusScratch* s)
+         shadow->facts_members += facts->member_count;
+         shadow->facts_windows += windows;
+         shadow->facts_widest = facts->widest > shadow->facts_widest ? facts->widest : shadow->facts_widest;
++        shadow->subscript_producer_ticks += facts->subscript_producer_ticks;
+         shadow->facts_row_ticks += facts->row_ticks;
+         shadow->facts_line_ticks += facts->line_ticks;
+         // --facts-reads, last: its rules' runs fill the members' and the pointer conversions' slots with keys no pass
+@@ -6694,6 +6698,11 @@ static void node_shadow_facts_report(const NodeShadow* shadow)
+            shadow->facts_rows, shadow->facts_rows != 0 ? (double)shadow->facts_row_ticks / (double)shadow->facts_rows : 0.0, shadow->facts_lines,
+            shadow->facts_lines != 0 ? (double)shadow->facts_line_ticks / (double)shadow->facts_lines : 0.0, shadow->facts_line_versions, shadow->facts_members,
+            shadow->facts_windows, shadow->facts_widest);
++    if (shadow->subscript_producer_ticks != 0)
++    {
++        printf("subscript-cost: producer=%" PRIu64 " given-and-kernel=%" PRIu64 " records=%" PRIu64 "\n",
++               shadow->subscript_producer_ticks, shadow->facts_ticks, shadow->facts_records);
++    }
+     if (shadow->passes != 0 && taken != 0)
+     {
+         // The kernel's own: a pass less the same windows' given records put in place alone. A tick's cycles are the pass's.
+@@ -7492,8 +7501,10 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+             }
+             if (room && shadow->facts)
+             {
++                const uint64_t before = getenv("BUSTER_SUBSCRIPT_COST") != NULL ? __rdtsc() : 0;
+                 room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE,
+                                         shadow->facts_operators, 0, &scratch);
++                if (room && facts.subscript_cost) facts.subscript_producer_ticks += __rdtsc() - before;
+                 s.facts = room ? &facts : NULL;
+             }
+             if (room && shadow->facts_reads)
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 2d7ed85f4..0e24df2dc 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -184,6 +184,8 @@ static inline __attribute__((always_inline)) uint32_t node_facts_exponent(uint32
+ // float and double), and one of them that is an integer type.
+ #define BUSTER_NODE_FACTS_ARITHMETIC 0x1000000u
+ #define BUSTER_NODE_FACTS_INTEGRAL 0x2000000u
++// Whether the type is a subscript base, at each of the two supported array qualifiers. The element
++// must also be complete at the actual use. A pointer needs no canonical array-to-pointer conversion.
+ 
+ // A member slot's flags: found (and no unknown member), a bit-field, of an incomplete array type, and in use (every
+ // slot that holds an answer, a member found or not).
+@@ -588,6 +590,8 @@ struct NodeFacts
+     uint64_t leaf_ticks;
+     uint64_t lookup_ticks;
+     uint64_t row_ticks;
++    uint64_t subscript_producer_ticks;
++    bool subscript_cost;
+     uint64_t line_ticks;
+     // The kernel's lists' lengths for the window it last ran.
+     uint32_t leaf_count;
+@@ -597,6 +601,8 @@ struct NodeFacts
+     bool packed;
+     // Whether the windows are a lean kernel's: their discards are no lookups.
+     bool lean;
++    bool subscript_projected;
++    bool subscript_verify;
+     // Whether they are the operators' kernel's: their literals' leaves have lines and their other operators are made.
+     bool operators;
+     bool room;
+@@ -854,6 +860,9 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
+         .cut = cut != 0 && cut <= BUSTER_NODE_FACTS_WINDOW ? cut : BUSTER_NODE_FACTS_CUT,
+         .packed = packed,
+         .lean = lean,
++        .subscript_projected = getenv("BUSTER_SUBSCRIPT_PROJECT") != NULL,
++        .subscript_cost = getenv("BUSTER_SUBSCRIPT_COST") != NULL,
++        .subscript_verify = getenv("BUSTER_SUBSCRIPT_VERIFY") != NULL,
+         .operators = operators,
+     };
+     facts->rows = arena_push_array(arena, (uint64_t)row_capacity + 1, sizeof(NodeFactsRow), 64);
+@@ -3366,6 +3375,71 @@ static inline __attribute__((always_inline)) bool node_facts_subscript_fast(Node
+     return fast;
+ }
+ 
++// Project a common subscript from the pointer type row and the existing semantic word in the index
++// record. No index type row is needed in lean mode. The three pointer standings below become an
++// unknown pointer value, except a static array address. Every other standing takes the general short rule.
++static inline __attribute__((always_inline)) bool node_facts_subscript_project(NodeFactsRecord* records, const NodeFactsView* view,
++                                                                               uint32_t w, uint32_t a, uint32_t b, bool lean)
++{
++    const NodeFactsRecord* pointer = records + a;
++    const NodeFactsRecord* index = records + b;
++    const uint32_t standing = pointer->standing;
++    const uint32_t key = standing & 31u;
++    const uint32_t dynamic = (1u << BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_ADDRESS)) |
++                             (1u << BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_NONE)) |
++                             (1u << BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_NONE));
++    if (((dynamic >> key) & 1u) == 0 || (standing & BUSTER_NODE_MACHINE_WIDE) != 0)
++    {
++        return node_facts_subscript_fast(records, view, w, a, b, lean);
++    }
++    const TypeId pointer_type = pointer->type;
++    const TypeId index_type = index->type;
++    const NodeFactsRow* row = node_facts_row_of(view, pointer_type);
++    const uint32_t pointer_flags = pointer->flags, index_flags = index->flags;
++    const uint32_t qualifiers = type_qualifiers(pointer_type);
++    const uint32_t array = (row->flags & BUSTER_NODE_FACTS_ARRAY) != 0;
++    const uint32_t array_mask = 0u - array;
++    const uint32_t pointer_lvalue = 0u - (standing & 1u);
++    const uint32_t idx = index->standing;
++    const uint32_t index_lvalue = 0u - (idx & 1u);
++    const uint32_t index_kind = (idx >> 2) & 7u;
++    const uint32_t index_constant = index_kind != CHECK_CONSTANT_NONE &&
++                                    ((idx & 1u) == 0 || (index_kind != CHECK_CONSTANT_ADDRESS && (index_flags & BUSTER_CHECK_ICE) != 0));
++    const uint32_t static_address = array && key == BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_ADDRESS) &&
++                                    (pointer_flags & BUSTER_CHECK_STATIC_OBJECT) != 0;
++    const uint32_t word_mask = BUSTER_NODE_MACHINE_WORD_VALID | BUSTER_NODE_MACHINE_WORD_PLAIN | (0xffu << 16);
++    const uint32_t integer_word = BUSTER_NODE_MACHINE_WORD_VALID | BUSTER_NODE_MACHINE_WORD_PLAIN | (BUSTER_TYPE_KIND_INTEGER << 16);
++    const uint32_t unfit = node_facts_unfit(index_type, idx, index_flags, index_lvalue, false) | (index_flags & BUSTER_CHECK_BIT_FIELD) |
++                           (array_mask & ((pointer_flags & BUSTER_CHECK_REGISTER_NAME) | (qualifiers > BUSTER_TYPE_CONST))) |
++                           (~array_mask & pointer_lvalue & ((pointer_flags & BUSTER_CHECK_VOLATILE_PART) | (pointer_type & BUSTER_TYPE_VOLATILE))) |
++                           (static_address & index_constant);
++    const uint32_t available = ((row->flags & BUSTER_NODE_FACTS_POINTER) != 0) |
++                               (array & (row->decayed[qualifiers & BUSTER_TYPE_CONST] != 0));
++    const bool fast = available != 0 && (row->flags & BUSTER_NODE_FACTS_OBJECTS) != 0 &&
++                      (index->word & word_mask) == integer_word && type_index(index_type) < view->row_count &&
++                      unfit == 0 && row->element_complete_at <= view->positions[w];
++    if (fast)
++    {
++        const uint32_t kept = BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_INACTIVE_UNION_ADDRESS | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS;
++        const uint32_t held = array_mask & ((pointer_flags & (BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME)) == BUSTER_CHECK_REGISTER ? BUSTER_CHECK_REGISTER : 0);
++        const uint32_t result = ((pointer_flags | index_flags) & BUSTER_CHECK_INHERITED) | (pointer_flags & kept) |
++                                ((pointer_flags >> 1) & BUSTER_CHECK_INACTIVE_UNION_READ) | held;
++        node_facts_record(records, w, row->element | (array_mask & qualifiers), row->element_word,
++                          BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_NONE), result, 0, 0);
++        if (!lean)
++        {
++            const NodeFactsRow* index_row = node_facts_row_of(view, index_type);
++            const TypeId index_value = index_type ^ ((index_type ^ index_row->value) & index_lvalue);
++            const TypeId pointer_value = pointer_type ^ ((pointer_type ^ row->value) & pointer_lvalue);
++            const TypeId first = array ? row->decayed[qualifiers & BUSTER_TYPE_CONST] : pointer_value;
++            const uint32_t first_flags = array ? BUSTER_CHECK_CONVERT_ARRAY : (pointer_lvalue & 1u);
++            const uint32_t second_flags = (index_lvalue & 1u) | (index_row->promoted != index_value ? BUSTER_CHECK_CONVERT_PROMOTION : 0);
++            node_facts_conversions(records, w, first, first_flags, index_row->promoted, second_flags, 0);
++        }
++    }
++    return fast;
++}
++
+ // A call's short path: a function's designator, or a pointer to a function's value, of a prototype that takes the
+ // arguments' count and whose return type is void or complete at the node, with no wide argument. Its record is the
+ // rule's where each argument's conversion changes nothing the call inherits, which the calls' loop asks next of each
+@@ -3823,7 +3897,7 @@ static inline __attribute__((always_inline)) void node_facts_dereferences_of(Nod
+     }
+ }
+ 
+-static inline __attribute__((always_inline)) void node_facts_subscripts_of(NodeFacts* facts, uint32_t first, const uint32_t* batch, uint32_t batched, uint32_t mode)
++static inline __attribute__((always_inline)) void node_facts_subscripts_of(NodeFacts* facts, uint32_t first, const uint32_t* batch, uint32_t batched, uint32_t mode, bool projected, bool verify)
+ {
+     NodeFactsRecord* const records = facts->records;
+     uint32_t* const rare = facts->rare;
+@@ -3836,8 +3910,22 @@ static inline __attribute__((always_inline)) void node_facts_subscripts_of(NodeF
+     {
+         const uint32_t w = batch[i];
+         const uint32_t a = w - left[w];
+-        const bool taken = right[w] != 0 && (mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_subscript_load(records, &view, w, a)
+-                                                                             : node_facts_subscript_fast(records, &view, w, a, w - right[w], mode == BUSTER_NODE_FACTS_LEAN));
++        NodeFactsRecord before;
++        if (verify) before = records[w];
++        const bool taken = right[w] != 0 && (mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_subscript_load(records, &view, w, a) :
++                                             projected ? node_facts_subscript_project(records, &view, w, a, w - right[w], mode == BUSTER_NODE_FACTS_LEAN) :
++                                                         node_facts_subscript_fast(records, &view, w, a, w - right[w], mode == BUSTER_NODE_FACTS_LEAN));
++        if (verify && right[w] != 0)
++        {
++            const NodeFactsRecord actual = records[w];
++            records[w] = before;
++            const bool original = node_facts_subscript_fast(records, &view, w, a, w-right[w], mode == BUSTER_NODE_FACTS_LEAN);
++            if (taken != original || memcmp(&actual, records + w, sizeof(actual)) != 0)
++            {
++                fprintf(stderr, "subscript verification failure window=%u record=%u original=%u projected=%u\n",first,w,original,taken);
++                abort();
++            }
++        }
+         if (__builtin_expect(!taken, 0))
+         {
+             rare[rare_count] = w;
+@@ -3964,17 +4052,21 @@ static __attribute__((noinline)) void node_facts_dereferences_loads(NodeFacts* f
+ 
+ static __attribute__((noinline)) void node_facts_subscripts(NodeFacts* facts, uint32_t first, const uint32_t* batch, uint32_t batched)
+ {
+-    node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_WHOLE);
++    if (facts->subscript_verify && facts->subscript_projected) node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_WHOLE, true, true);
++    else if (facts->subscript_projected) node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_WHOLE, true, false);
++    else node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_WHOLE, false, false);
+ }
+ 
+ static __attribute__((noinline)) void node_facts_subscripts_lean(NodeFacts* facts, uint32_t first, const uint32_t* batch, uint32_t batched)
+ {
+-    node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_LEAN);
++    if (facts->subscript_verify && facts->subscript_projected) node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_LEAN, true, true);
++    else if (facts->subscript_projected) node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_LEAN, true, false);
++    else node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_LEAN, false, false);
+ }
+ 
+ static __attribute__((noinline)) void node_facts_subscripts_loads(NodeFacts* facts, uint32_t first, const uint32_t* batch, uint32_t batched)
+ {
+-    node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_LOADS);
++    node_facts_subscripts_of(facts, first, batch, batched, BUSTER_NODE_FACTS_LOADS, false, false);
+ }
+ 
+ static __attribute__((noinline)) void node_facts_calls(NodeFacts* facts, uint32_t first, const uint32_t* batch, uint32_t batched)
