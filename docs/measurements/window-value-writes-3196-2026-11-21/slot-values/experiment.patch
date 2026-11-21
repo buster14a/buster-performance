@@ -1,0 +1,134 @@
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index 080022c0d..ac9ba2f01 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -1286,6 +1286,28 @@ static inline __attribute__((always_inline)) void node_rows_transpose(const __m5
+     }
+ }
+ 
++// Values emitted alongside the compacted kinds for eight records. The first slot of each carried row
++// gets its record's payload. A PTR_ADD defaults to one. The remaining slots start at zero before the
++// specific stride, constant, store and control fixups. Only rows with a carried value load that column.
++static inline __attribute__((always_inline)) void node_rows_write_values(uint64_t* out, const uint64_t* records,
++                                                                         __m512i kinds, uint64_t entries, uint32_t count, __mmask8 carried)
++{
++    const uint64_t first_slots = _pdep_u64(carried, UINT64_C(0x0101010101010101));
++    uint64_t payload_slots = _pext_u64(first_slots, entries);
++    uint64_t ones = _pext_u64(_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD)), entries);
++    __m512i payloads = _mm512_maskz_compress_epi64(carried, _mm512_maskz_loadu_epi64(carried, records));
++    for (uint32_t at = 0; at < count; at += 8)
++    {
++        const __mmask8 takes = (__mmask8)payload_slots;
++        const __m512i base = _mm512_maskz_mov_epi64((__mmask8)ones, _mm512_set1_epi64(1));
++        _mm512_storeu_si512(out + at, _mm512_mask_expand_epi64(base, takes, payloads));
++        const uint32_t used = (uint32_t)_mm_popcnt_u32(takes);
++        payloads = _mm512_maskz_compress_epi64((__mmask8)(0xffu << used), payloads);
++        payload_slots >>= 8;
++        ones >>= 8;
++    }
++}
++
+ // The rows of a chunk's `count` records, 64 a step, into the chunk's streams (NodeFactsReader.x_kinds and x_classes);
+ // the entries before each eight records' (x_cursors) and, in a record's eight, before its own (window_x_offsets): a
+ // row's place is the two together (node_rows_window_place). How many entries it wrote.
+@@ -1301,9 +1323,12 @@ static __attribute__((noinline, aligned(64))) uint32_t node_rows_window_write(st
+     for (uint32_t block = 0; block < blocks; block += 1)
+     {
+         const uint32_t x = block * 64;
++        const __m512i records_own = _mm512_loadu_si512(state->window_x_owns + x);
++        const __m512i value_sources = node_window_table(tables->value_owns, records_own);
++        const uint64_t carried = _mm512_test_epi8_mask(value_sources, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_FIRST));
+         const __m512i lengths = _mm512_loadu_si512(state->window_x_lengths + x);
+         // The block's records in the transposition's order: their two shapes and the three classes their entries' are.
+-        const __m512i owns = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_x_owns + x));
++        const __m512i owns = _mm512_permutexvar_epi8(order, records_own);
+         const __m512i conversions = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_x_conversions + x));
+         const __m512i own_classes = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_c_classes + x));
+         const __m512i target_classes = _mm512_permutexvar_epi8(order, _mm512_loadu_si512(state->window_x_targets + x));
+@@ -1355,7 +1380,10 @@ static __attribute__((noinline, aligned(64))) uint32_t node_rows_window_write(st
+             _mm512_storeu_si512(state->x_kinds + cursor, _mm512_maskz_compress_epi8(entries, kind_rows[eight]));
+             _mm512_storeu_si512(state->x_classes + cursor, _mm512_maskz_compress_epi8(entries, class_rows[eight]));
+             state->x_cursors[x / 8 + eight] = cursor;
+-            cursor += (uint32_t)_mm_popcnt_u64(entries);
++            const uint32_t emitted = (uint32_t)_mm_popcnt_u64(entries);
++            node_rows_write_values(state->x_values + cursor, state->window_x_values + x + eight * 8, kind_rows[eight], entries, emitted,
++                                   (__mmask8)(carried >> (eight * 8)));
++            cursor += emitted;
+         }
+         // In each eight, the entries before each record: its eight's lengths' prefix sum, a quadword's product.
+         _mm512_storeu_si512(state->window_x_offsets + x, _mm512_mullo_epi64(lengths, _mm512_set1_epi64(0x0101010101010100)));
+@@ -1620,13 +1648,12 @@ static __attribute__((noinline, cold)) bool node_rows_window_number(struct NodeF
+ // - and zero for an access (a vector's bytes, and C takes no vector's access), a conversion, an operation and a test.
+ // `made` has the two lists' counts; the sweep's lists' counts are added to `listed`, the expressions numbered to
+ // `*numbered` and the records their labels' walks went over to `*steps`.
+-static __attribute__((noinline)) void node_rows_window_values(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, uint32_t written, const NodeRowsCounts* made,
++static __attribute__((noinline)) void node_rows_window_values(struct NodeFactsReader* state, const NodeFront* front, uint32_t count, const NodeRowsCounts* made,
+                                                               uint32_t* listed, uint32_t* numbered, uint64_t* steps)
+ {
+     const NodeRowsTables* tables = state->x_tables;
+     const uint64_t* record_values = state->window_x_values;
+     uint64_t* values = state->x_values;
+-    uint16_t* firsts = state->x_lists[BUSTER_NODE_ROWS_LIST_FIRST];
+     uint16_t* stored = state->x_lists[BUSTER_NODE_ROWS_LIST_STORED];
+     uint16_t* constants = state->x_lists[BUSTER_NODE_ROWS_LIST_CONSTANT];
+     uint16_t* strides = state->x_lists[BUSTER_NODE_ROWS_LIST_STRIDE];
+@@ -1639,18 +1666,6 @@ static __attribute__((noinline)) void node_rows_window_values(struct NodeFactsRe
+     uint32_t stride_count = 0;
+     uint32_t rest_count = 0;
+     uint32_t second_count = 0;
+-    // The stream's zeros and its PTR_ADDs' ones, 64 entries a step from their kinds: through the last step's entries,
+-    // within the streams' room past a chunk's most (an entry past the chunk's has whatever kind was there, and no
+-    // one reads its value).
+-    const __m512i ones = _mm512_set1_epi64(1);
+-    for (uint32_t at = 0; at < written; at += 64)
+-    {
+-        const uint64_t sums = _mm512_cmpeq_epi8_mask(_mm512_loadu_si512(state->x_kinds + at), _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
+-        for (uint32_t eight = 0; eight < 8; eight += 1)
+-        {
+-            _mm512_storeu_si512(values + at + 8 * eight, _mm512_maskz_mov_epi64((__mmask8)(sums >> (8 * eight)), ones));
+-        }
+-    }
+     const __m512i places = _mm512_load_si512(tables->places);
+     const uint32_t blocks = (count + 63) / 64;
+     // Whether the expression that goes on from the block before has a marked record there, of each of the two kinds
+@@ -1674,7 +1689,7 @@ static __attribute__((noinline)) void node_rows_window_values(struct NodeFactsRe
+         const __mmask64 floating = constant & _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F32));
+         const __mmask64 to_bool = folded & _mm512_test_epi8_mask(to_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_BOOL));
+         const __m512i base = _mm512_set1_epi16((int16_t)x);
+-        first_count = node_rows_listed(firsts, first_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_FIRST)), places, base);
++        first_count += (uint32_t)_mm_popcnt_u64(_mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_FIRST)));
+         stored_count = node_rows_listed(stored, stored_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_STORED)), places, base);
+         constant_count = node_rows_listed(constants, constant_count, constant & ~floating & ~to_bool, places, base);
+         stride_count = node_rows_listed(strides, stride_count, _mm512_test_epi8_mask(lists, _mm512_set1_epi8(BUSTER_NODE_ROWS_VALUE_STRIDE)), places, base);
+@@ -1723,13 +1738,6 @@ static __attribute__((noinline)) void node_rows_window_values(struct NodeFactsRe
+     const uint8_t* offsets = state->window_x_offsets;
+     const uint8_t* owns = state->window_x_owns;
+     const uint8_t* entry_classes = state->x_classes;
+-    // Its record's value, its row's first entry's.
+-    #pragma clang loop unroll(disable)
+-    for (uint32_t i = 0; i < first_count; i += 1)
+-    {
+-        const uint32_t x = firsts[i];
+-        values[cursors[x / 8] + offsets[x]] = record_values[x];
+-    }
+     // A store by name's one entry: its destination's record's value, its first operand's.
+     const uint16_t* lefts = front->window_left;
+     #pragma clang loop unroll(disable)
+@@ -2249,7 +2257,7 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
+     uint32_t lists[BUSTER_NODE_ROWS_LISTS] = { 0 };
+     uint32_t numbered = 0;
+     uint64_t steps = 0;
+-    node_rows_window_values(state, front, count, written, &read, lists, &numbered, &steps);
++    node_rows_window_values(state, front, count, &read, lists, &numbered, &steps);
+     const uint64_t values_end = __rdtsc();
+     first_sample[5] = node_window_stamp(counter);
+     node_rows_window_part(state, front);
+@@ -2327,7 +2335,7 @@ static void node_rows_window_chunk(struct NodeFactsReader* state, const NodeFron
+     uint32_t lists_again[BUSTER_NODE_ROWS_LISTS] = { 0 };
+     uint32_t numbered_again = 0;
+     uint64_t steps_again = 0;
+-    node_rows_window_values(state, front, count, written_again, &again, lists_again, &numbered_again, &steps_again);
++    node_rows_window_values(state, front, count, &again, lists_again, &numbered_again, &steps_again);
+     const uint64_t later_values_end = __rdtsc();
+     second_sample[5] = node_window_stamp(counter);
+     node_rows_window_part(state, front);
