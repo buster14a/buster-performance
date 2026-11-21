@@ -1,0 +1,120 @@
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index e752e0382..37234f4d6 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -456,6 +456,7 @@ struct NodeFactsOperand
+ typedef struct NodeFacts NodeFacts;
+ struct NodeFacts
+ {
++    bool deferred_direct_callee;
+     NodeMachine* machine;
+     // The unit's reader's columns and its parser: the program's after the pipeline, the reader's own at reader time,
+     // where there is no program yet (node_facts_reader_begin).
+@@ -1381,6 +1382,7 @@ static void node_facts_given(NodeFacts* facts, uint32_t window, uint32_t poison)
+ typedef struct NodeFactsView NodeFactsView;
+ struct NodeFactsView
+ {
++    bool deferred_direct_callee;
+     const uint32_t* inputs;
+     const uint16_t* counts;
+     const uint32_t* positions;
+@@ -1826,7 +1828,19 @@ static inline __attribute__((always_inline)) bool node_facts_call(NodeFacts* fac
+     NodeFactsOperand callee;
+     TypeId converted = 0;
+     uint32_t conversion_flags = 0;
+-    bool taken = (function & BUSTER_NODE_FACTS_FUNCTION) != 0 && node_facts_operand(records, row, a, &callee, &converted, &conversion_flags) &&
++    const bool deferred = view->deferred_direct_callee && (function & BUSTER_NODE_FACTS_DESIGNATOR) && row->decayed[0] == 0;
++    bool fits;
++    if (deferred)
++    {
++        fits = (records[a].word & BUSTER_NODE_MACHINE_WORD_PLAIN) != 0 && (records[a].standing & BUSTER_NODE_MACHINE_WIDE) == 0;
++        callee.flags = records[a].flags & ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL);
++        conversion_flags = BUSTER_CHECK_CONVERT_FUNCTION;
++    }
++    else
++    {
++        fits = node_facts_operand(records, row, a, &callee, &converted, &conversion_flags);
++    }
++    bool taken = (function & BUSTER_NODE_FACTS_FUNCTION) != 0 && fits &&
+                  (function >> 8 & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && count >= parameters && ((function >> 8 & BUSTER_TYPE_FLAG_VARIADIC) != 0 || count == parameters) &&
+                  (function & BUSTER_NODE_FACTS_RETURNS) != 0 && row->returned_ready_at <= view->positions[w];
+     uint32_t flags = taken ? BUSTER_CHECK_SIDE_EFFECT | (callee.flags & BUSTER_CHECK_INHERITED) : 0;
+@@ -3383,7 +3397,7 @@ static inline __attribute__((always_inline)) bool node_facts_call_fast(NodeFacts
+     const bool designator = (function & BUSTER_NODE_FACTS_DESIGNATOR) != 0;
+     const TypeId pointer = row->decayed[0];
+     const uint32_t lvalue = 0u - (standing & 0x01u);
+-    const uint32_t as_designator = (standing & BUSTER_NODE_MACHINE_WIDE) | (pointer == 0 ? 1u : 0u);
++    const uint32_t as_designator = (standing & BUSTER_NODE_MACHINE_WIDE) | (pointer == 0 && !view->deferred_direct_callee ? 1u : 0u);
+     const uint32_t as_value = node_facts_unfit(type, standing, flags, lvalue, false) | (~row->flags & BUSTER_NODE_FACTS_SCALAR);
+     const uint32_t wanted = BUSTER_NODE_FACTS_FUNCTION | BUSTER_NODE_FACTS_RETURNS | BUSTER_TYPE_FLAG_PROTOTYPE << 8;
+     // Every argument's flags and standing, gathered whether the call is taken or not. A loop of the arguments' count
+@@ -3459,6 +3473,7 @@ static inline __attribute__((always_inline)) bool node_facts_discard_fast(NodeFa
+ static inline __attribute__((always_inline)) NodeFactsView node_facts_view(const NodeFacts* facts, uint32_t first)
+ {
+     return (NodeFactsView){
++        .deferred_direct_callee = facts->deferred_direct_callee,
+         .inputs = facts->inputs + first,
+         .counts = facts->counts + first,
+         .positions = facts->positions + first,
+@@ -5332,6 +5347,44 @@ static void node_cross_type_end(NodeFront* front, const NodeCrossTypeView* view)
+ }
+ 
+ 
++// The callee conversion is solely a pointer to the source declaration's function
++// type. Store that recipe when the pointer has no ordinary TypeId at this
++// frontier. No temporary TypeId or type-table insertion is required.
++static void node_cross_symbolic_callees(NodeFront* front)
++{
++    struct NodeFactsReader* st = front->typer->facts;
++    CheckInput* in = st->reader->output;
++    TypeTable* types = st->facts.machine->types;
++    if (!in->cross_callee_pointees)
++    {
++        in->cross_callee_pointees = BUSTER_ARENA_PUSH_ARRAY(st->reader->arena, TypeId, in->token_count + 1u);
++        if (!in->cross_callee_pointees) abort();
++        memset(in->cross_callee_pointees, 0, ((size_t)in->token_count + 1u) * sizeof(TypeId));
++    }
++    uint32_t requests = 0, deferred = 0;
++    for (uint32_t x=0; x<front->count; x++)
++    {
++        if (!st->proof_made[x] || front->ops[x] != CHECK_OP_CALL) continue;
++        const NodeFactsRecord* call = st->proof_records+x;
++        if (call->conversion_flags[0] != BUSTER_CHECK_CONVERT_FUNCTION) continue;
++        if (front->window_left[x] == 0 || front->window_left[x] > x) abort();
++        const TypeId fn = st->proof_records[x-front->window_left[x]].type;
++        if (type_kind(types,fn) != BUSTER_TYPE_KIND_FUNCTION) abort();
++        if (call->converted[0] == 0)
++        {
++            deferred++;
++        }
++        else if (type_kind(types,call->converted[0]) != BUSTER_TYPE_KIND_POINTER ||
++                 type_element(types,call->converted[0]) != type_unqualified(fn)) abort();
++        const uint32_t token = front->tokens[x];
++        if (token >= in->token_count) abort();
++        if (in->cross_callee_pointees[token] && in->cross_callee_pointees[token] != type_unqualified(fn)) abort();
++        in->cross_callee_pointees[token] = getenv("NODE_CROSS_MUTATE_KEY") != NULL ? BUSTER_TYPE_INT : type_unqualified(fn);
++        requests++;
++    }
++    fprintf(stderr,"cross-symbolic calls=%u deferred=%u\n",requests,deferred);
++}
++
+ static void node_window_probe(NodeFront* front)
+ {
+     struct NodeFactsReader* state = front->typer->facts;
+@@ -5340,6 +5393,8 @@ static void node_window_probe(NodeFront* front)
+     NodeCrossTypeView transaction;
+     if (temporary_types) node_cross_type_begin(front,&transaction);
+     NodeFacts run = state->facts;
++    run.deferred_direct_callee = getenv("NODE_CROSS_SYMBOLIC_CALLEE") != NULL;
++    if (run.deferred_direct_callee && temporary_types) abort();
+     const CheckGraph environment = { .extensions = run.machine->graph->extensions };
+     NodeMachine machine = {
+         .types = run.machine->types, .graph = &environment, .type_words = run.machine->type_words,
+@@ -5495,6 +5550,7 @@ static void node_window_probe(NodeFront* front)
+     }
+     node_probe_warning_select(front);
+     if (temporary_types) node_cross_type_end(front,&transaction);
++    if (run.deferred_direct_callee) node_cross_symbolic_callees(front);
+     for (uint32_t v = 0; v < 3; v += 1)
+     {
+         if (voids[v][0])
