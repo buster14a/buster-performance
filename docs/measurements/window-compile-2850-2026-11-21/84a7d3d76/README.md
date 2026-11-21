@@ -31,3 +31,5 @@ On the development machine, 1,231 tracked C files and 13,880 C fixtures extracte
 | Total | 60,444 | 13,653 | 0 |
 
 The development executable had SHA-256 2da794e2760b9a38c2a9a5bc82d9eea86b35fed0e49ab6159be1dfac6d47f99f and the production source at 84a7d3d76. `driver-parity.tar.xz` contains the path-normalized comparison log for every pair and each campaign summary. `actual-window-check.py` is the local campaign driver.
+
+The same production source at successor 55700f5a4ca30d139fd406bb36dc3ee38adf7ffd also passed 90,000 ordinary/opt-in generated compiler comparisons and 8,009 object comparisons on the targeted probes. The [campaign definitions and receipts](generator-and-probes/README.md) include the comparison modes and exact-byte checks.
