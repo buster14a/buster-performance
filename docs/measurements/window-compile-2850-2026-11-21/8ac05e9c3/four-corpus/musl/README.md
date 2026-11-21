@@ -1,0 +1,3 @@
+# musl input and measurements
+
+One fresh process compiled 1,336 source file(s) containing 5,039,639 preprocessed tokens. Every one of 45 recorded compilation commands produced the identical [per-file object manifest](objects.tsv). Each input also ran independently under the default and `-Wall -Wextra` policy in the three modes. Its [per-source ELF, exit, diagnostic and token receipts](per-source-qualification.tsv.gz) and [independent admission counts](admissions.tsv) preserve that second check. [Checks](checks.tsv) · [Run order](order.tsv) · [Samples](samples.tsv) · [Paired differences](paired.tsv) · [Raw reports](reports.tar.xz).

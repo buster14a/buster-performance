@@ -47,3 +47,16 @@ The [frozen driver method](../paired-driver/README.md), [mode selectors](main-cu
 The [native verification](native-qualification.tsv) compared all 2,668 functions and 381,191 entry kind, class, value and source-token records. The complete disassembly and [per-function digests](native-function-digests.tsv.gz) were identical across all four controls. [Warning streams](warnings.tar.xz), [round-by-round cycles, instructions and faults](paired.tsv) accompany the measurements.
 
 The [source and tree receipt](tree-equivalence.tsv) compares the executable checkout with the selected queue source.
+
+## Regular windows across all four corpora
+
+The table compares regular windows against ordinary compilation on the same release binary. Each row gives the median within-round difference and the number of rounds in which regular windows reduced the measurement.
+
+| Whole input | Rounds | Total cycles/token | Uninstrumented elapsed ms |
+| --- | ---: | ---: | ---: |
+| SQLite | 7 | -4.4285 (7/7 lower) | -0.1555 (5/7 lower) |
+| Lua 5.4.8 | 3 | -0.0231 (2/3 lower) | +0.1780 (1/3 lower) |
+| musl | 3 | +1.1566 (0/3 lower) | +2.1955 (0/3 lower) |
+| Buster compiler | 3 | +1.1785 (0/3 lower) | -0.5850 (3/3 lower) |
+
+The [three-corpus comparison](four-corpus/README.md) also includes the assignment option, the process counts and the per-source object and diagnostic receipts.
