@@ -1,0 +1,257 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index e2ec189d1..e2adf605e 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -628,6 +628,11 @@ struct PPFileData
+     uint32_t* starts;
+     uint32_t* values;
+     uint64_t* space;
++    // Private primary file only: one pending word of raw identifiers per 64 tokens. Its source ends
++    // occupy values until that ordinary run or directive line is read.
++    uint64_t* pending_names;
++    uint32_t raw_names;
++    uint32_t materialized_names;
+     // The directive table: per directive, its '#' token, the token past its line, its kind, and for a conditional the
+     // index of the next directive of its group (#elif, #else or #endif), or BUSTER_PP_NONE if the group is unterminated.
+     uint32_t directive_count;
+@@ -808,6 +813,7 @@ struct PPPrepare
+     uint64_t split_kinds;
+     bool dollar_punctuation;
+     bool vectorized;
++    bool active_refinement;
+     uint32_t window_bytes;
+     // -C's and -CC's comments as tokens (PPOptions.keep_comments): 0 none, 1 outside the directives' lines (-C), 2 in
+     // #define's replacement lists too (-CC). Files prepared so are prepared whole by the scalar lexer
+@@ -1184,6 +1190,7 @@ struct PPOpaqueSpan
+ 
+ struct PPContext
+ {
++    uint32_t names_prepared_until;
+     uint8_t kind;
+     // A buffer that ends a capture: an argument being expanded, or a directive's line. Nothing reads past it.
+     bool barrier;
+@@ -3069,18 +3076,86 @@ static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count,
+ // pp_directive_table for a file prepared a window at a time, whose `count` directives pp_scan_directives_window found
+ // in the words of `directives`, and its lines in those of `lines`: the directives' '#' tokens out of their words into
+ // the table (pp_directive_places).
+-static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, uint32_t count)
++// Prepare only identifier words requested by the active preprocessor context. The raw token boundaries and
++// gap flags were made by the ordinary lexer and pass A, including in skipped groups.
++static bool pp_materialize_names(InternTable* table, PPFileData* data, uint32_t begin, uint32_t end, uint32_t flags)
++{
++    RefineIdentifiers ids;
++    bool ok = true;
++    const uint32_t first = begin >> 6;
++    const uint32_t limit = (uint32_t)(((uint64_t)end + 63) >> 6);
++    for (uint32_t word = first; ok && word < limit;)
++    {
++        while (word < limit && data->pending_names[word] == 0) { word += 1; }
++        const uint32_t run = word;
++        uint32_t n = 0;
++        for (; word < limit && word - run < BUSTER_REFINE_BLOCK_TOKENS / 64; word += 1)
++        {
++            const uint64_t mask = data->pending_names[word];
++            ids.masks[word - run] = mask;
++            for (uint32_t q = 0; q < 4; q += 1)
++            {
++                const __mmask16 lanes = (__mmask16)(mask >> (q * 16));
++                const uint32_t t = word * 64 + 16 * q;
++                const __m512i starts = _mm512_maskz_loadu_epi32(lanes, data->starts + t);
++                const __m512i ends = _mm512_maskz_loadu_epi32(lanes, data->values + t);
++                _mm512_mask_compressstoreu_epi32(ids.starts + n, lanes, starts);
++                _mm512_mask_compressstoreu_epi32(ids.lengths + n, lanes, _mm512_sub_epi32(ends, starts));
++                n += (uint32_t)__builtin_popcount(lanes);
++            }
++        }
++        if (n != 0)
++        {
++            ids.count = n;
++            ok = (flags & C_TOKENIZER_TRIGRAPHS ? refine_pass_b_64_trigraphs : refine_pass_b_64_plain)(table, data->bytes, data->length, &ids, flags);
++            if (ok)
++            {
++                const uint32_t after = word * 64 < data->token_count ? word * 64 : data->token_count;
++                refine_pass_c(&ids, run * 64, after, data->values);
++                memset(data->pending_names + run, 0, (word - run) * sizeof(uint64_t));
++                data->materialized_names += n;
++            }
++        }
++    }
++    return ok;
++}
++
++static bool pp_directive_table_active(InternTable* table, uint32_t flags, Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, uint32_t count)
+ {
+     bool result = pp_directive_arrays(arena, data, count);
+     if (result)
+     {
+         pp_directive_places(directives, (data->token_count + 63) / 64, data->directive_hash);
+     }
++    if (result && data->pending_names != NULL)
++    {
++        // Coalesce complete directive lines that share or touch a 64-token word. Their names and
++        // whole macro bodies are ready before the directive table, guards or any consumer reads them.
++        uint32_t first = 0, stop = 0;
++        for (uint32_t d = 0; result && d < count; d += 1)
++        {
++            const uint32_t hash = data->directive_hash[d];
++            const uint32_t end = pp_next_line(lines, data->token_count, hash);
++            if (hash / 64 > (uint32_t)(((uint64_t)stop + 63) / 64))
++            {
++                result = pp_materialize_names(table, data, first, stop, flags);
++                first = hash;
++            }
++            stop = end;
++        }
++        result = result && pp_materialize_names(table, data, first, stop, flags);
++    }
+     result = result && pp_finish_directives(true, arena, data, lines);
+     data->guard = result ? pp_find_guard(data, &data->guard_opener) : 0;
+     return result;
+ }
+ 
++static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, uint32_t count)
++{
++    return pp_directive_table_active(NULL, 0, arena, data, lines, directives, count);
++}
++
++
+ // What preparing a file came to (pp_prepare_into).
+ typedef enum PPPrepareStatus
+ {
+@@ -3757,6 +3832,11 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     PPPrepareStatus result = !pushed                                                           ? PP_PREPARE_NO_COLUMNS
+                              : backslash_chunks == 0 || space == 0 || directive_words == 0 ? PP_PREPARE_NO_MEMORY
+                                                                                                : PP_PREPARE_DONE;
++    if (prepare->active_refinement && result == PP_PREPARE_DONE)
++    {
++        data->pending_names = arena_push_array(arena, word_room, sizeof(uint64_t), 64);
++        result = data->pending_names != NULL ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
++    }
+     // The next window starts at `at`, the start of the file or of a token that starts a logical line, and takes `size`
+     // bytes; the tokens before it are kept (`count`), those before `refined` are refined, and those before `counted`
+     // have had their UNKNOWN tokens counted (`unknowns`).
+@@ -3821,9 +3901,26 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+         const uint64_t begin = refined;
+         if (result == PP_PREPARE_DONE && complete > refined)
+         {
+-            result = refine_tokens_blocks(table, data->bytes, length, data->kinds, data->starts, data->values, space, prepare->refine_flags, refined, complete, &progress)
+-                         ? PP_PREPARE_DONE
+-                         : PP_PREPARE_NO_MEMORY;
++            if (data->pending_names != NULL)
++            {
++                RefineIdentifiers ids;
++                for (uint64_t block = refined; block < complete; block += BUSTER_REFINE_BLOCK_TOKENS)
++                {
++                    const uint64_t stop = complete - block > BUSTER_REFINE_BLOCK_TOKENS ? block + BUSTER_REFINE_BLOCK_TOKENS : complete;
++                    progress.scanned = refine_scan_chunks(data->bytes, length, backslash_chunks, progress.scanned, data->values[stop - 1],
++                                                         (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0);
++                    progress.previous_ends = refine_pass_a(data->bytes, length, data->kinds, data->starts, data->values, block, stop, data->values, space,
++                                                          prepare->refine_flags, backslash_chunks, progress.previous_ends, &ids, false);
++                    memcpy(data->pending_names + block / 64, ids.masks, ((stop - block + 63) / 64) * sizeof(uint64_t));
++                    data->raw_names += ids.count;
++                }
++            }
++            else
++            {
++                result = refine_tokens_blocks(table, data->bytes, length, data->kinds, data->starts, data->values, space, prepare->refine_flags, refined, complete, &progress)
++                             ? PP_PREPARE_DONE
++                             : PP_PREPARE_NO_MEMORY;
++            }
+             refined = complete;
+             // The named UCNs' candidates in the chunks refinement has just marked, while their bytes are in the caches.
+             pp_scan_named_ucn_chunks(data->bytes, length, backslash_chunks, named_words, progress.scanned, (prepare->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0, &named);
+@@ -3878,7 +3975,9 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     }
+     if (result == PP_PREPARE_DONE)
+     {
+-        data->prepared = pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, directives);
++        data->prepared = data->pending_names != NULL ?
++            pp_directive_table_active(table, prepare->refine_flags, arena, data, directive_words, directive_words + word_room, directives) :
++            pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, directives);
+         result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+         data->line_pages = pages;
+     }
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index a07855e3e..0737bf954 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -728,13 +728,16 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+ // Prepares a file this unit enters for the first time: one it made (the predefines, the command line) into its own
+ // arenas, and any other through the file cache, which prepares each file once for every unit (file_cache_prepare) and
+ // whose record the unit's data then copies. Diagnoses a file that can't be prepared, and returns false.
+-static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
++static bool pp_prepare_context_data(Preprocessor* pp, PPFileData* data, const char* path, bool primary)
+ {
+     uint64_t* ticks = pp->options.timing ? pp->ticks : 0;
+     PPPrepareStatus status;
+-    if (data->record == BUSTER_PP_NONE)
++    const char* setting = primary && data->length >= BUSTER_PP_WINDOW_BYTES ? getenv("BUSTER_TEST_ACTIVE_REFINEMENT") : NULL;
++    const bool dynamic = setting != NULL && setting[0] == '1';
++    if (dynamic || data->record == BUSTER_PP_NONE)
+     {
+-        const PPPrepare prepare = pp_prepare_config(pp);
++        PPPrepare prepare = pp_prepare_config(pp);
++        prepare.active_refinement = dynamic;
+         status = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, data, ticks);
+     }
+     else
+@@ -760,6 +763,11 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
+     return status == PP_PREPARE_DONE;
+ }
+ 
++static __attribute__((unused)) bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
++{
++    return pp_prepare_context_data(pp, data, path, false);
++}
++
+ // Doubles the path table and places every path again. The table starts small and doubles when it is half full, so
+ // that the pages it touches are about the ones it needs: at its largest size, the first paths would each touch a huge
+ // page of their own, which the kernel clears (2% of the time of sqlite3.c's run).
+@@ -8806,6 +8814,24 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
+     while (!pp->fatal && pp->context_count > stop_depth)
+     {
+         PPContext* context = &pp->contexts[pp->context_count - 1];
++        if (context->kind == BUSTER_PP_CONTEXT_FILE && context->position >= context->names_prepared_until)
++        {
++            PPFileData* data = &pp->datas[context->data];
++            if (data->pending_names != NULL)
++            {
++                const uint32_t end = pp_run_limit(data, context);
++                if (context->position < end && !pp_materialize_names(pp->table, data, context->position, end, pp->refine_flags))
++                {
++                    pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory preparing active identifier names");
++                    break;
++                }
++                context->names_prepared_until = end;
++            }
++            else
++            {
++                context->names_prepared_until = UINT32_MAX;
++            }
++        }
+         if (pp_collecting(pp))
+         {
+             pp_collect_step(pp);
+@@ -9043,7 +9069,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
+         pp->diagnostic_origin = saved_origin;
+         pp->include_limit_reached = true;
+     }
+-    else if (data->prepared || pp_prepare_data(pp, data, pp->files[file].path))
++    else if (data->prepared || pp_prepare_context_data(pp, data, pp->files[file].path, file == pp->main_file))
+     {
+         const uint32_t range = pp_add_range(pp, data->length, file, data->bytes, parent, include_location);
+         PPContext* context = range != BUSTER_PP_NONE ? pp_push_context(pp, BUSTER_PP_CONTEXT_FILE) : 0;
+@@ -14361,6 +14387,13 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
+     pp->showing_includes = pp->options.show_includes && !pp->options.quiet;
+     pp_run_file(pp, file);
+     pp_resolve_keywords(pp);
++    if (file < pp->file_count && pp->files[file].data < pp->data_count && getenv("BUSTER_TEST_ACTIVE_REFINEMENT_COUNTS") != NULL)
++    {
++        const PPFileData* data = &pp->datas[pp->files[file].data];
++        fprintf(stderr, "active-refinement bytes=%u raw=%u names=%u prepared=%u mask_bytes=%u\n", data->length, data->token_count,
++                data->raw_names, data->materialized_names, data->pending_names != NULL ? 8 * ((data->token_count + 63) / 64) : 0);
++    }
++
+     return pp->errors == 0 && !pp->fatal;
+ }
+ 
