@@ -28,3 +28,5 @@ The exact-head Develop build matched Clang 23.1.4 on the original 805 cases and 
 The frozen performance result and the diagnostic evidence belong to this source revision. Separate timing controls and subsequent performance candidates have their own receipts.
 
 [Matched-binary and reversed-order musl controls](controls/README.md) quantify the variability of the first context sweep.
+
+The [predecessor campaign](campaign/README.md) preserves all eight checker shards, eight driver shards, the fixture sweeps under three warning policies, and six seeds of 15,000 generated programs each. Its warning-trigger and fixed-probe stages stopped when 24c16e298 replaced this revision. The manifest and cancellation point identify the exact coverage of this run.
