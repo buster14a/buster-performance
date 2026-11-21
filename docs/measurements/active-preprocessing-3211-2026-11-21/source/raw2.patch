@@ -1,0 +1,250 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 24b4e574c..490aa7323 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -608,6 +608,12 @@ struct PPRawError
+     uint8_t kind;
+ };
+ 
++typedef struct PPDeferredSpan PPDeferredSpan;
++struct PPDeferredSpan
++{
++    uint32_t before, begin, end, after, token;
++};
++
+ struct PPFileData
+ {
+     uint64_t device;
+@@ -637,6 +643,8 @@ struct PPFileData
+     uint32_t* starts;
+     uint32_t* values;
+     uint64_t* space;
++    PPDeferredSpan** deferred_spans;
++    uint32_t planned_spans, planned_bytes, entered_spans, entered_bytes, entered_rows;
+     // The directive table: per directive, its '#' token, the token past its line, its kind, and for a conditional the
+     // index of the next directive of its group (#elif, #else or #endif), or BUSTER_PP_NONE if the group is unterminated.
+     uint32_t directive_count;
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 2513a606b..9777f1205 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -717,11 +717,132 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+ // Prepares a file this unit enters for the first time: one it made (the predefines, the command line) into its own
+ // arenas, and any other through the file cache, which prepares each file once for every unit (file_cache_prepare) and
+ // whose record the unit's data then copies. Diagnoses a file that can't be prepared, and returns false.
+-static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
++// A speculative ordinary region between physical directive lines. The complete preprocessor must confirm that
++// the numeric stand-in is the entire ordinary span between those two actual directives before the plan is used.
++static bool pp_plain_source_range(const uint8_t* bytes, uint32_t first, uint32_t end, uint32_t flags)
++{
++    bool block = false, line = false, has_token = false;
++    uint8_t quote = 0;
++    for (uint32_t i = first; i < end; i += 1)
++    {
++        const uint8_t c = bytes[i], next = i + 1 < end ? bytes[i + 1] : 0;
++        if (c == 0 || c >= 128 || c == '#' || (c == '%' && next == ':') || c == '\r' ||
++            (c == 'R' && next == '"' && (flags & C_TOKENIZER_RAW_STRINGS) != 0) || (c == '?' && (flags & C_TOKENIZER_TRIGRAPHS) != 0) ||
++            (c == '\\' && (next == 'N' || next == 'u' || next == 'U' || next == '\n' || next == '\r' || next == ' ' || next == '\t')))
++        {
++            return false;
++        }
++        if (block)
++        {
++            if (c == '*' && next == '/') { block = false; i += 1; }
++        }
++        else if (line) { line = c != '\n'; }
++        else if (quote != 0)
++        {
++            if (c == '\n') { return false; }
++            if (c == '\\' && i + 1 < end) { i += 1; }
++            else if (c == quote) { quote = 0; }
++        }
++        else if (c == '/' && (next == '*' || next == '/')) { block = next == '*'; line = !block; i += 1; }
++        else
++        {
++            if (c == '\\') { return false; }
++            has_token |= c > ' ';
++            quote = c == '\'' || c == '"' ? c : 0;
++        }
++    }
++    return has_token && !block && !line && quote == 0;
++}
++
++static PPPrepareStatus pp_prepare_structural_primary(Preprocessor* pp, PPFileData* data, const PPPrepare* prepare, uint64_t* ticks)
++{
++    const PPFileData original = *data;
++    const uint8_t* bytes = original.bytes;
++    const uint32_t length = original.length;
++    const uint32_t min_span = 4096;
++    PPDeferredSpan* spans = arena_push_array(&pp->arena, (uint64_t)length / min_span + 1, sizeof(PPDeferredSpan), _Alignof(PPDeferredSpan));
++    uint32_t count = 0, previous_hash = 0, first = 0;
++    bool have_previous = false;
++    for (uint32_t line = 0; spans != NULL && line < length;)
++    {
++        const uint8_t* newline = memchr(bytes + line, '\n', length - line);
++        const uint32_t end = newline != NULL ? (uint32_t)(newline - bytes) + 1 : length;
++        uint32_t hash = line;
++        while (hash < end && (bytes[hash] == ' ' || bytes[hash] == '\t')) { hash += 1; }
++        if (hash < end && bytes[hash] == '#')
++        {
++            if (have_previous && line - first >= min_span && pp_plain_source_range(bytes, first, line, prepare->refine_flags))
++            {
++                spans[count++] = (PPDeferredSpan){ .before = previous_hash, .begin = first, .end = line, .after = hash };
++            }
++            have_previous = newline != NULL && (end < 2 || bytes[end - 2] != '\\');
++            previous_hash = hash;
++            first = end;
++        }
++        line = end;
++    }
++    uint8_t* masked = count != 0 ? arena_push(&pp->arena, length, 64) : NULL;
++    if (count == 0 || masked == NULL)
++    {
++        return pp_prepare_into(prepare, pp->table, pp->columns, &pp->arena, data, ticks);
++    }
++    memcpy(masked, bytes, length);
++    for (uint32_t i = 0; i < count; i += 1)
++    {
++        const uint32_t begin = spans[i].begin, end = spans[i].end;
++        for (uint32_t j = begin; j < end; j += 64)
++        {
++            const __mmask64 valid = end - j < 64 ? _bzhi_u64(~0ull, end - j) : ~0ull;
++            const __m512i row = _mm512_maskz_loadu_epi8(valid, bytes + j);
++            const __m512i fill = _mm512_mask_mov_epi8(_mm512_set1_epi8(' '), _mm512_cmpeq_epi8_mask(row, _mm512_set1_epi8('\n')), row);
++            _mm512_mask_storeu_epi8(masked + j, valid, fill);
++        }
++        masked[begin] = '0';
++    }
++    data->bytes = masked;
++    PPPrepareStatus result = pp_prepare_into(prepare, pp->table, pp->columns, &pp->arena, data, ticks);
++    data->bytes = bytes;
++    if (result != PP_PREPARE_DONE) { return result; }
++    PPDeferredSpan** by_next = arena_push_array(&pp->arena, (uint64_t)data->directive_count + 1, sizeof(PPDeferredSpan*), _Alignof(PPDeferredSpan*));
++    if (by_next == NULL) { return PP_PREPARE_NO_MEMORY; }
++    memset(by_next, 0, ((uint64_t)data->directive_count + 1) * sizeof(*by_next));
++    uint32_t d = 0, kept = 0;
++    for (; kept < count; kept += 1)
++    {
++        PPDeferredSpan* span = &spans[kept];
++        while (d < data->directive_count && data->starts[data->directive_hash[d]] < span->after) { d += 1; }
++        if (d == 0 || d >= data->directive_count) { break; }
++        const uint32_t t = data->directive_hash[d] - 1;
++        if (data->starts[data->directive_hash[d]] != span->after || data->starts[data->directive_hash[d - 1]] != span->before ||
++            data->directive_end[d - 1] != t || data->starts[t] != span->begin || data->kinds[t] != (C_TOKEN_NUMERIC_CONSTANT | BUSTER_C_TOKEN_START_OF_LINE)) { break; }
++        span->token = t;
++        by_next[d] = span;
++    }
++    if (kept != count)
++    {
++        *data = original;
++        return pp_prepare_into(prepare, pp->table, pp->columns, &pp->arena, data, ticks);
++    }
++    data->deferred_spans = by_next;
++    data->planned_spans = count;
++    for (uint32_t i = 0; i < count; i += 1) { data->planned_bytes += spans[i].end - spans[i].begin; }
++    return PP_PREPARE_DONE;
++}
++
++static bool pp_prepare_context_data(Preprocessor* pp, PPFileData* data, const char* path, bool primary)
+ {
+     uint64_t* ticks = pp->options.timing ? pp->ticks : 0;
+     PPPrepareStatus status;
+-    if (data->record == BUSTER_PP_NONE)
++    const char* setting = primary && data->length >= 2 * BUSTER_PP_WINDOW_BYTES ? getenv("BUSTER_TEST_ACTIVE_REFINEMENT") : NULL;
++    const bool eligible = setting != NULL && setting[0] == '1' &&
++                          !(pp->refine_flags & (C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_NO_LINE_COMMENTS)) &&
++                          memchr(data->bytes, '\r', data->length) == NULL;
++    if (eligible)
++    {
++        const PPPrepare prepare = pp_prepare_config(pp);
++        status = pp_prepare_structural_primary(pp, data, &prepare, ticks);
++    }
++    else if (data->record == BUSTER_PP_NONE)
+     {
+         const PPPrepare prepare = pp_prepare_config(pp);
+         status = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, data, ticks);
+@@ -749,6 +870,11 @@ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path
+     return status == PP_PREPARE_DONE;
+ }
+ 
++static __attribute__((unused)) bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
++{
++    return pp_prepare_context_data(pp, data, path, false);
++}
++
+ // Doubles the path table and places every path again. The table starts small and doubles when it is half full, so
+ // that the pages it touches are about the ones it needs: at its largest size, the first paths would each touch a huge
+ // page of their own, which the kernel clears (2% of the time of sqlite3.c's run).
+@@ -8574,11 +8700,50 @@ static __attribute__((noinline, cold)) void pp_check_limit(Preprocessor* pp)
+ // buffer, an invocation per macro whose arguments are collected (here, a token at a time, when they aren't in one
+ // context: pp_collect_step) and expanded, and a capture per line expanded for a directive or a builtin, whose
+ // continuation runs when its barrier ends (pp_finish_capture).
++static bool pp_enter_structural_run(Preprocessor* pp, PPContext* context, PPFileData* data, const PPDeferredSpan* span)
++{
++    const PPPrepare prepare = pp_prepare_config(pp);
++    PPFileData fragment = { .bytes = data->bytes + span->begin, .length = span->end - span->begin, .record = BUSTER_PP_NONE };
++    const bool ready = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &fragment, NULL) == PP_PREPARE_DONE;
++    if (!ready || fragment.directive_count != 0 || fragment.raw_error_count != 0 || fragment.unterminated_comment != 0)
++    {
++        pp_diagnose(pp, PP_SEVERITY_FATAL, pp->ranges[context->range].base + span->begin, "failed to materialize an ordinary preprocessing range");
++        return false;
++    }
++    const uint32_t start = pp->expansions.count;
++    const uint32_t base = pp->ranges[context->range].base + span->begin;
++    bool ok = pp_append_file_tokens(pp, &pp->expansions, &fragment, base, 0, fragment.token_count, false);
++    if (ok && fragment.token_count != 0)
++    {
++        pp_history_fill(pp, &pp->expansions, start, pp->expansions.count, 0);
++        pp->expansions.flags[start] |= BUSTER_PP_SPACE;
++        PPContext* run = pp_push_buffer(pp, &pp->expansions, start, pp->expansions.count, 0, 0, false, true);
++        ok = run != NULL;
++        if (ok) { run->pending_flags = context->pending_flags; context->pending_flags = 0; }
++    }
++    context->position += 1;
++    data->entered_spans += 1;
++    data->entered_bytes += fragment.length;
++    data->entered_rows += fragment.token_count;
++    return ok;
++}
++
+ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
+ {
+     while (!pp->fatal && pp->context_count > stop_depth)
+     {
+         PPContext* context = &pp->contexts[pp->context_count - 1];
++        if (context->kind == BUSTER_PP_CONTEXT_FILE)
++        {
++            PPFileData* data = &pp->datas[context->data];
++            PPDeferredSpan* span = data->deferred_spans != NULL && context->next_directive < data->directive_count ?
++                data->deferred_spans[context->next_directive] : NULL;
++            if (span != NULL && context->position == span->token)
++            {
++                if (!pp_enter_structural_run(pp, context, data, span)) { break; }
++                continue;
++            }
++        }
+         if (pp_collecting(pp))
+         {
+             pp_collect_step(pp);
+@@ -8816,7 +8981,7 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
+         pp->diagnostic_origin = saved_origin;
+         pp->include_limit_reached = true;
+     }
+-    else if (data->prepared || pp_prepare_data(pp, data, pp->files[file].path))
++    else if (data->prepared || pp_prepare_context_data(pp, data, pp->files[file].path, file == pp->main_file))
+     {
+         const uint32_t range = pp_add_range(pp, data->length, file, data->bytes, parent, include_location);
+         PPContext* context = range != BUSTER_PP_NONE ? pp_push_context(pp, BUSTER_PP_CONTEXT_FILE) : 0;
+@@ -14127,6 +14292,12 @@ static bool pp_run_main(Preprocessor* pp, uint32_t file)
+     pp->showing_includes = pp->options.show_includes && !pp->options.quiet;
+     pp_run_file(pp, file);
+     pp_resolve_keywords(pp);
++    if (file < pp->file_count && pp->files[file].data < pp->data_count && getenv("BUSTER_TEST_ACTIVE_REFINEMENT_COUNTS") != NULL)
++    {
++        const PPFileData* data = &pp->datas[pp->files[file].data];
++        fprintf(stderr, "active-refinement bytes=%u compact_rows=%u spans=%u planned_bytes=%u entered_spans=%u entered_bytes=%u entered_rows=%u\n",
++                data->length, data->token_count, data->planned_spans, data->planned_bytes, data->entered_spans, data->entered_bytes, data->entered_rows);
++    }
+     return pp->errors == 0 && !pp->fatal;
+ }
+ 

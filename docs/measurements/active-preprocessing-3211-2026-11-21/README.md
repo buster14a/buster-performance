@@ -60,3 +60,5 @@ Two calls per arm run the production vector preprocessor under the native lease.
 | blocks512 | features | 980321 | 49.61 → 51.92 | 49.84 → 51.89 |
 | blocks512 | shell | 199666 | 74.77 → 75.66 | 75.10 → 76.19 |
 | blocks512 | all-active | 66510 | 18.99 → 17.94 | 18.90 → 18.22 |
+
+The [structural source-window results](STRUCTURAL.md) cover three implementations that skip actual raw rows, full conditional and include execution, the 64-byte source scan, rejected-code diagnostics, and marker-bearing comment-preserving output.
