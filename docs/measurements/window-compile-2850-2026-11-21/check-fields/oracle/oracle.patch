@@ -1,0 +1,274 @@
+diff --git a/src/buster/compiler/c_check_graph_test.c b/src/buster/compiler/c_check_graph_test.c
+index 420641b63..30266b1cb 100644
+--- a/src/buster/compiler/c_check_graph_test.c
++++ b/src/buster/compiler/c_check_graph_test.c
+@@ -1090,6 +1090,53 @@ static void check_test_leaf_rows_invalid(CheckTest* test, Arena* storage)
+     arena_pop_to(storage, mark);
+ }
+ 
++// An address interns the next type after the block begins. The earlier reference to its future
++// id is invalid, and the later one sees the newly created pointer. Nonzero payloads interleave
++// with rowless values, including an unknown condition that still carries its operand's effect.
++static void check_test_leaf_fact_barrier(CheckTest* test, Arena* storage, Arena* scratch)
++{
++    const uint64_t mark = storage->length;
++    CheckTestTypes owner = { 0 };
++    Arena output = arena_reserve(1u << 20);
++    CheckGraph graph;
++    const bool ready = output.base != NULL && check_test_types_open(&owner) && check_graph_initialize(&graph, storage, 32, 0);
++    check_test_expect(test, ready, "fresh output and graph for compact leaf type barrier");
++    if (ready)
++    {
++        TypeTable* types = &owner.table;
++        const TypeId next = types->types.count << BUSTER_TYPE_INDEX_SHIFT;
++        const uint32_t early = check_test_leaf(&graph, 0, (CheckValue){ .type = next });
++        const uint32_t x = check_test_leaf(&graph, 1, (CheckValue){ .type = BUSTER_TYPE_INT, .category = CHECK_LVALUE, .object = 1 });
++        const uint32_t before = check_test_leaf(&graph, 2, check_test_integer(BUSTER_TYPE_INT, 3));
++        const uint32_t address = check_graph_add(&graph, CHECK_OP_ADDRESS, 3, x, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
++        const uint32_t late = check_test_leaf(&graph, 4, (CheckValue){ .type = next });
++        const uint32_t effect = check_test_leaf(&graph, 5, (CheckValue){ .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_SIDE_EFFECT });
++        const uint32_t condition = check_graph_add(&graph, CHECK_OP_CONDITION, 6, effect, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
++        for (uint32_t token = 7; token < 32; ++token)
++        {
++            check_test_leaf(&graph, token, check_test_integer(BUSTER_TYPE_INT, token % 3 != 0 ? 0 : token));
++        }
++        const CheckOptions options = { .fresh_output = true, .verify = true };
++        CheckStream stream;
++        const bool checked = check_graph_run(types, &graph, &output, scratch, &options, &stream);
++        check_test_expect(test, checked, "fresh bounded leaf run checks");
++        if (checked)
++        {
++            check_test_expect(test, stream.diagnostics[early] == CHECK_DIAG_INVALID_TYPE && check_stream_type(&stream, early) == 0 &&
++                              stream.conversions[early].operands[0].type == next, "future type is invalid before the ordinary address action");
++            check_test_expect(test, check_stream_type(&stream, address) == next && check_stream_type(&stream, late) == next &&
++                              stream.diagnostics[late] == CHECK_DIAG_NONE && stream.conversions[late].operands[0].type == next, "future type is valid after the ordinary address action");
++            check_test_expect(test, stream.payload_rows[before] == 1 && check_stream_value(&stream, before).integer == 3,
++                              "first payload keeps graph order in a partly published block");
++            check_test_expect(test, check_stream_flags(&stream, condition) == BUSTER_CHECK_SIDE_EFFECT &&
++                              stream.conversions[condition].operands[0].type == BUSTER_TYPE_INT, "an unknown int condition retains side effects and its operand conversion");
++        }
++    }
++    check_test_types_close(&owner);
++    arena_release(&output);
++    arena_pop_to(storage, mark);
++}
++
+ static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* test, TypeTable* table, Arena* storage, Arena* output, Arena* scratch)
+ {
+     check_test_leaf_records(test);
+@@ -1097,6 +1144,7 @@ static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* te
+     check_test_graph_partial_allocations(test, table, storage);
+     check_test_graph_argument_guards(test, table, storage, output, scratch);
+     check_test_graph_barriers(test, storage, output, scratch);
++    check_test_leaf_fact_barrier(test, storage, scratch);
+     check_test_graph_report_order(test, table, storage, output, scratch);
+     check_test_graph_updates(test, table, storage, output, scratch);
+     check_test_graph_validation(test, storage);
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index 2307bc6e2..1df4930e9 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -2017,15 +2017,39 @@ static inline __attribute__((always_inline)) CheckConversion check_conversion_fi
+     return result;
+ }
+ 
++static _Thread_local uint32_t check_leaf_block_hits, check_leaf_arity_hits, check_leaf_condition_hits;
++static _Thread_local bool check_leaf_condition_enable, check_leaf_remove_flags, check_leaf_remove_conversions;
++static _Thread_local bool check_leaf_use_sparse;
++static _Thread_local bool check_leaf_mutate;
+ static inline __attribute__((always_inline)) void check_graph_store(CheckStream* stream, uint32_t node, const CheckActionResult* result)
+ {
+     check_stream_set_value_flags(stream, node, &result->value, check_value_source_flags((CheckOp)stream->graph->ops[node], result->value.flags));
+     CheckNodeConversions* conversions = stream->conversions + node;
++    if (check_leaf_use_sparse)
++    {
++    conversions->operands[0] = check_conversion_fields(&result->conversions[0]);
++    const CheckConversion second = check_conversion_fields(&result->conversions[1]);
++    const CheckConversion third = check_conversion_fields(&result->conversions[2]);
++    const CheckConversion store = check_conversion_fields(&result->store_conversion);
++    // Most actions describe only their first conversion. The six remaining fields agree with the
++    // initial output whenever none was set, including flags of an individual typeless conversion.
++    if (stream->zero_columns && (second.type | second.flags | third.type | third.flags | store.type | store.flags) == 0)
++        check_leaf_arity_hits++;
++    if (!stream->zero_columns || (!check_leaf_remove_conversions && (second.type | second.flags | third.type | third.flags | store.type | store.flags) != 0))
++    {
++        conversions->operands[1] = second;
++        conversions->operands[2] = third;
++        conversions->store = store;
++    }
++    }
++    else
++    {
+     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(result->conversions); i += 1)
+     {
+         conversions->operands[i] = check_conversion_fields(&result->conversions[i]);
+     }
+     conversions->store = check_conversion_fields(&result->store_conversion);
++    }
+     // Few nodes have a diagnostic or a warning: in a fresh output (CheckStream.zero_columns), the run writes only those
+     // that do. A member's offset is written whatever it is, since the member accesses, a node in 13 of sqlite3.c's, touch
+     // every line of its column anyway.
+@@ -3282,10 +3306,38 @@ static inline __attribute__((always_inline)) void check_graph_discard(TypeTable*
+     stream->statistics.scalar_nodes += 1;
+ }
+ 
++// An unknown ordinary int rvalue gives its condition an unknown int with its inherited flags.
++// The three absent conversions, payload, status and constant fields already have their initial
++// zero values. Payload-bearing or qualified inputs and the floating-environment pass remain
++// on the ordinary action path.
++static bool check_graph_unknown_int_condition(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
++{
++    const uint32_t operand = graph->operand0[node];
++    bool taken = stream->zero_columns && graph->overload_candidate_count == 0 &&
++                 ((graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default) & BUSTER_CHECK_FP_ENV_ACCESS) == 0 &&
++                 operand < node && stream->dense_values == NULL && stream->value_types[operand] == BUSTER_TYPE_INT &&
++                 stream->value_categories[operand] == CHECK_RVALUE && stream->value_constants[operand] == CHECK_CONSTANT_NONE &&
++                 stream->payload_rows[operand] == 0 && (stream->value_flags[operand] & ~BUSTER_CHECK_INHERITED) == 0 &&
++                 type_is_valid(types, BUSTER_TYPE_INT);
++    if (taken)
++    {
++        stream->value_types[node] = BUSTER_TYPE_INT;
++        check_leaf_condition_hits++;
++        stream->value_flags[node] = check_leaf_remove_flags ? 0 : stream->value_flags[operand];
++        stream->conversions[node].operands[0].type = BUSTER_TYPE_INT;
++        stream->statistics.scalar_nodes += 1;
++    }
++    return taken;
++}
++
+ // Always inlined (#880), as profile-guided builds do; hot caller: check_graph_run, once per impure node.
+ static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments, Arena* scratch)
+ {
+     CheckValue discarded;
++    if (check_leaf_condition_enable && graph->ops[node] == CHECK_OP_CONDITION && check_graph_unknown_int_condition(types, graph, stream, node))
++    {
++        return;
++    }
+     if (check_graph_discard_taken(types, graph, stream, node, &discarded))
+     {
+         check_graph_discard(types, stream, node, &discarded);
+@@ -3296,6 +3348,54 @@ static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTa
+     }
+ }
+ 
++// Compact non-overloaded leaves own their conversion and value columns. A block can publish a valid
++// rowless leaf before its preceding actions: it references no node, changes no type and appends no
++// payload. A type that is not valid at block entry stays on the ordinary path at its own position.
++static uint32_t check_graph_leaf_blocks(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckValue* arguments, Arena* scratch)
++{
++    uint32_t node = 0;
++    uint32_t slot = 0;
++    for (; graph->count - node >= 16; node += 16)
++    {
++        const __m512i ops = _mm512_loadu_si512(graph->ops + node);
++        uint32_t leaves = _mm512_cmpeq_epi32_mask(ops, _mm512_set1_epi32(CHECK_OP_VALUE));
++        uint32_t pending = 0xffff;
++        while (leaves != 0)
++        {
++            const uint32_t bit = leaves & (0u - leaves);
++            const uint32_t at = node + (uint32_t)_tzcnt_u32(bit);
++            const CheckGraphLeaf* leaf = graph->leaf_records + slot++;
++            if (leaf->row == 0 && leaf->integer == 0 && type_is_valid(types, leaf->type))
++            {
++                stream->value_types[at] = leaf->type;
++                stream->value_flags[at] = leaf->flags;
++                stream->value_objects[at] = leaf->object;
++                stream->value_categories[at] = leaf->category;
++                stream->value_constants[at] = leaf->constant_kind;
++                if (!check_leaf_mutate) stream->conversions[at].operands[0].type = leaf->type;
++                check_leaf_block_hits++;
++                pending ^= bit;
++            }
++            leaves ^= bit;
++        }
++        stream->statistics.vector_nodes += 16u - (uint32_t)_mm_popcnt_u32(pending);
++        while (pending != 0)
++        {
++            const uint32_t at = node + (uint32_t)_tzcnt_u32(pending);
++            if (graph->ops[at] == CHECK_OP_VALUE)
++            {
++                check_graph_leaf(types, graph, stream, at);
++            }
++            else
++            {
++                check_graph_scalar_node(types, graph, stream, at, arguments, scratch);
++            }
++            pending &= pending - 1;
++        }
++    }
++    return node;
++}
++
+ // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
+ // default is check_graph_region_postorder's batches, which the benchmark measured faster). Dependencies before begin
+ // are already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them
+@@ -4064,6 +4164,12 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
+ 
+ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
+ {
++    check_leaf_block_hits = check_leaf_arity_hits = check_leaf_condition_hits = 0;
++    check_leaf_condition_enable = getenv("LEAF_CONDITION") != NULL;
++    check_leaf_remove_flags = getenv("LEAF_MUTATE_FLAGS") != NULL;
++    check_leaf_remove_conversions = getenv("LEAF_MUTATE_ARITY") != NULL;
++    check_leaf_use_sparse = getenv("LEAF_ARITY") != NULL;
++    check_leaf_mutate = getenv("LEAF_MUTATE") != NULL;
+     const uint64_t output_start = output->length;
+     const uint64_t scratch_start = scratch->length;
+     *stream = (CheckStream){
+@@ -4214,6 +4320,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->zero_columns = zero_output;
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
++        if (getenv("LEAF_BLOCKS") != NULL && !transitions && !regions && zero_output && graph->dense_leaves == NULL && graph->overload_candidate_count == 0)
++        {
++            node = check_graph_leaf_blocks(types, graph, stream, arguments, scratch);
++        }
+         while (node < count)
+         {
+             if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+@@ -4275,6 +4385,45 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+             }
+         }
+     }
++    const char* hitlog = getenv("CHECKED_LEAF_HITS");
++    if (result && hitlog != NULL)
++    {
++        FILE* file = fopen(hitlog, "ab");
++        if (!file) abort();
++        fprintf(file, "%u %u %u\n",check_leaf_block_hits,check_leaf_arity_hits,check_leaf_condition_hits);
++        fclose(file);
++    }
++    const char* leaf_log = getenv("CHECKED_LEAF_ORACLE");
++    if (result && leaf_log != NULL)
++    {
++        FILE* out = fopen(leaf_log, "ab");
++        if (out == NULL) abort();
++        const uint32_t header[] = { count, zero_output, graph->argument_count, types->types.count, stream->payload_count,
++            stream->statistics.scalar_nodes, stream->statistics.vector_nodes, stream->effect_count, stream->report_count };
++        fwrite(header, sizeof(header), 1, out);
++        for (uint32_t node = 0; node < count; ++node)
++        {
++            CheckValue value = check_stream_value(stream, node);
++            value.floating_storage[1] &= 0xffffu;
++            value.imaginary_storage[1] &= 0xffffu;
++            fwrite(&value, sizeof(value), 1, out);
++            const uint32_t fields[] = { graph->tokens[node], graph->ops[node], graph->operand0[node], graph->operand1[node], graph->operand2[node],
++                stream->value_types[node], stream->value_flags[node], stream->value_objects[node], stream->value_categories[node], stream->value_constants[node],
++                stream->diagnostics[node], stream->diagnostic_operands[node], stream->warnings[node], stream->warning_ignored[node],
++                stream->payload_rows[node], stream->constant_evaluated == NULL ? 0 : stream->constant_evaluated[node] };
++            fwrite(fields, sizeof(fields), 1, out);
++            fwrite(stream->conversions + node, sizeof(*stream->conversions), 1, out);
++            fwrite(stream->member_offsets + node, sizeof(*stream->member_offsets), 1, out);
++        }
++        if (graph->argument_count != 0) fwrite(stream->argument_conversions, sizeof(*stream->argument_conversions), graph->argument_count, out);
++        for (uint32_t index = 0; index < types->types.count; ++index)
++        {
++            const uint64_t fields[] = { types->types.kind[index], types->types.code[index], types->types.flags[index], types->types.alignment_log2[index], types->types.base[index],
++                types->types.index[index], types->types.extent[index], types->types.size[index], types->types.hash[index] };
++            fwrite(fields, sizeof(fields), 1, out);
++        }
++        if (fclose(out) != 0) abort();
++    }
+     if (!result)
+     {
+         arena_pop_to(output, output_start);
