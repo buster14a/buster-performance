@@ -1,0 +1,428 @@
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 6298e369f..6fb7f5017 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -776,6 +776,8 @@ struct CheckControlWriter
+ {
+     CheckProgram* program;
+     const Parser* parser;
++    // A resolved branch, asm or case edge enters the implicit END of the main body.
++    bool targets_end;
+     // The index of the body the writer builds (check_control_build), which its regions record (CheckProgramRegion.body).
+     uint32_t body;
+     // The body's children lists, by token: each token's first and last child and its siblings, which check_control_begin
+@@ -2894,6 +2896,8 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
+             region->count = writer->count - writer->first_entry - region->first;
+         }
+     }
++    const uint32_t end = writer->entry_count - 1u;
++    writer->targets_end = false;
+     for (uint32_t i = writer->first_entry; i < writer->count && writer->program->status == CHECK_PROGRAM_OK; i += 1)
+     {
+         CheckControl* entry = &writer->entries[i];
+@@ -2906,6 +2910,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
+             else
+             {
+                 entry->target = writer->labels[entry->target];
++                writer->targets_end |= entry->target == end;
+             }
+         }
+         else if (entry->kind == CHECK_CONTROL_ASM)
+@@ -2922,6 +2927,7 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
+                 else
+                 {
+                     writer->program->asm_targets[writer->program->asm_offsets[entry->target] + l] = writer->labels[label];
++                    writer->targets_end |= writer->labels[label] == end;
+                 }
+             }
+         }
+@@ -2938,17 +2944,17 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
+         else
+         {
+             item->target = writer->labels[label];
++            writer->targets_end |= item->target == end;
+         }
+     }
+ }
+ 
+ #include "c_check_return_flow.c"
+ 
+-// Aggregate returns need an address even at a reachable implicit return. Reuse the completed writer's label and
+-// task scratch for a bounded CFG worklist; each control enters once. The first walk retains both conditional edges,
+-// as Tier 0 validates them, and removes dead transfers without renumbering labels. The second selects constant
+-// conditions for the source warning. Statement-expression regions keep the lowering's existing stack tracking.
+-static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, const uint8_t* return_facts, bool return_warnings,
++// Aggregate emission retains both conditional edges and removes unreachable transfers without renumbering labels.
++// The warning folds conditions. First assume every expression returns: if END is unreachable even then, no
++// expression contract can make it reachable. Only a body that can fall through needs its accurate return contracts.
++static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBody* body, CheckReturnFacts* return_facts, bool return_warnings,
+                                       bool noreturn_warnings)
+ {
+     CheckProgram* program = writer->program;
+@@ -2962,13 +2968,22 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
+     if (program->status == CHECK_PROGRAM_OK && (aggregate || scalar || (noreturn_warnings && noreturn)) && body->count != 0 && body->count == body->entry_count)
+     {
+         CheckControl* entries = writer->entries + body->first;
++        // A scalar return needs no emission walk. END can only be reached by a resolved target or by falling
++        // through its preceding entry. An indirect jump can enter only a source LABEL.
++        if (scalar && !writer->targets_end && body->count >= 2 && entries[body->count - 1].kind == CHECK_CONTROL_END)
++        {
++            const uint32_t last = entries[body->count - 2].kind;
++            if (last == CHECK_CONTROL_RETURN || last == CHECK_CONTROL_JUMP || last == CHECK_CONTROL_JUMP_INDIRECT || last == CHECK_CONTROL_END)
++            {
++                return;
++            }
++        }
+         uint8_t* seen = (uint8_t*)writer->tasks;
+         uint32_t* queue = writer->labels;
+         const CheckGraph* graph = &program->input->graph;
+-        // The first walk is the aggregate return's alone: a scalar return's lowering reads neither its falls nor its
+-        // entries' kinds, so that a scalar body takes the warning's walk only. The second walk is the warnings': -Wreturn-type's,
+-        // and -Winvalid-noreturn's, which -Wno-return-type keeps.
+-        for (uint32_t pass = aggregate ? 0u : 1u; pass < (return_warnings || (noreturn_warnings && noreturn) ? 2u : 1u); pass += 1)
++        enum { EMISSION, POSSIBLE_FALLTHROUGH, RETURN_WARNING };
++        const bool warnings = return_warnings || (noreturn_warnings && noreturn);
++        for (uint32_t pass = aggregate ? EMISSION : POSSIBLE_FALLTHROUGH; pass <= (warnings ? RETURN_WARNING : EMISSION); pass += 1)
+         {
+             bool warning_safe = true;
+             memset(seen, 0, body->count);
+@@ -2989,12 +3004,12 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
+                 {
+                     bool truth = false;
+                     const bool jump = entry->kind == CHECK_CONTROL_JUMP;
+-                    const bool known = pass != 0 && !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
++                    const bool known = pass != EMISSION && !jump && check_program_branch_truth(program, entry->node, entry->node, &truth);
+                     const bool taken = truth == (entry->kind == CHECK_CONTROL_BRANCH_TRUE);
+                     targets[0] = jump || !known || taken ? entry->target : BUSTER_CHECK_NONE;
+                     next = !jump && (!known || !taken);
+                 }
+-                else if (pass != 0 && entry->kind == CHECK_CONTROL_SWITCH)
++                else if (pass != EMISSION && entry->kind == CHECK_CONTROL_SWITCH)
+                 {
+                     // Clang also recognizes exhaustive enum switches. Their enumerator set is not retained here;
+                     // avoid a false fall-off warning until that coverage fact is available, as for noreturn calls.
+@@ -3013,9 +3028,9 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
+                 else if (entry->kind == CHECK_CONTROL_CASE)
+                 {
+                     const CheckProgramCase* item = program->cases + entry->target;
+-                    const uint32_t condition = pass != 0 ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
++                    const uint32_t condition = pass != EMISSION ? program->input->token_nodes[item->owner] : BUSTER_CHECK_NONE;
+                     CheckProgramCase selected = { .type = item->type };
+-                    const bool known = pass != 0 && check_program_case_value(program, condition, item->type, &selected.lower, &selected.wide_lower);
++                    const bool known = pass != EMISSION && check_program_case_value(program, condition, item->type, &selected.lower, &selected.wide_lower);
+                     const bool taken = known && check_program_case_compare(program, &selected, false, item, false) >= 0 &&
+                                        check_program_case_compare(program, &selected, false, item, true) <= 0;
+                     targets[0] = !known || taken ? item->target : BUSTER_CHECK_NONE;
+@@ -3051,16 +3066,16 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
+                     }
+                     next = entry->kind != CHECK_CONTROL_JUMP_INDIRECT;
+                 }
+-                if (pass != 0)
++                if (pass == RETURN_WARNING)
+                 {
+-                    uint8_t fact = entry->node < graph->count ? return_facts[entry->node] : 0;
++                    uint8_t fact = check_program_return_cached(program, return_facts, entry->node);
+                     if (entry->kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL && entry->target < program->initializers->count)
+                     {
+                         const CheckInitializer* plan = program->initializers->plans + entry->target;
+                         for (uint32_t part = 0; part < plan->count; part += 1)
+                         {
+                             const CheckInitPart* value = plan->parts + part;
+-                            fact |= value->kind == CHECK_INIT_VALUE && value->node < graph->count ? return_facts[value->node] : 0;
++                            fact |= value->kind == CHECK_INIT_VALUE ? check_program_return_cached(program, return_facts, value->node) : 0;
+                         }
+                     }
+                     // A guaranteed nonreturning expression ends only this CFG edge. Unknown contracts retain the
+@@ -3090,7 +3105,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
+                 }
+             }
+             const bool falls = body->count != 0 && seen[body->count - 1] != 0;
+-            if (pass == 0)
++            if (pass == EMISSION)
+             {
+                 body->return_flow = aggregate;
+                 body->falls = falls;
+@@ -3101,16 +3116,14 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
+                         entries[i].kind = CHECK_CONTROL_END;
+                     }
+                 }
+-                // The warning walk only removes edges by folding conditions or recognizing terminal calls.
+-                // If the conservative first walk cannot fall through, it cannot produce a fall-off warning.
+-                if (!falls)
+-                {
+-                    break;
+-                }
+             }
+-            else
++            if (!falls)
++            {
++                break;
++            }
++            if (pass == RETURN_WARNING)
+             {
+-                body->return_warning = falls && warning_safe ? noreturn ? (noreturn_warnings ? 3 : 0) : returns ? 2 : 1 : 0;
++                body->return_warning = warning_safe ? noreturn ? (noreturn_warnings ? 3 : 0) : returns ? 2 : 1 : 0;
+             }
+         }
+     }
+@@ -5762,7 +5775,7 @@ struct CheckProgramRun
+     Arena controls;
+     CheckControlWriter writer;
+     CheckProgramTargetEvents target_events;
+-    const uint8_t* return_facts;
++    CheckReturnFacts return_facts;
+     uint32_t* openings;
+     uint32_t* seen;
+     uint32_t* nodes;
+@@ -6188,11 +6201,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+         .fold_capacity = node_count + 1,
+         .capacity = capacity,
+     };
+-    // Source warning contracts are a single postorder reduction, reused by every body's CFG walk. They neither
+-    // alter emission reachability nor run on a rejected stream. Warning-disabled commands keep no extra facts.
+-    const uint8_t* return_facts = valid && program->status == CHECK_PROGRAM_OK && options.return_warnings && node_count != 0 ?
+-                                    check_program_return_facts(program, scratch, options.return_flow_work, BUSTER_SCALAR_PATH(options.scalar)) : NULL;
+-    valid = valid && (!options.return_warnings || node_count == 0 || return_facts != NULL) && program->status == CHECK_PROGRAM_OK;
++    valid = valid && program->status == CHECK_PROGRAM_OK;
+     // The labelled library declarations, which a computed call's test reads in the references' pass below.
+     valid = valid && check_program_labelled_objects(program, output);
+     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
+@@ -6251,7 +6260,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+         .controls = controls,
+         .writer = writer,
+         .target_events = target_events,
+-        .return_facts = return_facts,
++        .return_facts = { .work = options.return_flow_work },
+         .openings = openings,
+         .seen = seen,
+         .nodes = nodes,
+@@ -6287,7 +6296,6 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
+     const CheckProgramOptions* options = &run->options;
+     Arena* output = run->output;
+     Arena* scratch = run->scratch;
+-    const uint8_t* return_facts = run->return_facts;
+     const uint32_t* openings = run->openings;
+     uint32_t* seen = run->seen;
+     uint32_t* nodes = run->nodes;
+@@ -6324,7 +6332,7 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
+         body->label_count = writer->label_position_count - label_first;
+         body->cleanup_first = writer->cleanup_first;
+         body->cleanup_count = writer->cleanup_count;
+-        check_program_return_flow(writer, body, return_facts, options->return_warnings, options->noreturn_warnings);
++        check_program_return_flow(writer, body, &run->return_facts, options->return_warnings, options->noreturn_warnings);
+         program->exit_count = writer->exit_count;
+         if (writer->exit_count != exit_start && program->status == CHECK_PROGRAM_OK)
+         {
+@@ -6600,6 +6608,7 @@ static bool check_program_finish(CheckProgramRun* run)
+     {
+         arena_pop_to(scratch, temporary);
+     }
++    arena_release(&run->return_facts.storage);
+     arena_release(&controls);
+     return valid;
+ }
+diff --git a/src/buster/compiler/c_check_program_test.c b/src/buster/compiler/c_check_program_test.c
+index 343de275b..5c2718a37 100644
+--- a/src/buster/compiler/c_check_program_test.c
++++ b/src/buster/compiler/c_check_program_test.c
+@@ -2009,6 +2009,19 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
+             const uint8_t* sparse = check_program_return_facts(&program, &scratch, NULL, false);
+             snprintf(description, sizeof(description), "%s: the return facts' walk gives every node the definition's facts", name);
+             check_test_expect(test, input.graph.count == 0 || (exact != NULL && sparse != NULL && memcmp(exact, sparse, input.graph.count) == 0), description);
++            CheckReturnFacts cached = { 0 };
++            bool same = exact != NULL || input.graph.count == 0;
++            for (uint32_t node = 0; same && node < input.graph.count; node += 1)
++            {
++                same = check_program_return_cached(&program, &cached, node) == exact[node];
++            }
++            for (uint32_t end = input.graph.count; same && end != 0; end -= 1)
++            {
++                same = check_program_return_cached(&program, &cached, end - 1) == exact[end - 1];
++            }
++            snprintf(description, sizeof(description), "%s: incremental and cached return facts match every scalar node", name);
++            check_test_expect(test, same, description);
++            arena_release(&cached.storage);
+             arena_pop_to(&scratch, facts_mark);
+         }
+         // A program that includes the system's headers lowers what its roots reach, as -c does: their other functions
+@@ -3453,7 +3466,8 @@ static void check_test_program_return_marks(CheckTest* test)
+             CheckControl entries[] = { { .kind = CHECK_CONTROL_EVALUATE, .node = 0 }, { .kind = CHECK_CONTROL_END, .node = BUSTER_CHECK_NONE } };
+             CheckControlWriter writer = { .program = &program, .entries = entries, .tasks = tasks, .labels = labels, .capacity = capacity };
+             CheckProgramBody body = { .count = BUSTER_ARRAY_LENGTH(entries), .entry_count = BUSTER_ARRAY_LENGTH(entries) };
+-            check_program_return_flow(&writer, &body, facts, true, true);
++            CheckReturnFacts cached = { .facts = facts, .computed = NODES };
++            check_program_return_flow(&writer, &body, &cached, true, true);
+             bool same = body.return_flow && body.falls && body.return_warning == (contract == 0 ? 1 : 0);
+             for (uint32_t node = 0; same && node <= NODES; node += 1)
+             {
+diff --git a/src/buster/compiler/c_check_return_call_driver_test.c b/src/buster/compiler/c_check_return_call_driver_test.c
+index 2b6e1a296..8ac4b550c 100644
+--- a/src/buster/compiler/c_check_return_call_driver_test.c
++++ b/src/buster/compiler/c_check_return_call_driver_test.c
+@@ -28,6 +28,9 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
+         { "ordinary int call on the falling path", "int g(int); int f(int x){if(x)return 1;g(x);}\n", 1, 1 },
+         { "ordinary calls on both paths", "void g(void); int f(int x){if(x){g();return 1;}g();}\n", 1, 1 },
+         { "call followed by another statement", "void g(void); int f(int x){if(x)return 1;g();x++;}\n", 1, 1 },
++        { "conditional branch targets implicit end after return", "int f(int x){if(x)return 1;}\n", 1, 1 },
++        { "switch can miss a returning case", "int f(int x){switch(x){case 1:return 1;}}\n", 1, 1 },
++        { "goto reaches a label after return", "int f(int x){if(x)goto tail;return 1;tail:;}\n", 1, 1 },
+         { "both branches return after calls", "void g(void); int f(int x){if(x){g();return 1;}g();return 2;}\n", 0, 0 },
+         { "unreachable call", "void g(void); int f(void){return 1;g();}\n", 0, 0 },
+         { "declared noreturn call", "_Noreturn void die(void); int f(void){die();}\n", 0, 0 },
+diff --git a/src/buster/compiler/c_check_return_flow.c b/src/buster/compiler/c_check_return_flow.c
+index 17373fdb2..813da2a06 100644
+--- a/src/buster/compiler/c_check_return_flow.c
++++ b/src/buster/compiler/c_check_return_flow.c
+@@ -229,27 +229,27 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
+     return fact;
+ }
+ 
+-// check_program_return_facts' walk: only a source, a node whose own contract may be a stop or unknown (a call, a
++// Walk [first, end) in topological order. Only a source, a node whose own contract may be a stop or unknown (a call, a
+ // miscellaneous or x86 builtin, a query), or a node one of whose operands' or arguments' facts isn't zero can have facts,
+ // so that each node's test reads its operands' facts, a byte each (an absent one the sink's, `facts[count]`, zero), and
+ // only those nodes take check_program_return_node. A node's operands precede it, so their facts are made; one that doesn't
+ // precede it has none yet, which check_program_return_node reads as none too. The sources are 16 operators at a time,
+ // whose bits each block's nodes then take. Every other node's facts are zero, as check_program_return_node would make
+ // them.
+-static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
++static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, uint32_t first, uint32_t end,
++                                        const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
+ {
+     const CheckGraph* graph = &program->input->graph;
+     const uint32_t count = graph->count;
+     const bool arguments = graph->argument_offsets != NULL && graph->argument_counts != NULL;
+-    memset(facts, 0, (uint64_t)count + 1);
+     const __m512i call = _mm512_set1_epi32(CHECK_OP_CALL);
+     const __m512i query = _mm512_set1_epi32(CHECK_OP_BUILTIN_QUERY);
+     const __m512i misc = _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC);
+     const __m512i x86 = _mm512_set1_epi32(CHECK_OP_BUILTIN_X86);
+     const __m512i limit = _mm512_set1_epi32((int)count);
+-    for (uint32_t first = 0; first < count; first += 16)
++    while (first < end)
+     {
+-        const __mmask16 live = count - first >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << (count - first)) - 1);
++        const __mmask16 live = end - first >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << (end - first)) - 1);
+         const __m512i ops = _mm512_maskz_loadu_epi32(live, graph->ops + first);
+         const uint32_t sources = _mm512_mask_cmpeq_epi32_mask(live, ops, call) | _mm512_mask_cmpeq_epi32_mask(live, ops, query) |
+                                  _mm512_mask_cmpeq_epi32_mask(live, ops, misc) | _mm512_mask_cmpeq_epi32_mask(live, ops, x86);
+@@ -258,7 +258,7 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, c
+         _mm512_store_si512(operands[0], _mm512_min_epu32(_mm512_maskz_loadu_epi32(live, graph->operand0 + first), limit));
+         _mm512_store_si512(operands[1], _mm512_min_epu32(_mm512_maskz_loadu_epi32(live, graph->operand1 + first), limit));
+         _mm512_store_si512(operands[2], _mm512_min_epu32(_mm512_maskz_loadu_epi32(live, graph->operand2 + first), limit));
+-        const uint32_t lanes = count - first < 16 ? count - first : 16;
++        const uint32_t lanes = end - first < 16 ? end - first : 16;
+         for (uint32_t lane = 0; lane < lanes; lane += 1)
+         {
+             const uint32_t node = first + lane;
+@@ -281,33 +281,76 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, c
+                 }
+             }
+         }
++        first += lanes;
+     }
+ }
+ 
+-// One postorder reduction gives each node a guaranteed stop and a possible unknown control contract
+-// (check_program_return_node), visiting only the nodes that can have facts (check_program_return_sparse). Their
+-// `count` + 1 entries end with a sink, zero. `scalar` is only the attributes' scan's (check_program_return_unknowns).
+-static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
++typedef struct CheckReturnFacts CheckReturnFacts;
++struct CheckReturnFacts
+ {
+-    const CheckGraph* graph = &program->input->graph;
+-    const uint32_t count = graph->count;
+-    uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
+-    uint32_t* unknowns = NULL;
+-    const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns);
+-    if (!ready)
++    Arena storage;
++    uint8_t* facts;
++    uint32_t* unknowns;
++    const uint8_t* names;
++    uint64_t* work;
++    uint32_t computed;
++};
++
++static bool check_program_return_prepare(CheckProgram* program, CheckReturnFacts* cache, Arena* scratch)
++{
++    const uint64_t bytes = (uint64_t)program->input->graph.count + 1;
++    cache->facts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, bytes);
++    if (cache->facts == NULL || !check_program_return_unknowns(program, scratch, &cache->unknowns))
+     {
+         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
+-        facts = NULL;
++        return false;
+     }
+-    // The names' answers are an optimisation only: without them every call searches the catalogue, as before.
+-    const uint8_t* names = ready && count != 0 ? check_program_return_library_names(program->identifiers, scratch) : NULL;
+-    if (ready && count != 0)
++    // This includes a zero sink for absent operands, and zeroes for forward references the checked walk may read.
++    memset(cache->facts, 0, bytes);
++    cache->names = check_program_return_library_names(program->identifiers, scratch);
++    return true;
++}
++
++// The complete postorder reduction for the diagnostic census and the checker's independent comparison.
++static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
++{
++    const uint32_t count = program->input->graph.count;
++    CheckReturnFacts cache = { 0 };
++    if (count == 0 || !check_program_return_prepare(program, &cache, scratch))
+     {
+-        check_program_return_sparse(program, facts, unknowns, names, work);
++        return NULL;
+     }
+-    if (ready && count != 0)
++    check_program_return_sparse(program, cache.facts, 0, count, cache.unknowns, cache.names, work);
++    return cache.facts;
++}
++
++// The source warning asks only about controls in a body that can fall through. A node's operands precede it:
++// retain completed vector blocks across bodies, extending the prefix only as far as a demanded root requires.
++static uint8_t check_program_return_cached(CheckProgram* program, CheckReturnFacts* cache, uint32_t root)
++{
++    const uint32_t count = program->input->graph.count;
++    if (root >= count || program->status != CHECK_PROGRAM_OK)
++    {
++        return 0;
++    }
++    if (root >= cache->computed)
+     {
+-        facts[count] = 0;
++        if (cache->facts == NULL)
++        {
++            // Body windows reuse their scratch, so this cache owns its storage until check_program_finish.
++            const uint64_t names = program->identifiers != NULL ? program->identifiers->count : 0;
++            const uint64_t tokens = (uint64_t)program->input->token_count + 1;
++            const uint64_t bytes = (uint64_t)count + 1 + tokens * sizeof(uint32_t) + names + _Alignof(uint32_t);
++            cache->storage = arena_reserve(bytes);
++            if (!check_program_return_prepare(program, cache, &cache->storage))
++            {
++                return 0;
++            }
++        }
++        const uint32_t block = root & ~15u;
++        const uint32_t end = count - block <= 16 ? count : block + 16;
++        check_program_return_sparse(program, cache->facts, cache->computed, end, cache->unknowns, cache->names, cache->work);
++        cache->computed = end;
+     }
+-    return facts;
++    return cache->facts[root];
+ }
+diff --git a/src/buster/compiler/c_check_warning_driver_test.c b/src/buster/compiler/c_check_warning_driver_test.c
+index c0f0d6ab4..4bbffafc6 100644
+--- a/src/buster/compiler/c_check_warning_driver_test.c
++++ b/src/buster/compiler/c_check_warning_driver_test.c
+@@ -1501,6 +1501,11 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
+         .options = { "-Wno-return-type" },
+         .warnings = 1,
+     },
++    {
++        .name = "noreturn call when return-type warnings are disabled",
++        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
++        .options = { "-Wno-return-type" },
++    },
+     {
+         .name = "noreturn group disabled",
+         .source = "_Noreturn void f(void){return;}\n",
