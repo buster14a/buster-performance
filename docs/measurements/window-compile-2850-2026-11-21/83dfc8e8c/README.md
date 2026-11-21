@@ -1,0 +1,7 @@
+# Source-certified constant operands after parser source indexing
+
+The integrated [PR #3247](https://github.com/buster14a/buster/pull/3247) candidate maps parser token positions through the current mainline source indexing before decoding hexadecimal integer spellings. The [three-way four-corpus comparison](four-corpus/README.md) compares its actual direct mainline base 325883abf with the ordinary and opt-in modes of the production binary.
+
+A [native contiguous and remapped regression](const83d-fixture.sh) passed on both debug compilation paths. Both selected four roots and removed ten nodes. All four complete debug objects match in the [object receipts](regression-object-sha256.txt). [Checker shard 5](checker-shard.txt) completed 210,637 assertions. The source, per-unit measures, disjoint build identities, and [earlier preintegration study](../a60859270/README.md) identify the experiments.
+
+On the same executable, the option saved 5.9845 ms when compiling Buster itself and reduced total cycles in each of three rounds. SQLite saved 0.3595 ms at the median, with one positive elapsed difference. Lua and musl had small increases in their paired elapsed medians with ranges spanning zero. The option-enabled process was faster in every paired elapsed comparison with the independently built parent on all four inputs. The table also shows the ordinary compiler differences between those two builds.
