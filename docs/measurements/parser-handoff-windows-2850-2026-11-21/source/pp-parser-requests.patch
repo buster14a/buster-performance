@@ -1,0 +1,174 @@
+diff --git a/src/buster/compiler/c_parser_benchmark.c b/src/buster/compiler/c_parser_benchmark.c
+index 03d1ab354..9895c3f00 100644
+--- a/src/buster/compiler/c_parser_benchmark.c
++++ b/src/buster/compiler/c_parser_benchmark.c
+@@ -587,7 +587,19 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
+         case PARSE_TIMED_VECTOR_FALLBACK:
+         {
+             const bool everything = k->unbalanced || k->unsupported || !bench->statements_ok;
+-            parse_fallback(k, &input, everything);
++            // The whole parser collects these blocks while publishing function roles and counting flags.
++            // Standalone fallback charges collection here.
++            uint32_t flagged_blocks = 0;
++            for (uint32_t block = 0; !everything && block < count; block += 64)
++            {
++                const __mmask64 live = _bzhi_u64(UINT64_MAX, count - block < 64 ? count - block : 64);
++                const __m512i bytes = _mm512_maskz_loadu_epi8(live, k->flags + block);
++                if (_mm512_test_epi8_mask(bytes, bytes) != 0)
++                {
++                    buffers->lefts[flagged_blocks++] = block;
++                }
++            }
++            parse_fallback(k, &input, everything, buffers->lefts, flagged_blocks);
+             break;
+         }
+         // The tree's columns as the parser derives them, then with the subtree sizes, then the links from that postorder, as
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index 87d2d26b0..7c4fae822 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -7693,14 +7693,25 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input,
+     result->tokens += end + 1 - begin;
+ }
+ 
+-// Parses every top-level declaration that has a flagged token with the scalar parser, in place: roles, depths and
+-// parents of its tokens. The scalar parser sees the file-scope typedef names declared before each one. With
+-// `everything`, the whole unit is one range (unbalanced brackets, a typedef the pass can't read, or what K5 can't
+-// settle). The declarations end where a terminator or a function body's closer is at node depth 0, found 64 tokens at a
+-// time.
+-static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* input, bool everything)
+-{
+-    ParseFallback result = { .items = 0, .tokens = 0, .errors = false };
++// The declaration ends in the aligned block, skipped for blocks outside the few declarations sent to fallback.
++static uint64_t parse_fallback_ends(const ParseKernels* kernels, uint32_t count, uint32_t block)
++{
++    const __m512i roles = _mm512_loadu_si512(kernels->roles + block);
++    const __mmask64 end_roles = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_TERMINATOR)) |
++                               _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BODY));
++    __mmask64 top = 0;
++    for (uint32_t q = 0; q < 4; q += 1)
++    {
++        top |= (__mmask64)_mm512_cmpeq_epi32_mask(_mm512_loadu_si512(kernels->node_depths + block + 16 * q), _mm512_setzero_si512()) << (16 * q);
++    }
++    return top & end_roles & _bzhi_u64(UINT64_MAX, count - block < 64 ? count - block : 64);
++}
++
++// Recover the beginning and end of the declaration containing a flagged token. Each backward search stops at the
++// previous reparsed declaration: its original roles need not survive the scalar parser, and it cannot own later tokens.
++static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* input, bool everything, const uint32_t* flagged_blocks, uint32_t block_count)
++{
++    ParseFallback result = { 0 };
+     const uint32_t count = input->count;
+     uint32_t visible = 0;
+     if (everything && count != 0)
+@@ -7709,48 +7720,50 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
+     }
+     else
+     {
+-        uint32_t begin = 0;
+-        bool flagged = false;
+-        for (uint32_t block = 0; block < count; block += 64)
++        uint32_t consumed = 0;
++        for (uint32_t i = 0; i < block_count; i += 1)
+         {
+-            const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+-            const __m512i flag_bytes = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
+-            uint64_t flags = _mm512_test_epi8_mask(flag_bytes, flag_bytes);
+-            const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+-            __mmask64 top = 0;
+-            for (uint32_t q = 0; q < 4; q += 1)
++            const uint32_t block = flagged_blocks[i];
++            const uint32_t skip = consumed > block ? consumed - block : 0;
++            if (skip >= 64)
+             {
+-                top |= (__mmask64)_mm512_cmpeq_epi32_mask(_mm512_loadu_si512(kernels->node_depths + block + 16 * q), _mm512_setzero_si512()) << (16 * q);
++                continue;
+             }
+-            uint64_t ends = top & live & (_mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_TERMINATOR)) | _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_CLOSE_BODY)));
+-            if (!flagged && flags == 0)
++            const __mmask64 live = _bzhi_u64(UINT64_MAX, count - block < 64 ? count - block : 64);
++            const __m512i bytes = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
++            uint64_t flags = _mm512_test_epi8_mask(bytes, bytes) & ~_bzhi_u64(UINT64_MAX, skip);
++            while (flags != 0)
+             {
+-                begin = ends != 0 ? block + 64 - (uint32_t)__builtin_clzll(ends) : begin;
+-            }
+-            else
+-            {
+-                while (ends != 0)
++                const uint32_t first = block + (uint32_t)__builtin_ctzll(flags);
++                uint32_t begin = first;
++                while (begin > consumed)
+                 {
+-                    const uint32_t lane = (uint32_t)__builtin_ctzll(ends);
+-                    ends &= ends - 1;
+-                    const uint64_t through = lane == 63 ? ~(uint64_t)0 : (((uint64_t)1 << (lane + 1)) - 1);
+-                    flagged |= (flags & through) != 0;
+-                    flags &= ~through;
+-                    if (flagged)
++                    const uint32_t here = (begin - 1) & ~63u;
++                    const uint32_t lower = consumed > here ? consumed - here : 0;
++                    const uint64_t ends = parse_fallback_ends(kernels, count, here) & _bzhi_u64(UINT64_MAX, begin - here) & ~_bzhi_u64(UINT64_MAX, lower);
++                    if (ends != 0)
+                     {
+-                        parse_fallback_item(kernels, input, begin, block + lane, &visible, &result);
++                        begin = here + 64 - (uint32_t)__builtin_clzll(ends);
++                        break;
+                     }
+-                    begin = block + lane + 1;
+-                    flagged = false;
++                    begin = here + lower;
+                 }
+-                flagged |= flags != 0;
++                uint32_t end = count - 1;
++                for (uint32_t here = block; here < count; here += 64)
++                {
++                    const uint32_t lower = here == block ? first - block : 0;
++                    const uint64_t ends = parse_fallback_ends(kernels, count, here) & ~_bzhi_u64(UINT64_MAX, lower);
++                    if (ends != 0)
++                    {
++                        end = here + (uint32_t)__builtin_ctzll(ends);
++                        break;
++                    }
++                }
++                parse_fallback_item(kernels, input, begin, end, &visible, &result);
++                consumed = end + 1;
++                flags &= ~_bzhi_u64(UINT64_MAX, consumed - block < 64 ? consumed - block : 64);
+             }
+         }
+-        // A flagged declaration the input ends in.
+-        if (flagged && begin < count)
+-        {
+-            parse_fallback_item(kernels, input, begin, count - 1, &visible, &result);
+-        }
+     }
+     for (uint32_t i = 0; i < visible; i += 1)
+     {
+@@ -11100,6 +11113,7 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+     // A unit the kernels can't take goes to the scalar parser whole, without K6's flags. Where its brackets don't
+     // balance, or K5 can't settle its statements, the kernels before K6 leave some of what it reads unwritten, so it
+     // would flag tokens by what a parse's reused temporaries held before (#528).
++    uint32_t flagged_blocks = 0;
+     if (!result.everything)
+     {
+         parse_check_avx512(kernels, names, input->flags, count, buffers->typed, &buffers->check_twins);
+@@ -11108,11 +11122,17 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+         {
+             const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+             const __m512i flags = _mm512_maskz_loadu_epi8(live, kernels->flags + block);
+-            result.flagged_tokens += (uint64_t)__builtin_popcountll(_mm512_test_epi8_mask(flags, flags));
++            const uint64_t failed = _mm512_test_epi8_mask(flags, flags);
++            if (failed != 0)
++            {
++                // K4's left candidates are dead after K5; these are the only blocks the fallback reads.
++                buffers->lefts[flagged_blocks++] = block;
++                result.flagged_tokens += (uint64_t)__builtin_popcountll(failed);
++            }
+             parse_function_roles_block_avx512(kernels, block, live);
+         }
+     }
+-    result.fallback = parse_fallback(kernels, input, result.everything);
++    result.fallback = parse_fallback(kernels, input, result.everything, buffers->lefts, flagged_blocks);
+     parse_typedefs_clear(kernels);
+     parse_kernels_predeclared(kernels, predeclared, false);
+     return result;
