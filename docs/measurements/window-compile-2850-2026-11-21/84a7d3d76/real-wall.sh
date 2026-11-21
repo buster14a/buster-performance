@@ -19,7 +19,7 @@ for n in $(seq 1 7); do
         args=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sql" "$sql/sqlite3.c" -o "$root/sqlite3.o")
         [ "$mode" != on ] || args=(--node-window "${args[@]}")
         rm -f "$root/sqlite3.o"
-        ./lock.sh taskset -c 2 "$PWD/results/$label/compiler" time-runs --runs 1 --warmups 0 --executable "$bin" --list "${args[@]}" > "$out/$tag.log" 2>&1
+        ./lock.sh taskset -c 2 "$PWD/results/$label/compiler" time-runs --runs 1 --warmups 1 --executable "$bin" --list "${args[@]}" > "$out/$tag.log" 2>&1
         sha256sum "$root/sqlite3.o" | cut -d' ' -f1 > "$out/$tag.sha256"
     done
 done

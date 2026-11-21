@@ -20,6 +20,18 @@ The 42 timed compiles ran on CPU 2 under the shared host lock, twice per mode pe
 
 `pmu.tsv` contains all 42 samples and their output hashes. `process-counters.tar.xz` contains perf output, diagnostics, object sizes and digests, and the three stage reports. The archived perf version returned zero for its duration_time tool event. The table reports perf's CPU task time. The scripts preserve the exact argument lists, mode order, timestamp collection and per-run locking convention.
 
+## Wall time and throughput
+
+A separate seven-round locked series used the same three modes and paired order, with one warm-up followed by one measured child per position. The compiler’s `time-runs` driver measured monotonic elapsed time. The warm-up and timed child shared a tmpfs output path, freshly removed before each pair. The 42 measured outputs had the same object digest as the PMU series.
+
+| Frozen SQLite compilation | Median wall time (ms) | Source throughput (decimal MB/s) |
+| --- | ---: | ---: |
+| Parent, ordinary compile | 121.1305 | 78.486 |
+| Candidate, ordinary compile | 121.0870 | 78.514 |
+| Candidate, opt-in | 120.9440 | 78.607 |
+
+The median paired opt-in difference was −0.0545 ms versus flag-off (range −0.4190 to +0.3945) and −0.1505 ms versus the parent (−2.6040 to +0.7825). Both ranges span zero. [All wall samples and object digests](wall.tsv) and the [individual child time reports](wall-reports.tar.xz) are available.
+
 ## Driver coverage
 
 On the development machine, 1,231 tracked C files and 13,880 C fixtures extracted from checker test source ran through ordinary and opt-in driver modes. Each input used `-fsyntax-only` and `-c`, with default warnings and with `-Wall -Wextra`. The comparison checked exit status, diagnostic bytes, standard output and SHA-256 of each successfully compiled object.
