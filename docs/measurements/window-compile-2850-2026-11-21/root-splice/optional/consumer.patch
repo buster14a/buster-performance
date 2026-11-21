@@ -1,0 +1,413 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f821e9949..e689330c5 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -901,8 +901,35 @@ struct CheckInputWindowEntry
+     uint8_t class;
+ };
+ 
++typedef struct NodeWindowNativeEntry
++{
++    uint64_t value;
++    uint32_t token, left_token, right_token, previous_token, parent_token, cast_token;
++    uint8_t kind, class, op;
++} NodeWindowNativeEntry;
++
++typedef struct NodeWindowNativeCall
++{
++    uint32_t object, arguments;
++    bool variadic;
++    uint8_t classes[];
++} NodeWindowNativeCall;
++
++typedef struct NodeWindowNativeTape
++{
++    uint32_t count;
++    uint32_t calls;
++    uint32_t root_token;
++    uint8_t root_op;
++    NodeWindowNativeCall** rows;
++    NodeWindowNativeEntry entries[];
++} NodeWindowNativeTape;
++
+ struct CheckInput
+ {
++    NodeWindowNativeTape** source_native;
++    uint32_t source_candidates;
++    uint32_t source_key_collisions;
+     CheckGraph graph;
+     CheckEnvironment environment;
+     CheckInputDiagnosticPragmas* diagnostic_pragmas;
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 3420a6e97..93031aa2f 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -554,6 +554,9 @@ struct NodeCensusScratch
+     NodeReads* reads;
+     const Tier0Function* function;
+     const uint32_t* owners;
++    const uint32_t* splice_source;
++    uint64_t source_entries, source_equal, source_roots, source_pure, source_owner, source_root;
++    uint64_t splice_kinds[256][3];
+     // The log's labels' entries (CheckLowerOwners.labels), which a pop's `label` indexes.
+     const uint32_t* labels;
+     uint64_t label_count;
+@@ -5344,6 +5347,7 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+     const uint32_t length = window != NULL ? window->count : machine->entry_count;
+     uint32_t t = 0;
+     bool same = true;
++    bool source_pure = true;
+     uint64_t base = UINT64_MAX;
+     bool inside = e < function->count;
+     s->temporary_count = 0;
+@@ -5359,6 +5363,38 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+             const uint8_t actual_kind = t >= length ? 0 : window != NULL ? window->entries[t].kind : machine->kinds[t];
+             const uint8_t actual_class = t >= length ? 0 : window != NULL ? window->entries[t].class : machine->classes[t];
+             uint64_t actual_value = t >= length ? 0 : window != NULL ? window->entries[t].value : machine->tape[t];
++            if (window != NULL && s->splice_source != NULL && t < length)
++            {
++                const uint32_t want = s->splice_source[e], supplied = window->entries[t].token;
++                const bool hit = want == supplied;
++                if (getenv("NODE_SPLICE_DUMP") != NULL)
++                {
++                    const NodeWindowNativeEntry* q = window->entries + t;
++                    fprintf(stderr,"loc-row %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",root,window->root_op,window->root_token,window->count,t,
++                        q->op,q->kind,q->token,q->left_token,q->right_token,q->previous_token,q->parent_token,want,
++                        node < s->program->stream->count ? s->program->input->graph.tokens[node] : UINT32_MAX, q->class,q->cast_token);
++                }
++                ++s->source_entries; s->source_equal += hit;
++                s->source_root += want == s->program->input->graph.tokens[root];
++                s->source_owner += node < s->program->stream->count && want == s->program->input->graph.tokens[node];
++                ++s->splice_kinds[actual_kind][0];
++                s->splice_kinds[actual_kind][1] += hit;
++                s->splice_kinds[actual_kind][2] += want == s->program->input->graph.tokens[root];
++                source_pure &= hit;
++                if (getenv("NODE_SPLICE_SPELL") && actual_kind==BUSTER_TYPED_DISCARD && want!=window->root_token && s->source_entries < 4000)
++                {
++                    const Parser* parser=s->program->parser;
++                    const uint32_t begin=want>4?want-4:0, end=want+10<parser->tokens.count?want+10:parser->tokens.count;
++                    fprintf(stderr,"splice-spell: root=%u rec=%u ordinary=%u line=%u",window->root_token,supplied,want,node_census_line(s->pp,parser,want));
++                    for(uint32_t j=begin;j<end;++j) fprintf(stderr," %u/%u/%u/%u",j,(uint32_t)parser->tokens.kinds[j],(uint32_t)parser->tree.roles[j],parser->tree.parents[j]);
++                    fputc('\n',stderr);
++                }
++                if (!hit && s->source_entries - s->source_equal <= 8)
++                {
++                    fprintf(stderr, "row-location-miss: root=%u op=%u row=%u kind=%u supplied=%u normal=%u inventory=%u record-op=%u\n",
++                            s->program->input->graph.tokens[root], s->program->input->graph.ops[root], t, actual_kind, supplied, want, node, window->entries[t].op);
++                }
++            }
+             if (window != NULL && node_shadow_global_kind(actual_kind))
+             {
+                 *globals += 1;
+@@ -5386,6 +5422,10 @@ static bool node_shadow_same_entries(NodeCensusScratch* s, const NodeMachine* ma
+             inside = e < function->count;
+         }
+     }
++    if (window != NULL && s->splice_source != NULL)
++    {
++        ++s->source_roots; s->source_pure += source_pure && t == length;
++    }
+     // Every label, a branch's or not, at the lowering's label's entry.
+     for (uint32_t label = 0; same && label < machine->label_count; label += 1)
+     {
+@@ -5870,7 +5910,7 @@ static void node_probe_warning_select(NodeFront* front)
+             state->place_taken = included;
+             uint64_t made[6] = {0};
+             uint32_t asks_fresh = 0;
+-            node_tests_window_bytes_by(tests, state, front, made, true, false, false);
++            node_tests_window_bytes_by(tests, state, front, made, true, true, true);
+             node_tests_window_loop_by(tests, state, front, count, made + 1, made + 2, made + 3, made + 4, made + 5, &asks_fresh, false);
+             node_tests_window_asks(tests, front, asks_fresh);
+             NodeContextsLoopCounts source_contexts = {0};
+@@ -5896,6 +5936,25 @@ static void node_probe_warning_select(NodeFront* front)
+                 if (node_contexts_window_any(state->window_c_masks, BUSTER_NODE_ROWS_MASK_LISTED, first, size)) continue;
+                 NodeWindowNativeTape* part = node_probe_keep_tape(state, front, first, top, r, true);
+                 state->proof_source_tapes[r] = part;
++                CheckInput* input = state->reader->output;
++                if (input->source_native == NULL)
++                {
++                    input->source_native = BUSTER_ARENA_PUSH_ARRAY(state->reader->arena, NodeWindowNativeTape*, (uint64_t)input->token_count + 1);
++                    if (input->source_native == NULL) abort();
++                    memset(input->source_native, 0, ((size_t)input->token_count + 1) * sizeof(*input->source_native));
++                }
++                uint32_t key = part->root_token;
++                if (key >= input->token_count) abort();
++                if (input->source_native[key] != NULL)
++                {
++                    input->source_key_collisions++;
++                    input->source_native[key] = (NodeWindowNativeTape*)(uintptr_t)1;
++                }
++                else
++                {
++                    input->source_native[key] = part;
++                }
++                input->source_candidates++;
+                 kept++;
+                 entries += part->count;
+                 calls_kept += part->calls;
+@@ -7834,6 +7893,33 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+     CheckProgramLowered lowered = { 0 };
+     const bool lowering = prepared && owners.pops != 0 && owners.labels != 0 && owners.named != 0 &&
+                           check_program_lower_owners(&lowered, &selected.program, &owners, &path->output_arena, &path->scratch);
++    CheckProgramLowered provenance = {0};
++    const bool source_provenance = lowering && getenv("NODE_SPLICE_LOCATIONS") != NULL;
++    if (source_provenance && !check_program_lower_sources(&provenance, &selected.program, true, &path->output_arena, &path->scratch)) abort();
++    CheckProgramLowered spliced = {0};
++    if (source_provenance && getenv("NODE_SPLICE_CHECK"))
++    {
++        setenv("NODE_SPLICE_ENABLE","1",1);
++        if (!check_program_lower_sources(&spliced, &selected.program, true, &path->output_arena, &path->scratch)) abort();
++        unsetenv("NODE_SPLICE_ENABLE");
++        uint64_t count=0,wrong=0,source_wrong=0,functions_wrong=0;
++        for(uint32_t b=0;b<selected.program.body_count;++b)
++        {
++            const Tier0Function* off=provenance.functions+b,*on=spliced.functions+b;
++            functions_wrong += off->count!=on->count;
++            if(off->count!=on->count) continue;
++            for(uint32_t i=0;i<off->count;++i)
++            {
++                ++count;
++                const bool miss=off->kinds[i]!=on->kinds[i] || off->classes[i]!=on->classes[i] || off->values[i]!=on->values[i];
++                wrong+=miss; source_wrong+=provenance.entry_tokens[b][i]!=spliced.entry_tokens[b][i];
++                if((miss||provenance.entry_tokens[b][i]!=spliced.entry_tokens[b][i]) && wrong+source_wrong<8) fprintf(stderr,"splice-diff: body=%u row=%u off=%u:%u:%llu on=%u:%u:%llu oldtoken=%u newtoken=%u\n",
++                    b,i,off->kinds[i],off->classes[i],(unsigned long long)off->values[i],on->kinds[i],on->classes[i],(unsigned long long)on->values[i],provenance.entry_tokens[b][i],spliced.entry_tokens[b][i]);
++            }
++        }
++        fprintf(stderr,"splice-result: keys=%u collisions=%u compared=%llu functions-wrong=%llu rows-wrong=%llu sources-wrong=%llu\n",
++            selected.program.input->source_candidates,selected.program.input->source_key_collisions,(unsigned long long)count,(unsigned long long)functions_wrong,(unsigned long long)wrong,(unsigned long long)source_wrong);
++    }
+     const bool complete = lowering && !owners.overflow;
+     if (complete)
+     {
+@@ -7943,6 +8029,14 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                 if (lowered.entry_tokens[b] != 0)
+                 {
+                     s.function = lowered.functions + b;
++                    if (source_provenance)
++                    {
++                        const Tier0Function* ordinary = provenance.functions + b;
++                        if (s.function->count != ordinary->count || memcmp(s.function->kinds, ordinary->kinds, ordinary->count) ||
++                            memcmp(s.function->classes, ordinary->classes, ordinary->count) ||
++                            memcmp(s.function->values, ordinary->values, (size_t)ordinary->count * sizeof(uint64_t))) abort();
++                        s.splice_source = provenance.entry_tokens[b];
++                    }
+                     s.owners = lowered.entry_tokens[b];
+                     s.labels = owners.labels;
+                     s.label_count = owners.label_count;
+@@ -7953,6 +8047,14 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                 }
+                 first = end;
+             }
++            if (source_provenance)
++            {
++                fprintf(stderr, "row-locations: file=%s roots=%llu fully=%llu entries=%llu exact=%llu root-owner=%llu inventory-owner=%llu\n",
++                        file, (unsigned long long)s.source_roots, (unsigned long long)s.source_pure, (unsigned long long)s.source_entries,
++                        (unsigned long long)s.source_equal, (unsigned long long)s.source_root, (unsigned long long)s.source_owner);
++                for (uint32_t kind=0;kind<256;++kind) if (s.splice_kinds[kind][0]) fprintf(stderr, "row-kind: k=%u total=%llu exact=%llu root=%llu\n",
++                     kind,(unsigned long long)s.splice_kinds[kind][0],(unsigned long long)s.splice_kinds[kind][1],(unsigned long long)s.splice_kinds[kind][2]);
++            }
+             if (shadow != NULL)
+             {
+                 for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+index ca93d1dbe..7b04db447 100644
+--- a/src/buster/compiler/c_check_node_machine_front.c
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -381,27 +381,6 @@ typedef enum NodeFactsCount
+ // What T made, at reader time, of the full expressions the front made whole (BUSTER_NODE_FRONT_TYPES;
+ // c_check_node_machine_reader.c), in the output's arena: by each expression's root's graph node, for the shadow's
+ // comparison with its own T after the pipeline.
+-typedef struct NodeWindowNativeEntry
+-{
+-    uint64_t value;
+-    uint8_t kind, class;
+-} NodeWindowNativeEntry;
+-
+-typedef struct NodeWindowNativeCall
+-{
+-    uint32_t object, arguments;
+-    bool variadic;
+-    uint8_t classes[];
+-} NodeWindowNativeCall;
+-
+-typedef struct NodeWindowNativeTape
+-{
+-    uint32_t count;
+-    uint32_t calls;
+-    NodeWindowNativeCall** rows;
+-    NodeWindowNativeEntry entries[];
+-} NodeWindowNativeTape;
+-
+ typedef struct NodeFrontTypes NodeFrontTypes;
+ struct NodeFrontTypes
+ {
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index fe1f49760..3a4caf920 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -2240,6 +2240,8 @@ static NodeWindowNativeTape* node_probe_keep_tape(struct NodeFactsReader* state,
+     NodeWindowNativeTape* part = arena_push_array(state->reader->arena, bytes, 1, _Alignof(NodeWindowNativeTape));
+     if (part == NULL) abort();
+     part->count = length;
++    part->root_token = front->tokens[record];
++    part->root_op = front->ops[record];
+     const bool mutate = getenv("NODE_PROOF_NATIVE_FAULT") != NULL;
+     for (uint32_t i = 0; i < length; ++i)
+     {
+@@ -2247,6 +2249,34 @@ static NodeWindowNativeTape* node_probe_keep_tape(struct NodeFactsReader* state,
+         part->entries[i] = (NodeWindowNativeEntry){.value=state->x_values[at],.kind=state->x_kinds[at],.class=state->x_classes[at]};
+         if (mutate && i == 0) part->entries[i].class ^= 1;
+     }
++    for (uint32_t x = first; x <= operand || (rooted && x == record); )
++    {
++        const uint32_t pos = x == record && rooted ? middle : node_rows_window_place(state, x) - begin;
++        const uint32_t len = node_rows_window_length(state, x);
++        if (pos > length || len > length - pos) abort();
++        for (uint32_t k = 0; k < len; ++k)
++        {
++            part->entries[pos + k].token = front->tokens[x];
++            part->entries[pos + k].op = front->ops[x];
++            part->entries[pos + k].left_token = front->window_left[x] <= x ? front->tokens[x - front->window_left[x]] : UINT32_MAX;
++            part->entries[pos + k].right_token = front->window_right[x] <= x ? front->tokens[x - front->window_right[x]] : UINT32_MAX;
++            part->entries[pos + k].previous_token = x > first ? front->tokens[x-1] : UINT32_MAX;
++            part->entries[pos + k].parent_token = state->reader->parser->tree.parents[front->tokens[x]];
++            uint32_t cast = part->entries[pos+k].parent_token;
++            const Parser* parser = state->reader->parser;
++            while (cast < parser->tokens.count && cast != part->root_token && parser->tree.roles[cast] != PARSE_ROLE_CLOSE_CAST)
++            {
++                const uint32_t next = parser->tree.parents[cast];
++                if (next == cast) { cast = UINT32_MAX; break; }
++                cast = next;
++            }
++            part->entries[pos+k].cast_token = cast < parser->tokens.count && parser->tree.roles[cast] == PARSE_ROLE_CLOSE_CAST ? cast : part->root_token;
++
++        }
++        if (x == operand && rooted && x != record) x = record;
++        else if (x == record || x == operand) break;
++        else x += 1;
++    }
+     part->calls = 0;
+     for (uint32_t i = 0; i < length; ++i) part->calls += part->entries[i].kind == BUSTER_TYPED_CALL;
+     part->rows = part->calls == 0 ? NULL : BUSTER_ARENA_PUSH_ARRAY(state->reader->arena, NodeWindowNativeCall*, part->calls);
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 2bc8812ad..b451237e8 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -699,6 +699,8 @@ typedef struct CheckLowerWriter CheckLowerWriter;
+ struct CheckLowerWriter
+ {
+     const CheckProgram* program;
++    NodeWindowNativeTape* const* source_native;
++    uint8_t source_native_probes;
+     CheckProgramLowered* output;
+     CheckLowerAbi* abi;
+     CheckLowerTaskPacked* tasks;
+@@ -16548,6 +16550,66 @@ static void check_lower_task_source(CheckLowerWriter* writer, CheckLowerTask tas
+     writer->source = token;
+ }
+ 
++static bool check_lower_source_splice(CheckLowerWriter* writer, uint32_t node, uint32_t flags)
++{
++    const CheckProgram* program = writer->program;
++    const CheckInput* input = program->input;
++    if ((flags & ~4u) != 0 || writer->owners != NULL || writer->track || writer->segments) return false;
++    const uint32_t token = input->graph.tokens[node];
++    const NodeWindowNativeTape* tape = token < input->token_count ? writer->source_native[token] : NULL;
++    if ((uintptr_t)tape <= 1 || tape->root_token != token || tape->root_op != input->graph.ops[node] || tape->calls != 0 || tape->count == 0 || tape->count > 32) return false;
++    const bool returned = tape->root_op == CHECK_OP_CONVERT && flags == 0;
++    const bool stored = tape->root_op == CHECK_OP_CAST && tape->count == 3 && tape->entries[2].kind == BUSTER_TYPED_DISCARD &&
++                        (tape->entries[1].kind == BUSTER_TYPED_STORE_LOCAL || tape->entries[1].kind == BUSTER_TYPED_STORE_GLOBAL);
++    if (!(returned || stored)) return false;
++    uint64_t values[32];
++    for (uint32_t i=0; i<tape->count; ++i)
++    {
++        const NodeWindowNativeEntry* row = tape->entries+i;
++        const uint8_t kind = row->kind;
++        const bool local = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || (stored && i == 1 && kind == BUSTER_TYPED_STORE_LOCAL);
++        const bool global = kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || (stored && i == 1 && kind == BUSTER_TYPED_STORE_GLOBAL);
++        const bool integer = kind == BUSTER_TYPED_CONST || kind == BUSTER_TYPED_NEG || kind == BUSTER_TYPED_NOT ||
++                             (kind >= BUSTER_TYPED_ADD && kind <= BUSTER_TYPED_SHR) || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE);
++        if (!(local || global || integer || (stored && i == 2 && kind == BUSTER_TYPED_DISCARD)) ||
++            row->class == BUSTER_TYPED_CLASS_VOID || row->class > BUSTER_TYPED_CLASS_U64) return false;
++        values[i] = row->value;
++        if (local || global)
++        {
++            if (row->value >= program->object_count) return false;
++            values[i] = local ? check_lower_local_of(writer,(uint32_t)row->value) : program->object_symbols[row->value];
++            if ((local && values[i] >= writer->local_count) || (global && values[i] == 0)) return false;
++            if (local && kind != BUSTER_TYPED_LOCAL_ADDRESS && writer->local_classes[values[i]] != row->class)
++            {
++                if ((writer->source_native_probes & 1u) != 0) fprintf(stderr,"splice-local-class: root=%u body=%u start=%u i=%u kind=%u object=%llu slot=%llu recorded=%u storage=%u\n",
++                    token,writer->body->declaration,writer->count,i,kind,(unsigned long long)row->value,(unsigned long long)values[i],row->class,writer->local_classes[values[i]]);
++                if ((writer->source_native_probes & 16u) == 0) return false;
++            }
++
++        }
++    }
++    const uint32_t outer = writer->source;
++    const uint32_t before = writer->count;
++    const bool fault_source = (writer->source_native_probes & 2u) != 0, fault_value = (writer->source_native_probes & 4u) != 0;
++    for(uint32_t i=0; i<tape->count; ++i)
++    {
++        const NodeWindowNativeEntry* row=tape->entries+i;
++        const uint32_t source=stored && i==2 ? token : row->token;
++        if (row->kind == BUSTER_TYPED_LOCAL_ADDRESS && (writer->source_native_probes & 8u) == 0)
++            writer->local_flags[values[i]] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
++        check_lower_source(writer, fault_source ? token : source);
++        check_lower_emit(writer,row->kind,row->class,values[i] ^ (uint64_t)(fault_value && row->kind == BUSTER_TYPED_CONST));
++    }
++    check_lower_source(writer,outer);
++    if (returned && tape->count == 1 && tape->entries[0].kind == BUSTER_TYPED_CONST && writer->count == before + 1)
++    {
++        writer->constant_end = writer->count;
++        writer->constant_node = node + 1;
++    }
++    if ((writer->source_native_probes & 1u) != 0) fprintf(stderr,"splice-taken: token=%u node=%u k=%u n=%u op=%u\n",token,node,tape->entries[0].kind,tape->count,tape->root_op);
++    return true;
++}
++
+ // The tasks' loop, as check_lower_drain, check_lower_drain_bit_ints, check_lower_drain_sources and
+ // check_lower_drain_templates compile it: with `sources`, each task's token set before it runs (check_lower_task_source);
+ // with `bit_ints`, a program's that has a _BitInt type (CheckLowerWriter.bit_ints), whose expressions and conversions it
+@@ -16576,7 +16638,11 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
+         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
+         if (__builtin_expect(kind <= CHECK_LOWER_INSTRUCTION, 1))
+         {
+-            if (templates && kind == CHECK_LOWER_EXPRESSION && check_lower_template_splice(writer, node, flags))
++            if (kind == CHECK_LOWER_EXPRESSION && writer->source_native != NULL && check_lower_source_splice(writer, node, flags))
++            {
++                // The window supplied the complete expression at this source root.
++            }
++            else if (templates && kind == CHECK_LOWER_EXPRESSION && check_lower_template_splice(writer, node, flags))
+             {
+                 // A closed subtree of #1048's node templates: its entries copied from the body's pass (c_check_program_templates.c).
+             }
+@@ -20050,6 +20116,11 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
+         .local_capacity = local_capacity,
+         .scalar = BUSTER_SCALAR_PATH(shared->scalar),
+         .sources = sources,
++        .source_native = program->input->source_native != NULL && getenv("NODE_SPLICE_ENABLE") != NULL ? program->input->source_native : NULL,
++        .source_native_probes = program->input->source_native == NULL ? 0u :
++            (getenv("NODE_SPLICE_REPORT") != NULL ? 1u : 0u) | (getenv("NODE_SPLICE_SOURCE_FAULT") != NULL ? 2u : 0u) |
++            (getenv("NODE_SPLICE_VALUE_FAULT") != NULL ? 4u : 0u) | (getenv("NODE_SPLICE_OMIT_ADDRESS") != NULL ? 8u : 0u) |
++            (getenv("NODE_SPLICE_UNCHECKED_LOCAL") != NULL ? 16u : 0u),
+         .x87_constant_capacity = shared->x87_constant_capacity,
+         .atomic_room = shared->atomic_capacity + 1,
+         .label_symbol_capacity = shared->label_symbol_capacity,
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 344b4fd0f..77584055c 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -14512,6 +14512,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     options.semantic_pragmas = true;
+     options.timing = time_stages;
+     options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
++    if (getenv("NODE_SPLICE_FRONT") != NULL)
++    {
++        options.node_front = BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_BEFORE;
++        options.node_reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
++                              BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS;
++    }
+     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
+     // The preprocessor's phases' ticks in pp_run, for the report.
+     uint64_t pp_ticks[PP_PHASE_COUNT] = { 0 };
