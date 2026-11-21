@@ -1,0 +1,8 @@
+The initial combined commit `fa88df117cb04f1dc8b296101ce5613c5ce1558b` and the field-on-for commit `84adabc089262fbf3a2ffd92248d706a9251c388` share Git tree `86a0d00be20427e5388087458c4a8ca5214f16ab`. The latter applies the field addition directly atop the for-initializer PR head `a62702e323e37ec9777b7efbc94d70a05598e38f`.
+
+In the frozen SQLite actual compile, the combination takes 4,468 expressions and replaces 14,379 ordinary nodes, leaving 313,712 graph nodes. This comprises all 610 additional for initializers and all 881 additional integer-literal field stores. Every admitted root matched all 96 ordinary checked-value bytes. All 381,191 native entries across 2,668 functions had identical kinds, classes, 64-bit operands and parser-source tokens. The generic and combined production compiles produced identical complete native objects and warnings. The exact Develop build passed 210,491 checker and 1,454 driver tests.
+
+The sibling archive's `verify-frozen.sh` reproduces these exact-byte and sourced-native comparisons on either combined tree. The compressed capture uses little-endian records of three 32-bit fields (source token, graph operation and retained slot) followed by the complete 96-byte checked value. The per-function digests match the sibling and ordinary source captures. [Reproducer and individual sibling evidence](https://github.com/buster14a/buster-performance/tree/7889f696ae78057a167e0ca2e6366c237c7dd495/docs/measurements/window-compile-2850-2026-11-21/assignment-shapes).
+
+Agent session: 01a1fd72-c69a-7aa3-9540-11ff6816d868 (Codex session ID, no share URL is exposed, collaborating agent warnings)
+Model: OpenAI / GPT-6
