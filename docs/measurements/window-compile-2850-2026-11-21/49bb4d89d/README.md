@@ -1,5 +1,9 @@
 # Carry discarded expressions in a packed node bitmap
 
+## Subsequent source qualification
+
+This experimental revision changes the native object for an explicit-void exception return and changes typed dumps for discarded expressions. The timing below records the experimental compiler. [Minimal sources, objects and per-mode results](../discard-source-regressions/README.md)
+
 In units of at least 8,192 preprocessed tokens a bitmap marks ordinary store, call, arithmetic and explicit void expression roots. The graph retains the original operand. Control grouping recovers its semicolon from the expression end and closing parentheses. The graph and native output of every translation unit are constructed during the timed process.
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `49bb4d89dc48c7877eeee5724283caf16de871fb`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.

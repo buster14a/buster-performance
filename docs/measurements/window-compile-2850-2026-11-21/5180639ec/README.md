@@ -1,5 +1,9 @@
 # Carry discarded stores and explicit void expressions as statement roots
 
+## Subsequent source qualification
+
+This experimental revision changes the native object for an explicit-void exception return and changes typed dumps for discarded expressions. The timing below records the experimental compiler. [Minimal sources, objects and per-mode results](../discard-source-regressions/README.md)
+
 A completed assignment, update or explicit void expression in a block uses its own node as the control operand. Its semicolon is carried in a compact list, preserving the expression token and the point of evaluation. Every paired process constructs the checked native object.
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `5180639ec036edae74c075f83f1ee1c0f4ac8c21`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.

@@ -1,0 +1,155 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 60bd42a86..0dc28f048 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -294,28 +294,7 @@ static inline __attribute__((always_inline)) void check_input_batch_record(Check
+         }
+     }
+     _mm_mask_storeu_epi8(graph->recorded_pure + node, lanes, _mm_maskz_mov_epi8((__mmask16)pure, _mm_set1_epi8(1)));
+-    // The counters: varargs, and every other node's arguments; the effects and builtins by operator.
+-    CheckGraphValidation* state = &graph->recorded;
+-    const __mmask16 varargs = _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VARARGS));
+-    const __m512i arguments = _mm512_maskz_mov_epi32(lanes & (__mmask16)~varargs, counts);
+-    const uint32_t widest = _mm512_reduce_max_epu32(arguments);
+-    state->varargs += (uint32_t)__builtin_popcount(varargs);
+-    state->maximum_arguments = widest > state->maximum_arguments ? widest : state->maximum_arguments;
+-    state->arguments += (uint32_t)_mm512_reduce_add_epi32(arguments);
+-    state->maximum_effects += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)));
+-    const CheckOp counted[6] =
+-    {
+-        CHECK_OP_BUILTIN_MISC,
+-        CHECK_OP_BUILTIN_FLOAT,
+-        CHECK_OP_BUILTIN_QUERY,
+-        CHECK_OP_BUILTIN_ATOMIC,
+-        CHECK_OP_BUILTIN_VECTOR,
+-        CHECK_OP_BUILTIN_BIT_CAST,
+-    };
+-    for (uint32_t i = 0; i < 6; i += 1)
+-    {
+-        state->builtins[i] += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(counted[i])));
+-    }
++    check_graph_record_counts(&graph->recorded, lanes, ops, counts);
+ }
+ 
+ // The batch's nodes written to the graph's columns, then recorded with the nodes a visit made before them
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..3eb62e5c8 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -17297,10 +17297,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     reader.parameter_next = input->parameter_next;
+     // The graph's byte columns before the others, which start huge pages of their own (check_graph_column): here they
+     // share a huge page with the output columns' end, where they would take one of their own after the graph (#628).
+-    uint8_t* recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+-    uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
++    const bool counts_only = fresh_output && complete_translation_unit && deferred_tokens == NULL && deferred == NULL && attested == NULL;
++    uint8_t* recorded_pure = valid && !counts_only ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
++    valid &= counts_only || recorded_pure != NULL;
++    uint8_t* warning_suppressed = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+     valid &= warning_suppressed != NULL;
+     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
++    input->graph.counts_only = counts_only;
+     const uint8_t fp_contract = predefines_fp_contract(&pp->options.predefines);
+     input->graph.fp_contract_default = fp_contract == BUSTER_PREDEFINES_CONTRACT_ON ? BUSTER_CHECK_FP_CONTRACT_ON :
+                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..b8073260e 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -371,6 +371,8 @@ struct CheckGraph
+     CheckGraphValidation recorded;
+     uint32_t recorded_nodes;
+     bool recorded_ready;
++    // The ordinary postorder schedule needs allocation counts only. Other schedules rebuild their purity marks from the graph.
++    bool counts_only;
+ };
+ 
+ typedef enum CheckStatus
+@@ -1378,6 +1380,10 @@ static inline __attribute__((always_inline)) bool check_graph_pure(const CheckGr
+ // cross-node work is three already-produced purity bytes; required source order is preserved on both paths.
+ static void check_graph_record_nodes(CheckGraph* graph)
+ {
++    if (graph->counts_only)
++    {
++        return;
++    }
+     for (uint32_t node = graph->recorded_nodes; node < graph->count; node += 1)
+     {
+         const CheckOp op = graph->ops[node];
+@@ -1413,9 +1419,50 @@ static void check_graph_record_nodes(CheckGraph* graph)
+     graph->recorded_nodes = graph->count;
+ }
+ 
++static inline __attribute__((always_inline)) void check_graph_record_counts(CheckGraphValidation* state, __mmask16 lanes, __m512i ops, __m512i counts)
++{
++    // The counters: varargs, and every other node's arguments; the effects and builtins by operator.
++    const __mmask16 varargs = _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VARARGS));
++    const __m512i arguments = _mm512_maskz_mov_epi32(lanes & (__mmask16)~varargs, counts);
++    const uint32_t widest = _mm512_reduce_max_epu32(arguments);
++    state->varargs += (uint32_t)__builtin_popcount(varargs);
++    state->maximum_arguments = widest > state->maximum_arguments ? widest : state->maximum_arguments;
++    state->arguments += (uint32_t)_mm512_reduce_add_epi32(arguments);
++    state->maximum_effects += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)));
++    const CheckOp counted[6] =
++    {
++        CHECK_OP_BUILTIN_MISC,
++        CHECK_OP_BUILTIN_FLOAT,
++        CHECK_OP_BUILTIN_QUERY,
++        CHECK_OP_BUILTIN_ATOMIC,
++        CHECK_OP_BUILTIN_VECTOR,
++        CHECK_OP_BUILTIN_BIT_CAST,
++    };
++    for (uint32_t i = 0; i < 6; i += 1)
++    {
++        state->builtins[i] += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(counted[i])));
++    }
++}
++
+ static void check_graph_record_finish(CheckGraph* graph)
+ {
+-    check_graph_record_nodes(graph);
++    if (graph->counts_only)
++    {
++        graph->recorded = (CheckGraphValidation){ 0 };
++        for (uint32_t node = 0; node < graph->count; node += 16)
++        {
++            const uint32_t left = graph->count - node;
++            const __mmask16 lanes = left >= 16 ? UINT16_MAX : (__mmask16)_bzhi_u32(UINT32_MAX, left);
++            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + node);
++            const __m512i counts = _mm512_maskz_loadu_epi32(lanes, graph->argument_counts + node);
++            check_graph_record_counts(&graph->recorded, lanes, ops, counts);
++        }
++        graph->recorded_nodes = graph->count;
++    }
++    else
++    {
++        check_graph_record_nodes(graph);
++    }
+     graph->recorded.builtin_calls = graph->builtin_count;
+     graph->recorded.vectors = graph->vector_member_count;
+     graph->recorded.x86 = graph->x86_count;
+@@ -1431,7 +1478,7 @@ static bool check_graph_recorded_equal(const CheckGraph* graph, const CheckGraph
+     expected.vector_blocks = 0;
+     bool result = graph->recorded_ready && graph->recorded_nodes == graph->count &&
+                   memcmp(&expected, &graph->recorded, sizeof(expected)) == 0;
+-    for (uint32_t node = 0; result && node < graph->count; node += 1)
++    for (uint32_t node = 0; result && !graph->counts_only && node < graph->count; node += 1)
+     {
+         result = pure[node] == graph->recorded_pure[node];
+         *failed = result ? BUSTER_CHECK_NONE : node;
+@@ -4115,11 +4162,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+     if (result)
+     {
+         const bool recorded = graph->recorded_ready && graph->recorded_nodes == count &&
+-                              (count == 0 || graph->recorded_pure != NULL);
+-        if (recorded && !options->verify)
++                              (count == 0 || graph->recorded_pure != NULL || graph->counts_only);
++        const bool scheduled = options->regions || options->level_order || options->transitions;
++        if (recorded && !options->verify && (!graph->counts_only || !scheduled))
+         {
+             validation = graph->recorded;
+-            if (count != 0)
++            if (scheduled && count != 0)
+             {
+                 memcpy(pure, graph->recorded_pure, count);
+             }

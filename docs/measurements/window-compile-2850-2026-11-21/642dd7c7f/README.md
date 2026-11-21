@@ -1,5 +1,9 @@
 # Carry discarded calls and stores as statement roots
 
+## Subsequent source qualification
+
+This experimental revision changes the native object for an explicit-void exception return and changes typed dumps for discarded expressions. The timing below records the experimental compiler. [Minimal sources, objects and per-mode results](../discard-source-regressions/README.md)
+
 This variant also carries calls as physical statement roots. An ignored-result warning looks up the root in the ordered statement events. Every timed process runs the complete compiler and builds the native object.
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `642dd7c7fed795cb5d73a87acb654e3b3559de70`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.
