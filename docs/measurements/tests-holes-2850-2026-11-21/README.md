@@ -91,12 +91,12 @@ the two machines' verdicts by fault.
 | --- | --- | ---: | ---: | ---: | ---: |
 | `round1/` | the two parts as first written | 104 | 67 | 30 | 7 |
 | `round2/` | with the first round's lines and tests | 117 | 103 | 11 | 3 |
-| `round3/` | **the code here** | 24 | 21 | 3 | 0 |
+| `round3/` | **the code here** | 40 | 35 | 5 | 0 |
 
 The first two rounds ran from the list's two ends at once (`cloud.txt`, `9700x.txt`), the third on the 9700X
 alone. A mutant that did not build was a text the build refuses (a variable left unused, `x && !x`), written again
 for the next round. Each round's list is its `faults.py`. The last round's survivors:
-`ordered-any-other-operand`, `ordered-two-pointers-too` and `segment-unextended-asked`.
+`ordered-any-other-operand`, `ordered-two-pointers-too`, `orders-any-operator`, `own-order-unasked` and `segment-unextended-asked`.
 
 ## 7. The 9700X (`9700x/`)
 
