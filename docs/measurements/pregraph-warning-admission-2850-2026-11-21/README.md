@@ -9,6 +9,8 @@ The experimental compiler selected complete integer and pointer returns and disc
 | musl | 8,843 | 5,591 | 55,549 | 0 |
 | Buster compiler | 1,274 | 8,284 | 56,080 | 0 |
 
+The same executable also passed all four corpora with `-Wall -Wextra` and `-Weverything -Wno-c++-compat`. The stricter policies changed the selection, particularly for discarded expressions. All 12 corpus runs exited successfully with zero unsafe takes, hidden refusal keys, checked warning bits, missing oracle results or admitted record mismatches. The `corpus-policies.log` table and `corpus-policy-rows.log.gz` individual observations cover all three policies.
+
 The old reader first populated its root list after ordinary T accepted an expression. The window tests also consulted the typed flag indexed by its graph root. The context pass selected only expressions with a recorded ordinary C run. These conditions were unavailable before graph construction.
 
 The probe enumerates new front roots with complete operand spans. It consumes the pregraph typed records, per-token declaration and FP metadata, parser root roles, function regions, warning policy, and events already present at unit setup. It keeps separate declaration and line caches. The existing vector warning and C kernels run on these columns before the normal walk. A root with a warning or context operation that requires a later detailed check falls back. The pregraph admission bit is `state->proof_select[root_record] & 16u`. Graph root numbers first enter the comparison when the ordinary reader binds the stored decisions after the chunk.
