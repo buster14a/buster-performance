@@ -1,0 +1,2057 @@
+diff --git a/src/buster/compiler/c_check_cleanup_input.c b/src/buster/compiler/c_check_cleanup_input.c
+index 413950bf9..99b12f7b8 100644
+--- a/src/buster/compiler/c_check_cleanup_input.c
++++ b/src/buster/compiler/c_check_cleanup_input.c
+@@ -51,6 +51,8 @@ static bool check_input_cleanup_record(CheckInputReader* reader, CheckInputClean
+     }
+     if (valid)
+     {
++        const uint32_t reach = input->cleanup_count != 0 ? input->cleanups[input->cleanup_count - 1].reach : 0;
++        cleanup.reach = cleanup.end > reach ? cleanup.end : reach;
+         input->cleanups[input->cleanup_count++] = cleanup;
+     }
+     input->resource |= !valid;
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 520858f68..8174cba78 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -728,7 +728,7 @@ static uint32_t check_input_expression_identifiers(const CheckInputReader* reade
+         identifiers->flags[at] |= (identifiers->flags[at] & BUSTER_CHECK_REGISTER) != 0 ? check_input_register_flags(reader, identifiers->declarations[at], found[at]) : 0;
+     }
+     // Weak addresses are rare. The gather marks every object non-null; this clears a weak attribute or `#pragma weak`.
+-    if (reader->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
++    if (input->weak_name_count != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0))
+     {
+         for (uint32_t at = 0; at < count; at += 1)
+         {
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 601bc2fa7..e45711194 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -871,6 +871,9 @@ struct CheckInputCleanup
+     uint32_t argument;
+     uint32_t scope;
+     uint32_t end;
++    // The furthest `end` of the records up to this one, which are in source order (check_input_cleanup_record): a token
++    // after this record's declaration and before the next one's is in some variable's scope where it is before this.
++    uint32_t reach;
+ };
+ 
+ // A return statement with clang's musttail attribute (#147, check_input_statement_attributes): its `return` token, the
+@@ -897,6 +900,11 @@ struct CheckInput
+     CheckInputPackPragmas* pack_pragmas;
+     CheckInputVisibilityPragmas* visibility_pragmas;
+     CheckInputSymbolPragmas* symbol_pragmas;
++    // The names the reader noted as weak addresses, each with the declaration token it is weak from
++    // (check_input_note_weak_name): a use of the name at or after the token may be null, a use before it still folds, as
++    // clang folds it (check_input_address_is_weak). The node machine's facts read them too (#3206).
++    const struct CheckInputWeakName* weak_names;
++    uint32_t weak_name_count;
+     CheckInputMsPragmas* ms_pragmas;
+     uint8_t* ms_struct;
+     uint8_t* object_visibility;
+@@ -2060,9 +2068,6 @@ struct CheckInputReader
+     uint32_t* declaration_starts;
+     uint32_t* declaration_storage;
+     uint8_t* declaration_flags;
+-    // Weak names applied so far, with the declaration token. A use before that token still folds, as clang folds it.
+-    struct CheckInputWeakName* weak_names;
+-    uint32_t weak_name_count;
+     uint8_t* declaration_abis;
+     CheckInputAttributes** attribute_bases;
+     CheckInputAttributes* specifier_attributes;
+@@ -6940,28 +6945,49 @@ static bool check_input_pragma_weak(const CheckInput* input, IdentId name, uint3
+     return weak;
+ }
+ 
++// Whether the reader noted `name` as a weak address at or before `use` (CheckInput.weak_names); with `use` UINT32_MAX,
++// anywhere in the unit. Eight records a step: a record is a name and its token.
++static bool check_input_weak_name(const CheckInput* input, IdentId name, uint32_t use)
++{
++    const __m512i names = _mm512_set1_epi32((int)name);
++    const __m512i uses = _mm512_set1_epi32((int)use);
++    const uint32_t count = input->weak_name_count;
++    __mmask16 found = 0;
++    for (uint32_t i = 0; found == 0 && i < count; i += 8)
++    {
++        const uint32_t live = count - i < 8 ? count - i : 8;
++        const __mmask16 lanes = (__mmask16)((1u << (2 * live)) - 1);
++        const __m512i records = _mm512_maskz_loadu_epi32(lanes, input->weak_names + i);
++        const __mmask16 named = _mm512_mask_cmpeq_epi32_mask(lanes & 0x5555, records, names);
++        const __mmask16 before = _mm512_mask_cmple_epu32_mask(lanes & 0xaaaa, records, uses);
++        found = named & (__mmask16)(before >> 1);
++    }
++    return found != 0;
++}
++
+ // Records `name` as a weak address at `token`. A use before that token still folds.
+ static void check_input_note_weak_name(CheckInputReader* reader, IdentId name, uint32_t token)
+ {
++    CheckInput* input = reader->output;
+     bool seen = name == 0;
+-    for (uint32_t i = 0; !seen && i < reader->weak_name_count; i += 1)
++    for (uint32_t i = 0; !seen && i < input->weak_name_count; i += 1)
+     {
+-        seen = reader->weak_names[i].name == name && reader->weak_names[i].token == token;
++        seen = input->weak_names[i].name == name && input->weak_names[i].token == token;
+     }
+     if (!seen)
+     {
+-        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)reader->weak_name_count + 1);
++        CheckInputWeakName* names = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputWeakName, (uint64_t)input->weak_name_count + 1);
+         if (names != 0)
+         {
+-            if (reader->weak_name_count != 0)
++            if (input->weak_name_count != 0)
+             {
+-                memcpy(names, reader->weak_names, (uint64_t)reader->weak_name_count * sizeof(CheckInputWeakName));
++                memcpy(names, input->weak_names, (uint64_t)input->weak_name_count * sizeof(CheckInputWeakName));
+             }
+-            names[reader->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
+-            reader->weak_names = names;
+-            reader->weak_name_count += 1;
++            names[input->weak_name_count] = (CheckInputWeakName){ .name = name, .token = token };
++            input->weak_names = names;
++            input->weak_name_count += 1;
+         }
+-        reader->output->resource |= names == 0;
++        input->resource |= names == 0;
+     }
+ }
+ 
+@@ -6971,12 +6997,7 @@ static bool check_input_address_is_weak(const CheckInputReader* reader, uint32_t
+     const Parser* parser = reader->parser;
+     const bool named = parser != NULL && parser->tokens.names != NULL && declaration < parser->tokens.count;
+     const IdentId name = named ? parser->tokens.names[declaration] : 0;
+-    bool weak = reader->output != NULL && check_input_pragma_weak(reader->output, name, use);
+-    for (uint32_t i = 0; !weak && i < reader->weak_name_count; i += 1)
+-    {
+-        weak = reader->weak_names[i].name == name && reader->weak_names[i].token <= use;
+-    }
+-    return weak;
++    return reader->output != NULL && (check_input_pragma_weak(reader->output, name, use) || check_input_weak_name(reader->output, name, use));
+ }
+ 
+ // BUSTER_CHECK_NONNULL_ADDRESS for a declaration's address, or 0 when the address may be null or is not an object.
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 4c44c3e37..70a19ce09 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -106,6 +106,7 @@ typedef enum NodeCensusTest
+     NODE_CENSUS_UNSEQUENCED,
+     NODE_CENSUS_REGION,
+     NODE_CENSUS_UNMODELED,
++    NODE_CENSUS_ORDER,
+     NODE_CENSUS_TESTS,
+ } NodeCensusTest;
+ 
+@@ -143,6 +144,7 @@ static const char* const node_census_test_names[NODE_CENSUS_TESTS] = {
+     [NODE_CENSUS_UNSEQUENCED] = "unsequenced",
+     [NODE_CENSUS_REGION] = "region",
+     [NODE_CENSUS_UNMODELED] = "unmodeled-warning",
++    [NODE_CENSUS_ORDER] = "pointer-integer-order",
+ };
+ 
+ // The roots by the control that pushed them.
+@@ -367,6 +369,8 @@ struct NodeCensusPolicy
+     bool enums;
+     bool sign_compare;
+     bool pointer_casts;
++    // An ordered comparison of a pointer with an integer (CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, #3201).
++    bool ordered;
+     bool void_dereference;
+     bool string_plus_int;
+     bool packed_member;
+@@ -507,6 +511,9 @@ struct NodeCensusScratch
+     // The declared type of the object whose initializer the current expression is, where the caller gives it (0
+     // otherwise): at reader time, and after the pipeline for a root the lowering never popped, which no control names.
+     TypeId given_declared;
++    // And that object's declaration's token, where the caller gives it for the pipeline's tests of a root the lowering
++    // never popped (BUSTER_CHECK_NONE otherwise, and at reader time, whose events' span is its caller's to widen).
++    uint32_t given_declaration;
+     // Per token: whether a kept warning event is at it, as a running count (events before it), token_count + 1 entries.
+     uint32_t* event_prefix;
+     // Per token, the first event's ID there (UINT32_MAX for none), for the report's histogram.
+@@ -605,6 +612,7 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
+                            check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST, false) ||
+                            check_common_enabled(pp, input, CHECK_WARNING_ID_POINTER_TO_ENUM_CAST, false) ||
+                            check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST, false);
++    policy.ordered = check_common_enabled(pp, input, CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, false);
+     policy.void_dereference = check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_PTR_DEREFERENCE, false);
+     policy.string_plus_int = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+     policy.packed_member = check_common_enabled(pp, input, CHECK_WARNING_ID_ADDRESS_OF_PACKED_MEMBER, false);
+@@ -640,6 +648,13 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
+                          input->type_tags->declaration_count != 0;
+     // A demoted or ignored default-error conversion is made only at a relaxed token, and warned of there (#1963).
+     policy.unmodeled |= input->relaxed_tokens;
++    // And two attributes whose warnings no test stands for (#3201), each a fact of the unit the reader has before its
++    // coded walk. x86's interrupt and no_caller_saved_registers, read on any declaration (CheckInput.interrupt_calls):
++    // every other call in such a function's body warns (-Wexcessive-regsave, check_input_interrupt_calls), and a call of
++    // an interrupt routine is an error. And noderef, where the unit spells it at all (the reader reserves the column
++    // then, c_check_input.c): a dereference warns by its operand's declaration's type's annotation, which a typedef, a
++    // member or a cast may give it (check_input_noderef_graph), and no node's type says.
++    policy.unmodeled |= input->interrupt_calls || check_sparse_wide_present(input->noderef_types);
+     for (uint32_t id = 0; id < CHECK_WARNING_ID_COUNT; id += 1)
+     {
+         const uint8_t class = node_census_warning_classes[id];
+@@ -817,7 +832,11 @@ static uint8_t node_census_kind(const TypeTable* types, TypeId type)
+     return type != 0 ? type_kind(types, node_census_base(types, type)) : BUSTER_TYPE_KIND_NONE;
+ }
+ 
+-// A complex, _BitInt, atomic, vector, half-precision or __float128 type: the values the machine has no kind for.
++// A complex, _BitInt, atomic, vector, half-precision or __float128 type: the values the machine has no kind for. And an
++// object's type in a segment's address space (#3205; 256, 257 and 258, x86's %gs, %fs and %ss, as check_lower_segment
++// has them, an array's element's too): the lowering gives each load and store at such an object its segment's
++// override (check_lower_access), which the machine's rows have no entry for. A unit without an extended qualifier
++// (TypeTable.extended, nearly every one) asks nothing of a type.
+ static bool node_census_special_type(const TypeTable* types, TypeId type)
+ {
+     const bool atomic = type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_ATOMIC;
+@@ -827,7 +846,9 @@ static bool node_census_special_type(const TypeTable* types, TypeId type)
+                               kind == BUSTER_TYPE_KIND_EXT_VECTOR;
+     const bool special_code = base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT16) || base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_HALF) ||
+                               base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_BF16) || base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT128);
+-    return atomic || special_kind || special_code;
++    const uint32_t space = type != 0 && types->extended && type_is_valid(types, type) ? type_address_space(type_object_qualifiers(types, type)) : 0;
++    const bool segment = space >= BUSTER_TYPE_SPACE_TARGET + 256 && space <= BUSTER_TYPE_SPACE_TARGET + 258;
++    return atomic || special_kind || special_code || segment;
+ }
+ 
+ static bool node_census_aggregate(const TypeTable* types, TypeId type)
+@@ -894,18 +915,24 @@ static TypeId node_census_function_type(const TypeTable* types, TypeId type)
+ // reads as one, for the census's code to decide), and an array.
+ #define BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE 0x40u
+ #define BUSTER_NODE_CENSUS_TYPE_ARRAY 0x80u
++// A value that is a pointer once an operator converts it as an operand (check_action_operand_value's): a pointer's, an
++// array's, and a function's (#3201). A function's type has a pointer's bit and the void pointee's with it, as
++// nullptr_t's has: no plain pointer's byte (the quiet rule's kind is the pointer's bit alone), and what asks for a
++// pointer to void reads the type itself.
++#define BUSTER_NODE_CENSUS_TYPE_CONVERTS (BUSTER_NODE_CENSUS_TYPE_POINTER | BUSTER_NODE_CENSUS_TYPE_ARRAY)
+ 
+ static __attribute__((noinline)) uint8_t node_census_type_bits_make(const TypeTable* types, TypeId type)
+ {
+     const uint8_t kind = node_census_kind(types, type);
+     const TypeId pointee = kind == BUSTER_TYPE_KIND_POINTER ? type_unqualified(type_strip_aligned(types, type_element(types, node_census_base(types, type)))) : 0;
+     const bool void_pointee = kind == BUSTER_TYPE_KIND_NULLPTR || (kind == BUSTER_TYPE_KIND_POINTER && type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID);
++    const bool function = kind == BUSTER_TYPE_KIND_FUNCTION;
+     const uint8_t bits = (uint8_t)(BUSTER_NODE_CENSUS_TYPE_KNOWN | (node_census_special_type(types, type) ? BUSTER_NODE_CENSUS_TYPE_SPECIAL : 0) |
+                                    (node_census_aggregate(types, type) ? BUSTER_NODE_CENSUS_TYPE_AGGREGATE : 0) |
+                                    (node_census_enum(types, type) ? BUSTER_NODE_CENSUS_TYPE_ENUM : 0) |
+                                    (node_census_floating(types, type) ? BUSTER_NODE_CENSUS_TYPE_FLOATING : 0) |
+-                                   (node_census_pointer(types, type) ? BUSTER_NODE_CENSUS_TYPE_POINTER : 0) |
+-                                   (void_pointee ? BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE : 0) | (type_kind_is_array(kind) ? BUSTER_NODE_CENSUS_TYPE_ARRAY : 0));
++                                   (node_census_pointer(types, type) || function ? BUSTER_NODE_CENSUS_TYPE_POINTER : 0) |
++                                   (void_pointee || function ? BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE : 0) | (type_kind_is_array(kind) ? BUSTER_NODE_CENSUS_TYPE_ARRAY : 0));
+     return bits;
+ }
+ 
+@@ -1003,6 +1030,16 @@ static bool node_census_attributed(const CheckInput* input, uint32_t declaration
+     return found;
+ }
+ 
++// Whether a declaration token has a list of diagnose_if's or enable_if's conditions (CheckInput.condition_declarations,
++// #3201): its own or an earlier redeclaration's, which it inherits (c_check_condition.c), though no attribute of its own
++// or of its entity's first declaration says so. A call of the name reads that list after the graph's run
++// (check_input_condition_call). A use that is no call is diagnosed before the walk (check_input_condition_uses), and
++// its event refuses its expression. A unit without the attributes has no list.
++static bool node_census_conditioned(const CheckInput* input, uint32_t declaration)
++{
++    return input->condition_declaration_count != 0 && check_condition_declaration(input, declaration) != NULL;
++}
++
+ // The visible declaration of the name at `token`, or BUSTER_CHECK_NONE.
+ static uint32_t node_census_declaration(const CheckProgram* program, uint32_t token)
+ {
+@@ -1056,7 +1093,8 @@ static __attribute__((noinline)) uint8_t node_census_declaration_facts_make(cons
+     {
+         const String8 spelled = { .pointer = (char*)intern_bytes(s->pp->table, name), .length = intern_length(s->pp->table, name) };
+         const bool callee = check_common_format_index(spelled, &s->pp->options) != UINT32_MAX ||
+-                            node_census_attributed(input, declaration, node_census_callee_kinds, BUSTER_ARRAY_LENGTH(node_census_callee_kinds));
++                            node_census_attributed(input, declaration, node_census_callee_kinds, BUSTER_ARRAY_LENGTH(node_census_callee_kinds)) ||
++                            node_census_conditioned(input, declaration);
+         facts |= callee ? BUSTER_NODE_CENSUS_DECLARATION_CALLEE : 0;
+     }
+     else
+@@ -1213,22 +1251,21 @@ static uint32_t node_census_local_object(const NodeCensusScratch* s, uint32_t no
+ 
+ // Whether the value a return gives is a local's address, followed through conversions, casts, a comma's value, a
+ // conditional's arms and pointer arithmetic: an address of a local, or a local array's value, which decays to it. The
+-// operands followed wait in a list of BUSTER_NODE_CENSUS_FOLLOWED (a deeper tree's further nodes are refused).
+-#define BUSTER_NODE_CENSUS_FOLLOWED 64u
++// operands followed wait in the walk's stack (NodeCensusScratch.stack, free once the expression is walked), which has
++// room for each of the expression's nodes once: every operand is followed, however deep the tree (a list of 64 refused a
++// sum of more operands, which the tests on the window, asked only where an address is taken, never did: #3201).
+ static bool node_census_returns_address(const NodeCensusScratch* s, uint32_t root)
+ {
+     const CheckProgram* program = s->program;
+     const CheckGraph* graph = &program->input->graph;
+     const TypeTable* types = program->types;
+-    uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
++    uint32_t* const pending = s->stack;
+     uint32_t count = 0;
+-    uint32_t visited = 0;
+     bool result = false;
+     pending[count++] = root;
+     while (count != 0 && !result)
+     {
+         const uint32_t node = pending[--count];
+-        visited += 1;
+         if (node < graph->count)
+         {
+             const CheckOp op = graph->ops[node];
+@@ -1247,11 +1284,8 @@ static bool node_census_returns_address(const NodeCensusScratch* s, uint32_t roo
+             }
+             else
+             {
+-                // A tree past the list's room, or past as many visits, is refused rather than followed.
+-                result = count + 2 > BUSTER_NODE_CENSUS_FOLLOWED || visited > BUSTER_NODE_CENSUS_FOLLOWED;
+-                pending[count] = first;
+-                count += !result;
+-                if (second != BUSTER_CHECK_NONE && !result)
++                pending[count++] = first;
++                if (second != BUSTER_CHECK_NONE)
+                 {
+                     pending[count++] = second;
+                 }
+@@ -1271,6 +1305,26 @@ static bool node_census_comparison(CheckOp op)
+     return op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
+ }
+ 
++// Whether an ordered comparison of the nodes `a` and `b` is one of a pointer with an integer, which the compiler warns of
++// after the graph's run (check_warning_ordered_event, #3201): its test, of the operands as the action converts them
++// (check_action_operand_value: an array's and a function's value is a pointer). Exactly one is a pointer, and the other
++// an integer that is no null pointer constant (check_action_null, of its value before the conversion, which changes
++// neither an integer's type nor its constant).
++static bool node_census_ordered(const NodeCensusScratch* s, uint32_t a, uint32_t b)
++{
++    const TypeTable* types = s->program->types;
++    const CheckValue left = node_view_value(s, a);
++    const CheckValue right = node_view_value(s, b);
++    const uint8_t left_kind = type_is_valid(types, left.type) ? check_action_kind(types, left.type) : BUSTER_TYPE_KIND_NONE;
++    const uint8_t right_kind = type_is_valid(types, right.type) ? check_action_kind(types, right.type) : BUSTER_TYPE_KIND_NONE;
++    const bool left_pointer = left_kind == BUSTER_TYPE_KIND_POINTER || left_kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(left_kind);
++    const bool right_pointer = right_kind == BUSTER_TYPE_KIND_POINTER || right_kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(right_kind);
++    const CheckValue* integer = left_pointer ? &right : &left;
++    const bool result = left_pointer != right_pointer && type_is_valid(types, integer->type) && check_action_is_integer(types, integer->type) &&
++                        !check_action_null(types, integer, 0);
++    return result;
++}
++
+ // Whether `token` was written in a system header, as the common warnings find it (check_common_severity): the graph's
+ // mark, or the preprocessor's level at the token's place.
+ static bool node_census_system(const NodeCensusScratch* s, uint32_t token)
+@@ -1367,6 +1421,7 @@ static bool node_census_unsequenced(const NodeCensusScratch* s, uint32_t count,
+ // Whether a discarded node gives -Wunused-value or its kin, following the discard down a comma's and a conditional's
+ // operands: a value without an effect, or a call whose callee asks for its result. A cast to void is explicit. The
+ // operands followed wait in a list of BUSTER_NODE_CENSUS_FOLLOWED (a deeper tree is refused).
++#define BUSTER_NODE_CENSUS_FOLLOWED 64u
+ static bool node_census_discarded(const NodeCensusScratch* s, uint32_t root)
+ {
+     const CheckProgram* program = s->program;
+@@ -1738,14 +1793,22 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
+         const bool mixed = (a_wide && bs && !b_safe) || (b_wide && as && !a_safe);
+         tests |= integers && mixed ? UINT64_C(1) << NODE_CENSUS_SIGN_COMPARE : 0;
+     }
+-    if (op == CHECK_OP_CAST && policy->pointer_casts && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)
++    if (policy->ordered && op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && binary)
++    {
++        tests |= node_census_ordered(s, a, b) ? UINT64_C(1) << NODE_CENSUS_ORDER : 0;
++    }
++    // A cast of a pointer, or of an array or a function, which the cast converts to one (check_warning_graph_pointer_cast's
++    // `from_pointer`, #3201), to an integer narrower than it or to an enumeration.
++    if (op == CHECK_OP_CAST && policy->pointer_casts && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_CONVERTS) != 0)
+     {
+         uint32_t width = 0;
+         bool sign = false;
+         const bool narrow = node_census_integer(types, type, &width, &sign) && width < 64;
+         tests |= narrow || (type_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
+     }
+-    if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)
++    // (A pointer's own type: a function's byte has the pointer's bit and the void pointee's too.)
++    if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) != 0 &&
++        node_census_kind(types, a_type) == BUSTER_TYPE_KIND_POINTER)
+     {
+         const TypeId pointee = type_unqualified(type_strip_aligned(types, type_element(types, node_census_base(types, a_type))));
+         tests |= type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
+@@ -1828,6 +1891,49 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
+     return tests;
+ }
+ 
++// Whether a `return` at `token` is in the scope of a variable with a cleanup (CheckInput.cleanups, in source order: a
++// record's scope is from its declaration to its `end`, #3202). The program then computes the value first, as a RESULT's,
++// runs the cleanups and returns it (check_control_statement), and the value's root is no return's. A named result's
++// stays its RETURN's there: an aggregate's value, which the tests refuse whichever control has it, and which is
++// another control's here too. Of the records declared before the token, one's scope holds it where the furthest of
++// their ends is past it, which the last of them has (CheckInputCleanup.reach): a search, whatever the unit's records.
++static bool node_census_cleans(const CheckInput* input, uint32_t token)
++{
++    const CheckInputCleanup* cleanups = input->cleanups;
++    uint32_t low = 0;
++    uint32_t high = input->cleanup_count;
++    while (low < high)
++    {
++        const uint32_t middle = low + (high - low) / 2;
++        low = cleanups[middle].declaration < token ? middle + 1 : low;
++        high = cleanups[middle].declaration < token ? high : middle;
++    }
++    return low != 0 && cleanups[low - 1].reach > token;
++}
++
++// Whether the object declared at `declaration`, whose initializer's whole value a root is, is an automatic one with an
++// asm label (#3201): one in a body, with no linkage, neither static nor `register` (a register variable's label names
++// its register, as musl's system calls' arguments' do). Its label is ignored with a warning at the label, which the
++// reader raises after the object's body, by this test (c_check_asm_input.c): the event is among the initializer's tokens
++// after the pipeline (they begin after the object's name, node_census_initializer_low) and not there yet when the
++// walk reads the initializer. So the declaration refuses its initializer, on both sides: its root is read as a brace
++// initializer's, which the machine doesn't read (node_census_root, node_census_reader_expression). In a unit with an
++// asm keyword alone.
++static bool node_census_labelled(const CheckInput* input, const Parser* parser, uint32_t declaration)
++{
++    const bool known = input->asm_capacity != 0 && declaration < input->token_count && declaration < parser->tokens.count;
++    const uint8_t bits = known ? input->declaration_bits[declaration] : 0;
++    const bool automatic = known && parser->tree.depths[declaration] != 0 && input->declaration_kinds[declaration] == C_BINDING_OBJECT &&
++                           (bits & (BUSTER_CHECK_BITS_REGISTER | BUSTER_CHECK_BITS_STATIC)) == 0 && check_input_linkage(input->declaration_bits, declaration) == 0;
++    const CheckInputAttributes* attributes = automatic ? check_input_attributes_at(input, declaration) : NULL;
++    bool result = false;
++    for (uint32_t i = 0; attributes != NULL && i < attributes->count && !result; i += 1)
++    {
++        result = attributes->records[i].kind == CHECK_ATTRIBUTE_ASM_LABEL;
++    }
++    return result;
++}
++
+ // Whether a root's token is a for statement's clause's: its `)` (the increment's) or a `;` of its head.
+ static bool node_census_for_clause(const Parser* parser, uint32_t token)
+ {
+@@ -1943,7 +2049,8 @@ static uint64_t node_census_root_tests(NodeCensusScratch* s, uint32_t root, uint
+     // A scalar object's initializer converts its value to the object's type in its plan, not at a node.
+     const bool given = s->given_declared != 0 || s->records != NULL;
+     const TypeId declared = context != NODE_CENSUS_ROOT_INITIALIZER ? 0 : given ? s->given_declared : node_census_initialized_type(s, root);
+-    const uint32_t low = node_census_initializer_low(lowest, context != NODE_CENSUS_ROOT_INITIALIZER || given ? BUSTER_CHECK_NONE : node_census_initialized_token(s, root));
++    const uint32_t low = node_census_initializer_low(lowest, context != NODE_CENSUS_ROOT_INITIALIZER ? BUSTER_CHECK_NONE : given ? s->given_declaration :
++                                                             node_census_initialized_token(s, root));
+     tests |= (s->policy.constant_conversion || s->policy.assign_enum) && declared != 0 && node_census_constant_changes(s, root, declared) ?
+              UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+     // And a null pointer constant that is no literal, which the initializer's walker warns of there (#3012).
+@@ -2019,6 +2126,7 @@ typedef enum NodeTestsTrigger
+     NODE_TESTS_TRIGGER_ATOMIC_MEMBER,
+     NODE_TESTS_TRIGGER_ENUM,
+     NODE_TESTS_TRIGGER_SIGN_COMPARE,
++    NODE_TESTS_TRIGGER_ORDER,
+     NODE_TESTS_TRIGGER_VOID_DEREFERENCE,
+     NODE_TESTS_TRIGGER_CONVERSION,
+     NODE_TESTS_TRIGGER_DIVISION,
+@@ -2039,6 +2147,7 @@ static const char* const node_tests_trigger_names[NODE_TESTS_TRIGGERS] = {
+     [NODE_TESTS_TRIGGER_ATOMIC_MEMBER] = "atomic-member",
+     [NODE_TESTS_TRIGGER_ENUM] = "enum-operand",
+     [NODE_TESTS_TRIGGER_SIGN_COMPARE] = "sign-compare",
++    [NODE_TESTS_TRIGGER_ORDER] = "pointer-integer-order",
+     [NODE_TESTS_TRIGGER_VOID_DEREFERENCE] = "void-dereference",
+     [NODE_TESTS_TRIGGER_CONVERSION] = "constant-conversion",
+     [NODE_TESTS_TRIGGER_DIVISION] = "constant-divisor",
+@@ -2314,6 +2423,9 @@ static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s,
+ #define BUSTER_NODE_TESTS_OPERAND_SUM 0x20u
+ #define BUSTER_NODE_TESTS_OPERAND_COMPARISON 0x40u
+ #define BUSTER_NODE_TESTS_OPERAND_TRUTH 0x80u
++// A pointer once converted as an operand (BUSTER_NODE_CENSUS_TYPE_CONVERTS, as an operand's properties): a pointer's, an
++// array's or a function's value.
++#define BUSTER_NODE_TESTS_OPERAND_CONVERTS (BUSTER_NODE_TESTS_OPERAND_POINTER | BUSTER_NODE_TESTS_OPERAND_ARRAY)
+ _Static_assert(CHECK_OP_COUNT <= 128, "the own form's tables have an entry an operator");
+ 
+ // The tree's tests (node_tests_tree) read a record's token's parent's role, and nearly every one ends there: a
+@@ -2447,6 +2559,7 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
+         const CheckOp op = (CheckOp)code;
+         const bool leaf = op == CHECK_OP_VALUE;
+         const bool comparison = node_census_comparison(op);
++        const bool order = op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL;
+         const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
+         const bool copies = op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
+                             op == CHECK_OP_CAST;
+@@ -2470,7 +2583,8 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
+         s->own_sends[code] = leaf ? 0 :
+                              (uint8_t)((op != CHECK_OP_CAST ? BUSTER_NODE_TESTS_OPERAND_CONSTANT : 0) |
+                                        (op != CHECK_OP_CAST && policy->enums ? BUSTER_NODE_TESTS_OPERAND_ENUM : 0) |
+-                                       (op == CHECK_OP_CAST && policy->pointer_casts ? BUSTER_NODE_TESTS_OPERAND_POINTER : 0) |
++                                       (op == CHECK_OP_CAST && policy->pointer_casts ? BUSTER_NODE_TESTS_OPERAND_CONVERTS : 0) |
++                                       (order && policy->ordered ? BUSTER_NODE_TESTS_OPERAND_CONVERTS : 0) |
+                                        ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference ? BUSTER_NODE_TESTS_OPERAND_VOID_POINTEE : 0) |
+                                        (op == CHECK_OP_ADD && policy->string_plus_int ? BUSTER_NODE_TESTS_OPERAND_ARRAY : 0) |
+                                        (shift && policy->shift_parentheses ? BUSTER_NODE_TESTS_OPERAND_SUM : 0) |
+@@ -2630,10 +2744,13 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
+         const uint8_t first_bits = o[0] != UINT32_MAX ? kept[o[0]] : 0;
+         const uint8_t first_property = o[0] != UINT32_MAX ? properties[o[0]] : 0;
+         const uint8_t second_property = o[1] != UINT32_MAX ? properties[o[1]] : 0;
++        // An ordered comparison of exactly one operand that is a pointer once converted: the census's code's test's.
++        const bool order = op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && binary &&
++                           ((first_property & BUSTER_NODE_TESTS_OPERAND_CONVERTS) != 0) != ((second_property & BUSTER_NODE_TESTS_OPERAND_CONVERTS) != 0);
+         tests |= op == CHECK_OP_ADD && policy->string_plus_int && binary && (node_census_string(program, graph->operand0[node]) || node_census_string(program, graph->operand1[node])) ?
+                  UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT : 0;
+-        // A pointer cast to an integer narrower than it, or to an enumeration.
+-        if (op == CHECK_OP_CAST && policy->pointer_casts && (first_bits & BUSTER_NODE_CENSUS_TYPE_POINTER) != 0)
++        // A cast of a pointer, or of what a cast converts to one, to an integer narrower than it, or to an enumeration.
++        if (op == CHECK_OP_CAST && policy->pointer_casts && (first_bits & BUSTER_NODE_CENSUS_TYPE_CONVERTS) != 0)
+         {
+             const uint32_t width = node_tests_ranges(s, columns->value_types[r]) & 0x7fu;
+             tests |= (width != 0 && width < 64) || (own & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
+@@ -2650,6 +2767,10 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
+         {
+             trigger = NODE_TESTS_TRIGGER_SIGN_COMPARE;
+         }
++        else if (policy->ordered && order)
++        {
++            trigger = NODE_TESTS_TRIGGER_ORDER;
++        }
+         else if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (first_bits & BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) != 0)
+         {
+             trigger = NODE_TESTS_TRIGGER_VOID_DEREFERENCE;
+@@ -2918,12 +3039,18 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
+                 const uint32_t node = r + 1 == count ? root : first + r;
+                 const bool call = (CheckOp)codes[r] == CHECK_OP_CALL;
+                 const bool cast = (CheckOp)codes[r] == CHECK_OP_CAST;
++                // An ordered comparison the orders' rule left out has an operand that is a pointer once converted;
++                // one the quiet rule left out has two plain integers.
++                const bool order = (CheckOp)codes[r] >= CHECK_OP_LESS && (CheckOp)codes[r] <= CHECK_OP_GREATER_EQUAL &&
++                                   (loop->operands[r] & BUSTER_NODE_TESTS_OPERAND_CONVERTS) != 0;
+                 const uint64_t found = node_tests_operator(s, r, node, loop->operands[r], unsent, &sends, counts);
+                 const bool wrong = found != 0 || sends != 0;
+-                counts->own_quiet_checked += !call && !cast;
+-                counts->own_quiet_wrong += !call && !cast && wrong;
++                counts->own_quiet_checked += !call && !cast && !order;
++                counts->own_quiet_wrong += !call && !cast && !order && wrong;
+                 counts->own_quiet_casts_checked += cast;
+                 counts->own_quiet_casts_wrong += cast && wrong;
++                counts->own_quiet_orders_checked += order;
++                counts->own_quiet_orders_wrong += order && wrong;
+                 // A call left out has no constant the rule doesn't take, by its own list of arguments.
+                 counts->own_quiet_calls_checked += call;
+                 counts->own_quiet_calls_wrong += call && wrong;
+@@ -3076,7 +3203,8 @@ static NodeCensusRoot node_census_root(const NodeCensusScratch* s, const CheckLo
+     {
+         root = kind == CHECK_CONTROL_EVALUATE ? NODE_CENSUS_ROOT_STATEMENT :
+                kind == CHECK_CONTROL_BRANCH_FALSE || kind == CHECK_CONTROL_BRANCH_TRUE ? NODE_CENSUS_ROOT_CONDITION :
+-               kind == CHECK_CONTROL_RETURN && control->target != BUSTER_CHECK_CONTROL_TAIL ? NODE_CENSUS_ROOT_RETURN :
++               kind == CHECK_CONTROL_RETURN && control->target != BUSTER_CHECK_CONTROL_TAIL &&
++               !(program->input->cleanup_count != 0 && node_census_cleans(program->input, control->token)) ? NODE_CENSUS_ROOT_RETURN :
+                kind == CHECK_CONTROL_SWITCH ? NODE_CENSUS_ROOT_SWITCH : NODE_CENSUS_ROOT_OTHER;
+     }
+     else if (control != NULL && (pop->pusher & BUSTER_CHECK_LOWER_OWNER_TOKEN) == BUSTER_CHECK_LOWER_OWNER_TOKEN)
+@@ -3094,7 +3222,7 @@ static NodeCensusRoot node_census_root(const NodeCensusScratch* s, const CheckLo
+             brace = parser->tokens.kinds[t] == PARSE_KIND_L_BRACE;
+         }
+         const bool whole = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->node == pop->node;
+-        root = whole && scalar && !brace ? NODE_CENSUS_ROOT_INITIALIZER : NODE_CENSUS_ROOT_BRACE;
++        root = whole && scalar && !brace && !node_census_labelled(program->input, parser, control->token) ? NODE_CENSUS_ROOT_INITIALIZER : NODE_CENSUS_ROOT_BRACE;
+     }
+     return root;
+ }
+@@ -3311,6 +3439,7 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
+     {
+         memset(tests, 0, sizeof(*tests));
+         NodeCensusScratch* s = &tests->scratch;
++        s->given_declaration = BUSTER_CHECK_NONE;
+         tests->types = types;
+         tests->event_low = UINT32_MAX;
+         tests->program.input = input;
+@@ -3491,19 +3620,32 @@ static uint64_t node_census_reader_expression(NodeCensusReader* tests, uint32_t
+     const CheckGraph* graph = &program->input->graph;
+     // An initializer's whole value is a scalar object's without a brace before it, as node_census_root has it.
+     const bool nested = node_census_reader_nested(tests, token);
++    const CheckInput* input = program->input;
+     NodeCensusRoot context = nested ? NODE_CENSUS_ROOT_OTHER : node_census_root_kind(op);
++    if (__builtin_expect(input->cleanup_count != 0, 0) && context == NODE_CENSUS_ROOT_RETURN && node_census_cleans(input, token))
++    {
++        // A return's value under a cleanup is another control's (node_census_root's).
++        context = NODE_CENSUS_ROOT_OTHER;
++    }
+     if (op == CHECK_OP_INITIALIZE && !nested)
+     {
+         // A scalar's type: no struct, union or array, by its byte.
+         const uint8_t declared_bits = declared != 0 ? node_census_type_bits(s, declared) : 0;
+         const bool scalar = declared != 0 && (declared_bits & (BUSTER_NODE_CENSUS_TYPE_AGGREGATE | BUSTER_NODE_CENSUS_TYPE_ARRAY)) == 0;
++        // A brace between the object's name and its initializer's first token (the reader's, CheckInput.
++        // initializer_begins), which is where the plan's part begins (node_census_root's): one after it is its value's
++        // own, a cast's type's (`(enum { V })0`, #3202). The value's node's token where the reader has no such token.
+         const uint32_t value_token = root < graph->count ? graph->tokens[root] : 0;
++        const uint32_t begin = declaration < input->token_count && check_sparse_present(input->initializer_begins) ? check_sparse_get(input->initializer_begins, declaration) :
++                                                                                                                     BUSTER_CHECK_NONE;
++        const uint32_t limit = begin != BUSTER_CHECK_NONE && begin < value_token ? begin : value_token;
+         bool brace = declaration >= parser->tokens.count;
+-        for (uint32_t t = declaration + 1; !brace && t < value_token && t < parser->tokens.count; t += 1)
++        for (uint32_t t = declaration + 1; !brace && t < limit && t < parser->tokens.count; t += 1)
+         {
+             brace = parser->tokens.kinds[t] == PARSE_KIND_L_BRACE;
+         }
+-        context = scalar && !brace ? NODE_CENSUS_ROOT_INITIALIZER : NODE_CENSUS_ROOT_BRACE;
++        // And an object with an asm label's is its declaration's to refuse (node_census_labelled), as a brace's is.
++        context = scalar && !brace && !node_census_labelled(input, parser, declaration) ? NODE_CENSUS_ROOT_INITIALIZER : NODE_CENSUS_ROOT_BRACE;
+     }
+     s->given_declared = context == NODE_CENSUS_ROOT_INITIALIZER ? declared : 0;
+     uint32_t walked = 0;
+@@ -3511,7 +3653,10 @@ static uint64_t node_census_reader_expression(NodeCensusReader* tests, uint32_t
+     // is its reference.
+     uint64_t bits = given != NULL ? node_tests_expression(s, root, context, &walked, tests->types, given) : node_census_expression(s, root, 0, context, &walked);
+     s->given_declared = 0;
+-    bits |= node_census_reader_marks(tests, root < graph->count ? graph->tokens[root] : 0, s->span_low, s->span_high);
++    // An initializer's tokens begin after its object's name, as after the pipeline (node_census_initializer_low, #3201):
++    // a declarator's event that the reader has raised by now (an attribute it ignores) refuses its initializer here too.
++    const uint32_t marks_low = context == NODE_CENSUS_ROOT_INITIALIZER && declaration < parser->tokens.count ? node_census_initializer_low(s->span_low, declaration) : s->span_low;
++    bits |= node_census_reader_marks(tests, root < graph->count ? graph->tokens[root] : 0, marks_low, s->span_high);
+     // A node the records don't hold refuses the expression (none does: T takes one range of nodes, whole).
+     bits |= s->missed != 0 ? UINT64_C(1) << NODE_CENSUS_SIZE : 0;
+     tests->types->tested_missed += s->missed;
+@@ -3950,7 +4095,7 @@ static void node_tests_window_bytes(NodeCensusReader* tests, const struct NodeFa
+ // operand's place is at hand.
+ static inline __attribute__((always_inline)) void node_tests_window_loop_by(NodeCensusReader* tests, const struct NodeFactsReader* state, const NodeFront* front, uint32_t count,
+                                                                           uint64_t* far_count, uint64_t* quiet_count, uint64_t* call_count, uint64_t* cast_count,
+-                                                                          uint32_t* ask_count, const bool summaries)
++                                                                          uint64_t* order_count, uint32_t* ask_count, const bool summaries)
+ {
+     const NodeCensusScratch* s = &tests->scratch;
+     const __m512i quiet_pairs = _mm512_loadu_si512(s->own_quiet_pairs);
+@@ -3973,6 +4118,8 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
+     uint64_t quiet_total = 0;
+     uint64_t call_total = 0;
+     uint64_t cast_total = 0;
++    uint64_t order_total = 0;
++    const __m512i converts = _mm512_set1_epi8((char)BUSTER_NODE_TESTS_OPERAND_CONVERTS);
+     // A plain pointer that is a constant a test may read: its kind and its constant's bit, among a value's byte's
+     // kind's three bits and that bit.
+     const __m512i pointer_bits = _mm512_set1_epi8((char)((BUSTER_NODE_TESTS_KINDS - 1) << BUSTER_NODE_TESTS_KIND_SHIFT | BUSTER_NODE_TESTS_VALUE_CONSTANT));
+@@ -4096,12 +4243,21 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
+         const __mmask64 writes = _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_TESTS_CLASS_WRITE));
+         const __mmask64 voids = _mm512_test_epi8_mask(own, _mm512_set1_epi8(BUSTER_NODE_TESTS_TYPE_VOID));
+         const __mmask64 casts = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8((char)CHECK_OP_CAST));
+-        // The casts' rule: a cast is sent to its test by a pointer operand alone (the table's), and that test asks
+-        // whether its own type is an integer narrower than a pointer or an enumeration: none where its own type is
+-        // void (a statement's discard of a pointer's top) or a pointer. A cast to an integer stays listed, whatever
+-        // its width: the byte says none.
++        // The casts' rule: a cast is sent to its test by an operand that is a pointer once converted alone (the
++        // table's), and that test asks whether its own type is an integer narrower than a pointer or an enumeration:
++        // none where its own type is void (a statement's discard of a pointer's top) or a pointer. A cast to an
++        // integer stays listed, whatever its width: the byte says none.
+         const __mmask64 quiet_casts = casts & _mm512_test_epi8_mask(sends, operands) &
+                                       _mm512_test_epi8_mask(own, _mm512_set1_epi8((char)(BUSTER_NODE_TESTS_TYPE_VOID | BUSTER_NODE_CENSUS_TYPE_POINTER)));
++        // The orders' rule (#3201): an ordered comparison is sent to its test by an operand that is a pointer once
++        // converted (the table's, under the warning), and that test asks for exactly one such operand: none where both
++        // are, a loop's `p < end`. Left out where nothing else sends it (a constant, an enumeration, a comparison under
++        // it) and its operator has no test whatever its operands are (the sign comparison's). An operand before the
++        // block before reads as none, and its comparison stays listed.
++        const __m512i sent_by = _mm512_and_si512(sends, operands);
++        const __mmask64 quiet_orders = _mm512_test_epi8_mask(quiets, _mm512_set1_epi8(BUSTER_NODE_TESTS_QUIET_RELATIONAL)) & _mm512_testn_epi8_mask(always, always) &
++                                       _mm512_test_epi8_mask(left, converts) & _mm512_test_epi8_mask(right, converts) & _mm512_test_epi8_mask(sent_by, sent_by) &
++                                       _mm512_testn_epi8_mask(_mm512_andnot_si512(converts, sent_by), _mm512_andnot_si512(converts, sent_by));
+         const __m512i left_out = _mm512_movm_epi8(quiet_calls);
+         const __m512i top_left_out = node_window_operands(at_left, near_left, previous_left_out, left_out);
+         const uint64_t asks = _cvtmask64_u64(casts & voids & _mm512_test_epi8_mask(top_left_out, top_left_out));
+@@ -4114,11 +4270,12 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
+         const __m512i sent = _mm512_or_si512(always, _mm512_and_si512(sends, operands));
+         uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
+         masks[BUSTER_NODE_TESTS_MASK_TREE] = tree_first | _mm512_test_epi8_mask(tree_sends, operands);
+-        masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls | quiet_casts;
++        masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls | quiet_casts | quiet_orders;
+         quiet_total += (uint64_t)_mm_popcnt_u64(quiet);
+         call_total += (uint64_t)_mm_popcnt_u64(quiet_calls);
+         cast_total += (uint64_t)_mm_popcnt_u64(quiet_casts);
+-        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent) & ~quiet & ~quiet_calls & ~quiet_casts;
++        order_total += (uint64_t)_mm_popcnt_u64(quiet_orders);
++        masks[BUSTER_NODE_TESTS_MASK_OPERATORS] = _mm512_test_epi8_mask(sent, sent) & ~quiet & ~quiet_calls & ~quiet_casts & ~quiet_orders;
+         masks[BUSTER_NODE_TESTS_MASK_WRITES] = writes;
+         masks[BUSTER_NODE_TESTS_MASK_DISCARDS] = writes | voids | quiet_calls;
+         previous = property;
+@@ -4130,21 +4287,22 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
+     *quiet_count += quiet_total;
+     *call_count += call_total;
+     *cast_count += cast_total;
++    *order_count += order_total;
+     *ask_count = ask_total;
+ }
+ 
+ // The loop in its two forms, each its own code: as it is without X's rows, and with the calls' mask for a summary's
+ // side facts.
+ static void node_tests_window_loop(NodeCensusReader* tests, const struct NodeFactsReader* state, const NodeFront* front, uint32_t count, uint64_t* far_count,
+-                                   uint64_t* quiet_count, uint64_t* call_count, uint64_t* cast_count, uint32_t* ask_count)
++                                   uint64_t* quiet_count, uint64_t* call_count, uint64_t* cast_count, uint64_t* order_count, uint32_t* ask_count)
+ {
+     if (state->x_tables != NULL && state->summaries)
+     {
+-        node_tests_window_loop_by(tests, state, front, count, far_count, quiet_count, call_count, cast_count, ask_count, true);
++        node_tests_window_loop_by(tests, state, front, count, far_count, quiet_count, call_count, cast_count, order_count, ask_count, true);
+     }
+     else
+     {
+-        node_tests_window_loop_by(tests, state, front, count, far_count, quiet_count, call_count, cast_count, ask_count, false);
++        node_tests_window_loop_by(tests, state, front, count, far_count, quiet_count, call_count, cast_count, order_count, ask_count, false);
+     }
+ }
+ 
+@@ -4264,7 +4422,7 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+     const uint64_t t1 = __rdtsc();
+     uint32_t ask_count = 0;
+     node_tests_window_loop(tests, state, front, front->count, &counts[NODE_FACTS_COUNT_TESTS_FAR], &types->own_quiet, &types->own_quiet_calls, &types->own_quiet_casts,
+-                           &ask_count);
++                           &types->own_quiet_orders, &ask_count);
+     types->own_result_asks += node_tests_window_asks(tests, front, ask_count);
+     const uint64_t t2 = __rdtsc();
+     types->own_result_casts += ask_count;
+@@ -4274,6 +4432,7 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+     const uint32_t return_address = policy->return_address;
+     // A root's token is inside a statement expression only in a unit that has one.
+     const bool nests = reader->output->region_count != 0;
++    const bool cleanups = reader->output->cleanup_count != 0;
+     uint32_t word_count = 0;
+     uint32_t called = 0;
+     for (uint32_t e = 0; e < state->expression_count; e += 1)
+@@ -4358,7 +4517,13 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
+             // tokens.
+             const uint32_t held = in_unit != 0 ? token : 0;
+             const uint32_t nested = nests ? in_unit & (uint32_t)(tests->nested_bits[held >> 6] >> (held & 63) & 1) : 0;
+-            const uint32_t context = nested != 0 ? NODE_CENSUS_ROOT_OTHER : s->own_roots[front->ops[root_record] & 0x7f];
++            uint32_t context = nested != 0 ? NODE_CENSUS_ROOT_OTHER : s->own_roots[front->ops[root_record] & 0x7f];
++            if (__builtin_expect(cleanups, 0) && context == NODE_CENSUS_ROOT_RETURN && node_census_cleans(reader->output, token))
++            {
++                // A return's value under a cleanup is another control's (node_census_reader_expression's), in the few
++                // units with a cleanup.
++                context = NODE_CENSUS_ROOT_OTHER;
++            }
+             // Whether its top writes: its operand's last record. A root with a cast's operator is the front's discard at
+             // a statement's terminator, the one such root it makes (CHECK_INPUT_FORM_DISCARD), and no explicit cast: what
+             // a statement discards is its operand, whatever the root's token's role.
+@@ -4708,6 +4873,12 @@ struct NodeShadow
+     // builtin's semantics of its own?" differs (of `typed_library_calls` T asked it of there). Both must be none.
+     uint64_t typed_objects;
+     uint64_t typed_object_differences;
++    // And the program's own objects, which no declaration of the unit's declares (a multiversioned function's group's
++    // reference): reader time has nothing for one, and nothing to compare. And the objects whose asm label a rename
++    // pragma made once the reader was done (#3207): reader time has none for one, and T asks no label in such a unit
++    // (node_machine_renames); their other facts are compared.
++    uint64_t typed_objects_own;
++    uint64_t typed_objects_renamed;
+     uint64_t typed_library_calls;
+     uint64_t typed_library_differences;
+     uint32_t typed_listed;
+@@ -4796,6 +4967,9 @@ struct NodeShadow
+     uint64_t own_quiet_casts;
+     uint64_t own_quiet_casts_checked;
+     uint64_t own_quiet_casts_wrong;
++    uint64_t own_quiet_orders;
++    uint64_t own_quiet_orders_checked;
++    uint64_t own_quiet_orders_wrong;
+     uint64_t own_result_casts;
+     uint64_t own_result_asks;
+     uint64_t own_root_nulls;
+@@ -6531,11 +6705,11 @@ static void node_shadow_reader_facts_report(const NodeShadow* shadow)
+         }
+     }
+     printf("node-shadow: reader-time fact words words rows=%" PRIu64 " (%.1f ticks each) declarations'-lines=%" PRIu64 " (%.1f ticks each; %" PRIu64
+-           " made again) member-slots=%" PRIu64 " pointer-conversion-slots=%" PRIu64 "\n",
++           " made again; %" PRIu64 " uses asked the long way) member-slots=%" PRIu64 " pointer-conversion-slots=%" PRIu64 "\n",
+            counts[NODE_FACTS_COUNT_ROWS], counts[NODE_FACTS_COUNT_ROWS] != 0 ? (double)counts[NODE_FACTS_COUNT_ROW_TICKS] / (double)counts[NODE_FACTS_COUNT_ROWS] : 0.0,
+            counts[NODE_FACTS_COUNT_DECLARATION_LINES],
+            counts[NODE_FACTS_COUNT_DECLARATION_LINES] != 0 ? (double)counts[NODE_FACTS_COUNT_LINE_TICKS] / (double)counts[NODE_FACTS_COUNT_DECLARATION_LINES] : 0.0,
+-           counts[NODE_FACTS_COUNT_LINE_VERSIONS], counts[NODE_FACTS_COUNT_MEMBER_SLOTS], counts[NODE_FACTS_COUNT_PAIR_SLOTS]);
++           counts[NODE_FACTS_COUNT_LINE_VERSIONS], counts[NODE_FACTS_COUNT_LINE_ASKS], counts[NODE_FACTS_COUNT_MEMBER_SLOTS], counts[NODE_FACTS_COUNT_PAIR_SLOTS]);
+     if (records != 0)
+     {
+         // The kernel's ticks a record of its windows, beside T's on the same expressions in the same turn; and the
+@@ -6903,8 +7077,10 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+                shadow->typed_unpopped[NODE_MACHINE_TAKEN], shadow->typed_unpopped[NODE_MACHINE_REFUSED_CONTEXT], shadow->typed_unpopped_inside[NODE_MACHINE_TAKEN],
+                shadow->typed_unpopped_inside[NODE_MACHINE_REFUSED_CONTEXT], shadow->typed_discards, shadow->typed_compared, shadow->typed_compared_records,
+                shadow->typed_differences, shadow->typed_range_differences, shadow->typed_refusal_differences, shadow->typed_missing, shadow->typed_unrun);
+-        printf("node-shadow: reader-time T objects=%" PRIu64 " differences=%" PRIu64 " library-calls=%" PRIu64 " differences=%" PRIu64 "\n", shadow->typed_objects,
+-               shadow->typed_object_differences, shadow->typed_library_calls, shadow->typed_library_differences);
++        printf("node-shadow: reader-time T objects=%" PRIu64 " differences=%" PRIu64 " library-calls=%" PRIu64 " differences=%" PRIu64 " the-program's-own-objects=%" PRIu64
++               " objects-a-pragma-labelled=%" PRIu64 "\n",
++               shadow->typed_objects, shadow->typed_object_differences, shadow->typed_library_calls, shadow->typed_library_differences, shadow->typed_objects_own,
++               shadow->typed_objects_renamed);
+     }
+     if ((shadow->reader & BUSTER_NODE_READER_FACTS) != 0 && shadow->front_units != 0)
+     {
+@@ -6967,6 +7143,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
+                    shadow->own_result_asks, shadow->own_root_nulls);
+             printf("node-shadow: own tests casts-left-out=%" PRIu64 " checked=%" PRIu64 " of-them-with-a-test=%" PRIu64 "\n", shadow->own_quiet_casts,
+                    shadow->own_quiet_casts_checked, shadow->own_quiet_casts_wrong);
++            printf("node-shadow: own tests pointers'-ordered-comparisons-left-out=%" PRIu64 " checked=%" PRIu64 " of-them-with-a-test=%" PRIu64 "\n", shadow->own_quiet_orders,
++                   shadow->own_quiet_orders_checked, shadow->own_quiet_orders_wrong);
+             printf("node-shadow: own tests tree's-tests'-records-no-listed-operator-has checked=%" PRIu64 " of-them-with-a-test=%" PRIu64
+                    " lists'-words-with-a-bit-past-their-expression=%" PRIu64 "\n",
+                    shadow->own_tree_checked, shadow->own_tree_wrong, shadow->own_lists_past);
+@@ -7095,6 +7273,46 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t
+     census->bodies_taken_nodes += whole ? body_nodes : 0;
+ }
+ 
++// Whether a rename pragma the reader took gave object `object` its asm label (#3207): one of the unit's records of
++// `#pragma redefine_extname`, without a warning, whose declaration (the one it labelled, check_input_symbol_attribute)
++// declares the object.
++static bool node_shadow_object_renamed(const CheckInput* input, uint32_t object)
++{
++    const CheckInputSymbolPragmas* pragmas = input->symbol_pragmas;
++    bool renamed = false;
++    for (uint32_t k = 0; pragmas != NULL && !renamed && k < pragmas->count; k += 1)
++    {
++        const CheckInputSymbolPragma* record = pragmas->records + k;
++        renamed = record->supported && record->kind == CHECK_SYMBOL_PRAGMA_REDEFINE && record->warning == CHECK_SYMBOL_WARNING_NONE &&
++                  record->declaration < input->token_count && input->objects[record->declaration] == object;
++    }
++    return renamed;
++}
++
++// Reader time's facts of an object (`facts`, NodeMachine.reader_facts' bits, and its static declaration
++// `reader_declaration`) against the program's (`declaration`, `twice`, `labelled`): whether they are the same.
++// - An object no declaration of the unit's declares is the program's own, made after the reader (#3203, `own`): reader
++//   time must have nothing for it.
++// - A label the program has and reader time has not is no difference where a rename pragma made it (`pragma`, #3207:
++//   T asks no label in such a unit), and is counted (`renamed`); any other difference of a label is one.
++typedef struct NodeShadowObject NodeShadowObject;
++struct NodeShadowObject
++{
++    bool same;
++    bool own;
++    bool renamed;
++};
++
++static NodeShadowObject node_shadow_object(uint8_t facts, uint32_t reader_declaration, uint32_t declaration, bool twice, bool labelled, bool pragma)
++{
++    const bool reader_labelled = (facts & BUSTER_NODE_MACHINE_OBJECT_LABELLED) != 0;
++    const bool own = (facts & BUSTER_NODE_MACHINE_OBJECT_DECLARED) == 0 && declaration != BUSTER_CHECK_NONE;
++    const bool renamed = !own && labelled && !reader_labelled && pragma;
++    const bool same = own ? reader_declaration == BUSTER_CHECK_NONE && facts == 0 :
++                            reader_declaration == declaration && ((facts & BUSTER_NODE_MACHINE_OBJECT_TWICE) != 0) == twice && (reader_labelled == labelled || renamed);
++    return (NodeShadowObject){ .same = same, .own = own, .renamed = renamed };
++}
++
+ // File `file`, read with `options`, prepared and lowered as -c lowers it, counted into `census`: whether its options could
+ // be read.
+ static bool node_census_file(NodeCensus* census, const char* file, char** options, uint32_t option_count)
+@@ -7144,6 +7362,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+             .program = &selected.program,
+             .pp = &source.pp,
+             .file = file,
++            .given_declaration = BUSTER_CHECK_NONE,
+         };
+         s.policy = node_census_policy(&source.pp, selected.program.input);
+         uint32_t** node_columns[] = { &s.marks, &s.parents, &s.depths, &s.node_controls, &s.list, &s.stack, &s.node_pop };
+@@ -7380,6 +7599,9 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                     shadow->own_quiet_casts += typed->own_quiet_casts;
+                     shadow->own_quiet_casts_checked += typed->own_quiet_casts_checked;
+                     shadow->own_quiet_casts_wrong += typed->own_quiet_casts_wrong;
++                    shadow->own_quiet_orders += typed->own_quiet_orders;
++                    shadow->own_quiet_orders_checked += typed->own_quiet_orders_checked;
++                    shadow->own_quiet_orders_wrong += typed->own_quiet_orders_wrong;
+                     shadow->own_result_casts += typed->own_result_casts;
+                     shadow->own_result_asks += typed->own_result_asks;
+                     shadow->own_root_nulls += typed->own_root_nulls;
+@@ -7501,8 +7723,10 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                             const NodeCensusRoot context = typed->kinds[node] < NODE_CENSUS_ROOTS ? (NodeCensusRoot)typed->kinds[node] : NODE_CENSUS_ROOT_OTHER;
+                             uint32_t walked = 0;
+                             s.given_declared = typed->declared[node];
++                            s.given_declaration = context == NODE_CENSUS_ROOT_INITIALIZER ? typed->declarations[node] : BUSTER_CHECK_NONE;
+                             uint64_t tests = node_census_expression(&s, node, 0, context, &walked);
+                             s.given_declared = 0;
++                            s.given_declaration = BUSTER_CHECK_NONE;
+                             tests |= node_census_region_at(program, path->input.graph.tokens[node]) ? UINT64_C(1) << NODE_CENSUS_REGION : 0;
+                             node_shadow_tested(shadow, &s, typed, node, tests, context, walked, false);
+                         }
+@@ -7528,9 +7752,14 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+                         const bool twice = program->object_returns_twice != NULL && program->object_returns_twice[object] != 0;
+                         const bool labelled = program->object_labelled != NULL && program->object_labelled[object] != 0;
+                         const uint8_t facts = typed->object_facts[object];
+-                        const bool same = typed->object_declarations[object] == declaration && ((facts & BUSTER_NODE_MACHINE_OBJECT_TWICE) != 0) == twice &&
+-                                          ((facts & BUSTER_NODE_MACHINE_OBJECT_LABELLED) != 0) == labelled;
+-                        shadow->typed_objects += declaration != BUSTER_CHECK_NONE || typed->object_declarations[object] != BUSTER_CHECK_NONE;
++                        const bool pragma = labelled && (facts & BUSTER_NODE_MACHINE_OBJECT_LABELLED) == 0 && node_shadow_object_renamed(&path->input, object);
++                        const NodeShadowObject compared = node_shadow_object(facts, typed->object_declarations[object], declaration, twice, labelled, pragma);
++                        const bool own = compared.own;
++                        const bool renamed = compared.renamed;
++                        const bool same = compared.same;
++                        shadow->typed_objects += !own && (declaration != BUSTER_CHECK_NONE || typed->object_declarations[object] != BUSTER_CHECK_NONE);
++                        shadow->typed_objects_own += own;
++                        shadow->typed_objects_renamed += renamed;
+                         shadow->typed_object_differences += !same;
+                         if (!same && shadow->typed_listed < node_census_list)
+                         {
+@@ -7618,6 +7847,29 @@ static void node_census_report(const NodeCensus* census)
+     }
+ }
+ 
++// Whether anything the shadow compared differs from the pipeline's, or from its own second making: the command's
++// status, and what a fixture of the whole shadow asks (c_check_node_census_test.c's node_objects_test_fixture).
++static bool node_shadow_differs(const NodeShadow* shadow)
++{
++    return shadow->value_differences != 0 || shadow->entry_differences != 0 || shadow->twin_differences != 0 || shadow->fused_differences != 0 ||
++           shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
++           shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
++           shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||
++           shadow->swept_differences != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
++           shadow->tested_missed != 0 || shadow->tested_policy_differences != 0 || shadow->reader_twin_differences != 0 || shadow->own_count_differences != 0 ||
++           shadow->own_quiet_wrong != 0 || shadow->own_quiet_calls_wrong != 0 || shadow->own_quiet_calls_loud != 0 || shadow->own_quiet_casts_wrong != 0 ||
++           shadow->own_quiet_orders_wrong != 0 || shadow->own_values_wrong != 0 || shadow->own_tree_wrong != 0 || shadow->own_direct_wrong != 0 ||
++           shadow->own_lists_past != 0 || shadow->flat_differences != 0 || shadow->reader_facts[NODE_FACTS_COUNT_DIFFERENCES] != 0 ||
++           shadow->reader_facts[NODE_FACTS_COUNT_LIST_DIFFERENCES] != 0 || shadow->reader_facts[NODE_FACTS_COUNT_FAILURES] != 0 ||
++           shadow->reader_facts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] != 0 || shadow->reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] != 0 ||
++           shadow->reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] != 0 || shadow->reader_facts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] != 0 ||
++           shadow->front_plain_differences != 0 || shadow->reader_facts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] != 0 ||
++           shadow->reader_facts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] != 0 || shadow->reader_facts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] != 0 ||
++           shadow->reader_facts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] != 0 || shadow->summary_reference_differences != 0 ||
++           shadow->summary_fact_differences != 0 || shadow->summary_truth_differences != 0 || shadow->summary_fold_differences != 0 ||
++           shadow->summary_unkept != 0 || shadow->front_window_name_differences != 0 || shadow->front_window_arguments_most > BUSTER_NODE_FRONT_RECORDS;
++}
++
+ static int run_node_census(int count, char** arguments)
+ {
+     char** options = calloc((size_t)count + 1, sizeof(char*));
+@@ -7826,29 +8078,7 @@ static int run_node_census(int count, char** arguments)
+     }
+     free(files);
+     free(options);
+-    const bool differences = shadowed && (shadow.value_differences != 0 || shadow.entry_differences != 0 || shadow.twin_differences != 0 || shadow.fused_differences != 0 ||
+-                                          shadow.facts_differences != 0 || shadow.facts_list_differences != 0 || shadow.facts_failures != 0 ||
+-                                          shadow.facts_conversions != shadow.facts_conversions_derived || shadow.reads.same_differences != 0 ||
+-                                          shadow.reads.misplaced != 0 || shadow.front_differences != 0 || shadow.typed_differences != 0 ||
+-                                          shadow.typed_object_differences != 0 || shadow.typed_library_differences != 0 || shadow.swept_differences != 0 ||
+-                                          shadow.tested_unsound != 0 || shadow.tested_differences != 0 || shadow.tested_kind_differences != 0 ||
+-                                          shadow.tested_missed != 0 || shadow.tested_policy_differences != 0 || shadow.reader_twin_differences != 0 ||
+-                                          shadow.own_count_differences != 0 || shadow.own_quiet_wrong != 0 || shadow.own_quiet_calls_wrong != 0 || shadow.own_quiet_calls_loud != 0 ||
+-                                          shadow.own_quiet_casts_wrong != 0 ||
+-                                          shadow.own_values_wrong != 0 || shadow.own_tree_wrong != 0 ||
+-                                          shadow.own_direct_wrong != 0 || shadow.own_lists_past != 0 ||
+-                                          shadow.flat_differences != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_LIST_DIFFERENCES] != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_FAILURES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_FRONT_DIFFERENCES] != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_DIFFERENCES] != 0 || shadow.reader_facts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_KERNEL_DIFFERENCES] != 0 || shadow.front_plain_differences != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] != 0 ||
+-                                          shadow.reader_facts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] != 0 ||
+-                                          shadow.summary_reference_differences != 0 || shadow.summary_fact_differences != 0 ||
+-                                          shadow.summary_truth_differences != 0 || shadow.summary_fold_differences != 0 || shadow.summary_unkept != 0 ||
+-                                          shadow.front_window_name_differences != 0 || shadow.front_window_arguments_most > BUSTER_NODE_FRONT_RECORDS);
++    const bool differences = shadowed && node_shadow_differs(&shadow);
+     return valid && census.failures == 0 && census.files != 0 && !differences ? 0 : 1;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index 7d0538003..c13fa4756 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -765,6 +765,274 @@ static const char node_census_test_atomic[] =
+     "int indirect(void) { return p->x; } // refuse: complex-bitint-atomic-vector-half\n"
+     "int ordinary(struct A* q) { return q->x + 1; } // take\n";
+ 
++// What the compiler's own test tables had and no corpus (#3201, #3202), with the default warnings. An ordered comparison
++// of a pointer with an integer, by each operand that is a pointer once converted (a pointer, an array, a function), and
++// the comparisons its test has nothing for: a null constant, two pointers (which the loop on the window leaves out).
++// A cast of an array, a string, a function and a function's dereference to a narrower integer or an enumeration, and
++// to a pointer's width. A call of a function whose earlier redeclaration has diagnose_if, with the declarations before
++// and after it bare. An initializer whose declarator has a warning after its name (an attribute the reader ignores, one
++// it doesn't know), an automatic object's asm label beside a register variable's, which names its register and is
++// taken, and a brace that is its cast's type's. A `return` under a cleanup,
++// by each scope that holds one. And a return of a sum of more operands than the address test's list once held.
++static const char node_census_test_holes[] =
++    "enum A { A0, A1 };\n"
++    "struct L { int first; int list[4]; };\n"
++    "int ga[8];\n"
++    "int one(int);\n"
++    "void f8(int x);\n"
++    "void f8(int y) __attribute__((diagnose_if(y == 3, \"redeclared\", \"warning\")));\n"
++    "void f8(int z);\n"
++    "void rel(int* p);\n"
++    "void vf(void);\n"
++    "int at_file_scope __attribute__((nonnull)) = 5;\n"
++    "int order(long a, int* p, int* e, struct L* q, int (*fp)(int))\n"
++    "{\n"
++    "    int x = 0;\n"
++    "    enum A ea = A0;\n"
++    "    x = a < p; // refuse: pointer-integer-order\n"
++    "    x = p >= a; // refuse: pointer-integer-order\n"
++    "    x = p <= 1; // refuse: pointer-integer-order\n"
++    "    x = ga > a; // refuse: pointer-integer-order\n"
++    "    x = q->list > a; // refuse: pointer-integer-order\n"
++    "    x = one < a; // refuse: pointer-integer-order\n"
++    "    x = a < one; // refuse: pointer-integer-order\n"
++    "    x = a > ga; // refuse: pointer-integer-order\n"
++    "    if (a < p) x = 1; // refuse: pointer-integer-order\n"
++    "    x = p < 0; // take\n"
++    "    x = p < e; // take\n"
++    "    x = ga < p; // take\n"
++    "    while (p < e) p++; // take\n"
++    "    x = p < (int*)0; // take\n"
++    "    x = a < x; // take\n"
++    "    x = (int)ga; // refuse: pointer-cast-or-void-dereference\n"
++    "    x = (char)q->list; // refuse: pointer-cast-or-void-dereference\n"
++    "    x = (short)\"s\"; // refuse: pointer-cast-or-void-dereference\n"
++    "    x = (short)one; // refuse: pointer-cast-or-void-dereference\n"
++    "    x = (unsigned char)*fp; // refuse: pointer-cast-or-void-dereference\n"
++    "    ea = (enum A)ga; // refuse: pointer-cast-or-void-dereference\n"
++    "    a = (long)ga; // take\n"
++    "    a = (long)one; // take\n"
++    "    p = (int*)ga; // take\n"
++    "    x = (*one)(x); // take\n"
++    "    (*vf)(); // take\n"
++    "    f8(3); // refuse: callee\n"
++    "    f8(2); // refuse: callee\n"
++    "    return x + (int)ea; // take\n"
++    "}\n"
++    "void declared(int n)\n"
++    "{\n"
++    "    int a __attribute__((nonnull)) = n; // refuse: warning-event\n"
++    "    int b __attribute__((unknown_attribute_of_no_compiler)) = n + 1; // refuse: warning-event\n"
++    "    int d asm(\"d1\") = n + 2; // refuse: control\n"
++    "    register long r asm(\"r10\") = n + 4; // take\n"
++    "    static int labelled_static asm(\"ls1\") = 3;\n"
++    "    enum A e = (enum { V1 })0; // take\n"
++    "    int plain = n + 3; // take\n"
++    "    f8(a + b + d + (int)e + plain + labelled_static + at_file_scope); // refuse: callee\n"
++    "}\n"
++    "int cleaned(int n)\n"
++    "{\n"
++    "    int c __attribute__((cleanup(rel))) = n;\n"
++    "    if (n) return 1; // refuse: control\n"
++    "    {\n"
++    "        int inner __attribute__((cleanup(rel))) = n;\n"
++    "        if (inner) return 2; // refuse: control\n"
++    "    }\n"
++    "    for (int i __attribute__((cleanup(rel))) = 0; i < n; i++)\n"
++    "    {\n"
++    "        if (i > 3) return i; // refuse: control\n"
++    "    }\n"
++    "    return c; // refuse: control\n"
++    "}\n"
++    "int before(int n)\n"
++    "{\n"
++    "    if (n) return 1; // take\n"
++    "    {\n"
++    "        int inner __attribute__((cleanup(rel))) = n;\n"
++    "        n += inner; // take\n"
++    "        if (n > 9) return 3; // refuse: control\n"
++    "    }\n"
++    "    return n; // take\n"
++    "}\n"
++    "struct L whole(struct L* q, int n)\n"
++    "{\n"
++    "    int c __attribute__((cleanup(rel))) = n;\n"
++    "    return *q; // refuse: aggregate-value\n"
++    "}\n"
++    "long sum(long a)\n"
++    "{\n"
++    "    return a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + "
++    "a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a + a; // take\n"
++    "}\n";
++
++// A segment's address space (#3205): a value of a type in one is the machine's to refuse, as any type it has no kind for,
++// through a pointer, a member, a subscript and a name; an address space that is no segment's, and a pointer to a
++// segment's object that nothing reads through, are taken.
++static const char node_census_test_segments[] =
++    "struct S { int a, b; };\n"
++    "__seg_gs int count;\n"
++    "int seg(__seg_gs int* p, __seg_fs struct S* s, int __attribute__((address_space(258)))* q, int __attribute__((address_space(1)))* flat, long v)\n"
++    "{\n"
++    "    int x = *p; // refuse: complex-bitint-atomic-vector-half\n"
++    "    *p = (int)v; // refuse: complex-bitint-atomic-vector-half\n"
++    "    s->b = (int)v; // refuse: complex-bitint-atomic-vector-half\n"
++    "    x = p[1]; // refuse: complex-bitint-atomic-vector-half\n"
++    "    x = count; // refuse: complex-bitint-atomic-vector-half\n"
++    "    x = *q; // refuse: complex-bitint-atomic-vector-half\n"
++    "    x = *(__seg_gs int*)v; // refuse: complex-bitint-atomic-vector-half\n"
++    "    x = *flat; // take\n"
++    "    p = p + 1; // take\n"
++    "    v = (long)p; // take\n"
++    "    return x; // take\n"
++    "}\n";
++
++// With every warning off (`-w`), the tests that a warning's policy asks refuse nothing: an ordered comparison of a
++// pointer with an integer and a pointer's cast to a narrower integer are taken, in the census's code and in the
++// machine's own form, and two pointers' comparison, which nothing sends, is not one the loop leaves out.
++static const char node_census_test_silent[] =
++    "int order(long a, int* p, int* e, char* s)\n"
++    "{\n"
++    "    int x = a < p; // take\n"
++    "    x = (int)s; // take\n"
++    "    if (p >= a) x = 2; // take\n"
++    "    while (p < e) p++; // take\n"
++    "    return x; // take\n"
++    "}\n";
++
++// Under the sign comparison's warning every comparison is sent to its tests whatever its operands, and two pointers'
++// ordered comparison is not one the loop leaves out.
++static const char node_census_test_signs[] =
++    "int order(long a, int* p, int* e)\n"
++    "{\n"
++    "    int x = p < e; // take\n"
++    "    while (p < e) p++; // take\n"
++    "    x = a < p; // refuse: pointer-integer-order\n"
++    "    return x; // take\n"
++    "}\n";
++
++// Two attributes whose warnings no test stands for (#3201): a unit that reads either has every expression refused, the
++// function's that has the attribute and any other's.
++static const char node_census_test_interrupt[] =
++    "void g(void);\n"
++    "__attribute__((interrupt)) void h(void* p) { g(); } // refuse: unmodeled-warning\n"
++    "int w(int a, int b)\n"
++    "{\n"
++    "    a = a + b; // refuse: unmodeled-warning\n"
++    "    return a; // refuse: unmodeled-warning\n"
++    "}\n";
++
++static const char node_census_test_noderef[] =
++    "typedef int __attribute__((noderef)) Scalar;\n"
++    "Scalar* p;\n"
++    "void f(void) { (void)*p; } // refuse: unmodeled-warning\n"
++    "int w(int a, int b)\n"
++    "{\n"
++    "    return a + b; // refuse: unmodeled-warning\n"
++    "}\n";
++
++// The objects' side at reader time (#3203, #3206, #3207): what T reads of an object that the reader settles after the
++// bodies, each in a unit of its own (the answers are a unit's).
++// - An asm label. One the asm pass keeps (memmove's; a tentative definition's redeclaration's; one spelled twice; a
++//   register variable's): the builtin's call is a call, which T takes. One it ignores, on a declaration after the
++//   definition (memcpy's, `object`'s): the builtin's call is computed, and T refuses it at both times.
++static const char node_objects_test_labels[] =
++    "typedef unsigned long size_t;\n"
++    "void* memmove(void* destination, const void* source, size_t count) asm(\"moved\");\n"
++    "void* memcpy(void* destination, const void* source, size_t count) { char* to = destination; const char* from = source; while (count--) *to++ = *from++; return destination; }\n"
++    "void* memcpy(void* destination, const void* source, size_t count) asm(\"ignored_copy\");\n"
++    "int object = 1;\n"
++    "extern int object asm(\"ignored_object\");\n"
++    "int tentative;\n"
++    "extern int tentative asm(\"kept_tentative\");\n"
++    "extern int twice asm(\"same\");\n"
++    "extern int twice asm(\"same\");\n"
++    "int twice = 3;\n"
++    "int uses(char* to, const char* from, int n)\n"
++    "{\n"
++    "    register long kept asm(\"r10\") = n;\n"
++    "    memcpy(to, from, 8);\n"
++    "    memmove(to, from, 8);\n"
++    "    return object + tentative + twice + (int)kept;\n"
++    "}\n";
++
++// - A rename pragma (with an asm label in the unit, without which the program reads no label at all: #3208). The
++//   declarations it labels are chosen when the reader is done, so T refuses every library builtin's call of the unit,
++//   the one before the pragma and memmove's too, and asks no label; the two objects it labels are counted apart.
++static const char node_objects_test_renames[] =
++    "typedef unsigned long size_t;\n"
++    "void* memcpy(void* destination, const void* source, size_t count);\n"
++    "void* memmove(void* destination, const void* source, size_t count);\n"
++    "int plain(int n);\n"
++    "extern int other asm(\"other_name\");\n"
++    "int before(char* to, const char* from) { memcpy(to, from, 8); return plain(1); }\n"
++    "#pragma redefine_extname memcpy renamed_copy\n"
++    "int after(char* to, const char* from) { memcpy(to, from, 8); memmove(to, from, 8); return plain(2) + other; }\n"
++    "extern int data;\n"
++    "#pragma redefine_extname data renamed_data\n"
++    "int read(void) { return data; }\n";
++
++// - A weak pragma, which is no rename pragma: a labelled builtin's call is a call T takes, in a unit of its own (a
++//   symbol pragma sends every name's line the long way).
++static const char node_objects_test_pragmas[] =
++    "typedef unsigned long size_t;\n"
++    "void* memmove(void* destination, const void* source, size_t count) asm(\"moved\");\n"
++    "extern int late;\n"
++    "#pragma weak late\n"
++    "int uses(char* to, const char* from) { memmove(to, from, 8); return &late != 0; }\n";
++
++// - A function multiversioned by target strings, called: the program's own object for its versions, and its call's
++//   candidates, made after the last body: T refuses every call of the unit at both times.
++static const char node_objects_test_versions[] =
++    "__attribute__((target(\"default\"))) int versioned(int n) { return n; }\n"
++    "__attribute__((target(\"avx2\"))) int versioned(int n) { return n + 1; }\n"
++    "int plain(int n);\n"
++    "int calls(int n) { int a = versioned(n); int b = plain(n); return a + b; }\n"
++    "int (*address(void))(int) { return versioned; }\n"
++    "int unused(int n) { return n * 2; }\n";
++
++// - The same declared and never called: the graph has no candidate at either time, and the unit's one call is refused
++//   all the same, the answer being the unit's declarations'.
++static const char node_objects_test_unversioned[] =
++    "__attribute__((target(\"default\"))) int versioned(int n) { return n; }\n"
++    "__attribute__((target(\"avx2\"))) int versioned(int n) { return n + 1; }\n"
++    "int plain(int n);\n"
++    "int calls(int n) { return plain(n); }\n";
++
++// - An overloadable function: its declarations are the graph's candidates before the bodies, and at both times every
++//   call of the unit is refused (at its callee's leaf: the plain function's before and after the overloaded one's
++//   too; and for its callee, a call through a pointer) and every discard is left to the action.
++static const char node_objects_test_overloads[] =
++    "int __attribute__((overloadable)) chosen(int n);\n"
++    "int __attribute__((overloadable)) chosen(long n);\n"
++    "int plain(int n);\n"
++    "int before(int n) { return plain(n); }\n"
++    "int calls(int n) { return chosen(n); }\n"
++    "int after(int n) { return plain(n) + n; }\n"
++    "int through(int (*fp)(int), int n) { return fp(n); }\n"
++    "int none(int n) { (void)n; return n + 1; }\n";
++
++// - A weak name, which is the name's from a token on and not a declaration's: a function declared weak and then
++//   defined; a block's weak declaration of a name whose other declaration is used before it (not weak) and after it
++//   (weak: the declaration's line is made again); a weakref of a function and of an object; a plain weak
++//   declaration, tested and called; and a name the unit does not note, used three times, whose line its second and
++//   third use take without asking.
++static const char node_objects_test_weak[] =
++    "int declared(void) __attribute__((weak));\n"
++    "int declared(void) { return 1; }\n"
++    "int first(void) { return declared(); }\n"
++    "static int hidden(void) { return 1; }\n"
++    "int early(void) { return hidden(); }\n"
++    "int second(void) { int hidden(void) __attribute__((weak)); return hidden(); }\n"
++    "int late(void) { return hidden(); }\n"
++    "static int missing(void) __attribute__((weakref(\"target\")));\n"
++    "int third(void) { return missing(); }\n"
++    "static int data __attribute__((weakref(\"external_data\")));\n"
++    "int fourth(void) { return data; }\n"
++    "extern int plain_weak(void) __attribute__((weak));\n"
++    "int fifth(void) { return plain_weak ? plain_weak() : 0; }\n"
++    "int plain(int n);\n"
++    "int sixth(int n) { return plain(n) + plain(n + 1) + plain(n + 2); }\n";
++
+ // The shadow's fixture (#2524's step 1): each line that ends with `// machine: taken` has expressions the census takes and
+ // the machine takes them all, each that ends with `// machine: REFUSAL` one the machine refuses for that reason
+ // (node_machine_refusal_names). Its taken expressions' records and entries must be the pipeline's, by T's rows and by
+@@ -1407,6 +1675,8 @@ struct NodeTestsWindowed
+     uint32_t calls_checked;
+     uint32_t casts;
+     uint32_t casts_left;
++    // The ordered comparisons of two operands that are pointers once converted, which the loop's orders' rule left out.
++    uint32_t orders;
+     uint32_t asks;
+     // The initializers' roots asked of the census's code for a null pointer constant that is no literal.
+     uint32_t nulls;
+@@ -1474,6 +1744,8 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
+                                                  shadow.own_result_casts == windowed->casts &&
+                                                  shadow.own_quiet_casts == windowed->casts_left && shadow.own_quiet_casts_checked == windowed->casts_left &&
+                                                  shadow.own_quiet_casts_wrong == 0 &&
++                                                 shadow.own_quiet_orders == windowed->orders && shadow.own_quiet_orders_checked == windowed->orders &&
++                                                 shadow.own_quiet_orders_wrong == 0 &&
+                                                  shadow.own_values_checked == windowed->values && shadow.own_values_wrong == 0 &&
+                                                  shadow.own_tree_checked == windowed->spared && shadow.own_tree_wrong == 0 && shadow.own_lists_past == 0 &&
+                                                  shadow.own_direct == windowed->direct && shadow.own_direct_checked == windowed->direct && shadow.own_direct_wrong == 0 &&
+@@ -1517,6 +1789,9 @@ static bool node_tests_test_fixture_form(const char* directory, const char* name
+                 window ? windowed->apart : 0);
+         fprintf(stderr, "test-checker: node-tests %s%s: %" PRIu64 " initializers' roots were asked of the census's code for a null pointer constant (%u)\n", name,
+                 window ? " (on the window)" : "", shadow.own_root_nulls, window ? windowed->nulls : 0);
++        fprintf(stderr, "test-checker: node-tests %s%s: the loop left %" PRIu64 " ordered comparisons of two pointers out (%u): %" PRIu64 " of them checked, %" PRIu64
++                " with a test\n", name, window ? " (on the window)" : "", shadow.own_quiet_orders, window ? windowed->orders : 0, shadow.own_quiet_orders_checked,
++                shadow.own_quiet_orders_wrong);
+         fprintf(stderr, "test-checker: node-tests %s: %s: the tests ran on %" PRIu64 " expressions at reader time and refused %" PRIu64 " (%u expected); %" PRIu64
+                 " compared and %" PRIu64 " never lowered; %" PRIu64 " taken there that the census refuses, %" PRIu64 " differ, %" PRIu64 " roots' kinds differ, %" PRIu64
+                 " nodes outside the records, %" PRIu64 " units' enabled warnings differ; T's rows and rules there: %" PRIu64 " values not the action's, %" PRIu64
+@@ -1585,6 +1860,189 @@ static bool node_tests_test_fixture(const char* directory, const char* name, con
+     return census && window;
+ }
+ 
++// The weak names' search (check_input_weak_name, c_check_input.c), eight records a step: lists of every length to 20,
++// record k the name k + 1 from the token 10 * (k + 1) on, and a last record that makes the first name weak again
++// later. A name is weak at its token and after, not the token before; a name of no record never; with no use asked,
++// every record's name; and the name of a list's last record past each step's end.
++static bool node_objects_test_weak_search(void)
++{
++    CheckInputWeakName records[21];
++    bool held = true;
++    for (uint32_t count = 0; count <= 20; count += 1)
++    {
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            records[k] = (CheckInputWeakName){ .name = k + 1, .token = 10 * (k + 1) };
++        }
++        records[count] = (CheckInputWeakName){ .name = 1, .token = 1000 };
++        const CheckInput listed = { .weak_names = records, .weak_name_count = count };
++        const CheckInput again = { .weak_names = records, .weak_name_count = count + 1 };
++        for (uint32_t k = 0; k < count; k += 1)
++        {
++            held = held && check_input_weak_name(&listed, k + 1, 10 * (k + 1)) && check_input_weak_name(&listed, k + 1, 10 * (k + 1) + 5) &&
++                   !check_input_weak_name(&listed, k + 1, 10 * (k + 1) - 1) && check_input_weak_name(&listed, k + 1, UINT32_MAX) &&
++                   !check_input_weak_name(&listed, 10 * (k + 1), 10 * (k + 1));
++        }
++        held = held && !check_input_weak_name(&listed, count + 1, UINT32_MAX) && !check_input_weak_name(&listed, 0, UINT32_MAX) &&
++               check_input_weak_name(&again, 1, 1000) && check_input_weak_name(&again, 1, UINT32_MAX) &&
++               check_input_weak_name(&again, 1, 999) == (count != 0) && check_input_weak_name(&again, 1, 9) == false;
++    }
++    return held;
++}
++
++// The shadow's own comparisons of the objects' side, which no run of a fixture can make fail: an object's facts
++// against the program's (node_shadow_object), the objects a rename pragma labelled (node_shadow_object_renamed), and
++// a name's leaf by the names' pass's second run (node_facts_window_name_same). A row a case.
++static bool node_objects_test_comparisons(void)
++{
++    const uint8_t declared = BUSTER_NODE_MACHINE_OBJECT_DECLARED;
++    const uint8_t twice = BUSTER_NODE_MACHINE_OBJECT_TWICE;
++    const uint8_t labelled = BUSTER_NODE_MACHINE_OBJECT_LABELLED;
++    const uint32_t none = BUSTER_CHECK_NONE;
++    static const struct
++    {
++        uint8_t facts;
++        uint32_t reader_declaration;
++        uint32_t declaration;
++        bool twice;
++        bool labelled;
++        bool pragma;
++        NodeShadowObject expected;
++    } objects[] = {
++        // A declared object: its declaration, its returns_twice and its label, each the program's or a difference.
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 7, false, false, false, { .same = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 9, false, false, false, { .same = false } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false, false, false, { .same = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, BUSTER_CHECK_NONE, 7, false, false, false, { .same = false } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED | BUSTER_NODE_MACHINE_OBJECT_TWICE, 7, 7, true, false, false, { .same = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED | BUSTER_NODE_MACHINE_OBJECT_TWICE, 7, 7, false, false, false, { .same = false } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 7, true, false, false, { .same = false } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED | BUSTER_NODE_MACHINE_OBJECT_LABELLED, 7, 7, false, true, false, { .same = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED | BUSTER_NODE_MACHINE_OBJECT_LABELLED, 7, 7, false, false, false, { .same = false } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 7, false, true, false, { .same = false } },
++        // A label a rename pragma made, which reader time has not: counted, and no difference; its other facts still are.
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 7, false, true, true, { .same = true, .renamed = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 9, false, true, true, { .same = false, .renamed = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 7, true, true, true, { .same = false, .renamed = true } },
++        // A pragma that labelled the object changes nothing where reader time has the label, or the program has none.
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED | BUSTER_NODE_MACHINE_OBJECT_LABELLED, 7, 7, false, true, true, { .same = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED | BUSTER_NODE_MACHINE_OBJECT_LABELLED, 7, 7, false, false, true, { .same = false } },
++        { BUSTER_NODE_MACHINE_OBJECT_DECLARED, 7, 7, false, false, true, { .same = true } },
++        // The program's own object: reader time has nothing, or it differs.
++        { 0, BUSTER_CHECK_NONE, 7, false, false, false, { .same = true, .own = true } },
++        { 0, BUSTER_CHECK_NONE, 7, true, true, true, { .same = true, .own = true } },
++        { 0, 7, 7, false, false, false, { .same = false, .own = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_TWICE, BUSTER_CHECK_NONE, 7, true, false, false, { .same = false, .own = true } },
++        { BUSTER_NODE_MACHINE_OBJECT_LABELLED, BUSTER_CHECK_NONE, 7, false, true, false, { .same = false, .own = true } },
++        // An object neither has: nothing to compare.
++        { 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false, false, false, { .same = true } },
++    };
++    bool held = (declared | twice | labelled) != 0 && none == BUSTER_CHECK_NONE;
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
++    {
++        const NodeShadowObject made = node_shadow_object(objects[i].facts, objects[i].reader_declaration, objects[i].declaration, objects[i].twice, objects[i].labelled,
++                                                         objects[i].pragma);
++        const bool row = made.same == objects[i].expected.same && made.own == objects[i].expected.own && made.renamed == objects[i].expected.renamed;
++        if (!row)
++        {
++            fprintf(stderr, "test-checker: node-objects: the objects' comparison's row %u: same %d (%d expected), own %d (%d), renamed %d (%d)\n", i, made.same,
++                    objects[i].expected.same, made.own, objects[i].expected.own, made.renamed, objects[i].expected.renamed);
++        }
++        held = held && row;
++    }
++    // The pragmas' records: the object of token 2 a rename pragma labelled; token 3's named by a weak pragma, token 4's
++    // by a rename the reader did not take, token 5's by one with a warning, and one that labelled nothing.
++    CheckInputSymbolPragma records[] = {
++        { .kind = CHECK_SYMBOL_PRAGMA_WEAK, .supported = true, .declaration = 3 },
++        { .kind = CHECK_SYMBOL_PRAGMA_REDEFINE, .supported = false, .declaration = 4 },
++        { .kind = CHECK_SYMBOL_PRAGMA_REDEFINE, .supported = true, .warning = CHECK_SYMBOL_WARNING_INTERNAL, .declaration = 5 },
++        { .kind = CHECK_SYMBOL_PRAGMA_REDEFINE, .supported = true, .declaration = BUSTER_CHECK_NONE },
++        { .kind = CHECK_SYMBOL_PRAGMA_REDEFINE, .supported = true, .declaration = 2 },
++    };
++    CheckInputSymbolPragmas pragmas = { .records = records, .count = BUSTER_ARRAY_LENGTH(records) };
++    uint32_t token_objects[] = { 0, 0, 12, 13, 14, 15, 16 };
++    const CheckInput input = { .symbol_pragmas = &pragmas, .objects = token_objects, .token_count = BUSTER_ARRAY_LENGTH(token_objects) };
++    const CheckInput without = { .objects = token_objects, .token_count = BUSTER_ARRAY_LENGTH(token_objects) };
++    held = held && node_shadow_object_renamed(&input, 12) && !node_shadow_object_renamed(&input, 13) && !node_shadow_object_renamed(&input, 14) &&
++           !node_shadow_object_renamed(&input, 15) && !node_shadow_object_renamed(&input, 16) && !node_shadow_object_renamed(&input, 0) &&
++           !node_shadow_object_renamed(&without, 12);
++    // The lines: 1 and 2 with the same words, 3 with others.
++    uint64_t lines[16] = { 0 };
++    lines[4] = lines[8] = 5;
++    lines[7] = lines[11] = 9;
++    lines[12] = 5;
++    lines[15] = 10;
++    const uint8_t name = BUSTER_NODE_FACTS_IDENTIFIER;
++    const uint8_t literal = BUSTER_NODE_FACTS_LITERAL;
++    held = held && node_facts_window_name_same(lines, name, name, 1, 1) && node_facts_window_name_same(lines, name, name, 1, 2) &&
++           !node_facts_window_name_same(lines, name, name, 1, 3) && !node_facts_window_name_same(lines, name, literal, 1, 1) &&
++           !node_facts_window_name_same(lines, name, name, 1, 0) && !node_facts_window_name_same(lines, name, name, 0, 2) &&
++           node_facts_window_name_same(lines, literal, literal, 0, 0) && !node_facts_window_name_same(lines, literal, literal, 1, 2);
++    return held;
++}
++
++// What the objects' side counts on a fixture, which no verdict shows: the declared objects the shadow compared, the
++// program's own (which no declaration declares) and those a rename pragma labelled; the expressions T took at reader
++// time and those it refused for their callee; the library builtins' calls it asked about there; and the declarations'
++// lines the kernel made, with those made again for a declaration that had one and the uses that asked for a line the
++// long way (a use of a declaration whose line is settled asks nothing: one load and one test).
++typedef struct NodeObjectsCounted NodeObjectsCounted;
++struct NodeObjectsCounted
++{
++    uint32_t objects;
++    uint32_t own;
++    uint32_t renamed;
++    uint32_t taken;
++    uint32_t callees;
++    uint32_t library;
++    uint32_t lines;
++    uint32_t again;
++    uint32_t asks;
++};
++
++// The whole shadow at reader time on fixture `text`, written to `directory` as `name` and read with `options`, as
++// `measure-node-machine --shadow --window-rows --passes 0` runs it: nothing it compares differs from the pipeline's
++// (node_shadow_differs: T's verdicts and records, the objects' facts, the library calls' answers, the kernel's records,
++// the tests, C, X and the summaries), and what it counts is `counted`'s.
++static bool node_objects_test_fixture(const char* directory, const char* name, const char* text, char** options, uint32_t option_count, NodeObjectsCounted counted)
++{
++    char path[512];
++    snprintf(path, sizeof(path), "%s/%s", directory, name);
++    bool valid = parse_test_write(path, text, strlen(text));
++    NodeShadow shadow = {
++        .front = (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_AFTER),
++        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
++                             BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS),
++        .passes = 0,
++        .repeat = 1,
++    };
++    NodeCensus census = { .shadow = &shadow };
++    fflush(stdout);
++    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
++    const bool same = valid && !node_shadow_differs(&shadow) && shadow.typed_compared != 0 && shadow.typed_unrun == 0;
++    const bool counts = shadow.typed_objects == counted.objects && shadow.typed_objects_own == counted.own && shadow.typed_objects_renamed == counted.renamed &&
++                        shadow.typed_refused[NODE_MACHINE_TAKEN] == counted.taken && shadow.typed_refused[NODE_MACHINE_REFUSED_CALLEE] == counted.callees &&
++                        shadow.typed_library_calls == counted.library && shadow.reader_facts[NODE_FACTS_COUNT_DECLARATION_LINES] == counted.lines &&
++                        shadow.reader_facts[NODE_FACTS_COUNT_LINE_VERSIONS] == counted.again && shadow.reader_facts[NODE_FACTS_COUNT_LINE_ASKS] == counted.asks;
++    if (!same || !counts)
++    {
++        fprintf(stderr, "test-checker: node-objects %s: %s, %s: %" PRIu64 " objects compared (%u expected) with %" PRIu64 " differences, %" PRIu64
++                " the program's own (%u), %" PRIu64 " a pragma labelled (%u); T took %" PRIu64 " expressions there (%u) and refused %" PRIu64
++                " for their callee (%u), %" PRIu64 " differ from the pipeline's; it asked %" PRIu64 " library calls (%u), %" PRIu64 " differ; the kernel made %"
++                PRIu64 " declarations' lines (%u), %" PRIu64 " of them again (%u), for %" PRIu64 " uses that asked the long way (%u), %" PRIu64 " records differ, %" PRIu64
++                " names' leaves by the pass's second run\n",
++                name, valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.typed_objects, counted.objects, shadow.typed_object_differences,
++                shadow.typed_objects_own, counted.own, shadow.typed_objects_renamed, counted.renamed, shadow.typed_refused[NODE_MACHINE_TAKEN], counted.taken,
++                shadow.typed_refused[NODE_MACHINE_REFUSED_CALLEE], counted.callees, shadow.typed_differences, shadow.typed_library_calls, counted.library,
++                shadow.typed_library_differences, shadow.reader_facts[NODE_FACTS_COUNT_DECLARATION_LINES], counted.lines,
++                shadow.reader_facts[NODE_FACTS_COUNT_LINE_VERSIONS], counted.again, shadow.reader_facts[NODE_FACTS_COUNT_LINE_ASKS], counted.asks,
++                shadow.reader_facts[NODE_FACTS_COUNT_DIFFERENCES],
++                shadow.front_window_name_differences);
++    }
++    unlink(path);
++    return same && counts;
++}
++
+ // C on the window's fixture (#2850's step 2, c_check_node_machine_window.c; docs/one-core-path.md, "C on the window"):
+ // each of its loop's rules on both sides, and each kind of expression it lists.
+ // - Names: a parameter, a local, a global, a static local and a thread-local one (whose flags don't say it is a
+@@ -5674,6 +6132,21 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+                       "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
+     check_test_expect(test, ready && node_census_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                       "node-census refuses what warns without an option, by its test, with the default warnings alone");
++    check_test_expect(test, ready && node_census_test_fixture(directory, "holes.c", node_census_test_holes, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
++                      "node-census refuses a pointer's ordered comparison with an integer, a converted pointer's cast, a redeclared condition's call, a declarator's "
++                      "warning's initializer and a cleanup's return, and takes what stands beside each");
++    check_test_expect(test, ready && node_census_test_fixture(directory, "segments.c", node_census_test_segments, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
++                      "node-census refuses a value of a type in a segment's address space, and takes a pointer to one and another space's value");
++    char* signs[] = { "-nostdinc", "-Wsign-compare" };
++    check_test_expect(test, ready && node_census_test_fixture(directory, "signs.c", node_census_test_signs, signs, BUSTER_ARRAY_LENGTH(signs), &system),
++                      "node-census takes two pointers' ordered comparison under the sign comparison's warning, and refuses a pointer's with an integer");
++    char* silent[] = { "-nostdinc", "-w" };
++    check_test_expect(test, ready && node_census_test_fixture(directory, "silent.c", node_census_test_silent, silent, BUSTER_ARRAY_LENGTH(silent), &system),
++                      "node-census refuses nothing for a pointer's comparison or cast with every warning off");
++    check_test_expect(test, ready && node_census_test_fixture(directory, "interrupt.c", node_census_test_interrupt, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
++                      "node-census refuses every expression of a unit that reads x86's interrupt attribute");
++    check_test_expect(test, ready && node_census_test_fixture(directory, "noderef.c", node_census_test_noderef, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
++                      "node-census refuses every expression of a unit that spells noderef");
+     char* enums[] = { "-nostdinc",
+                       "-Wassign-enum",
+                       "-Wno-enum-compare",
+@@ -5779,11 +6252,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+         .values = 1,
+         .decided = 3,
+     };
++    // (Three of its operators are dereferences of a function, `(*k0)(a, b)` and `(**k0)(a, b)`: a function's type's
++    // byte has the void pointee's bit, so each is listed and sent to the census's code, which finds no pointer to void.)
+     static const NodeTestsWindowed windowed_defaults = {
+         .expressions = 475,
+         .trees = 29,
+-        .operators = 127,
+-        .sent = 52,
++        .operators = 130,
++        .sent = 55,
+         .walks = 12,
+         .far = 37,
+         .quiet = 77,
+@@ -5795,11 +6270,53 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+         .nulls = 8,
+         .values = 253,
+         .spared = 263,
+-        .direct = 213,
++        .direct = 211,
+         .apart = 22,
+         .decided = 446,
+         .decided_refused = 10,
+     };
++    // (The loop leaves three ordered comparisons of two pointers out: `p < e`, `ga < p` and the `while`'s.)
++    static const NodeTestsWindowed windowed_holes = {
++        .expressions = 64,
++        .operators = 25,
++        .sent = 13,
++        .quiet = 11,
++        .calls = 2,
++        .calls_checked = 2,
++        .casts = 1,
++        .casts_left = 3,
++        .orders = 3,
++        .values = 27,
++        .spared = 42,
++        .direct = 25,
++        .apart = 8,
++        .decided = 62,
++    };
++    static const NodeTestsWindowed windowed_segments = {
++        .expressions = 11,
++        .operators = 1,
++        .quiet = 2,
++        .casts_left = 1,
++        .values = 2,
++        .spared = 9,
++        .direct = 9,
++        .decided = 11,
++    };
++    static const NodeTestsWindowed windowed_interrupt = {
++        .expressions = 3,
++        .calls = 1,
++        .calls_checked = 1,
++        .casts = 1,
++        .asks = 1,
++        .spared = 1,
++        .direct = 3,
++        .decided = 3,
++    };
++    static const NodeTestsWindowed windowed_noderef = {
++        .expressions = 2,
++        .direct = 2,
++        .decided = 2,
++    };
+     static const NodeTestsWindowed windowed_enums = {
+         .expressions = 5,
+         .operators = 2,
+@@ -5876,6 +6393,113 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
+     check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
+                                                              BUSTER_NODE_FRONT_AFTER, 198, 28, windowed_defaults),
+                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");
++    check_test_expect(test, ready && node_tests_test_fixture(directory, "holes.c", node_census_test_holes, quiet, BUSTER_ARRAY_LENGTH(quiet),
++                                                             BUSTER_NODE_FRONT_AFTER, 28, 13, windowed_holes),
++                      "node-tests: at reader time the tests refuse what the compiler's own tests' programs had and no corpus, and leave a loop's pointers' comparison out");
++    check_test_expect(test, ready && node_tests_test_fixture(directory, "segments.c", node_census_test_segments, quiet, BUSTER_ARRAY_LENGTH(quiet),
++                                                             BUSTER_NODE_FRONT_AFTER, 7, 1, windowed_segments),
++                      "node-tests: at reader time a value of a type in a segment's address space is refused by its type's byte");
++    static const NodeTestsWindowed windowed_signs = {
++        .expressions = 5,
++        .operators = 3,
++        .sent = 3,
++        .casts_left = 1,
++        .spared = 4,
++        .direct = 2,
++        .apart = 1,
++        .decided = 5,
++    };
++    check_test_expect(test, ready && node_tests_test_fixture(directory, "signs.c", node_census_test_signs, signs, BUSTER_ARRAY_LENGTH(signs),
++                                                             BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_signs),
++                      "node-tests: at reader time, under the sign comparison's warning, the loop leaves no pointers' comparison out");
++    static const NodeTestsWindowed windowed_silent = {
++        .expressions = 7,
++        .quiet = 1,
++        .values = 2,
++        .spared = 5,
++        .direct = 6,
++        .apart = 2,
++        .decided = 7,
++    };
++    check_test_expect(test, ready && node_tests_test_fixture(directory, "silent.c", node_census_test_silent, silent, BUSTER_ARRAY_LENGTH(silent),
++                                                             BUSTER_NODE_FRONT_AFTER, 0, 1, windowed_silent),
++                      "node-tests: at reader time, with every warning off, a pointer's comparison and its cast are taken");
++    check_test_expect(test, ready && node_tests_test_fixture(directory, "interrupt.c", node_census_test_interrupt, quiet, BUSTER_ARRAY_LENGTH(quiet),
++                                                             BUSTER_NODE_FRONT_AFTER, 3, 0, windowed_interrupt),
++                      "node-tests: at reader time a unit that reads x86's interrupt attribute has every expression refused");
++    check_test_expect(test, ready && node_tests_test_fixture(directory, "noderef.c", node_census_test_noderef, quiet, BUSTER_ARRAY_LENGTH(quiet),
++                                                             BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_noderef),
++                      "node-tests: at reader time a unit that spells noderef has every expression refused");
++    static const NodeObjectsCounted counted_labels = {
++        .objects = 6,
++        .taken = 10,
++        .callees = 1,
++        .library = 2,
++        .lines = 14,
++        .asks = 28,
++    };
++    static const NodeObjectsCounted counted_renames = {
++        .objects = 8,
++        .renamed = 2,
++        .taken = 3,
++        .callees = 3,
++        .lines = 9,
++        .asks = 38,
++    };
++    static const NodeObjectsCounted counted_versions = {
++        .objects = 6,
++        .own = 1,
++        .taken = 5,
++        .callees = 2,
++        .lines = 8,
++        .asks = 14,
++    };
++    static const NodeObjectsCounted counted_unversioned = {
++        .objects = 4,
++        .own = 1,
++        .taken = 2,
++        .callees = 1,
++        .lines = 4,
++        .asks = 6,
++    };
++    static const NodeObjectsCounted counted_weak = {
++        .objects = 14,
++        .taken = 10,
++        .lines = 15,
++        .again = 7,
++        .asks = 48,
++    };
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "labels.c", node_objects_test_labels, quiet, BUSTER_ARRAY_LENGTH(quiet), counted_labels),
++                      "node-objects: at reader time an asm label the asm pass will ignore is none, and one it keeps makes a builtin's call a call");
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "renames.c", node_objects_test_renames, quiet, BUSTER_ARRAY_LENGTH(quiet), counted_renames),
++                      "node-objects: in a unit with a rename pragma T refuses every library builtin's call at both times, and the pragma's labels are counted apart");
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "versions.c", node_objects_test_versions, quiet, BUSTER_ARRAY_LENGTH(quiet), counted_versions),
++                      "node-objects: a function multiversioned by target strings has the program's own object, and its unit's calls are refused at both times");
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "unversioned.c", node_objects_test_unversioned, quiet, BUSTER_ARRAY_LENGTH(quiet),
++                                                               counted_unversioned),
++                      "node-objects: a unit that declares a multiversioned function and never calls it has its calls refused at both times too");
++    check_test_expect(test, node_objects_test_weak_search(), "node-objects: a weak name is found from its token on, in lists of every length to 20");
++    check_test_expect(test, node_objects_test_comparisons(), "node-objects: the shadow's comparisons of an object's facts, of a pragma's label and of a name's line, a row a case");
++    static const NodeObjectsCounted counted_pragmas = {
++        .objects = 3,
++        .taken = 2,
++        .library = 1,
++        .lines = 4,
++        .asks = 20,
++    };
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "pragmas.c", node_objects_test_pragmas, quiet, BUSTER_ARRAY_LENGTH(quiet), counted_pragmas),
++                      "node-objects: a weak pragma is no rename pragma, and a labelled builtin's call beside it is a call T takes");
++    static const NodeObjectsCounted counted_overloads = {
++        .objects = 8,
++        .taken = 2,
++        .callees = 1,
++        .lines = 8,
++        .asks = 10,
++    };
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "overloads.c", node_objects_test_overloads, quiet, BUSTER_ARRAY_LENGTH(quiet), counted_overloads),
++                      "node-objects: a unit that declares an overloadable function has every call refused at both times");
++    check_test_expect(test, ready && node_objects_test_fixture(directory, "weak.c", node_objects_test_weak, quiet, BUSTER_ARRAY_LENGTH(quiet), counted_weak),
++                      "node-objects: the kernel's value of a name is weak from the token the reader notes it at, whichever declaration the use binds");
+     check_test_expect(test, ready && node_tests_test_fixture(directory, "enums.c", node_census_test_enums, enums, BUSTER_ARRAY_LENGTH(enums),
+                                                              BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_enums),
+                       "node-tests: at reader time an enumeration's constant is tested where no mix of enumerations is asked about");
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index 923278ef4..b2e0c9ee4 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -124,9 +124,11 @@
+ #define BUSTER_NODE_MACHINE_WORD_VALID 0x02000000u
+ // And its six bits from BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT: what the census's tests ask of a value's type at every
+ // record (c_check_node_census.c's node_census_type_bits_make, which follows this file in the unit), less the bits they
+-// ask of a conversion's type alone. In order: a type the machine has no kind for, a struct or union, an enumeration, a
+-// pointer, a pointer whose pointee may be void, an array. A record's word has them wherever T or the kernel wrote the
+-// record, so the tests on the window read a record's type's byte from the record (node_tests_window_bytes).
++// ask of a conversion's type alone. In order: a type the machine has no kind for (a value in a segment's address space
++// among them, #3205), a struct or union, an enumeration, a pointer, a pointer whose pointee may be void (both of a
++// function's type and of nullptr_t too, which convert to a pointer and are none: #3201), an array. A record's word has
++// them wherever T or the kernel wrote the record, so the tests on the window read a record's type's byte from the
++// record (node_tests_window_bytes).
+ #define BUSTER_NODE_MACHINE_WORD_TESTS_SHIFT 26u
+ static uint8_t node_census_type_bits_make(const TypeTable* types, TypeId type);
+ 
+@@ -366,6 +368,12 @@ struct NodeMachine
+     NodeMachineMemo* argument_memo;
+     uint64_t memo_fills;
+     uint64_t memo_rules;
++    // Whether the unit's graph has an overload's candidates, or will have: T refuses every call of such a unit, and a
++    // discard is the action's there (node_machine_overloads).
++    bool overloads;
++    // Whether the unit has a `#pragma redefine_extname` the reader took: T refuses every plain library builtin's call
++    // of such a unit, the one answer an object's asm label decides (node_machine_renames).
++    bool renames;
+     // --scalar: T types every node by the action, the rows' exact twin.
+     bool scalar;
+     // --verify: T types each row-typed node by the action too, and counts the nodes where the two differ.
+@@ -480,9 +488,14 @@ struct NodeMachine
+     TypeId* converted_third;
+ };
+ 
+-// NodeMachine.reader_facts' bits.
++// NodeMachine.reader_facts' bits. And whether a declaration of the unit's declares the object at all: one that none
++// declares is the program's own (a multiversioned function's group's reference, a synthetic object at an attribute's
++// name, #3203), which no leaf of the reader's names. And, while the facts are made, whether a declaration before the
++// one at hand defines the object (node_machine_begin_reader's asm labels).
+ #define BUSTER_NODE_MACHINE_OBJECT_TWICE 0x01u
+ #define BUSTER_NODE_MACHINE_OBJECT_LABELLED 0x02u
++#define BUSTER_NODE_MACHINE_OBJECT_DECLARED 0x04u
++#define BUSTER_NODE_MACHINE_OBJECT_DEFINED 0x08u
+ 
+ // Forgets the unit's call answers, the types' pointers and the argument memo, as a unit starts without them:
+ // node_machine_begin, and the shadow's timing before each pass (c_check_node_census.c's node_shadow_time), so that each
+@@ -593,6 +606,36 @@ static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const Che
+     return room && node_machine_tables_initialize();
+ }
+ 
++// Whether the unit whose input is `input` and whose graph is `graph` has an overload's candidates, or will have
++// (#3203). A candidate is a declaration of an overloadable function, made where the reader reads it, before the bodies
++// (c_check_overload_input.c); or a call of a function multiversioned by target strings, made after the unit's last body
++// (check_input_multiversion_flush, c_check_target_versions.c). The machine after the pipeline read the graph's count
++// whole; the machine at reader time begins before the bodies, has the first kind's and none of the second's, and took
++// the calls of a unit that came to have one. What both have before the bodies is whether the unit declares a function
++// multiversioned so at all (CheckInput.target_multiversion): a call's candidate is one's.
++static bool node_machine_overloads(const CheckInput* input, const CheckGraph* graph)
++{
++    return graph->overload_candidate_count != 0 || input->target_multiversion;
++}
++
++// Whether the unit whose input is `input` has a `#pragma redefine_extname` the reader took (#3207). The pragma gives a
++// declaration its asm label once the reader is done (check_input_symbol_finish: the declaration it selects, by the
++// labels the asm pass kept and the uses the bodies made), so the machine at reader time cannot have the label of a call
++// it reads before; the records are made before the bodies (check_input_symbol_pragmas), and whether one is taken is
++// known at both times. An object's label decides one answer of T's, whether a plain library builtin's call is computed
++// or called (node_machine_call_library): in such a unit T refuses every call the reader marked for one, and asks
++// nothing of the labels.
++static bool node_machine_renames(const CheckInput* input)
++{
++    const CheckInputSymbolPragmas* pragmas = input->symbol_pragmas;
++    bool renames = false;
++    for (uint32_t i = 0; pragmas != NULL && !renames && i < pragmas->count; i += 1)
++    {
++        renames = pragmas->records[i].supported && pragmas->records[i].kind == CHECK_SYMBOL_PRAGMA_REDEFINE;
++    }
++    return renames;
++}
++
+ // The machine's columns for `program`'s unit, from `arena`: whether there was room.
+ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program, bool scalar, bool verify, Arena* arena)
+ {
+@@ -603,6 +646,8 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+         .object_count = program->object_count,
+     };
+     const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, arena);
++    machine->overloads = node_machine_overloads(program->input, &program->input->graph);
++    machine->renames = node_machine_renames(program->input);
+     if (room)
+     {
+         (void)check_lower_twice_names(program, machine->twice_names, &machine->twice_tag);
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 191531669..8037331d2 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -10,9 +10,9 @@
+ //   type and that type's word, its flags and its object, its payload (an enumerator's value) and its standing. Made from
+ //   the declaration's own columns as the reader had them at a use (CheckInput.declared_types at the use's token, where
+ //   the reader copied the declaration's; declaration_kinds, declaration_bits, objects and enum_values at the
+-//   declaration; its weak attribute and the unit's weak pragmas before the use), never from the use's leaf. A
+-//   declaration whose line would differ from its last (a type completed since, a weak pragma since) gets a new line, as
+-//   a compile would write its line again: counted.
++//   declaration; its name's weak attributes and the unit's weak pragmas before the use, CheckInput.weak_names), never
++//   from the use's leaf. A declaration whose line would differ from its last (a type completed since, a weak pragma or
++//   a weak declaration of its name since) gets a new line, as a compile would write its line again: counted.
+ // - A type's row (NodeFactsRow, 64 bytes, by type index): its own word, where it is complete, its value type and its
+ //   promotion; its element (a pointer's pointee, an array's element) with the element's word and completeness; an array's
+ //   or a function's pointer type; a function's or a function pointer's return type, with its word, its completeness
+@@ -449,6 +449,10 @@ struct NodeFactsOperand
+     uint8_t kind;
+ };
+ 
++// In NodeFacts.numbers: the declaration's name is one the unit notes weak (CheckInput.weak_names), so its line can change
++// at another declaration's token and no use takes its last line unasked (#3206).
++#define BUSTER_NODE_FACTS_LINE_UNSETTLED UINT32_C(0x80000000)
++
+ typedef struct NodeFacts NodeFacts;
+ struct NodeFacts
+ {
+@@ -463,6 +467,8 @@ struct NodeFacts
+     // The words.
+     NodeFactsRow* rows;
+     uint64_t* lines;
++    // A declaration's last line's number, 0 for none; with BUSTER_NODE_FACTS_LINE_UNSETTLED where the line is to be
++    // made again at every use (node_facts_front_line).
+     uint32_t* numbers;
+     NodeFactsMember* members;
+     NodeFactsMember no_member;
+@@ -573,6 +579,9 @@ struct NodeFacts
+     uint64_t literal_lines;
+     uint64_t member_fills;
+     uint64_t line_versions;
++    // The uses that asked for their declaration's line the long way (node_facts_declaration): a declaration's first, and
++    // every one whose line is not settled.
++    uint64_t line_asks;
+     uint64_t differences;
+     // The kernel's TSC ticks in its two loops, summed over the windows it ran; and the words' making: the rows' and the
+     // declarations' lines'.
+@@ -991,6 +1000,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
+     const uint64_t t0 = __rdtsc();
+     const TypeId type = input->declared_types[use];
+     const bool enumerator = input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
++    facts->line_asks += 1;
+     const uint32_t object = input->objects[declaration];
+     // An enumerator's value: its row of the unit's enumerators, which are in source order; at reader time the reader's
+     // own column's.
+@@ -1012,10 +1022,14 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
+     const bool valued = enumerator && (!listed || (low < input->enum_value_count && input->enum_values[low].token == declaration));
+     const unsigned __int128 value = !valued ? 0 : listed ? input->enum_values[low].value : facts->enum_values[declaration];
+     const bool wide = enumerator && (!valued || (uint64_t)(value >> 64) != 0 || object != 0);
+-    // An address that may be null: the declaration's weak attribute, or a weak pragma of its name before the use
+-    // (check_input_address_is_weak's, whose weak names the reader doesn't keep).
++    // An address that may be null: the reader's own rule (check_input_address_is_weak), a weak pragma of the name or a
++    // weak attribute on a declaration of the name, at or before the use. It is the name's, not the declaration's (#3206):
++    // a function declared weak and then defined, a weakref, a block's weak declaration of a name another declaration has.
++    // So a declaration whose name the unit notes weak anywhere can change its line from another declaration's token on,
++    // and its line is never settled (BUSTER_NODE_FACTS_LINE_UNSETTLED).
+     const IdentId name = declaration < parser->tokens.count && parser->tokens.names != NULL ? parser->tokens.names[declaration] : 0;
+-    const bool weak = check_input_attribute_of(check_input_attributes_at(input, declaration), CHECK_ATTRIBUTE_WEAK) != NULL || check_input_pragma_weak(input, name, use);
++    const bool noted = input->weak_name_count != 0 && check_input_weak_name(input, name, UINT32_MAX);
++    const bool weak = check_input_pragma_weak(input, name, use) || (noted && check_input_weak_name(input, name, use));
+     const uint8_t bits = input->declaration_bits[declaration];
+     const CheckCategory category = enumerator ? CHECK_RVALUE : type_kind(machine->types, type) == BUSTER_TYPE_KIND_FUNCTION ? CHECK_FUNCTION : CHECK_LVALUE;
+     // The line: the leaf's record's first half, a NodeFactsRecord's first four quadwords.
+@@ -1035,7 +1049,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
+     };
+     uint64_t line[4];
+     memcpy(line, &made, sizeof(line));
+-    uint32_t number = facts->numbers[declaration];
++    uint32_t number = facts->numbers[declaration] & ~BUSTER_NODE_FACTS_LINE_UNSETTLED;
+     const bool same = number != 0 && memcmp(facts->lines + 4 * (uint64_t)number, line, sizeof(line)) == 0;
+     if (!same)
+     {
+@@ -1045,7 +1059,7 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
+         {
+             facts->line_count = number;
+             memcpy(facts->lines + 4 * (uint64_t)number, line, sizeof(line));
+-            facts->numbers[declaration] = number;
++            facts->numbers[declaration] = number | (noted ? BUSTER_NODE_FACTS_LINE_UNSETTLED : 0);
+         }
+         facts->line_ticks += __rdtsc() - t0;
+     }
+@@ -3485,7 +3499,7 @@ static __attribute__((noinline)) void node_facts_slow(NodeFacts* facts, uint32_t
+         case CHECK_OP_CAST:
+         {
+             taken = operators ? node_facts_cast(facts, records, &view, w, a, false) :
+-                                node_facts_discard(records, &view, facts->machine->graph->overload_candidate_count == 0, w, a);
++                                node_facts_discard(records, &view, !facts->machine->overloads, w, a);
+         } break;
+         case CHECK_OP_CONDITION: case CHECK_OP_NOT:
+         {
+@@ -3964,7 +3978,7 @@ static __attribute__((noinline)) void node_facts_discards(NodeFacts* facts, uint
+     uint32_t* const rare = facts->rare;
+     uint32_t rare_count = 0;
+     const uint16_t* const left = facts->left + first;
+-    const bool plain = facts->machine->graph->overload_candidate_count == 0;
++    const bool plain = !facts->machine->overloads;
+     const NodeFactsView view = node_facts_view(facts, first);
+     for (uint32_t i = 0; i < batched; i += 1)
+     {
+@@ -5201,13 +5215,15 @@ static uint32_t node_facts_front_literal(NodeFacts* facts, const CheckValue* val
+ }
+ 
+ // The line of declaration `declaration` at the use `use`, its number: the declaration's last line where the use reads
+-// the type the line has and the unit has no symbol pragma (a weak one changes a line from its token on), one load and
+-// one test; and else node_facts_declaration's, which makes the line from the reader's columns and compares.
++// the type the line has, the unit has no symbol pragma (a weak one changes a line from its token on) and the
++// declaration's name is no weak name of the unit's (another declaration's weak attribute changes it from its token on:
++// its number has BUSTER_NODE_FACTS_LINE_UNSETTLED), one load and one test; and else node_facts_declaration's, which
++// makes the line from the reader's columns and compares.
+ static inline uint32_t node_facts_front_line(NodeFacts* facts, uint32_t declaration, uint32_t use)
+ {
+     const CheckInput* input = facts->input;
+     const uint32_t number = facts->numbers[declaration];
+-    const bool settled = number != 0 && (TypeId)facts->lines[4 * (uint64_t)number] == input->declared_types[use] &&
++    const bool settled = number - 1 < BUSTER_NODE_FACTS_LINE_UNSETTLED - 1 && (TypeId)facts->lines[4 * (uint64_t)number] == input->declared_types[use] &&
+                          (input->symbol_pragmas == NULL || input->symbol_pragmas->count == 0);
+     return settled ? number : node_facts_declaration(facts, declaration, use);
+ }
+@@ -5748,7 +5764,7 @@ static inline __attribute__((always_inline)) uint32_t node_facts_window_names_by
+         const uint64_t* lines = facts->lines;
+         for (uint32_t k = 0; k < names; k += 1)
+         {
+-            __builtin_prefetch(lines + 4 * (uint64_t)numbers[entries[list[k]]]);
++            __builtin_prefetch(lines + 4 * (uint64_t)(numbers[entries[list[k]]] & ~BUSTER_NODE_FACTS_LINE_UNSETTLED));
+         }
+         for (uint32_t k = 0; k < names; k += 1)
+         {
+@@ -5771,11 +5787,23 @@ static __attribute__((noinline)) uint32_t node_facts_window_names_scalar(NodeFac
+     return node_facts_window_names_by(facts, front, kinds, entries, list, first, count, true);
+ }
+ 
++// Whether a leaf's kind and entry by the names' pass's second run (`twin_kind`, `twin`) are the pass's (`pass_kind`,
++// `pass`): the same kind, and a name's the same line, by its number or by its words in `lines`. The second run's uses
++// come after the chunk's last, so a declaration whose line changes in the chunk (a weak name's from another
++// declaration's token on, #3206) is given its earlier line again under a new number.
++static bool node_facts_window_name_same(const uint64_t* lines, uint8_t pass_kind, uint8_t twin_kind, uint32_t pass, uint32_t twin)
++{
++    const bool words = pass_kind == BUSTER_NODE_FACTS_IDENTIFIER && pass != 0 && twin != 0 &&
++                       memcmp(lines + 4 * (uint64_t)pass, lines + 4 * (uint64_t)twin, 4 * sizeof(uint64_t)) == 0;
++    return pass_kind == twin_kind && (pass == twin || words);
++}
++
+ // The names' pass over the chunk the front has just made (its records from `made`): each name's leaf gets its
+ // declaration's line, in the front's own columns. A line made here reads its declaration's type's word, which the
+ // machine has had since it began: the reader made the declarations' types before the walk. The pass's ticks, the names
+ // and the lines it made with theirs go to the front's report. Then the same by the scalar path, on a copy of the
+-// chunk's kinds and entries as the front left them: a leaf whose kind or line is not the pass's is counted.
++// chunk's kinds and entries as the front left them: a leaf whose kind or line (its number, or its words) is not the
++// pass's is counted.
+ static void node_facts_window_names(NodeFront* front)
+ {
+     struct NodeFactsReader* state = front->typer->facts;
+@@ -5797,7 +5825,7 @@ static void node_facts_window_names(NodeFront* front)
+     uint32_t differences = again != names;
+     for (uint32_t r = 0; r < count; r += 1)
+     {
+-        differences += state->name_kinds[r] != front->window_kinds[first + r] || state->name_entries[r] != front->window_entries[first + r];
++        differences += !node_facts_window_name_same(facts->lines, front->window_kinds[first + r], state->name_kinds[r], front->window_entries[first + r], state->name_entries[r]);
+     }
+     shadow->window_name_differences += differences;
+ }
+@@ -6233,6 +6261,7 @@ static void node_facts_reader_flush(struct NodeFactsReader* state, const NodeFro
+     counts[NODE_FACTS_COUNT_DECLARATION_LINES] = facts->line_count - facts->literal_capacity;
+     counts[NODE_FACTS_COUNT_LINE_TICKS] = facts->line_ticks;
+     counts[NODE_FACTS_COUNT_LINE_VERSIONS] = facts->line_versions;
++    counts[NODE_FACTS_COUNT_LINE_ASKS] = facts->line_asks;
+     counts[NODE_FACTS_COUNT_MEMBER_SLOTS] = facts->member_count;
+     counts[NODE_FACTS_COUNT_PAIR_SLOTS] = facts->pair_count;
+     counts[NODE_FACTS_COUNT_ARGUMENT_ANSWERS] = facts->argument_answers;
+diff --git a/src/buster/compiler/c_check_node_machine_front.c b/src/buster/compiler/c_check_node_machine_front.c
+index d0af9db00..1262a256c 100644
+--- a/src/buster/compiler/c_check_node_machine_front.c
++++ b/src/buster/compiler/c_check_node_machine_front.c
+@@ -192,6 +192,7 @@ typedef enum NodeFactsCount
+     NODE_FACTS_COUNT_DECLARATION_LINES,
+     NODE_FACTS_COUNT_LINE_TICKS,
+     NODE_FACTS_COUNT_LINE_VERSIONS,
++    NODE_FACTS_COUNT_LINE_ASKS,
+     NODE_FACTS_COUNT_MEMBER_SLOTS,
+     NODE_FACTS_COUNT_PAIR_SLOTS,
+     NODE_FACTS_COUNT_TAKEN_RECORDS,
+@@ -460,11 +461,13 @@ struct NodeFrontTypes
+     // The census's tests at reader time (BUSTER_NODE_READER_TESTS; null otherwise), by root node, for a root T took
+     // (BUSTER_NODE_FRONT_TYPED_TESTED in `refusals`): the tests that refuse its expression, as bits of NodeCensusTest;
+     // its root's kind as the reader derives it from the front's root (a NodeCensusRoot); and the declared type of the
+-    // object it initializes (0 for none). C and X then run on the expressions no test refuses. `policy` is the unit's
+-    // enabled warnings as reader time read them (a NodeCensusPolicy), which the shadow compares with the pipeline's.
++    // object it initializes (0 for none) and that object's declaration's token (BUSTER_CHECK_NONE for none). C and X
++    // then run on the expressions no test refuses. `policy` is the unit's enabled warnings as reader time read them (a
++    // NodeCensusPolicy), which the shadow compares with the pipeline's.
+     uint64_t* tests;
+     uint8_t* kinds;
+     TypeId* declared;
++    uint32_t* declarations;
+     const void* policy;
+     // The expressions the tests ran on and those they refused; by test, the expressions it refuses (`tested_any`) and
+     // those it refuses first in the tests' order (`tested_first`); and the nodes a test asked of T's records that the
+@@ -518,6 +521,10 @@ struct NodeFrontTypes
+     uint64_t own_quiet_casts;
+     uint64_t own_quiet_casts_checked;
+     uint64_t own_quiet_casts_wrong;
++    // And the ordered comparisons of two operands that are pointers once converted, which the orders' rule left out.
++    uint64_t own_quiet_orders;
++    uint64_t own_quiet_orders_checked;
++    uint64_t own_quiet_orders_wrong;
+     // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
+     // whose payload is another.
+     uint64_t own_values_checked;
+diff --git a/src/buster/compiler/c_check_node_machine_reader.c b/src/buster/compiler/c_check_node_machine_reader.c
+index 7f27405b0..824199ba1 100644
+--- a/src/buster/compiler/c_check_node_machine_reader.c
++++ b/src/buster/compiler/c_check_node_machine_reader.c
+@@ -177,7 +177,8 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
+ // whether there was room. The program's columns T reads are made from the input's as the program makes them, into
+ // `declarations` and `facts` (the caller's, an entry an object: the unit's token count and one): each static object's
+ // last declaration (check_program_static_objects' visit, its returns_twice by check_program_static_object's test) and
+-// the objects with an asm label (check_program_labelled_objects' test); and the names that return twice from
++// the objects with an asm label the asm pass will keep (check_program_labelled_objects' test of the labels
++// check_input_asm_labels leaves); and the names that return twice from
+ // `identifiers` (check_lower_twice_names'). `symbols` (the caller's too) is what stands for the objects' symbols: each
+ // object with a static declaration has itself there, the others 0.
+ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* input, const Parser* parser, TypeTable* types, const CheckGraph* graph,
+@@ -193,6 +194,8 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+     };
+     const uint32_t late = types->types.capacity - types->types.count < BUSTER_NODE_MACHINE_LATE_TYPES ? types->types.capacity - types->types.count : BUSTER_NODE_MACHINE_LATE_TYPES;
+     const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, verify, arena);
++    machine->overloads = node_machine_overloads(input, graph);
++    machine->renames = node_machine_renames(input);
+     machine->reader_declarations = declarations;
+     machine->reader_facts = facts;
+     if (room)
+@@ -207,6 +210,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+             if (object != 0 && object <= count)
+             {
+                 const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
++                machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_DECLARED;
+                 if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
+                 {
+                     machine->reader_declarations[object] = token;
+@@ -214,10 +218,16 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+                     const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
+                     machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
+                 }
+-                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL)
++                // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
++                // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
++                // the declarations in their order (#3207). A label kept before stays the object's whatever this one's
++                // fate, and a register variable, whose label the pass never asks, has one declaration.
++                const bool kept = (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_DEFINED) == 0;
++                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL && kept)
+                 {
+                     machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_LABELLED;
+                 }
++                machine->reader_facts[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_NODE_MACHINE_OBJECT_DEFINED : 0;
+             }
+         }
+         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+@@ -364,7 +374,8 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
+     uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
+     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
+     TypeId* declared = tested ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
+-    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL));
++    uint32_t* root_declarations = tested ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
++    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL && root_declarations != NULL));
+     // A summary's side facts by root node, and their references' store: no expression has more references than
+     // leaves, so a node each is room for all.
+     const bool summaries = (options & BUSTER_NODE_READER_WINDOW_ROWS) != 0;
+@@ -425,6 +436,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
+             types->tests = tests;
+             types->kinds = kinds;
+             types->declared = declared;
++            types->declarations = root_declarations;
+             typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
+             room = typer->tests != NULL;
+         }
+@@ -591,6 +603,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
+                             types->tests[root] = verdict;
+                             types->kinds[root] = kind;
+                             types->declared[root] = declared;
++                            types->declarations[root] = declaration;
+                             types->tested += 1;
+                             types->tested_refused += verdict != 0;
+                             types->tested_first[verdict != 0 ? (uint32_t)__builtin_ctzll(verdict) : 63] += verdict != 0;
+diff --git a/src/buster/compiler/c_check_node_machine_type.c b/src/buster/compiler/c_check_node_machine_type.c
+index ed32a7a51..a8b9c5e99 100644
+--- a/src/buster/compiler/c_check_node_machine_type.c
++++ b/src/buster/compiler/c_check_node_machine_type.c
+@@ -574,7 +574,7 @@ static bool node_machine_discard(NodeMachine* machine, uint32_t r, uint32_t node
+     const CheckConstantKind constant_kind = (CheckConstantKind)((standing >> 2) & 0x07u);
+     const uint8_t kind = (uint8_t)(columns->words[a] >> 16);
+     const bool taken = (wide == NULL || wide->overload_head == 0) && graph->types != NULL && graph->types[node] == BUSTER_TYPE_VOID &&
+-                       graph->overload_candidate_count == 0 && (standing & 0x03u) == CHECK_RVALUE && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
++                       !machine->overloads && (standing & 0x03u) == CHECK_RVALUE && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
+                        kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR && kind != BUSTER_TYPE_KIND_COMPLEX;
+     const CheckConversion none = { 0 };
+     if (taken && wide == NULL && (kind != BUSTER_TYPE_KIND_BIT_INT || constant_kind == CHECK_CONSTANT_NONE))
+@@ -1200,8 +1200,9 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
+ 
+ // Whether call record `r` (node `node`, callee record `a`) has a callee with semantics of its own, which the machine
+ // leaves to the pipeline (docs/node-machine.md, "T: bind and type"): a library builtin's call that the catalogue folds or
+-// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library), any call in a unit with overload sets, a callee without a prototype
+-// or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
++// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library) and any the reader marked for one in a
++// unit with a rename pragma (node_machine_renames), any call in a unit with overload sets (node_machine_overloads), a
++// callee without a prototype or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
+ // registers), more arguments than Tier 0's calls take, or a callee that returns twice (check_lower_calls_twice's and
+ // check_lower_indirect_twice's, which the lowering marks its function for). The census refuses before it the callees
+ // whose attributes or names the warnings read (node_census_callee).
+@@ -1212,7 +1213,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r,
+     const TypeTable* types = machine->types;
+     const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
+     const TypeId function = node_machine_callee_function(machine, a);
+-    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && node_machine_call_library(machine, r, node)) || graph->overload_candidate_count != 0 || function == 0 ||
++    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && (machine->renames || node_machine_call_library(machine, r, node))) || machine->overloads || function == 0 ||
+                    columns->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
+     refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
+               type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);
