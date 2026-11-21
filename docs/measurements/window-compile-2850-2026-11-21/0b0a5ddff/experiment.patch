@@ -1,0 +1,220 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 6996a8d94..0a0e8e312 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1288,6 +1288,8 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
+                                                        CHECK_INPUT_FORM_DISCARD);
+         if (discard != BUSTER_CHECK_NONE)
+         {
++            if (check_sparse_present(input->control_heads) && value == values.first)
++                check_program_record_control_root(reader, token, discard);
+             if (reader->region_roots != NULL)
+             {
+                 if (last == BUSTER_CHECK_NONE)
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index d9e9562a1..a4615d092 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1080,6 +1080,9 @@ struct CheckInput
+     CheckSparseColumn initializer_begins;
+     CheckSparseColumn initializer_ends;
+     uint32_t* token_nodes;
++    CheckSparseColumn control_heads;
++    bool control_verify;
++    bool control_has_exceptions;
+     // A variably modified typeof's evaluated operand, by its declaration's terminator token. The operand is not
+     // otherwise a runtime root: the type query carries only its type, and its side effects run where the declaration
+     // does, after the type's bounds and before its initializers.
+@@ -15343,6 +15346,19 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+ // both walks: clang 23's code is the same without the attribute (its 28 KB aren't inlined at two places), which keeps the
+ // coded walk's dispatch small. --scalar's walk of sqlite3.c, which calls it at every token, took 57.5 ms against 55.5
+ // before the coded walk (minima of 21 runs in a 4-CPU VM, #1038's review); no benchmark times that path.
++// The ordinary statement root immediately follows the first parse child's retained value in the common case.
++static inline void check_program_record_control_root(CheckInputReader* reader, uint32_t token, uint32_t discard)
++{
++    CheckInput* input = reader->output;
++    const uint32_t child = reader->first_child[token];
++    const uint32_t value = child < input->token_count ? input->token_nodes[child] : BUSTER_CHECK_NONE;
++    if (value == BUSTER_CHECK_NONE || value + 1 != discard)
++    {
++        check_sparse_set(input->sparse_pool, input->control_heads, token, discard);
++        input->control_has_exceptions = true;
++    }
++}
++
+ static __attribute__((noinline)) void check_input_expression_act(CheckInputReader* reader, uint32_t token, uint8_t classes)
+ {
+     const Parser* parser = reader->parser;
+@@ -15791,6 +15807,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+             if (discard != BUSTER_CHECK_NONE)
+             {
+                 graph->types[discard] = BUSTER_TYPE_VOID;
++                if (check_sparse_present(reader->output->control_heads) && value == first)
++                    check_program_record_control_root(reader, token, discard);
+                 if (reader->region_roots != NULL)
+                 {
+                     if (last_discard == BUSTER_CHECK_NONE)
+@@ -17177,6 +17195,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     BUSTER_CHECK_OUTPUT_ARRAY(function_flags, uint8_t);
+     BUSTER_CHECK_OUTPUT_ARRAY(explicit_abis, uint8_t);
+     BUSTER_CHECK_OUTPUT_ARRAY(token_nodes, uint32_t);
++    const char* control_roots = deferred == NULL ? getenv("BUSTER_PROGRAM_DIRECT_ROOTS") : NULL;
++    input->control_verify = control_roots != NULL && strcmp(control_roots, "verify") == 0;
+     BUSTER_CHECK_OUTPUT_ARRAY(constant_warnings, uint8_t);
+     BUSTER_CHECK_OUTPUT_ARRAY(constant_warning_ignored, uint8_t);
+     BUSTER_CHECK_OUTPUT_ARRAY(regions, CheckInputRegion);
+@@ -17192,10 +17212,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     // The columns few tokens have an entry in, sparse (c_check_sparse.c, #628): their directories, which a fresh arena
+     // holds zero, and their blocks' pool, of which they take as many pages as their entries' blocks. The deferred reader's
+     // lanes write them at once.
+-    CheckSparseColumn sparse_columns[12] = { 0 };
++    CheckSparseColumn sparse_columns[13] = { 0 };
+     CheckSparseWide wide_columns[2] = { 0 };
+     const bool noderef = intern_find(pp->table, (const uint8_t*)"noderef", 7) != 0 || intern_find(pp->table, (const uint8_t*)"__noderef__", 11) != 0;
+-    valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), wide_columns, noderef ? 2 : 1, count, output_zero, deferred != 0);
++    valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, control_roots != NULL ? 13 : 12, wide_columns, noderef ? 2 : 1, count, output_zero, deferred != 0);
++    input->control_heads = sparse_columns[12];
+     input->attributes = wide_columns[0];
+     input->noderef_types = wide_columns[1];
+     input->initializer_nodes = sparse_columns[0];
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 6fb7f5017..ceedaca36 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -786,6 +786,7 @@ struct CheckControlWriter
+     uint32_t* last;
+     uint32_t* next;
+     uint32_t* previous;
++    uint32_t roots_checked, roots_diff, roots_next_diff;
+     const uint32_t* token_first;
+     const uint32_t* node_next;
+     // Each initializer node's declaration token, where `initialized` has the node's bit (check_program_openings), and each
+@@ -1970,6 +1971,42 @@ static bool check_control_fold_operand(const CheckControlWriter* writer, uint32_
+ // terminator or a for statement's first `;`): its declarations' initializers, or else its expressions, each a value
+ // that check_control_fold_value takes, and none a static declaration, an asm statement or a typeof's operand. The
+ // expressions go on the walk's stack, for the __builtin_constant_p they may hold. An extern declaration has no code.
++static uint32_t check_program_control_head(const CheckControlWriter* writer, uint32_t token)
++{
++    const CheckInput* input = writer->program->input;
++    if (!check_sparse_present(input->control_heads)) return writer->token_first[token];
++    const uint32_t exception = input->control_has_exceptions ? check_sparse_get(input->control_heads, token) : BUSTER_CHECK_NONE;
++    const uint32_t child = writer->first[token];
++    const uint32_t value = child < input->token_count ? input->token_nodes[child] : BUSTER_CHECK_NONE;
++    const uint32_t candidate = value != BUSTER_CHECK_NONE ? value + 1 : BUSTER_CHECK_NONE;
++    const uint32_t predicted = exception != BUSTER_CHECK_NONE ? exception :
++        candidate < input->graph.count && input->graph.tokens[candidate] == token ? candidate : BUSTER_CHECK_NONE;
++    if (input->control_verify)
++    {
++        CheckControlWriter* w = (CheckControlWriter*)writer;
++        ++w->roots_checked;
++        if (predicted != writer->token_first[token] && ++w->roots_diff < 12)
++            fprintf(stderr, "root-miss token=%u role=%u kind=%u expected=%u op=%u predicted=%u\n",token,writer->parser->tree.roles[token],writer->parser->tokens.kinds[token],writer->token_first[token],writer->token_first[token]<input->graph.count ? input->graph.ops[writer->token_first[token]] : 255,predicted);
++        return writer->token_first[token];
++    }
++    return predicted;
++}
++
++static uint32_t check_program_control_next(const CheckControlWriter* writer, uint32_t token, uint32_t node)
++{
++    const CheckInput* input = writer->program->input;
++    if (!check_sparse_present(input->control_heads)) return writer->node_next[node];
++    const uint32_t predicted = node+1 < input->graph.count && input->graph.tokens[node+1] == token ? node+1 : BUSTER_CHECK_NONE;
++    if (input->control_verify)
++    {
++        CheckControlWriter* w = (CheckControlWriter*)writer;
++        if (predicted != writer->node_next[node] && ++w->roots_next_diff < 12)
++            fprintf(stderr, "root-next-miss token=%u node=%u expected=%u predicted=%u\n",token,node,writer->node_next[node],predicted);
++        return writer->node_next[node];
++    }
++    return predicted;
++}
++
+ static bool check_control_fold_simple(const CheckControlWriter* writer, uint32_t token, uint32_t* depth, uint32_t visits)
+ {
+     const CheckProgram* program = writer->program;
+@@ -1999,8 +2036,8 @@ static bool check_control_fold_simple(const CheckControlWriter* writer, uint32_t
+                        (check_control_fold_value(&write->value) && (!source || check_control_fold_push(writer, depth, visits, write->node)));
+         }
+     }
+-    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? writer->token_first[token] : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
+-         node = writer->node_next[node])
++    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? check_program_control_head(writer, token) : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
++         node = check_program_control_next(writer, token, node))
+     {
+         foldable = check_control_fold_operand(writer, node, depth, visits);
+     }
+@@ -2076,7 +2113,7 @@ static bool check_control_fold_statement(const CheckControlWriter* writer, uint3
+             body = child > statement && child_role != PARSE_ROLE_ELSE ? child : body;
+         }
+         const bool loop = role == PARSE_ROLE_CLOSE_FOR;
+-        const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? writer->token_first[condition] : BUSTER_CHECK_NONE) : input->token_nodes[statement];
++        const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? check_program_control_head(writer, condition) : BUSTER_CHECK_NONE) : input->token_nodes[statement];
+         const CheckGraph* graph = &input->graph;
+         const uint32_t expression = node < graph->count && graph->ops[node] == CHECK_OP_CONDITION ? graph->operand0[node] : node;
+         const CheckValue value = expression < graph->count ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
+@@ -2408,7 +2445,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
+             check_control_token(writer, token);
+             check_control_mark(writer, update);
+             check_control_statement(writer, body, end, update);
+-            const uint32_t node = writer->token_first[condition];
++            const uint32_t node = check_program_control_head(writer, condition);
+             if (node != BUSTER_CHECK_NONE)
+             {
+                 check_control_entry(writer, CHECK_CONTROL_BRANCH_FALSE, condition, node, end);
+@@ -2770,7 +2807,7 @@ static void check_control_drain(CheckControlWriter* writer)
+             }
+             // The graph's token groups are in postorder. Each wrapper here is a complete discarded expression
+             // or declaration initializer; expressions of nested statements have their own source tokens.
+-            for (uint32_t node = plan == BUSTER_CHECK_NONE && assembly == BUSTER_CHECK_NONE ? writer->token_first[task.token] : BUSTER_CHECK_NONE; node != BUSTER_CHECK_NONE; node = writer->node_next[node])
++            for (uint32_t node = plan == BUSTER_CHECK_NONE && assembly == BUSTER_CHECK_NONE ? check_program_control_head(writer, task.token) : BUSTER_CHECK_NONE; node != BUSTER_CHECK_NONE; node = check_program_control_next(writer, task.token, node))
+             {
+                 // The evaluated typeof operand is already a control entry; the discard wrapper the expression walk
+                 // made of its value at the terminator must not evaluate it again.
+@@ -5873,8 +5910,9 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+     uint32_t* last = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+     uint32_t* next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+     uint32_t* previous = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+-    uint32_t* token_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+-    uint32_t* node_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
++    const bool indexed = !check_sparse_present(input->control_heads) || input->control_verify || options.selection_census;
++    uint32_t* token_first = valid && indexed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
++    uint32_t* node_next = valid && indexed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+     // The initializers by node and the plans by statement, written at few entries, which their bits mark, rather than
+     // cleared at every one: 4 bytes a node and 4 a token, against a bit of each (#877).
+     uint32_t* initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+@@ -5926,7 +5964,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
+     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
+     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControlTask, capacity) : 0;
+-    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && initializers != 0 && initialized != 0 && labels != 0 &&
++    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && (!indexed || (token_first != 0 && node_next != 0)) && initializers != 0 && initialized != 0 && labels != 0 &&
+             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
+             (options.initializers == 0 || plan_next != 0) &&
+             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
+@@ -5967,7 +6005,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+     {
+         check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
+-        memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
++        if (indexed) memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+         memset(initialized, 0, ((uint64_t)node_count + 64) / 64 * sizeof(uint64_t));
+         memset(planned, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
+         if (variable)
+@@ -6033,7 +6071,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+             kept += check_cpu_dispatch_kind(check_input_attributes_at(input, declaration)) != CHECK_CPU_DISPATCH_DISPATCH;
+         }
+         body_count = input->cpu_dispatch ? kept : body_count;
+-        for (uint32_t node = node_count; node-- > 0;)
++        for (uint32_t node = indexed ? node_count : 0; node-- > 0;)
+         {
+             const uint32_t token = input->graph.tokens[node];
+             node_next[node] = token_first[token];
+@@ -6608,6 +6646,8 @@ static bool check_program_finish(CheckProgramRun* run)
+     {
+         arena_pop_to(scratch, temporary);
+     }
++    if (input->control_verify)
++        fprintf(stderr,"program-direct-roots: tokens=%u graph=%u reads=%u head_diffs=%u next_diffs=%u\n", input->token_count,input->graph.count,writer.roots_checked,writer.roots_diff,writer.roots_next_diff);
+     arena_release(&run->return_facts.storage);
+     arena_release(&controls);
+     return valid;
