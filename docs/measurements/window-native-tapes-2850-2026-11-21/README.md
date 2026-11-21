@@ -1,0 +1,3 @@
+# Window tapes compared with ordinary native lowering
+
+The [placement experiment](placed/) feeds independent T records into the existing tests, context and row calculations. It compares 269,441 native entries on frozen SQLite while using the ordinary placement and eligibility decisions. The [source-selected producer](pregraph/) derives those decisions for a conservative set of return and discarded expressions and constructs their native tapes before the ordinary expression graph exists. It matches 133,611 SQLite native entries under default warnings. The two experiments report both the source coverage and the native comparisons possible after program selection.

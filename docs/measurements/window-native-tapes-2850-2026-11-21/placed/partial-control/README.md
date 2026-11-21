@@ -1,0 +1,3 @@
+# Isolating the overwritten argument field
+
+This control applies the larger partial-record substitution to frozen SQLite. It optionally preserves one field from the ordinary placed record. Restoring the last quadword (`spare`, in which a consumer stores an argument conversion) alone eliminated all 2,340 context and 374 row differences. Restoring either the exponent or the rule-selection byte left all differences present. This identifies why replacing a child independently of its consumer failed in this test. The complete-expression producer does not need that restoration. [Results](results.tsv) · [Raw output](runs.tar.xz) · [Source against 84a7d3d76](experiment.patch) · [Runner](run.sh).
