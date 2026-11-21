@@ -1,0 +1,474 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 6996a8d94..a85628c47 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -58,14 +58,6 @@ static uint32_t check_input_expression_compact(const CheckInputReader* reader, u
+     return result;
+ }
+ 
+-typedef struct CheckInputValues CheckInputValues;
+-struct CheckInputValues
+-{
+-    uint32_t first;
+-    uint32_t last;
+-    uint32_t count;
+-};
+-
+ // The values of `token`'s children, chained as the walk's action chains them: each child's chain after the one before
+ // it, through value_next, and their counts added (CheckInputReader.value_counts).
+ // Its branches stay: a branch-free splice (each child's last value and count taken by selects, the link stored into a
+@@ -77,9 +69,11 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
+     CheckInputValues values = { .first = BUSTER_CHECK_NONE, .last = BUSTER_CHECK_NONE, .count = 0 };
+     for (uint32_t child = reader->first_child[token]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+     {
+-        const uint32_t begin = reader->first_value[child];
+-        if (begin != BUSTER_CHECK_NONE)
++        const uint32_t entry = reader->first_value[child];
++        if (entry != BUSTER_CHECK_NONE)
+         {
++            const CheckInputValues child_values = check_input_chain_read(reader, child, entry);
++            const uint32_t begin = child_values.first;
+             if (values.last != BUSTER_CHECK_NONE)
+             {
+                 reader->value_next[values.last] = begin;
+@@ -88,8 +82,8 @@ static inline CheckInputValues check_input_expression_values(CheckInputReader* r
+             {
+                 values.first = begin;
+             }
+-            values.last = reader->last_value[child];
+-            values.count += reader->value_counts[child];
++            values.last = child_values.last;
++            values.count += child_values.count;
+         }
+     }
+     return values;
+@@ -493,9 +487,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
+     if (node != BUSTER_CHECK_NONE)
+     {
+         reader->output->token_nodes[token] = node;
+-        reader->first_value[token] = node;
+-        reader->last_value[token] = node;
+-        reader->value_counts[token] = 1;
++        check_input_chain_single(reader, token, node);
+     }
+ }
+ 
+@@ -503,9 +495,7 @@ static void check_input_expression_value(CheckInputReader* reader, uint32_t toke
+ static void check_input_expression_list(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+ {
+     reader->output->token_nodes[token] = values.count == 1 ? values.first : BUSTER_CHECK_NONE;
+-    reader->first_value[token] = values.first;
+-    reader->last_value[token] = values.last;
+-    reader->value_counts[token] = values.count;
++    check_input_chain_list(reader, token, values);
+     if (BUSTER_CHECK_RARE(reader, static_initializers, token))
+     {
+         // A braced static initializer's elements are constant expressions, which initializer planning diagnoses:
+@@ -1603,8 +1593,10 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t
+                     if (barrier)
+                     {
+                         id += made[token];
+-                        chain = reader->first_value[token];
+-                        chained = reader->value_counts[token];
++                        const uint32_t entry = reader->first_value[token];
++                        const CheckInputValues values = check_input_chain_read(reader, token, entry);
++                        chain = values.first;
++                        chained = values.count;
+                     }
+                     else if (code == CHECK_INPUT_CODE_TERMINATOR)
+                     {
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index d9e9562a1..b86115c23 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1886,6 +1886,14 @@ struct CheckInputGnuRows
+ 
+ #define BUSTER_CHECK_GNU_ROW_BITS 7u
+ 
++typedef struct CheckInputValues CheckInputValues;
++struct CheckInputValues
++{
++    uint32_t first;
++    uint32_t last;
++    uint32_t count;
++};
++
+ struct CheckInputReader
+ {
+     CheckInput* output;
+@@ -2242,6 +2250,11 @@ struct CheckInputReader
+     const uint32_t* next_child;
+     uint32_t* first_value;
+     uint32_t* last_value;
++    bool chain_lazy;
++    bool chain_packed;
++    uint32_t multiple_count;
++    uint32_t multiple_capacity;
++    CheckInputValues* multiples;
+     // The length of each token's chain of values, from first_value to last_value, written with them: a parent adds its
+     // children's rather than walking their chains, which an initializer's separators, each a child of the next, made
+     // quadratic in its elements. The scalar reader walks the chains, as the twin of these counts.
+@@ -15223,6 +15236,56 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const
+ #include "c_check_region_input.c"
+ 
+ 
++// Multi-value chains carry immutable head/tail/count records. A singleton is its own head and tail.
++#define BUSTER_CHECK_CHAIN_MULTIPLE UINT32_C(0x80000000)
++static inline __attribute__((always_inline)) CheckInputValues check_input_chain_read(const CheckInputReader* reader, uint32_t child, uint32_t entry)
++{
++    if (!reader->chain_packed) return (CheckInputValues){entry, reader->last_value[child], reader->value_counts[child]};
++    if (entry == BUSTER_CHECK_NONE) return (CheckInputValues){BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, 0};
++    if ((entry & BUSTER_CHECK_CHAIN_MULTIPLE) == 0) return (CheckInputValues){entry,entry,1};
++    const uint32_t slot = entry & ~BUSTER_CHECK_CHAIN_MULTIPLE;
++    assert(slot < reader->multiple_count);
++    return reader->multiples[slot];
++}
++static void check_input_chain_list(CheckInputReader* reader, uint32_t token, CheckInputValues values)
++{
++    if (!reader->chain_packed)
++    {
++        reader->first_value[token] = values.first;
++        reader->last_value[token] = values.last;
++        reader->value_counts[token] = values.count;
++    }
++    else if (values.count <= 1 || values.first == BUSTER_CHECK_NONE)
++    {
++        reader->first_value[token] = values.first;
++    }
++    else
++    {
++        if (reader->multiple_count == reader->multiple_capacity)
++        {
++            const uint32_t next = reader->multiple_capacity == 0 ? 256 : reader->multiple_capacity * 2;
++            CheckInputValues* rows = next <= (UINT32_C(1)<<30) && next > reader->multiple_capacity ?
++                                     BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckInputValues, next) : NULL;
++            if (rows == NULL) {reader->output->resource=true; return;}
++            if (reader->multiple_count!=0) memcpy(rows,reader->multiples,reader->multiple_count*sizeof(*rows));
++            reader->multiples=rows;
++            reader->multiple_capacity=next;
++        }
++        const uint32_t slot=reader->multiple_count++;
++        reader->multiples[slot]=values;
++        reader->first_value[token]=BUSTER_CHECK_CHAIN_MULTIPLE | slot;
++    }
++}
++static inline __attribute__((always_inline)) void check_input_chain_single(CheckInputReader* reader, uint32_t token, uint32_t node)
++{
++    reader->first_value[token]=node;
++    if (!reader->chain_packed)
++    {
++        reader->last_value[token]=node;
++        reader->value_counts[token]=1;
++    }
++}
++
+ // The expressions' walk's classes of every token, into CheckInputReader.visits: 64 tokens' roles and kinds looked up in
+ // the tables (check_input_role_tests, check_input_role_codes) and their sparse entries in a word of marks
+ // (CheckInputReader.sparse_marks, which every write of the sparse columns keeps), 16 tokens' type queries and first
+@@ -15283,6 +15346,9 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+         codes = _mm512_mask_mov_epi8(codes, other & refused, _mm512_set1_epi8(CHECK_INPUT_CODE_SCALAR));
+         codes = _mm512_mask_mov_epi8(codes, skipped & ~list, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP));
+         codes = _mm512_mask_mov_epi8(codes, skipped & list, _mm512_set1_epi8(CHECK_INPUT_CODE_LIST));
++        // The compactor excludes a DROP as well as inactive tokens. Both need an empty chain
++        // when their parent reads them. Every other action initializes its own chain in postorder.
++        const uint64_t drops = reader->chain_lazy ? _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_DROP)) : 0;
+         // The folds (check_input_expression_fold): comma operators' separators, initializers' assignments, builtins'
+         // tokens and intrinsics' calls, from the columns the reader wrote before the walk.
+         const __mmask32 low = (__mmask32)lanes;
+@@ -15302,7 +15368,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
+             const uint32_t at = token + part;
+             const __mmask16 children = _mm512_mask_cmpneq_epu32_mask(parts, _mm512_maskz_loadu_epi32(parts, reader->first_child + at), none);
+             const __mmask16 part_acts = (__mmask16)((children | (__mmask16)(sparse >> part) | (__mmask16)(taken >> part)) & ~(__mmask16)(passed >> part));
+-            _mm512_mask_storeu_epi32(reader->first_value + at, parts & (__mmask16)~part_acts, none);
++            _mm512_mask_storeu_epi32(reader->first_value + at, parts & ((__mmask16)~part_acts | (__mmask16)(drops >> part)), none);
+             // The type queries that finish at the tokens, 8 pointers at a time.
+             const __m512i jobs_low = _mm512_maskz_loadu_epi64((__mmask8)parts, check_input_rare_line(reader, reader->specifier_finishes + at));
+             const __m512i jobs_high = _mm512_maskz_loadu_epi64((__mmask8)(parts >> 8), check_input_rare_line(reader, reader->specifier_finishes + at + 8));
+@@ -15364,9 +15430,11 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+             // A fixed-type query keeps its region checked; its value is not a runtime declaration operand.
+             continue;
+         }
+-        const uint32_t begin = reader->first_value[child];
+-        if (begin != BUSTER_CHECK_NONE)
++        const uint32_t entry = reader->first_value[child];
++        if (entry != BUSTER_CHECK_NONE)
+         {
++            const CheckInputValues values = check_input_chain_read(reader, child, entry);
++            const uint32_t begin = values.first;
+             if (last != BUSTER_CHECK_NONE)
+             {
+                 reader->value_next[last] = begin;
+@@ -15375,8 +15443,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+             {
+                 first = begin;
+             }
+-            last = reader->last_value[child];
+-            count += reader->value_counts[child];
++            last = values.last;
++            count += values.count;
+         }
+     }
+     uint32_t a = first;
+@@ -16173,17 +16241,13 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
+         reader->output->token_nodes[token] = node;
+         if (role != PARSE_ROLE_CLOSE_CONDITION && role != PARSE_ROLE_RETURN)
+         {
+-            reader->first_value[token] = node;
+-            reader->last_value[token] = node;
+-            reader->value_counts[token] = 1;
++            check_input_chain_single(reader, token, node);
+         }
+     }
+     else if (list)
+     {
+         reader->output->token_nodes[token] = count == 1 ? first : BUSTER_CHECK_NONE;
+-        reader->first_value[token] = first;
+-        reader->last_value[token] = last;
+-        reader->value_counts[token] = count;
++        check_input_chain_list(reader, token, (CheckInputValues){first,last,count});
+         if (BUSTER_CHECK_RARE(reader, static_initializers, token))
+         {
+             // A braced static initializer's elements are constant expressions, which initializer
+@@ -16812,6 +16876,38 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
+     return result;
+ }
+ 
++static void check_storage_reader(const char* stage, const CheckInputReader* reader)
++{
++    if (getenv("BUSTER_GRAPH_STORAGE") == NULL) return;
++    CheckStorageSample sample = check_storage_start(stage);
++    const CheckGraph* graph = &reader->output->graph;
++    const CheckInput* input = reader->output;
++    const uint64_t slots = (uint64_t)reader->parser->tokens.count + 1;
++    check_storage_graph(&sample, graph);
++    STORAGE_COLUMN(&sample, "reader", reader, first_value, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, last_value, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, initializer_declarations, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, initializer_finish_heads, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, selected_tokens, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, activate, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, ignored, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, declared_types, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, function_specifiers, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, conditions, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, constant_contexts, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, query_types, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, return_types, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, definition_origins, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, visits, slots, slots);
++    STORAGE_COLUMN(&sample, "token", input, token_nodes, slots, slots);
++    STORAGE_COLUMN(&sample, "token", input, declarations, slots, slots);
++    STORAGE_COLUMN(&sample, "token", input, expression_regions, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, value_next, graph->capacity, graph->count);
++    STORAGE_COLUMN(&sample, "reader", reader, value_counts, slots, slots);
++    STORAGE_COLUMN(&sample, "reader", reader, multiples, reader->multiple_capacity, reader->multiple_count);
++    check_storage_done(&sample);
++}
++
+ // The columns of a value a token whose empty value is NONE (UINT32_MAX), filled one at a time so that libc's vector stores
+ // replace the scalar twin's stores at each token of all of them, which clang doesn't vectorize across the columns'
+ // pointers (#628, #529): the output's declarations and token_nodes, and the reader's own columns in the scratch, whose
+@@ -16827,8 +16923,21 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
+     memset(reader->initializer_finish_heads, 0xff, bytes);
+     memset(reader->selected_tokens, 0xff, bytes);
+     memset(reader->activate, 0xff, bytes);
+-    memset(reader->first_value, 0xff, bytes);
+-    memset(reader->last_value, 0xff, bytes);
++    if (reader->chain_lazy)
++    {
++        if (getenv("BUSTER_CHAIN_POISON") != NULL)
++        {
++            memset(reader->first_value, 0x8b, bytes);
++            if (!reader->chain_packed) memset(reader->last_value, 0x9d, bytes);
++        }
++        reader->first_value[count] = BUSTER_CHECK_NONE;
++        if (!reader->chain_packed) reader->last_value[count] = BUSTER_CHECK_NONE;
++    }
++    else
++    {
++        memset(reader->first_value, 0xff, bytes);
++        memset(reader->last_value, 0xff, bytes);
++    }
+ }
+ 
+ #include "c_check_comma_input.c"
+@@ -17096,7 +17205,13 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     input->asm_capacity = counts.asms;
+     const uint32_t vector_members = counts.vector_members;
+     const bool transparent_unions = counts.groups[CHECK_INPUT_COUNT_TRANSPARENT_UNIONS] != 0;
+-    const uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
++    uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
++    const char* override = getenv("BUSTER_GRAPH_CAP_OVERRIDE");
++    if (override != NULL)
++    {
++        const uint64_t room = strtoull(override, NULL, 10);
++        if (room < graph_capacity) graph_capacity = room;
++    }
+     CheckInputReader reader =
+     {
+         .output = input,
+@@ -17105,6 +17220,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+         .types = types,
+         .arena = arena,
+         .scratch = scratch,
++        .chain_lazy = getenv("BUSTER_CHAIN_LAZY") != NULL || getenv("BUSTER_CHAIN_PACKED") != NULL,
++        .chain_packed = getenv("BUSTER_CHAIN_PACKED") != NULL,
+         .warning_events = { .arena = arena },
+         .const_values = { .arena = arena },
+         .literal_tables_disabled = !literal_tables,
+@@ -17282,8 +17399,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     BUSTER_CHECK_INPUT_ARRAY(parameter_previous, uint32_t);
+     BUSTER_CHECK_INPUT_ARRAY(parameter_declarations, uint32_t);
+     BUSTER_CHECK_INPUT_ARRAY(first_value, uint32_t);
+-    BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
+-    BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
++    if (!reader.chain_packed)
++    {
++        BUSTER_CHECK_INPUT_ARRAY(last_value, uint32_t);
++        BUSTER_CHECK_INPUT_ARRAY(value_counts, uint32_t);
++    }
+ #undef BUSTER_CHECK_INPUT_ARRAY
+     reader.warning_index_base = 1;
+     while ((uint64_t)reader.warning_index_base * BUSTER_CHECK_WARNING_BLOCK < count)
+@@ -17467,6 +17587,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     uint32_t* const starts = sizes != 0 && temporaries != 0 ? temporaries + (traversal != 0 ? 2 * slots : 0) : 0;
+     valid &= temporary_columns == 0 || temporaries != 0;
+ 
++    if (valid) check_storage_reader("before-fill", &reader);
+     if (valid && !output_zero)
+     {
+         // The output arena's columns whose empty value is zero, where its pages may hold what something wrote before.
+@@ -17815,7 +17936,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+                     struct rusage before;
+                     const bool used = getrusage(RUSAGE_SELF, &before) == 0;
+                     const uint64_t expressions_start = __rdtsc();
++                    check_storage_reader("before-expressions", &reader);
+                     check_input_expressions(&reader);
++                    check_storage_reader("after-expressions", &reader);
+                     input->expression_ticks = __rdtsc() - expressions_start;
+                     struct rusage after;
+                     const bool read = used && getrusage(RUSAGE_SELF, &after) == 0;
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index 2307bc6e2..1e46581a9 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -4062,6 +4062,100 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
+     }
+ }
+ 
++// Measurement-only resident-page view, restricted to the requested compilation.
++typedef struct CheckStorageSample { FILE* out; int pages; size_t page; const char* stage; } CheckStorageSample;
++static CheckStorageSample check_storage_start(const char* stage)
++{
++    const char* file = getenv("BUSTER_GRAPH_STORAGE");
++    CheckStorageSample sample = { .pages = -1, .stage = stage };
++    if (file != NULL)
++    {
++        sample.out = fopen(file, "a");
++        sample.pages = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
++        sample.page = (size_t)sysconf(_SC_PAGESIZE);
++    }
++    return sample;
++}
++static void check_storage_done(CheckStorageSample* sample)
++{
++    if (sample->out != NULL) fclose(sample->out);
++    if (sample->pages >= 0) close(sample->pages);
++}
++static void check_storage_column(CheckStorageSample* sample, const char* group, const char* name, const void* ptr,
++                                 uint64_t capacity, uint64_t used, size_t stride)
++{
++    if (sample->out == NULL || ptr == NULL || capacity == 0) return;
++    const uint64_t base = (uintptr_t)ptr, end = base + capacity * stride, past_used = base + used * stride;
++    const size_t size = sample->page;
++    const uint64_t first = base / size, past = (end + size - 1) / size;
++    uint64_t now = first, resident = 0, exclusive = 0, tail_exclusive = 0;
++    while (now < past)
++    {
++        uint64_t entries[256];
++        const uint64_t block = past - now < 256 ? past - now : 256;
++        const ssize_t length = (ssize_t)(block * sizeof(*entries));
++        if (pread(sample->pages, entries, (size_t)length, (off_t)(now * sizeof(*entries))) != length) abort();
++        for (uint64_t j = 0; j < block; j++)
++        {
++            const uint64_t lo = (now+j) * size;
++            const uint64_t begin = lo > base ? lo : base;
++            const uint64_t stop = lo + size < end ? lo + size : end;
++            const bool present = (entries[j] >> 63) != 0;
++            const bool private = present && ((entries[j] >> 56) & 1u) != 0;
++            resident += present ? stop-begin : 0;
++            exclusive += private ? stop-begin : 0;
++            const uint64_t tail = begin > past_used ? begin : past_used;
++            tail_exclusive += private && tail < stop ? stop - tail : 0;
++        }
++        now += block;
++    }
++    fprintf(sample->out, "%s\t%s\t%s\t%" PRIu64 "\t%" PRIu64 "\t%zu\t%" PRIu64 "\t%" PRIu64 "\t%" PRIu64 "\n",
++            sample->stage, group, name, capacity, used, stride, resident, exclusive, tail_exclusive);
++}
++#define STORAGE_COLUMN(sample, group, owner, field, cap, used) check_storage_column(sample, group, #field, (owner)->field, cap, used, sizeof(*(owner)->field))
++static void check_storage_graph(CheckStorageSample* sample, const CheckGraph* graph)
++{
++    if (sample->out == NULL) return;
++    STORAGE_COLUMN(sample, "graph", graph, ops, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, tokens, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, operand0, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, operand1, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, operand2, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, leaf_slots, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, types, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, members, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, contexts, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, source_positions, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, argument_offsets, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, argument_counts, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, recorded_pure, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, warning_suppressed, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, fp_environments, graph->capacity, graph->count);
++    STORAGE_COLUMN(sample, "graph", graph, leaf_records, graph->capacity, graph->leaf_count);
++    STORAGE_COLUMN(sample, "graph", graph, leaf_payloads, graph->leaf_payload_capacity, graph->leaf_payload_count);
++    STORAGE_COLUMN(sample, "graph", graph, argument_nodes, graph->argument_capacity, graph->argument_count);
++    STORAGE_COLUMN(sample, "graph", graph, argument_tokens, graph->argument_capacity, graph->argument_count);
++}
++static void check_storage_stream(CheckStorageSample* sample, const CheckStream* stream)
++{
++    if (sample->out == NULL) return;
++    STORAGE_COLUMN(sample, "stream", stream, value_types, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, value_flags, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, value_objects, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, value_categories, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, value_constants, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, payload_rows, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, conversions, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, diagnostics, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, diagnostic_operands, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, member_offsets, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, warnings, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, warning_ignored, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, constant_evaluated, stream->count, stream->count);
++    STORAGE_COLUMN(sample, "stream", stream, reports, stream->count, stream->report_count);
++    STORAGE_COLUMN(sample, "stream", stream, payloads, stream->count, stream->payload_count);
++}
++
+ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
+ {
+     const uint64_t output_start = output->length;
+@@ -4285,6 +4379,18 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+             .failed_node = failed,
+         };
+     }
++    if (result && getenv("BUSTER_GRAPH_STORAGE") != NULL)
++    {
++        CheckStorageSample sample = check_storage_start("typed");
++        check_storage_graph(&sample, graph);
++        check_storage_stream(&sample, stream);
++        check_storage_column(&sample, "scheduler", "pure", pure, (uint64_t)count + 1, count, 1);
++        check_storage_column(&sample, "scheduler", "levels", levels, count, count, 4);
++        check_storage_column(&sample, "scheduler", "counts", counts, (uint64_t)count + 2, count, 4);
++        check_storage_column(&sample, "scheduler", "order", order, count, count, 4);
++        check_storage_column(&sample, "scheduler", "reports", reports, count, stream->report_count, sizeof(*reports));
++        check_storage_done(&sample);
++    }
+     arena_pop_to(scratch, scratch_start);
+     return result;
+ }
