@@ -29,3 +29,5 @@ Each of the 42 successful compiles yielded a 2,061,192-byte object with SHA-256 
 The [frozen driver method](../paired-driver/README.md), [mode selectors](initializers-config.sh), [command and object checks](initializers-one.sh), [native build receipts](builds.tsv), [full order](order.tsv), [PMU and wall records](samples.tsv), [original reports](reports.tar.xz), [object receipts](objects.tsv) and [warning receipts](diagnostics.tsv) identify the exact inputs, command lines and outputs.
 
 The [sparse-directory](init81c.patch) and [one-based plus visit-bit](init1e6.patch) patches each apply independently to the pristine baseline.
+
+The [independent correctness and source-access record](correctness/README.md) includes 3,400 matching invocations per candidate, ELF, typed and static outputs, and 848,405 successful checker assertions for each layout. It also includes native execution of a nested initializer fixture and separate workstation timing.
