@@ -1,0 +1,1363 @@
+diff --git a/src/buster/compiler/c_check_common_warnings.c b/src/buster/compiler/c_check_common_warnings.c
+index a0ef6e3ab..effef7b8e 100644
+--- a/src/buster/compiler/c_check_common_warnings.c
++++ b/src/buster/compiler/c_check_common_warnings.c
+@@ -11587,6 +11587,8 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
+         if (source_tokens != NULL)
+         {
+             memset(source_tokens, 0xff, (size_t)count * sizeof(*source_tokens));
++            const bool omit_read = getenv("NODE_SOURCE_DROP_READ") != NULL;
++            const bool omit_write = getenv("NODE_SOURCE_DROP_WRITE") != NULL;
+             for (const NodeWindowNativeTape* tape = input->source_access_tapes; tape != NULL; tape = tape->access_next)
+             {
+                 const uint32_t node = tape->compact_node - 1;
+@@ -11596,7 +11598,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
+                 {
+                     const NodeSourceLocalAccess* event = tape->accesses + a;
+                     const uint32_t object = event->object - 1;
+-                    if (event->store ? getenv("NODE_SOURCE_DROP_WRITE") != NULL : getenv("NODE_SOURCE_DROP_READ") != NULL) { continue; }
++                    if (event->store ? omit_write : omit_read) { continue; }
+                     if (event->store)
+                     {
+                         written[object] = 1;
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index e0c3e7c22..8eb4626a0 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1674,6 +1674,116 @@ static void check_input_expression_numbering(CheckInputReader* reader, uint32_t
+ // walk makes them, with the preparation's three parts' ticks apart (the lean front reads the compaction's and the
+ // literals', not the identifiers' entries); then the front, where it runs before the walk acts at the chunk, where the
+ // machine would run. Returns the front's ticks.
++#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
++// Only complete parser subtrees ending in a conversion or discarded expression can be published. Gather
++// those with integer-source actions, preserving token order and each identifier/literal's ordinary decoded
++// input. The same source type, warning, native-row and physical ownership checks still decide admission.
++static void check_source_front_chunk(NodeFront* front, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
++                                     uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals)
++{
++    uint16_t starts[BUSTER_CHECK_EXPRESSION_CHUNK], stops[BUSTER_CHECK_EXPRESSION_CHUNK];
++    uint32_t runs = 0;
++    uint32_t kept_tokens[BUSTER_CHECK_EXPRESSION_CHUNK], kept_classes[BUSTER_CHECK_EXPRESSION_CHUNK];
++    CheckInputIdentifiers kept_identifiers;
++    CheckInputLiterals kept_literals;
++    uint32_t through = 0;
++    const __m512i code_mask = _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK);
++    const __m512i returned = _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++    const __m512i terminated = _mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++    const __m512i identifier_code = _mm512_set1_epi32(CHECK_INPUT_CODE_IDENTIFIER << BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++    const __m512i literal_code = _mm512_set1_epi32(CHECK_INPUT_CODE_LITERAL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++    for (uint32_t block = 0; block < acting; block += 16)
++    {
++        const uint32_t left = acting - block;
++        const __mmask16 valid = left >= 16 ? UINT16_MAX : (__mmask16)((1u << left) - 1u);
++        const __m512i codes = _mm512_and_si512(_mm512_maskz_loadu_epi32(valid, classes + block), code_mask);
++        const uint32_t returns = _mm512_cmpeq_epi32_mask(codes, returned);
++        uint32_t found = (returns | _mm512_cmpeq_epi32_mask(codes, terminated)) & valid;
++        while (found != 0)
++        {
++            const uint32_t bit = (uint32_t)__builtin_ctz(found);
++            found &= found - 1;
++            const uint32_t end = block + bit;
++            const bool is_return = ((returns >> bit) & 1u) != 0;
++            const uint32_t token = tokens[end];
++            const uint32_t last = reader->postorder_positions[token];
++            const uint32_t size = reader->subtree_sizes[last];
++            if (size < 2 || size > last + 1) continue;
++            const uint32_t first = last + 1 - size;
++            if (first < reader->postorder_positions[tokens[0]] || (through && first <= reader->postorder_positions[tokens[through - 1]])) continue;
++            uint32_t start = end;
++            bool leaves = false, assignment = false;
++            while (start != through && reader->postorder_positions[tokens[start - 1]] >= first)
++            {
++                const uint32_t at = start - 1;
++                const uint32_t action = (classes[at] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++                if (action == CHECK_INPUT_CODE_IDENTIFIER || action == CHECK_INPUT_CODE_LITERAL) leaves = true;
++                else if (action == CHECK_INPUT_CODE_BINARY)
++                {
++                    const CheckOp op = check_input_binary(reader->parser->tokens.kinds[tokens[at]]);
++                    assignment |= op == CHECK_OP_ASSIGN;
++                    if (op != CHECK_OP_ASSIGN && op != CHECK_OP_ADD && op != CHECK_OP_SUBTRACT && op != CHECK_OP_MULTIPLY &&
++                        op != CHECK_OP_BIT_AND && op != CHECK_OP_BIT_OR && op != CHECK_OP_BIT_XOR) break;
++                }
++                else if (action != CHECK_INPUT_CODE_PREFIX && action != CHECK_INPUT_CODE_GROUP &&
++                         action != CHECK_INPUT_CODE_SEPARATOR && action != CHECK_INPUT_CODE_LIST) break;
++                start = at;
++            }
++            if (leaves && (is_return || assignment) &&
++                (start == 0 || reader->postorder_positions[tokens[start - 1]] < first))
++            {
++                starts[runs] = (uint16_t)start;
++                stops[runs++] = (uint16_t)(end + 1);
++                through = end + 1;
++            }
++        }
++    }
++    uint32_t kept = 0, id = 0, lit = 0, kid = 0, klit = 0;
++    uint32_t cursor = 0;
++    for (uint32_t r = 0; r < runs; ++r)
++    {
++        // Across fallback spans only the number of names and literals is needed. Their decoded
++        // arrays are already in postorder; the retained spans below need neither a new parse nor a map.
++        for (; cursor < starts[r]; )
++        {
++            const uint32_t left = starts[r] - cursor;
++            const uint32_t n = left < 16 ? left : 16;
++            const __mmask16 valid = n == 16 ? UINT16_MAX : (__mmask16)((1u << n) - 1u);
++            const __m512i codes = _mm512_and_si512(_mm512_maskz_loadu_epi32(valid, classes + cursor), code_mask);
++            id += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(valid, codes, identifier_code));
++            lit += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(valid, codes, literal_code));
++            cursor += n;
++        }
++        for (; cursor < stops[r]; ++cursor)
++        {
++            const uint32_t code = (classes[cursor] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++            kept_tokens[kept] = tokens[cursor];
++            kept_classes[kept++] = classes[cursor];
++            if (code == CHECK_INPUT_CODE_IDENTIFIER)
++            {
++                kept_identifiers.types[kid] = identifiers->types[id];
++                kept_identifiers.flags[kid] = identifiers->flags[id];
++                kept_identifiers.objects[kid] = identifiers->objects[id];
++                kept_identifiers.declarations[kid] = identifiers->declarations[id];
++                kept_identifiers.status[kid++] = identifiers->status[id++];
++            }
++            else if (code == CHECK_INPUT_CODE_LITERAL) kept_literals.values[klit++] = literals->values[lit++];
++        }
++    }
++    front->stack_count = 0;
++    front->group_count = 0;
++    front->full = false;
++    front->count = 0;
++    front->made = 0;
++    front->pending = 0;
++    if (kept != 0)
++    {
++        node_front_chunk_windowed(front, reader, kept_tokens, kept_classes, kept, &kept_identifiers, &kept_literals);
++        node_window_probe(front);
++    }
++}
++#endif
++
+ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front, uint8_t fronted, CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
+                                                               uint32_t acting, CheckInputIdentifiers* identifiers, CheckInputLiterals* literals, uint64_t start)
+ {
+@@ -1689,7 +1799,11 @@ static __attribute__((noinline)) uint64_t node_front_prepared(NodeFront* front,
+     if ((fronted & BUSTER_NODE_FRONT_ORDER) == BUSTER_NODE_FRONT_BEFORE)
+     {
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+-        if (front->window)
++        if (front->window && reader->pp->options.node_source_window)
++        {
++            check_source_front_chunk(front, reader, tokens, classes, acting, identifiers, literals);
++        }
++        else if (front->window)
+         {
+             node_front_chunk_windowed(front, reader, tokens, classes, acting, identifiers, literals);
+             if (getenv("NODE_SOURCE_STRINGS") != NULL)
+@@ -1729,6 +1843,13 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
+                                                            const uint32_t* classes, uint32_t acting, const CheckInputIdentifiers* identifiers,
+                                                            const CheckInputLiterals* literals)
+ {
++    if (reader->pp->options.node_source_window)
++    {
++        // The next source window does not read the ordinary graph. Publish a pending batch only when the
++        // ordinary reader needs space or reaches the end, as it does without source admission.
++        front->pending = front->count;
++        return 0;
++    }
+     for (uint32_t k = 0; k < acting; k += 1)
+     {
+         front->shadow->acting[(classes[k] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT] += 1;
+@@ -1808,7 +1929,7 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
+     {
+-        front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
++        front->typer = node_machine_reader_begin(reader, front->shadow, !reader->pp->options.node_source_window && (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
+         // Whether the front writes the fact words' window (BUSTER_NODE_READER_WINDOW), where the kernel runs there.
+         node_facts_window_begin(front, reader);
+     }
+@@ -1875,6 +1996,7 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+                                             uint64_t* visited, uint32_t chunk_first)
+ {
+     const bool publish = getenv("NODE_SOURCE_COMPACT_DRY") == NULL;
++    const bool report = getenv("NODE_SOURCE_COMPACT_REPORT") != NULL;
+     uint32_t pos = 0, literal = 0, identifier = 0;
+     for (uint32_t root = front->made; root < front->count && !reader->output->resource; ++root)
+     {
+@@ -1920,6 +2042,25 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+             ++end;
+         }
+         if (!publish) continue;
++        CheckInput* output = reader->output;
++        if (reader->pp->options.node_source_window && output->source_root_bits == NULL)
++        {
++            const uint64_t words = ((uint64_t)output->token_count + 63) / 64;
++            output->source_root_bits = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, words);
++            if (output->source_root_bits == NULL) continue;
++            memset(output->source_root_bits, 0, words * sizeof(uint64_t));
++        }
++        if (reader->pp->options.node_source_window && output->source_compacted == output->source_physical_room)
++        {
++            const uint32_t old = output->source_physical_room;
++            const uint32_t room = old != 0 && old <= UINT32_MAX / 2 ? 2 * old : 32;
++            if (room <= old) continue;
++            NodeWindowNativeTape** entries = BUSTER_ARENA_PUSH_ARRAY(reader->arena, NodeWindowNativeTape*, room);
++            if (entries == NULL) continue;
++            if (old != 0) memcpy(entries, output->source_physical, (size_t)old * sizeof(*entries));
++            output->source_physical = entries;
++            output->source_physical_room = room;
++        }
+         while (pos < begin && !reader->output->resource)
+         {
+             check_input_expression_coded(reader, batch, tokens[pos], (uint8_t)classes[pos], true, identifiers, &identifier, literals, &literal, visited);
+@@ -1939,6 +2080,14 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+         }
+         else check_input_expression_value(reader, token, node);
+         tape->compact_node = node + 1;
++        if (reader->pp->options.node_source_window)
++        {
++            output->source_root_bits[tape->root_token >> 6] |= UINT64_C(1) << (tape->root_token & 63);
++            output->source_physical[output->source_compacted] = tape;
++            batch->members[node - batch->base] = output->source_compacted + 1;
++        }
++        reader->output->source_compacted += 1;
++        reader->output->source_removed += size - (whole ? 0u : 1u);
+         if (tape->access_count != 0)
+         {
+             tape->access_next = reader->output->source_access_tapes;
+@@ -1947,7 +2096,7 @@ static uint32_t check_source_compact_actions(CheckInputReader* reader, CheckInpu
+         identifier += ids;
+         literal += nums;
+         pos = end;
+-        if (getenv("NODE_SOURCE_COMPACT_REPORT"))
++        if (report)
+             fprintf(stderr,"compact-taken: token=%u operand=%u node=%u removed=%u rows=%u whole=%u\n",tape->root_token,token,node,size-1+(uint32_t)whole,tape->count,(unsigned)whole);
+     }
+     while (pos < acting && !reader->output->resource)
+@@ -2097,7 +2246,18 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     }
+     // The node machine's front in the shadow (PPOptions.node_front, #2524): over the whole unit's coded walk, its state on
+     // the scratch and its report, with a bit a node the graph has room for, in the output's arena.
+-    const uint8_t fronted = coded && begin == 0 && stop == count ? reader->pp->options.node_front : 0;
++    const PPOptions* options = &reader->pp->options;
++    bool source_allowed = !options->fatal_errors && !options->system_header_warnings && reader->parser->errors == 0 && input->musttail_count == 0;
++    if (options->node_source_window)
++    {
++        for (uint32_t i = 0; source_allowed && i < options->semantic_warning_option_count; ++i)
++        {
++            const char* option = options->semantic_warning_options[i];
++            source_allowed = strcmp(option,"-Wall") == 0 || strcmp(option,"-Wextra") == 0 ||
++                             strcmp(option,"-Wuninitialized") == 0 || strcmp(option,"-Wunused-but-set-parameter") == 0;
++        }
++    }
++    const uint8_t fronted = coded && begin == 0 && stop == count && (!options->node_source_window || source_allowed) ? options->node_front : 0;
+     NodeFront* front = fronted != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64) : NULL;
+     if (front != NULL && (fronted & BUSTER_NODE_FRONT_WARM) != 0)
+     {
+@@ -2107,7 +2267,8 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     }
+     if (front != NULL)
+     {
+-        const uint32_t words = reader->output->graph.capacity / 64 + 1;
++        // Source windows use chunk-relative records and never index a verifier column by graph node.
++        const uint32_t words = reader->pp->options.node_source_window ? 1 : reader->output->graph.capacity / 64 + 1;
+         NodeFrontShadow* shadow = arena_push_array(reader->arena, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
+         uint64_t* bits = arena_push_array(reader->arena, words, sizeof(uint64_t), _Alignof(uint64_t));
+         uint8_t* contexts = arena_push_array(reader->arena, (uint64_t)words * 64, sizeof(uint8_t), 1);
+@@ -2133,7 +2294,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+             front->ordinal = 0;
+             front->argument_count = 0;
+             front->wide_count = 0;
+-            reader->output->node_front = shadow;
++            if (!reader->pp->options.node_source_window) reader->output->node_front = shadow;
+             node_front_started(front, reader, fronted);
+         }
+         else
+@@ -2177,7 +2338,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         uint32_t literal = 0;
+         uint32_t i = 0;
+ #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+-        if (front != NULL && front->window && getenv("NODE_SOURCE_COMPACT") && getenv("NODE_SOURCE_ROWS") &&
++        if (front != NULL && front->window && front->count != 0 && (reader->pp->options.node_source_window || (getenv("NODE_SOURCE_COMPACT") && getenv("NODE_SOURCE_ROWS"))) &&
+             !timed && reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0)
+         {
+             i = check_source_compact_actions(reader, batch, front, tokens, classes, acting, &identifiers, &literals, &visited, first);
+@@ -2227,7 +2388,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         check_input_expression_flush(reader, batch);
+         acted += __rdtsc() - start;
+     }
+-    if (front != NULL)
++    if (front != NULL && !reader->pp->options.node_source_window)
+     {
+         node_front_finish(front, reader, base);
+     }
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 94f8038d1..3574632ad 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -946,6 +946,11 @@ struct CheckInput
+     NodeWindowNativeTape** source_native;
+     NodeWindowNativeTape* source_access_tapes;
+     uint32_t source_candidates;
++    NodeWindowNativeTape** source_physical;
++    uint64_t* source_root_bits;
++    uint32_t source_physical_room;
++    uint32_t source_compacted;
++    uint32_t source_removed;
+     uint32_t source_key_collisions;
+     CheckGraph graph;
+     CheckEnvironment environment;
+@@ -1340,9 +1345,22 @@ static __attribute__((unused)) bool check_source_window_compactable(const CheckI
+     return (uintptr_t)tape > 1 && tape->root_token == token && tape->compactable;
+ }
+ 
+-static __attribute__((unused)) const NodeWindowNativeTape* check_source_window_required(const CheckInput* input, uint32_t node)
++static __attribute__((noinline,unused)) const NodeWindowNativeTape* check_source_window_physical(const CheckInput* input, uint32_t node)
++{
++    const CheckGraph* graph = &input->graph;
++    const CheckOp op = graph->ops[node];
++    if (op != CHECK_OP_VALUE && op != CHECK_OP_CONVERT && op != CHECK_OP_CAST) return NULL;
++    const uint32_t leaf = op == CHECK_OP_VALUE ? node : graph->operand0[node];
++    if (leaf >= graph->count || graph->ops[leaf] != CHECK_OP_VALUE) return NULL;
++    const uint32_t index = graph->members[leaf];
++    if (index == 0 || index > input->source_compacted) return NULL;
++    const NodeWindowNativeTape* tape = input->source_physical[index - 1];
++    return tape->compact_node == leaf + 1 && tape->root_token == graph->tokens[node] &&
++           (tape->compact_whole ? node == leaf : op == tape->root_op) ? tape : NULL;
++}
++
++static __attribute__((noinline,unused)) const NodeWindowNativeTape* check_source_window_legacy(const CheckInput* input, uint32_t node)
+ {
+-    if (input->source_native == NULL || node >= input->graph.count) return NULL;
+     const uint32_t token = input->graph.tokens[node];
+     const NodeWindowNativeTape* tape = token < input->token_count ? input->source_native[token] : NULL;
+     if ((uintptr_t)tape <= 1 || tape->root_token != token || tape->compact_node == 0) return NULL;
+@@ -1351,6 +1369,20 @@ static __attribute__((unused)) const NodeWindowNativeTape* check_source_window_r
+     return tape->root_op == input->graph.ops[node] && input->graph.operand0[node] == tape->compact_node - 1 ? tape : NULL;
+ }
+ 
++// A bit in source-token space cheaply rules out ordinary nodes. Only a committed row can reach the
++// reciprocal graph/leaf check, which distinguishes multiple records owned by the same parser token.
++static inline __attribute__((always_inline,unused)) const NodeWindowNativeTape* check_source_window_required(const CheckInput* input, uint32_t node)
++{
++    if (input->source_root_bits != NULL && node < input->graph.count)
++    {
++        const uint32_t token = input->graph.tokens[node];
++        if (token < input->token_count && ((input->source_root_bits[token >> 6] >> (token & 63)) & 1u) != 0)
++            return check_source_window_physical(input, node);
++        return NULL;
++    }
++    return input->source_native != NULL && node < input->graph.count ? check_source_window_legacy(input, node) : NULL;
++}
++
+ static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)
+ {
+     return token < input->token_count && check_sparse_present(input->target_candidates) ? check_sparse_get(input->target_candidates, token) : BUSTER_CHECK_NONE;
+diff --git a/src/buster/compiler/c_check_node_census.c b/src/buster/compiler/c_check_node_census.c
+index 0e40786b4..9746b4453 100644
+--- a/src/buster/compiler/c_check_node_census.c
++++ b/src/buster/compiler/c_check_node_census.c
+@@ -3343,6 +3343,8 @@ struct NodeCensusReader
+     uint8_t* probe_tracked_body;
+     uint64_t* probe_events;
+     bool probe_terminal_unit;
++    uint32_t source_segment_count;
++    bool source_segment_types;
+     // By root node (`node_capacity` of them), the span of tokens the census's code gave the expression at reader time:
+     // the tests on the window have the same.
+     uint32_t* span_lows;
+@@ -3487,7 +3489,8 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
+         {
+             terminal_name[i] = intern_find(reader->pp->table, (const uint8_t*)terminal_spelling[i], (uint32_t)strlen(terminal_spelling[i]));
+         }
+-        for (uint32_t t = 0; t < tokens && !tests->probe_terminal_unit; ++t)
++        const bool might_terminate = (terminal_name[0] | terminal_name[1] | terminal_name[2]) != 0;
++        for (uint32_t t = 0; might_terminate && t < tokens && !tests->probe_terminal_unit; ++t)
+         {
+             if (reader->parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER)
+             {
+@@ -3504,7 +3507,7 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
+         tests->program.parser = reader->parser;
+         tests->program.types = reader->types;
+         tests->program.object_symbols = (SymbolId*)machine->object_symbols;
+-        tests->program.object_count = machine->object_count;
++        tests->program.object_count = machine->source_static_objects == NULL ? machine->object_count : 0;
+         s->program = &tests->program;
+         s->pp = reader->pp;
+         s->records = machine;
+@@ -3957,7 +3960,7 @@ static inline __attribute__((always_inline)) void node_tests_window_bytes_by(Nod
+                     const uint32_t number = front->window_entries[r];
+                     const NodeFactsRecord* record = (const NodeFactsRecord*)(const void*)(records + 64 * (uint64_t)r);
+                     const bool calls = (node_tests_window_row(&state->facts, record->type)->function & BUSTER_NODE_FACTS_FUNCTION) != 0;
+-                    const bool symbol = contexts && record->object != 0 && record->object < machine->object_count && machine->object_symbols[record->object] != 0;
++                    const bool symbol = contexts && record->object != 0 && node_machine_symbolled(machine, record->object);
+                     lines_made += tests->line_bytes[number] == 0;
+                     tests->line_bytes[number] = (uint8_t)(BUSTER_NODE_TESTS_LINE_KNOWN | (symbol ? BUSTER_NODE_TESTS_LINE_SYMBOL : 0) |
+                                                           node_tests_window_line(s, front->tokens[r], calls) | (rows ? node_tests_window_returns(s, front->tokens[r]) : 0));
+@@ -5914,9 +5917,9 @@ static bool node_probe_compact_warning_ok(const NodeFront* front, uint32_t root,
+     }
+     // A guarded statement need not receive a native expression request. Preserve its complete
+     // graph until the reader has a source reachability certificate for every enclosing control.
+-    const bool pruned = locals && getenv("NODE_SOURCE_PRUNED_GUARDS") != NULL;
+-    const bool straight = locals && getenv("NODE_SOURCE_STRAIGHT_GUARDS") != NULL;
+-    const bool external = locals && getenv("NODE_SOURCE_EXTERNAL_BODY") != NULL;
++    const bool pruned = locals && !reader->pp->options.node_source_window && getenv("NODE_SOURCE_PRUNED_GUARDS") != NULL;
++    const bool straight = locals && !reader->pp->options.node_source_window && getenv("NODE_SOURCE_STRAIGHT_GUARDS") != NULL;
++    const bool external = locals && !reader->pp->options.node_source_window && getenv("NODE_SOURCE_EXTERNAL_BODY") != NULL;
+     if (ok && (pruned || straight || external))
+     {
+         const Parser* parser = reader->parser;
+@@ -6070,6 +6073,11 @@ static void node_probe_warning_select(NodeFront* front)
+         state->facts.records = state->proof_records;
+         state->place_taken = (uint8_t*)state->proof_made;
+         tests->line_bytes = tests->probe_lines;
++        if (reader->pp->options.node_source_window)
++        {
++            // Line numbers are local to each projected chunk.
++            memset(tests->probe_lines, 0, (size_t)count + 1);
++        }
+         uint64_t accounting[6] = { 0 };
+         uint32_t asks = 0;
+         node_tests_window_bytes_by(tests, state, front, accounting, true, false, false);
+@@ -6080,7 +6088,7 @@ static void node_probe_warning_select(NodeFront* front)
+         node_contexts_window_loop(state, front, count, &contexts);
+         node_contexts_window_targets(state, front, count);
+         const NodeCensusPolicy* policy = &tests->scratch.policy;
+-        const bool admit_listed = getenv("NODE_PROBE_SELECT_ALL") != NULL;
++        const bool admit_listed = (!reader->pp->options.node_source_window && getenv("NODE_PROBE_SELECT_ALL") != NULL);
+         for (uint32_t root = front->made; root < count; root += 1)
+         {
+             const uint32_t distance = front->window_left[root];
+@@ -6154,11 +6162,11 @@ static void node_probe_warning_select(NodeFront* front)
+                                     BUSTER_NODE_TESTS_SET_BIT_FIELD | BUSTER_NODE_TESTS_SET_DECLARATION;
+             const bool address = (set & (BUSTER_NODE_TESTS_SET_ADDRESS | BUSTER_NODE_TESTS_SET_ARRAY)) != 0;
+             const uint64_t marks = node_census_reader_marks(tests, token, low, high);
+-            const bool warned = (marks & (UINT64_C(1) << NODE_CENSUS_EVENT)) != 0 && getenv("NODE_PROBE_OMIT_EVENTS") == NULL;
++            const bool warned = (marks & (UINT64_C(1) << NODE_CENSUS_EVENT)) != 0 && (reader->pp->options.node_source_window || getenv("NODE_PROBE_OMIT_EVENTS") == NULL);
+             const bool marked = warned || (marks & ~(UINT64_C(1) << NODE_CENSUS_EVENT)) != 0;
+             const bool track = tests->probe_terminal_unit || tests->probe_tracked_body[token];
+-            const bool owner = getenv("NODE_PROBE_OMIT_TRACK") != NULL || !track;
+-            const bool env = getenv("NODE_PROBE_OMIT_CONTEXT") != NULL || !contextual;
++            const bool owner = (!reader->pp->options.node_source_window && getenv("NODE_PROBE_OMIT_TRACK") != NULL) || !track;
++            const bool env = (!reader->pp->options.node_source_window && getenv("NODE_PROBE_OMIT_CONTEXT") != NULL) || !contextual;
+             const bool structure = env && owner && !missing && !node_census_reader_nested(tests, token) &&
+                                    !(returned && node_census_cleans(reader->output, token)) &&
+                                    !(policy->loops && node_census_for_clause(reader->parser, token));
+@@ -6169,26 +6177,27 @@ static void node_probe_warning_select(NodeFront* front)
+             const bool c_ok = !c_listed && !c_refused;
+             state->proof_select[root] = 1u | (structure ? 2u : 0u) | (quiet ? 4u : 0u) | (c_ok ? 8u : 0u) |
+                                         (structure && (admit_listed || (quiet && c_ok)) ? 16u : 0u);
+-            if (node_probe_compact_warning_ok(front, root, getenv("NODE_SOURCE_LOCAL_ACCESS") != NULL))
++            if (node_probe_compact_warning_ok(front, root, reader->pp->options.node_source_window || getenv("NODE_SOURCE_LOCAL_ACCESS") != NULL))
+             {
+                 state->proof_select[root] |= 32u;
+-                if (getenv("NODE_COMPACT_WARNING_TRACE") != NULL)
++                if ((!reader->pp->options.node_source_window && getenv("NODE_COMPACT_WARNING_TRACE") != NULL))
+                 {
+                     fprintf(stderr, "compact-warning token=%u op=%u operand=%u records=%u\n", token, op, front->ops[top], size + 1);
+                 }
+             }
+         }
+-        if (getenv("NODE_SOURCE_ROWS") != NULL)
++        if (reader->pp->options.node_source_window || getenv("NODE_SOURCE_ROWS") != NULL)
+         {
+             memset(state->proof_source_tapes, 0, sizeof(state->proof_source_tapes));
+             uint8_t included[BUSTER_NODE_FRONT_RECORDS + 64] = {0};
+             uint8_t senses[BUSTER_NODE_FRONT_RECORDS + 64] = {0};
+             uint16_t expressions[BUSTER_NODE_FRONT_RECORDS + 64] = {0};
+             uint8_t verdicts[BUSTER_NODE_FRONT_RECORDS + 64] = {0};
++            const uint8_t required = reader->pp->options.node_source_window ? 48u : 16u;
+             uint32_t selected = 0;
+             for (uint32_t r = front->made; r < count; ++r)
+             {
+-                if ((state->proof_select[r] & 16u) == 0) continue;
++                if ((state->proof_select[r] & required) != required) continue;
+                 const uint32_t top = r - front->window_left[r];
+                 const uint32_t size = front->sizes[top];
+                 memset(included + top + 1 - size, 1, size);
+@@ -6228,29 +6237,52 @@ static void node_probe_warning_select(NodeFront* front)
+             node_rows_window_values(state, front, count, written, &reads, lists, &numbered, &steps);
+             uint32_t kept = 0, entries = 0, calls_kept = 0;
+             const CheckInput* input = state->reader->output;
+-            const bool compact = getenv("NODE_SOURCE_COMPACT") != NULL || getenv("NODE_SOURCE_COMPACT_AUDIT") != NULL;
++            const bool compact = reader->pp->options.node_source_window || getenv("NODE_SOURCE_COMPACT") != NULL || getenv("NODE_SOURCE_COMPACT_AUDIT") != NULL;
+             const bool local_warnings = compact && (check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNINITIALIZED,false) ||
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE,false) ||
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_BUT_SET_PARAMETER,false) ||
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_PARAMETER,false) ||
+                 check_common_enabled(state->reader->pp,input,CHECK_WARNING_ID_UNUSED_VARIABLE,false));
+-            const bool segmented = compact && check_lower_segment_types(state->reader->types);
++            bool segmented;
++            if (reader->pp->options.node_source_window)
++            {
++                // Qualified type identities are immutable; ordinary reading can append more between chunks.
++                const TypeTable* table = reader->types;
++                for (uint32_t t = tests->source_segment_count; !tests->source_segment_types && t < table->types.count; ++t)
++                {
++                    tests->source_segment_types = table->types.kind[t] == BUSTER_TYPE_KIND_QUALIFIED &&
++                                                  check_lower_segment(table, (TypeId)t << BUSTER_TYPE_INDEX_SHIFT);
++                }
++                tests->source_segment_count = table->types.count;
++                segmented = tests->source_segment_types;
++            }
++            else segmented = compact && check_lower_segment_types(state->reader->types);
+ 
+             for (uint32_t r = front->made; r < count; ++r)
+             {
+-                if ((state->proof_select[r] & 16u) == 0) continue;
++                if ((state->proof_select[r] & required) != required) continue;
+                 const uint32_t top = r - front->window_left[r], size = front->sizes[top], first = top + 1 - size;
+                 if (node_contexts_window_any(state->window_c_masks, BUSTER_NODE_ROWS_MASK_LISTED, first, size)) continue;
+                 NodeWindowNativeTape* part = node_probe_keep_tape(state, front, first, top, r, true);
++                if (part == NULL) continue;
+                 if (compact)
+                 {
+-                    const bool local_plan = getenv("NODE_SOURCE_LOCAL_ACCESS") != NULL && (state->proof_select[r] & 32u) != 0;
++                    const bool local_plan = (reader->pp->options.node_source_window || getenv("NODE_SOURCE_LOCAL_ACCESS") != NULL) && (state->proof_select[r] & 32u) != 0;
+                     if (!local_plan || node_source_compact_local_plan(state,front,part,first,top))
+                         node_source_compact_references(state,front,part,first,top+1,local_warnings,segmented);
+-                    if (getenv("NODE_SOURCE_COMPACT_AUDIT") && part->compactable) fprintf(stderr,"compact-admit: token=%u refs=%u rows=%u\n",
++                    if (!reader->pp->options.node_source_window && getenv("NODE_SOURCE_COMPACT_AUDIT") && part->compactable) fprintf(stderr,"compact-admit: token=%u refs=%u rows=%u\n",
+                         part->root_token,part->reference_count,part->count);
+                 }
+                 state->proof_source_tapes[r] = part;
++                if (reader->pp->options.node_source_window)
++                {
++                    // A parser action can create several discard roots at one token. Only a unique complete
++                    // action may own a physical row. Every record of that action is made in the same chunk.
++                    if ((r != front->made && front->roots[r - 1] && front->tokens[r - 1] == part->root_token) ||
++                        (r + 1 < count && front->roots[r + 1] && front->tokens[r + 1] == part->root_token))
++                        state->proof_source_tapes[r] = NULL;
++                    continue;
++                }
+                 CheckInput* input = state->reader->output;
+                 if (input->source_native == NULL)
+                 {
+@@ -6274,7 +6306,7 @@ static void node_probe_warning_select(NodeFront* front)
+                 entries += part->count;
+                 calls_kept += part->calls;
+             }
+-            if (getenv("NODE_SOURCE_QUIET") == NULL) fprintf(stderr,"source-rows selected=%u written=%u entries=%u calls=%u\n",selected,kept,entries,calls_kept);
++            if (!reader->pp->options.node_source_window && getenv("NODE_SOURCE_QUIET") == NULL) fprintf(stderr,"source-rows selected=%u written=%u entries=%u calls=%u\n",selected,kept,entries,calls_kept);
+             state->c_updates_now = old_updates;
+             state->c_branches_now = old_branches;
+             state->window_x_senses = original_senses;
+@@ -8319,7 +8351,7 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
+             if (room && shadow->facts)
+             {
+                 room = node_facts_begin(&facts, &machine, nodes, shadow->facts_window, shadow->facts_packed, shadow->facts_mode != BUSTER_NODE_FACTS_WHOLE,
+-                                        shadow->facts_operators, 0, &scratch);
++                                        shadow->facts_operators, 0, false, &scratch);
+                 s.facts = room ? &facts : NULL;
+             }
+             if (room && shadow->facts_reads)
+diff --git a/src/buster/compiler/c_check_node_machine.c b/src/buster/compiler/c_check_node_machine.c
+index b2e0c9ee4..81ab1cc4d 100644
+--- a/src/buster/compiler/c_check_node_machine.c
++++ b/src/buster/compiler/c_check_node_machine.c
+@@ -459,6 +459,7 @@ struct NodeMachine
+     // static declaration has itself there, which stands for its symbol (X writes it where it writes a symbol, and a
+     // splice patches it), and the bits are the reader's input's.
+     const SymbolId* object_symbols;
++    uint64_t* source_static_objects;
+     const uint8_t* declaration_bits;
+     uint32_t object_count;
+     // At reader time (node_machine_begin_reader; `program` is null then, and T alone runs): what T asks of the program,
+@@ -543,57 +544,64 @@ static uint32_t node_machine_make_word(const TypeTable* types, uint32_t index, u
+ // The machine's columns for a unit whose types are `types` and whose graph is `graph`, from `arena`, with room for
+ // `type_room` types' words (the unit's count, or more at reader time): whether there was room. The machine's `program`,
+ // or its reader's fields, are the caller's to set first.
+-static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const CheckGraph* graph, uint32_t type_room, bool scalar, bool verify, Arena* arena)
++static bool node_machine_setup(NodeMachine* machine, TypeTable* types, const CheckGraph* graph, uint32_t type_room, bool scalar, bool verify, bool integer_window, Arena* arena)
+ {
+     const uint32_t most = BUSTER_NODE_MACHINE_MOST;
+     const uint32_t entries = BUSTER_NODE_MACHINE_TAPE_MOST;
+     machine->types = types;
+     machine->graph = graph;
+-    machine->type_count = types->types.count;
++    machine->type_count = types->types.count < type_room ? types->types.count : type_room;
+     machine->type_capacity = type_room;
+     machine->scalar = scalar;
+     machine->verify = verify;
+     machine->type_words = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)type_room + 64);
+     machine->type_complete_at = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)type_room + 64);
+     machine->pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)type_room + 64);
+-    machine->argument_memo = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineMemo, BUSTER_NODE_MACHINE_MEMO_ENTRIES);
+     uint8_t* classes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
+     uint8_t* facts = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)machine->type_count + 64);
+-    _Static_assert(sizeof(NodeMachineColumns) % 64 == 0 && sizeof(NodeMachineColumns) % 4096 == 25 * BUSTER_NODE_MACHINE_STAGGER % 4096,
+-                   "the record columns stagger by BUSTER_NODE_MACHINE_STAGGER each");
+-    machine->columns = arena_push_array(arena, 1, sizeof(NodeMachineColumns), 4096);
+-    // The others after the record columns' lines (25 arrays, two lines each).
+-    machine->wides = node_machine_column(arena, most, sizeof(CheckValue), 50);
+-    machine->kinds = node_machine_column(arena, entries, sizeof(uint8_t), 52);
+-    machine->classes = node_machine_column(arena, entries, sizeof(uint8_t), 54);
+-    machine->tape = node_machine_column(arena, entries, sizeof(uint64_t), 56);
+-    machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
+-    machine->calls_written = node_machine_column(arena, most, sizeof(uint32_t), 60);
+-    machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
+-    machine->label_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
+-    machine->label_met = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+-    machine->call_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+-    machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+-    machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
+-    machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
+-    machine->verified = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
+-    machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
+-    machine->consumers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
+-    machine->updates = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineUpdate, most / 2);
+     machine->const_pointers = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, (uint64_t)type_room + 64);
+-    machine->converted_third = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, most);
+-    const bool room = machine->converted_third != NULL && machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
++    if (!integer_window)
++    {
++        // The reference machine owns a node stack, per-call ABI data and an output tape. The ordinary
++        // integer source window reads only the canonical type words and the independently written chunk rows.
++        machine->argument_memo = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineMemo, BUSTER_NODE_MACHINE_MEMO_ENTRIES);
++        _Static_assert(sizeof(NodeMachineColumns) % 64 == 0 && sizeof(NodeMachineColumns) % 4096 == 25 * BUSTER_NODE_MACHINE_STAGGER % 4096,
++                       "the record columns stagger by BUSTER_NODE_MACHINE_STAGGER each");
++        machine->columns = arena_push_array(arena, 1, sizeof(NodeMachineColumns), 4096);
++        // The others after the record columns' lines (25 arrays, two lines each).
++        machine->wides = node_machine_column(arena, most, sizeof(CheckValue), 50);
++        machine->kinds = node_machine_column(arena, entries, sizeof(uint8_t), 52);
++        machine->classes = node_machine_column(arena, entries, sizeof(uint8_t), 54);
++        machine->tape = node_machine_column(arena, entries, sizeof(uint64_t), 56);
++        machine->label_entries = node_machine_column(arena, 2 * most, sizeof(uint32_t), 58);
++        machine->calls_written = node_machine_column(arena, most, sizeof(uint32_t), 60);
++        machine->call_records = node_machine_column(arena, most, sizeof(uint32_t), 62);
++        machine->label_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
++        machine->label_met = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
++        machine->call_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
++        machine->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
++        machine->argument_conversions = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, most);
++        machine->argument_values = BUSTER_ARENA_PUSH_ARRAY(arena, CheckValue, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
++        machine->verified = BUSTER_ARENA_PUSH_ARRAY(arena, CheckConversion, BUSTER_TIER0_MAX_CALL_ARGUMENTS);
++        machine->stack = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * most);
++        machine->consumers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, most);
++        machine->updates = BUSTER_ARENA_PUSH_ARRAY(arena, NodeMachineUpdate, most / 2);
++        machine->converted_third = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, most);
++    }
++    const bool reference_room = integer_window || (machine->converted_third != NULL && machine->type_words != NULL && machine->type_complete_at != NULL && classes != NULL && facts != NULL && machine->columns != NULL &&
+                       machine->wides != NULL && machine->kinds != NULL && machine->classes != NULL && machine->tape != NULL && machine->label_entries != NULL &&
+                       machine->calls_written != NULL && machine->call_records != NULL && machine->arguments != NULL && machine->argument_conversions != NULL &&
+                       machine->argument_values != NULL && machine->verified != NULL && machine->stack != NULL && machine->consumers != NULL &&
+                       machine->updates != NULL && machine->pointers != NULL && machine->const_pointers != NULL &&
+-                      machine->argument_memo != NULL && machine->label_ends != NULL && machine->label_met != NULL && machine->call_ends != NULL;
++                      machine->argument_memo != NULL && machine->label_ends != NULL && machine->label_met != NULL && machine->call_ends != NULL);
++    const bool room = reference_room && machine->type_words != NULL && machine->type_complete_at != NULL &&
++                      machine->pointers != NULL && machine->const_pointers != NULL && classes != NULL && facts != NULL;
+     if (room)
+     {
+         // The pointers' columns start empty, past the unit's types too (node_machine_forget's are the unit's).
+         memset(machine->pointers, 0, ((uint64_t)type_room + 64) * sizeof(TypeId));
+         memset(machine->const_pointers, 0, ((uint64_t)type_room + 64) * sizeof(TypeId));
+-        memset(machine->argument_memo, 0, BUSTER_NODE_MACHINE_MEMO_ENTRIES * sizeof(NodeMachineMemo));
++        if (!integer_window) memset(machine->argument_memo, 0, BUSTER_NODE_MACHINE_MEMO_ENTRIES * sizeof(NodeMachineMemo));
+         check_lower_classify_types(types, machine->type_count, classes, facts);
+         for (uint32_t index = 0; index < machine->type_count; index += 1)
+         {
+@@ -645,7 +653,7 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
+         .declaration_bits = program->input->declaration_bits,
+         .object_count = program->object_count,
+     };
+-    const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, arena);
++    const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, false, arena);
+     machine->overloads = node_machine_overloads(program->input, &program->input->graph);
+     machine->renames = node_machine_renames(program->input);
+     if (room)
+@@ -1013,9 +1021,20 @@ static inline void node_machine_record_set_update(NodeMachine* machine, uint32_t
+ // Whether `object` is a local of the function: an object without a symbol (a parameter's, an automatic object's), which
+ // the function's local numbers; one with a symbol is a global's (NodeMachine.object_symbols: at reader time, one with a
+ // static declaration).
++static inline SymbolId node_machine_storage_symbol(const NodeMachine* machine, uint32_t object)
++{
++    if (object >= machine->object_count) return 0;
++    if (machine->source_static_objects != NULL)
++    {
++        const uint64_t word = machine->source_static_objects[object >> 6];
++        return ((word >> (object & 63)) & 1u) != 0 ? object : 0;
++    }
++    return machine->object_symbols[object];
++}
++
+ static bool node_machine_local(const NodeMachine* machine, uint32_t object)
+ {
+-    return object != 0 && object < machine->object_count && machine->object_symbols[object] == 0;
++    return object != 0 && object < machine->object_count && node_machine_storage_symbol(machine, object) == 0;
+ }
+ 
+ // Whether an object's address is a template's (check_lower_template_address_takes): none's, a local's or a global's.
+@@ -1042,7 +1061,7 @@ static TypeId node_machine_callee_function(const NodeMachine* machine, uint32_t
+ // comes from.
+ static inline bool node_machine_symbolled(const NodeMachine* machine, uint32_t object)
+ {
+-    return object < machine->object_count && machine->object_symbols[object] != 0;
++    return node_machine_storage_symbol(machine, object) != 0;
+ }
+ 
+ // What T's callee refusal asks of a directly called object (node_machine_callee_refused): its declaration's name, and
+@@ -1051,7 +1070,7 @@ static inline IdentId node_machine_object_name(const NodeMachine* machine, uint3
+ {
+     const CheckProgram* program = machine->program;
+     const uint32_t declaration = program != NULL ? (program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE) :
+-                                                   machine->reader_declarations[object];
++                                                   object < machine->reader_objects ? machine->reader_declarations[object] : BUSTER_CHECK_NONE;
+     const Parser* parser = program != NULL ? program->parser : machine->parser;
+     const uint32_t token_count = program != NULL ? program->input->token_count : machine->input->token_count;
+     return parser != NULL && declaration < token_count ? parser->tokens.names[declaration] : 0;
+@@ -1089,7 +1108,7 @@ static uint32_t node_machine_direct_callee(const NodeMachine* machine, uint32_t
+ static SymbolId node_machine_call_target(const NodeMachine* machine, uint32_t r)
+ {
+     const uint32_t object = node_machine_direct_callee(machine, node_machine_record_left(machine, r));
+-    return object != 0 ? machine->object_symbols[object] : 0;
++    return object != 0 ? node_machine_storage_symbol(machine, object) : 0;
+ }
+ 
+ static bool node_machine_call_variadic(const NodeMachine* machine, uint32_t r)
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 290895150..bb8286349 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -825,7 +825,7 @@ static void node_facts_row(const NodeMachine* machine, uint32_t index, NodeFacts
+ // lookups with `lean`, its literals' leaves and other operators made with `operators`: whether there was room. With
+ // `literal_lines`, the literals' lines are that many of their own, the lines' first numbers (reader time's, a batch's).
+ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t capacity, uint32_t cut, bool packed, bool lean, bool operators, uint32_t literal_lines,
+-                             Arena* arena)
++                             bool direct_names, Arena* arena)
+ {
+     const CheckInput* input = machine->program != NULL ? machine->program->input : machine->input;
+     const Parser* parser = machine->program != NULL ? machine->program->parser : machine->parser;
+@@ -846,7 +846,7 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
+         .row_capacity = row_capacity,
+         // A declaration's lines, and with the operators' kernel a line a literal's leaf.
+         .line_count = literal_lines,
+-        .line_capacity = input->token_count / 2 + 64 + (operators ? capacity : 0) + literal_lines,
++        .line_capacity = direct_names ? BUSTER_NODE_FRONT_RECORDS + 65 : input->token_count / 2 + 64 + (operators ? capacity : 0) + literal_lines,
+         .literal_capacity = literal_lines,
+         .member_bits = member_bits,
+         .record_capacity = capacity,
+@@ -864,7 +864,7 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
+     facts->argued = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)row_capacity + 1);
+     facts->argument_slots = arena_push_array(arena, UINT64_C(1) << BUSTER_NODE_FACTS_ARGUMENT_BITS, sizeof(NodeFactsArgumentSlot), 64);
+     facts->lines = arena_push_array(arena, 4 * (uint64_t)facts->line_capacity, sizeof(uint64_t), 64);
+-    facts->numbers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)input->token_count + 1);
++    facts->numbers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, direct_names ? 1 : (uint64_t)input->token_count + 1);
+     facts->members = arena_push_array(arena, UINT64_C(1) << member_bits, sizeof(NodeFactsMember), 64);
+     facts->ops = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
+     facts->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
+@@ -905,7 +905,7 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
+                   facts->targets != NULL && facts->argued != NULL && facts->argument_slots != NULL && facts->expected_arguments != NULL;
+     if (facts->room)
+     {
+-        memset(facts->numbers, 0, ((uint64_t)input->token_count + 1) * sizeof(uint32_t));
++        memset(facts->numbers, 0, (direct_names ? 1 : (uint64_t)input->token_count + 1) * sizeof(uint32_t));
+         memset(facts->members, 0, (UINT64_C(1) << member_bits) * sizeof(NodeFactsMember));
+         memset(facts->rows + facts->row_count, 0, sizeof(NodeFactsRow));
+         memset(facts->sides, 0, ((uint64_t)row_capacity + 1) * sizeof(NodeFactsSide));
+@@ -992,7 +992,7 @@ static __attribute__((noinline, cold)) const NodeFactsMember* node_facts_member_
+ 
+ // The line of declaration `declaration` as the reader had it at the use `use`, its number (from 1), or 0 where the lines
+ // are full: the declaration's last line where that is still its line, and else a new one.
+-static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, uint32_t use)
++static uint32_t node_facts_declaration_at(NodeFacts* facts, uint32_t declaration, uint32_t use, uint32_t destination)
+ {
+     const NodeMachine* machine = facts->machine;
+     const CheckInput* input = facts->input;
+@@ -1049,6 +1049,11 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
+     };
+     uint64_t line[4];
+     memcpy(line, &made, sizeof(line));
++    if (destination != 0)
++    {
++        memcpy(facts->lines + 4 * (uint64_t)destination, line, sizeof(line));
++        return destination;
++    }
+     uint32_t number = facts->numbers[declaration] & ~BUSTER_NODE_FACTS_LINE_UNSETTLED;
+     const bool same = number != 0 && memcmp(facts->lines + 4 * (uint64_t)number, line, sizeof(line)) == 0;
+     if (!same)
+@@ -1066,6 +1071,11 @@ static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, u
+     return number;
+ }
+ 
++static uint32_t node_facts_declaration(NodeFacts* facts, uint32_t declaration, uint32_t use)
++{
++    return node_facts_declaration_at(facts, declaration, use, 0);
++}
++
+ // An array's or a function's row's pointer types, from the machine's own memo (node_machine_pointer), which T fills as it
+ // converts one: type_pointer's answers, which a row holds for its type unqualified and const.
+ static void node_facts_decays(NodeFacts* facts, TypeId type)
+@@ -5125,7 +5135,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
+             state->x_tables = NULL;
+         }
+     }
+-    room = room && node_facts_begin(&state->facts, machine, BUSTER_NODE_FACTS_READER_RECORDS, 0, true, false, true, BUSTER_NODE_FACTS_READER_LINES, arena);
++    room = room && node_facts_begin(&state->facts, machine, BUSTER_NODE_FACTS_READER_RECORDS, 0, true, false, true, BUSTER_NODE_FACTS_READER_LINES, reader->pp->options.node_source_window, arena);
+     if (room)
+     {
+         state->facts.enum_values = reader->enum_values;
+@@ -5156,22 +5166,23 @@ static NodeWindowNativeTape* node_window_compact_candidate(NodeFront* front, uin
+     struct NodeFactsReader* state = front->typer->facts;
+     CheckInput* input = state->reader->output;
+     const uint32_t token = front->tokens[root];
+-    if (input->source_native == NULL || !state->proof_made[root] || !state->proof_made[top] ||
+-        (state->proof_select[root] & 48u) != 48u || !check_source_window_compactable(input, token))
++    NodeWindowNativeTape* tape = state->proof_source_tapes[root];
++    if (tape == NULL || !tape->compactable || !state->proof_made[root] || !state->proof_made[top] ||
++        (state->proof_select[root] & 48u) != 48u ||
++        (!state->reader->pp->options.node_source_window && !check_source_window_compactable(input, token)))
+     {
+         return NULL;
+     }
+-    NodeWindowNativeTape* tape = input->source_native[token];
+-    if (tape != state->proof_source_tapes[root] || tape->root_op != front->ops[root] || tape->compact_node != 0) return NULL;
++    if (tape->root_token != token || tape->root_op != front->ops[root] || tape->compact_node != 0) return NULL;
+     const NodeFactsRecord* converted = state->proof_records + root;
+     const NodeFactsRecord* operand = state->proof_records + top;
+     const bool constant = tape->entries[0].kind == BUSTER_TYPED_CONST && tape->reference_count == 0 &&
+                           (converted->standing & 31u) == BUSTER_NODE_MACHINE_STANDING(CHECK_RVALUE, CHECK_CONSTANT_INTEGER) && converted->object == 0;
+-    const bool read = getenv("NODE_SOURCE_COMPACT_READS") != NULL && tape->entries[0].kind == BUSTER_TYPED_LOCAL &&
++    const bool read = (state->reader->pp->options.node_source_window || getenv("NODE_SOURCE_COMPACT_READS") != NULL) && tape->entries[0].kind == BUSTER_TYPED_LOCAL &&
+                       tape->entries[0].class == BUSTER_TYPED_CLASS_I32 && tape->access_count == 1 && !tape->accesses[0].store &&
+                       front->ops[top] == CHECK_OP_VALUE && operand->type == BUSTER_TYPE_INT && converted->type == BUSTER_TYPE_INT &&
+                       tape->entries[0].value == operand->object && tape->accesses[0].object == operand->object;
+-    *whole = getenv("NODE_SOURCE_COMPACT_FULL") != NULL && tape->root_op == CHECK_OP_CONVERT && tape->calls == 0 &&
++    *whole = (state->reader->pp->options.node_source_window || getenv("NODE_SOURCE_COMPACT_FULL") != NULL) && tape->root_op == CHECK_OP_CONVERT && tape->calls == 0 &&
+              tape->count == 1 && (converted->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && (constant || read);
+     const NodeFactsRecord* record = *whole ? converted : state->proof_records + top;
+     const uint8_t field = record->standing & BUSTER_NODE_MACHINE_FIELD;
+@@ -5233,7 +5244,7 @@ static void node_source_registered_pointers(struct NodeFactsReader* state)
+ static void node_window_probe(NodeFront* front)
+ {
+     struct NodeFactsReader* state = front->typer->facts;
+-    if (getenv("NODE_SOURCE_REFRESH_POINTERS") != NULL) { node_source_registered_pointers(state); }
++    if ((!state->reader->pp->options.node_source_window && getenv("NODE_SOURCE_REFRESH_POINTERS") != NULL)) { node_source_registered_pointers(state); }
+     NodeFacts run = state->facts;
+     const CheckGraph environment = { .extensions = run.machine->graph->extensions };
+     NodeMachine machine = {
+@@ -5241,14 +5252,14 @@ static void node_window_probe(NodeFront* front)
+         .type_count = run.machine->type_count, .overloads = run.machine->overloads,
+     };
+     run.machine = &machine;
+-    const bool mutate_argument = getenv("NODE_PROOF_FAULT_ARGUMENT") != NULL;
+-    const bool trace_calls = getenv("NODE_PROOF_TRACE_CALL") != NULL;
++    const bool mutate_argument = (!state->reader->pp->options.node_source_window && getenv("NODE_PROOF_FAULT_ARGUMENT") != NULL);
++    const bool trace_calls = (!state->reader->pp->options.node_source_window && getenv("NODE_PROOF_TRACE_CALL") != NULL);
+     run.argument_slots = state->proof_arg_cache;
+     run.input = NULL;
+     run.nodes = NULL;
+-    const bool pointers = getenv("NODE_PROOF_POINTERS") != NULL;
+-    const bool no_floating = getenv("NODE_PROOF_NO_FP") != NULL;
+-    const bool calls = getenv("NODE_PROOF_CALLS") != NULL;
++    const bool pointers = (!state->reader->pp->options.node_source_window && getenv("NODE_PROOF_POINTERS") != NULL);
++    const bool no_floating = state->reader->pp->options.node_source_window || getenv("NODE_PROOF_NO_FP") != NULL;
++    const bool calls = (!state->reader->pp->options.node_source_window && getenv("NODE_PROOF_CALLS") != NULL);
+     const uint32_t count = front->count;
+     uint8_t kinds[BUSTER_NODE_FRONT_RECORDS + 64] = { 0 };
+     uint32_t bounds[2] = { 0, count };
+@@ -5353,6 +5364,7 @@ static void node_window_probe(NodeFront* front)
+         state->proof_made[x] = made;
+         state->proof_tokens[x] = front->tokens[x];
+         state->proof_ops[x] = front->ops[x];
++        if (state->reader->pp->options.node_source_window) continue;
+         if (!made)
+         {
+             const bool leaf = front->ops[x] == CHECK_OP_VALUE;
+@@ -5389,7 +5401,7 @@ static void node_window_probe(NodeFront* front)
+         }
+     }
+     node_probe_warning_select(front);
+-    if (getenv("NODE_SOURCE_QUIET") != NULL) return;
++    if (state->reader->pp->options.node_source_window || getenv("NODE_SOURCE_QUIET") != NULL) return;
+     for (uint32_t v = 0; v < 3; v += 1)
+     {
+         if (voids[v][0])
+@@ -5866,8 +5878,8 @@ static void node_facts_window_begin(NodeFront* front, CheckInputReader* reader)
+         memset(front->window_op_codes, BUSTER_NODE_FACTS_CODES, sizeof(front->window_op_codes));
+         memcpy(front->window_op_kinds, state->op_kinds, CHECK_OP_COUNT);
+         memcpy(front->window_op_codes, state->op_codes, CHECK_OP_COUNT);
+-        NodeFront* plain = arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64);
+-        NodeFrontShadow* shadow = arena_push_array(reader->scratch, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
++        NodeFront* plain = reader->pp->options.node_source_window ? NULL : arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64);
++        NodeFrontShadow* shadow = plain != NULL ? arena_push_array(reader->scratch, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow)) : NULL;
+         if (plain != NULL && shadow != NULL)
+         {
+             if ((reader->pp->options.node_front & BUSTER_NODE_FRONT_WARM) != 0)
+@@ -5977,7 +5989,13 @@ static inline __attribute__((always_inline)) void node_facts_window_leaf(NodeFro
+     if (category == BUSTER_NODE_FRONT_LEAF_IDENTIFIER)
+     {
+         // Its declaration's line's number is asked for, not read: the names' pass reads it, once the chunk is made.
+-        __builtin_prefetch(front->window_numbers + declaration);
++        if (reader->pp->options.node_source_window)
++        {
++            // Each name and literal owns one line in this projected chunk. No per-token declaration map
++            // survives between chunks, and the usual declaration builder still resolves weak state at this use.
++            entry = node_facts_declaration_at(front->window_facts, declaration, token, record + 1);
++        }
++        else __builtin_prefetch(front->window_numbers + declaration);
+     }
+     else
+     {
+@@ -6183,6 +6201,7 @@ static void node_facts_window_names(NodeFront* front)
+     NodeFrontShadow* shadow = front->shadow;
+     const uint32_t first = front->made;
+     const uint32_t count = front->count - first;
++    if (state->reader->pp->options.node_source_window) return;
+     memcpy(state->name_kinds, front->window_kinds + first, count);
+     memcpy(state->name_entries, front->window_entries + first, (uint64_t)count * sizeof(uint32_t));
+     const uint64_t lines = facts->line_count;
+diff --git a/src/buster/compiler/c_check_node_machine_reader.c b/src/buster/compiler/c_check_node_machine_reader.c
+index 9851e039e..d26b44f06 100644
+--- a/src/buster/compiler/c_check_node_machine_reader.c
++++ b/src/buster/compiler/c_check_node_machine_reader.c
+@@ -182,7 +182,7 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
+ // `identifiers` (check_lower_twice_names'). `symbols` (the caller's too) is what stands for the objects' symbols: each
+ // object with a static declaration has itself there, the others 0.
+ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* input, const Parser* parser, TypeTable* types, const CheckGraph* graph,
+-                                      const InternTable* identifiers, uint32_t* declarations, uint8_t* facts, uint32_t* symbols, bool verify, Arena* arena)
++                                      const InternTable* identifiers, uint32_t* declarations, uint8_t* facts, uint32_t* symbols, bool verify, bool integer_window, Arena* arena)
+ {
+     const uint32_t count = input->token_count;
+     *machine = (NodeMachine){
+@@ -193,43 +193,71 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
+         .object_count = count + 1,
+     };
+     const uint32_t late = types->types.capacity - types->types.count < BUSTER_NODE_MACHINE_LATE_TYPES ? types->types.capacity - types->types.count : BUSTER_NODE_MACHINE_LATE_TYPES;
+-    const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, verify, arena);
++    const uint32_t type_room = integer_window && types->types.count > BUSTER_NODE_MACHINE_KINDS ? BUSTER_NODE_MACHINE_KINDS : types->types.count + late;
++    const bool room = node_machine_setup(machine, types, graph, type_room, false, verify, integer_window, arena);
+     machine->overloads = node_machine_overloads(input, graph);
+     machine->renames = node_machine_renames(input);
+     machine->reader_declarations = declarations;
+     machine->reader_facts = facts;
+     if (room)
+     {
+-        machine->reader_objects = count + 1;
+-        memset(machine->reader_declarations, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+-        memset(machine->reader_facts, 0, (uint64_t)count + 1);
+-        memset(symbols, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
+-        for (uint32_t token = 0; token < count; token += 1)
++        const uint64_t stored = integer_window ? 1 : (uint64_t)count + 1;
++        machine->reader_objects = (uint32_t)stored;
++        memset(machine->reader_declarations, 0xff, stored * sizeof(uint32_t));
++        memset(machine->reader_facts, 0, stored);
++        memset(symbols, 0, stored * sizeof(uint32_t));
++        if (integer_window)
+         {
+-            const uint32_t object = input->declarations[token] == token ? input->objects[token] : 0;
+-            if (object != 0 && object <= count)
++            // The checked integer source grammar does not admit calls, labels or string objects. C and X
++            // need only the local/global distinction until actual object relocation in the normal backend.
++            const uint64_t words = ((uint64_t)count + 64) / 64;
++            machine->source_static_objects = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
++            if (machine->source_static_objects == NULL) return false;
++            memset(machine->source_static_objects, 0, words * sizeof(uint64_t));
++        }
++        const __m512i offsets = _mm512_setr_epi32(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15);
++        for (uint64_t group = 0; group < count; group += 16)
++        {
++            const uint32_t left = count - (uint32_t)group;
++            const __mmask16 lanes = left >= 16 ? UINT16_MAX : (__mmask16)((1u << left) - 1u);
++            const __m512i keys = _mm512_add_epi32(offsets, _mm512_set1_epi32((int32_t)group));
++            uint32_t declarations_here = _mm512_mask_cmpeq_epi32_mask(lanes, keys, _mm512_maskz_loadu_epi32(lanes, input->declarations + group));
++            while (declarations_here != 0)
+             {
+-                const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+-                machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_DECLARED;
+-                if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
++                const uint32_t token = (uint32_t)group + (uint32_t)__builtin_ctz(declarations_here);
++                declarations_here &= declarations_here - 1;
++                const uint32_t object = input->objects[token];
++                if (object != 0 && object <= count)
+                 {
+-                    machine->reader_declarations[object] = token;
+-                    symbols[object] = object;
+-                    const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
+-                    machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
+-                }
+-                // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
+-                // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
+-                // the declarations in their order (#3207). A label kept before stays the object's whatever this one's
+-                // fate, and a register variable, whose label the pass never asks, has one declaration.
+-                const bool kept = (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_DEFINED) == 0;
+-                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL && kept)
+-                {
+-                    machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_LABELLED;
++                    if (integer_window)
++                    {
++                        if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
++                            machine->source_static_objects[object >> 6] |= UINT64_C(1) << (object & 63);
++                        continue;
++                    }
++                    const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
++                    machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_DECLARED;
++                    if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
++                    {
++                        machine->reader_declarations[object] = token;
++                        symbols[object] = object;
++                        const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
++                        machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
++                    }
++                    // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
++                    // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
++                    // the declarations in their order (#3207). A label kept before stays the object's whatever this one's
++                    // fate, and a register variable, whose label the pass never asks, has one declaration.
++                    const bool kept = (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_DEFINED) == 0;
++                    if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL && kept)
++                    {
++                        machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_LABELLED;
++                    }
++                    machine->reader_facts[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_NODE_MACHINE_OBJECT_DEFINED : 0;
+                 }
+-                machine->reader_facts[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_NODE_MACHINE_OBJECT_DEFINED : 0;
+             }
+         }
++        if (integer_window) return true;
+         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+         {
+             const BuiltinIntrinsicName* entry = check_lower_twice_entries + k;
+@@ -348,7 +376,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
+     uint32_t* counts = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+     uint8_t* refusals = arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1);
+     uint8_t* library = arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1);
+-    const uint32_t objects = reader->output->token_count + 1;
++    const uint32_t objects = reader->pp->options.node_source_window ? 1 : reader->output->token_count + 1;
+     uint32_t* declarations = arena_push_array(reader->arena, objects, sizeof(uint32_t), _Alignof(uint32_t));
+     uint8_t* facts = arena_push_array(reader->arena, objects, sizeof(uint8_t), 1);
+     uint32_t* symbols = arena_push_array(reader->arena, objects, sizeof(uint32_t), _Alignof(uint32_t));
+@@ -393,7 +421,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
+         typer->tests = NULL;
+         typer->facts = NULL;
+         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
+-                                         symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
++                                         symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->pp->options.node_source_window, reader->scratch);
+     }
+     if (room)
+     {
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index b8f939dfd..b7cee3323 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -797,7 +797,7 @@ static __attribute__((noinline)) void node_rows_window_reads(struct NodeFactsRea
+         const uint32_t x = lines[i];
+         const NodeFactsRecord* record = records + x;
+         const uint32_t object = record->object;
+-        const bool local = machine->object_symbols[object < machine->object_count ? object : 0] == 0;
++        const bool local = !node_machine_symbolled(machine, object);
+         state->window_x_bits[x] = (uint8_t)((record->member_offset != 0 ? BUSTER_NODE_ROWS_BIT_FAR : 0u) | (local ? BUSTER_NODE_ROWS_BIT_LOCAL : 0u));
+         state->window_x_operands[x] = node_machine_class(machine, record->converted[0]);
+         // A member's offset in bytes, its row's CONST's value, in its record's value's place: the values' loop reads
+@@ -2238,7 +2238,11 @@ static NodeWindowNativeTape* node_probe_keep_tape(struct NodeFactsReader* state,
+     const uint32_t length = middle + (rooted ? node_rows_window_length(state, record) : 0);
+     const uint64_t bytes = sizeof(NodeWindowNativeTape) + (uint64_t)length * sizeof(NodeWindowNativeEntry);
+     NodeWindowNativeTape* part = arena_push_array(state->reader->arena, bytes, 1, _Alignof(NodeWindowNativeTape));
+-    if (part == NULL) abort();
++    if (part == NULL)
++    {
++        if (state->reader->pp->options.node_source_window) return NULL;
++        abort();
++    }
+     part->count = length;
+     part->compact_node = 0;
+     part->access_count = 0;
+@@ -2250,7 +2254,7 @@ static NodeWindowNativeTape* node_probe_keep_tape(struct NodeFactsReader* state,
+     part->root_token = front->tokens[record];
+     part->compact_whole = false;
+     part->root_op = front->ops[record];
+-    const bool mutate = getenv("NODE_PROOF_NATIVE_FAULT") != NULL;
++    const bool mutate = !state->reader->pp->options.node_source_window && getenv("NODE_PROOF_NATIVE_FAULT") != NULL;
+     for (uint32_t i = 0; i < length; ++i)
+     {
+         const uint32_t at = i < middle ? begin + i : last + i - middle;
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 4c830ae8f..25c846f5d 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -702,6 +702,7 @@ struct CheckLowerWriter
+ {
+     const CheckProgram* program;
+     NodeWindowNativeTape* const* source_native;
++    bool source_physical;
+     uint8_t source_native_probes;
+     CheckProgramLowered* output;
+     CheckLowerAbi* abi;
+@@ -16566,14 +16567,13 @@ static void check_lower_source_entry(CheckLowerWriter* writer, const NodeWindowN
+     }
+ }
+ 
+-static bool check_lower_source_splice(CheckLowerWriter* writer, uint32_t node, uint32_t flags)
++static bool check_lower_source_splice(CheckLowerWriter* writer, uint32_t node, uint32_t flags, const NodeWindowNativeTape* tape)
+ {
+     const CheckProgram* program = writer->program;
+     const CheckInput* input = program->input;
+     if ((flags & ~4u) != 0 || writer->owners != NULL || writer->track || writer->segments) return false;
+     const uint32_t token = input->graph.tokens[node];
+-    const NodeWindowNativeTape* tape = token < input->token_count ? writer->source_native[token] : NULL;
+-    if ((uintptr_t)tape <= 1 || tape->root_token != token ||
++    if (tape->root_token != token ||
+         (tape->root_op != input->graph.ops[node] && (!tape->compact_whole || check_source_window_required(input,node) != tape)) || tape->calls != 0 || tape->count == 0 || tape->count > 32) return false;
+     if (tape->compact_node == 0 && (writer->source_native_probes & 32u) == 0) return false;
+     const bool returned = tape->root_op == CHECK_OP_CONVERT && flags == 0;
+@@ -16654,9 +16654,25 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
+         // each copy it left them out of line, and a compile without -g took 2% more cycles (#426).
+         if (__builtin_expect(kind <= CHECK_LOWER_INSTRUCTION, 1))
+         {
+-            const NodeWindowNativeTape* required = kind == CHECK_LOWER_EXPRESSION && writer->source_native != NULL ?
+-                                                   check_source_window_required(writer->program->input,node) : NULL;
+-            if (kind == CHECK_LOWER_EXPRESSION && writer->source_native != NULL && check_lower_source_splice(writer, node, flags))
++            const NodeWindowNativeTape* tape = NULL;
++            const NodeWindowNativeTape* required = NULL;
++            if (kind == CHECK_LOWER_EXPRESSION && writer->source_physical)
++            {
++                required = check_source_window_required(writer->program->input, node);
++                tape = required;
++            }
++            else if (kind == CHECK_LOWER_EXPRESSION && writer->source_native != NULL)
++            {
++                const CheckInput* input = writer->program->input;
++                const uint32_t token = input->graph.tokens[node];
++                const NodeWindowNativeTape* candidate = token < input->token_count ? writer->source_native[token] : NULL;
++                if ((uintptr_t)candidate > 1 && candidate->root_token == token)
++                {
++                    required = check_source_window_required(input, node);
++                    tape = required != NULL || (candidate->compact_node == 0 && (writer->source_native_probes & 32u) != 0) ? candidate : NULL;
++                }
++            }
++            if (tape != NULL && check_lower_source_splice(writer, node, flags, tape))
+             {
+                 if (required != NULL && (writer->source_native_probes & 1u) != 0) fprintf(stderr,"compact-consumed: token=%u node=%u\n",required->root_token,node);
+             }
+@@ -19164,6 +19180,7 @@ typedef struct CheckLowerShared CheckLowerShared;
+ struct CheckLowerShared
+ {
+     const CheckProgram* program;
++    uint8_t source_native_probes;
+     CheckProgramLowered* lowered;
+     CheckLowerSwitchTrees switch_trees;
+     // Every type's classification, made before the bodies: a body's struct or union result decides its returns
+@@ -19694,6 +19711,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+ 
+     *lowered = (CheckProgramLowered){ .token = BUSTER_CHECK_NONE };
+     *shared = (CheckLowerShared){ .program = program, .lowered = lowered, .scalar = BUSTER_SCALAR_PATH(scalar), .deferred = deferred };
++    if (program->input != NULL && (program->input->source_native != NULL || program->input->source_physical != NULL))
++    {
++        shared->source_native_probes = (getenv("NODE_SPLICE_REPORT") != NULL ? 1u : 0u) |
++            (getenv("NODE_SPLICE_SOURCE_FAULT") != NULL ? 2u : 0u) | (getenv("NODE_SPLICE_VALUE_FAULT") != NULL ? 4u : 0u) |
++            (getenv("NODE_SPLICE_OMIT_ADDRESS") != NULL ? 8u : 0u) | (getenv("NODE_SPLICE_UNCHECKED_LOCAL") != NULL ? 16u : 0u) |
++            (getenv("NODE_SPLICE_ENABLE") != NULL ? 32u : 0u);
++    }
+     const CheckInput* input = program->input;
+     const TypeTable* types = program->types;
+     const uint32_t count = input != 0 ? input->token_count : 0;
+@@ -20147,10 +20171,8 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
+         .scalar = BUSTER_SCALAR_PATH(shared->scalar),
+         .sources = sources,
+         .source_native = program->input != NULL ? program->input->source_native : NULL,
+-        .source_native_probes = program->input == NULL || program->input->source_native == NULL ? 0u :
+-            (getenv("NODE_SPLICE_REPORT") != NULL ? 1u : 0u) | (getenv("NODE_SPLICE_SOURCE_FAULT") != NULL ? 2u : 0u) |
+-            (getenv("NODE_SPLICE_VALUE_FAULT") != NULL ? 4u : 0u) | (getenv("NODE_SPLICE_OMIT_ADDRESS") != NULL ? 8u : 0u) |
+-            (getenv("NODE_SPLICE_UNCHECKED_LOCAL") != NULL ? 16u : 0u) | (getenv("NODE_SPLICE_ENABLE") != NULL ? 32u : 0u),
++        .source_physical = program->input != NULL && program->input->source_physical != NULL,
++        .source_native_probes = shared->source_native_probes,
+         .x87_constant_capacity = shared->x87_constant_capacity,
+         .atomic_room = shared->atomic_capacity + 1,
+         .label_symbol_capacity = shared->label_symbol_capacity,
+diff --git a/src/buster/compiler/c_check_symbol_pragma_driver_test.c b/src/buster/compiler/c_check_symbol_pragma_driver_test.c
+index f4d7a3d8b..f46f207b2 100644
+--- a/src/buster/compiler/c_check_symbol_pragma_driver_test.c
++++ b/src/buster/compiler/c_check_symbol_pragma_driver_test.c
+@@ -266,27 +266,28 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
+         "long a(int);\nint t(double d) { return d; }\n#pragma weak a = t\nint use(void) { return a(1); }\n",
+     };
+     char path[512];
+-    char objects[3][512];
+-    char programs[3][512];
+-    char captured[3][256] = { { 0 } };
++    static const char* const modes[] = { "clang", "vector", "scalar", "debug" };
++    char objects[BUSTER_ARRAY_LENGTH(modes)][512];
++    char programs[BUSTER_ARRAY_LENGTH(modes)][512];
++    char captured[BUSTER_ARRAY_LENGTH(modes)][256] = { { 0 } };
+     snprintf(path, sizeof(path), "%s/weak-aliases.c", directory);
+     const bool written = parse_test_write(path, source, sizeof(source) - 1);
+     check_test_expect(test, written, "the weak alias pragmas' fixture is written");
+-    for (uint32_t p = 0; written && p < 3; p += 1)
++    for (uint32_t p = 0; written && p < BUSTER_ARRAY_LENGTH(modes); p += 1)
+     {
+         snprintf(objects[p], sizeof(objects[p]), "%s/weak-aliases-%u.o", directory, p);
+         snprintf(programs[p], sizeof(programs[p]), "%s/weak-aliases-%u", directory, p);
+         char* text = NULL;
+-        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : NULL, NULL };
++        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : p == 3 ? "-g" : NULL, NULL };
+         const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+         free(text);
+-        check_test_expect(test, compiled, "weak alias pragmas compile through clang and both checker paths");
++        check_test_expect(test, compiled, "weak alias pragmas compile through clang and the checker");
+         for (uint32_t n = 0; compiled && p != 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
+         {
+             uint16_t ours = UINT16_MAX;
+             uint16_t theirs = UINT16_MAX - 1;
+             char description[160];
+-            snprintf(description, sizeof(description), "a weak alias pragma leaves %s's binding clang's, by the %s path", names[n], p == 1 ? "vector" : "scalar");
++            snprintf(description, sizeof(description), "a weak alias pragma leaves %s's binding clang's, by the %s path", names[n], modes[p]);
+             check_test_expect(test, check_test_visibility_symbol(objects[p], names[n], &ours) && check_test_visibility_symbol(objects[0], names[n], &theirs) &&
+                                    ours == theirs, description);
+         }
+@@ -296,9 +297,9 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
+         check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "weak alias pragmas' objects link and run");
+     }
+     check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "weak alias pragmas' scalar and vector objects match byte for byte");
+-    check_test_expect(test, captured[0][0] != 0 && strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0,
++    check_test_expect(test, captured[0][0] != 0 && strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0 && strcmp(captured[3], captured[0]) == 0,
+                       "weak alias pragmas' programs run as clang's");
+-    for (uint32_t p = 0; p < 3; p += 1)
++    for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(modes); p += 1)
+     {
+         unlink(objects[p]);
+         unlink(programs[p]);
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index a8a2339b0..c547e8ebd 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -10077,8 +10077,7 @@ static void check_driver_object_code(CheckDriverCode* state, const CheckProgram*
+                                             NULL, kept != NULL && !foreign, debug ? &state->rows : NULL, unwind, verify, lanes, stage_clock);
+ }
+ 
+-// The emission's arenas and lanes given back, for code that check_driver_object_finish won't take (#2536's step 2.2c.4,
+-// part 2).
++// Release a finished or abandoned object's arenas and lanes. A units' lane keeps its writer's columns for the next unit.
+ static void check_driver_object_release(CheckDriverCode* state, CheckProgramLanes* lanes, Arena* scratch)
+ {
+     arena_pop_to(scratch, state->mark);
+@@ -10101,9 +10100,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+                                        bool scalar, bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
+                                        CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
+ {
+-    Arena output = state->output;
+-    Arena bytes = state->bytes;
+-    const uint64_t mark = state->mark;
++    // The link adds pragma alias names through &state->output. DWARF and section descriptors must advance the same arena.
+     CheckProgramCode code = state->code;
+     CheckProgramRows rows = state->rows;
+     bool valid = state->valid;
+@@ -10117,7 +10114,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+     if (valid)
+     {
+         valid = check_data_publish(data, types, program->stream, program->object_symbols, program->object_count,
+-                                   &code.link, 0, &bytes, scratch, &emission);
++                                   &code.link, 0, &state->bytes, scratch, &emission);
+         if (!valid)
+         {
+             check_driver_diagnose(parser, pp, emission.failed_token, "checked static data could not be emitted");
+@@ -10125,7 +10122,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+     }
+     // The definitions' named sections and the file-scope assembly's (#619), each atom's section in the object.
+     ObjectAtomSection* sections = 0;
+-    if (valid && !check_program_sections(&code, program, &bytes, &output, &sections))
++    if (valid && !check_program_sections(&code, program, &state->bytes, &state->output, &sections))
+     {
+         check_driver_emission_failed(parser, pp, &code);
+         valid = false;
+@@ -10133,7 +10130,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+     check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
+     if (valid && debug)
+     {
+-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
++        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &state->output, scratch);
+         if (!valid)
+         {
+             fprintf(errors, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
+@@ -10195,19 +10192,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+         check_program_print_tier1_sizes(lanes->tier1_function_sizes, &code);
+     }
+     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
+-    arena_pop_to(scratch, mark);
+-    // A units' lane keeps lane 0's writer's columns for its next unit (check_program_lanes_settle, #442); a command of one
+-    // file is done with them.
+-    if (lanes != NULL && lanes->units_lane != NULL)
+-    {
+-        check_program_lanes_settle(lanes);
+-    }
+-    else
+-    {
+-        check_program_lanes_release(lanes);
+-    }
+-    arena_release(&bytes);
+-    arena_release(&output);
++    check_driver_object_release(state, lanes, scratch);
+     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+     return valid;
+ }
+@@ -12522,6 +12507,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+             {
+                 _Static_assert(BUSTER_CHECK_CLOCK_WALK_PARTS == BUSTER_CHECK_EXPRESSION_PARTS, "the clock reports each of the walk's parts");
+                 stage_clock->expression_ticks += input.expression_ticks;
++                if (pp->options.node_source_window)
++                {
++                    fprintf(errors, "source-window: taken=%u removed=%u graph-nodes=%u\n", input.source_compacted, input.source_removed, input.graph.count);
++                }
+                 if (pp->options.node_window)
+                 {
+                     fprintf(errors, "node-window: taken=%u ordinary-nodes-replaced=%u summary-nodes=%u graph-nodes=%u\n", input.window_count, input.window_nodes,
+@@ -13865,6 +13854,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     // --check-transitions checks the expressions by their memoized transitions (#1050), which --verify verifies.
+     bool check_transitions = false;
+     bool node_window = false;
++    bool node_source_window = false;
+     bool dump = false;
+     bool dump_static = false;
+     bool emit_object = false;
+@@ -14151,6 +14141,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         {
+             verify = true;
+         }
++        else if (match.exact == C_OPTION_NODE_SOURCE_WINDOW)
++        {
++            node_source_window = true;
++        }
+         else if (match.exact == C_OPTION_NODE_WINDOW)
+         {
+             node_window = true;
+@@ -14539,7 +14533,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     options.semantic_pragmas = true;
+     options.timing = time_stages;
+     options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
+-    if (getenv("NODE_SPLICE_FRONT") != NULL)
++    options.node_source_window = node_source_window;
++    if (node_source_window || getenv("NODE_SPLICE_FRONT") != NULL)
+     {
+         options.node_front = BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_BEFORE;
+         options.node_reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
+@@ -14659,7 +14654,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     }
+     else if (!parsed)
+     {
+-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
++        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window] [--node-window-source] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
+     }
+diff --git a/src/buster/compiler/c_option_table.c b/src/buster/compiler/c_option_table.c
+index 83e6379a1..16e169107 100644
+--- a/src/buster/compiler/c_option_table.c
++++ b/src/buster/compiler/c_option_table.c
+@@ -62,6 +62,7 @@
+     ENTRY(LOWER_ALL, "--lower-all") \
+     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
+     ENTRY(NODE_WINDOW, "--node-window") \
++    ENTRY(NODE_SOURCE_WINDOW, "--node-window-source") \
+     ENTRY(POISON_ARENAS, "--poison-arenas") \
+     ENTRY(PREDEFINES, "--predefines") \
+     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index b77515ef7..960fd9ddd 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -370,6 +370,7 @@ struct PPOptions
+     bool expression_numbering;
+     // --node-window takes eligible full expressions before the coded walk.
+     bool node_window;
++    bool node_source_window;
+     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
