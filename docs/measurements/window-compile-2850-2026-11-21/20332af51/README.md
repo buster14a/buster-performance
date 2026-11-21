@@ -4,21 +4,29 @@ Rotated ordinary SQLite compiles use the unmodified b86eadcbd parent, the full l
 
 | Mode | Median cycles/token | Median user instructions | Median wall ms |
 | --- | ---: | ---: | ---: |
-| baseline | 897.7382 | 1,307,142,332.0 | 116.6070 |
-| aggregate | 898.5001 | 1,304,383,926.0 | 116.7955 |
-| lean | 899.4881 | 1,304,444,553.0 | 116.7095 |
+| baseline | 902.5217 | 1,307,142,345.5 | 116.7005 |
+| aggregate | 900.7125 | 1,304,383,926.0 | 116.7955 |
+| lean | 900.5862 | 1,304,444,559.5 | 116.8590 |
 
 | Paired difference | Cycles/token, median [min, max] | User instructions, median | Wall ms, median [min, max] |
 | --- | ---: | ---: | ---: |
-| aggregate minus baseline | +0.4251 [−1.2141, +2.5402] | −2,758,311.5 | +0.2060 [+0.0000, +0.6195] |
-| lean minus baseline | +1.4130 [+0.8358, +7.6602] | −2,697,779.0 | +0.1025 [−0.3385, +0.6830] |
-| lean minus aggregate | +0.9879 [−1.7044, +8.8743] | +59,816.5 | −0.1035 [−0.3385, +0.0635] |
+| aggregate minus baseline | +0.4251 [−1.8781, +102.2841] | −2,758,417.0 | +0.0000 [−0.9745, +0.6195] |
+| lean minus baseline | +1.1383 [−2.2328, +12.9993] | −2,697,784.5 | +0.0405 [−0.3385, +0.6830] |
+| lean minus aggregate | −0.1410 [−89.2847, +8.8743] | +59,929.0 | +0.0635 [−0.3385, +1.0150] |
 
-PMU fault counts ranged from 5,650 to 5,656. The independent wall series recorded 5,757 to 5,763 minor faults and zero major faults.
+PMU fault counts ranged from 5,648 to 57,465. The independent wall series recorded 5,757 to 5,764 minor faults and zero major faults.
+
+Excluding rounds with a process above 20,000 faults in the pmu series removes rounds 4. The retained paired differences are
+
+| Paired difference | cycles/token, median [min, max] |
+| --- | ---: |
+| aggregate minus baseline | −0.3173 [−1.8781, +2.5402] |
+| lean minus baseline | +0.9870 [−2.2328, +7.6602] |
+| lean minus aggregate | −0.1337 [−1.7044, +8.8743] |
 
 The comparisons use two observations per mode in each rotated, symmetric round. The paired table takes the median of within-round differences between the two-position means. Cycles include user and kernel execution and use the frozen SQLite denominator of 716,136 preprocessed tokens. All PMU events ran at 100% enabled time.
 
-Each of the 42 successful compiles yielded a 2,061,192-byte object with SHA-256 `efcbc038fe65fd93722230ce222f8d761948b9e59c491ca9ce4ec081cc4ce1aa`. Default diagnostics were empty. All `-Wall -Wextra` compilations had identical output, with 5,846 bytes on stderr.
+Each of the 90 successful compiles yielded a 2,061,192-byte object with SHA-256 `efcbc038fe65fd93722230ce222f8d761948b9e59c491ca9ce4ec081cc4ce1aa`. Default diagnostics were empty. All `-Wall -Wextra` compilations had identical output, with 5,846 bytes on stderr.
 
 | Modes | Source revision | Release executable SHA-256 |
 | --- | --- | --- |
@@ -28,4 +36,6 @@ Each of the 42 successful compiles yielded a 2,061,192-byte object with SHA-256 
 
 The [frozen driver method](../paired-driver/README.md), [mode selectors](lexer-lean-config.sh), [command and object checks](lexer-lean-one.sh), [native build receipts](builds.tsv), [full order](order.tsv), [PMU and wall records](samples.tsv), [original reports](reports.tar.xz), [object receipts](objects.tsv) and [warning receipts](diagnostics.tsv) identify the exact inputs, command lines and outputs.
 
-The [built-in lexer](lexer/README.md) and the [fresh preprocessor](pp/README.md) use separate three-way schedules. Both were faster on the lean source in all three pairs against either the baseline or the full aggregate. The ordinary compiler’s whole-program wall intervals crossed zero for lean against both controls, and the lean compiler used more total cycles/token than pristine in every ordinary compilation round. The [complete source](implementation.patch), [exact current-source qualification](correctness/) and [seven-round full aggregate control](../a1609b1e9/README.md) identify the distinct evidence.
+The lean executable used +1.1383 total cycles/token and +0.0405 ms elapsed time against the pristine compiler at the paired medians. Its total cycles were lower in 2/7 rounds and its elapsed time was lower in 3/7. The [first three rounds](https://github.com/buster14a/buster-performance/tree/7c4bd5821a9c38cd8e6c9cfa5cc862ff9fc7fa0d/docs/measurements/window-compile-2850-2026-11-21/20332af51) are retained verbatim. The [extension](lexer-lean-extend.sh) ran four further rounds with the same binaries.
+
+The [built-in lexer](lexer/README.md) and [fresh preprocessor](pp/README.md) were faster on the lean source in all three pairs against either the baseline or full aggregate. The [complete source](implementation.patch), [correctness data](correctness/) and [seven-round full aggregate control](../a1609b1e9/README.md) retain the independent checks. Public [PR #3249](https://github.com/buster14a/buster/pull/3249) head 1a2f97e72 and measured source 20332af51 have identical full Git tree f82b740185e7083d2bebb5d1abe1b0d9cf0a83e2.
