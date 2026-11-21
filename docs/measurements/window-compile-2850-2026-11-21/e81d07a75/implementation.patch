@@ -1,0 +1,861 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 64248a52a..d43259324 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1808,12 +1808,65 @@ bool check_node_window_prepare(void);
+ bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
+ void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uint32_t token, bool local);
+ void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token);
++void check_node_window_call_row(CheckInputWindowRow* row, const TypeTable* types, TypeId type, uint64_t value, uint32_t token, bool call, bool discard, bool local);
++
+ 
+ static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
+ {
+     return (classes[i] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+ }
+ 
++#define BUSTER_CHECK_WINDOW_CALL_ARGUMENTS 8u
++// A call with one action per argument. The ordinary postorder includes the commas for multiargument calls.
++static uint32_t check_input_window_call_first(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes,
++                                              uint32_t start, uint32_t end)
++{
++    if (end <= start || check_input_window_code(classes,end-1) != CHECK_INPUT_CODE_CALL) return end;
++    const Parser* p = reader->parser;
++    const uint32_t root = tokens[end], close = tokens[end-1];
++    if (close == 0 || p->tokens.kinds[close] != PARSE_KIND_R_PAREN || p->tree.parents[close] != root) return end;
++    const bool statement = check_input_window_code(classes,end) == CHECK_INPUT_CODE_TERMINATOR;
++    uint32_t open = close - 1, args = 0;
++    if (p->tokens.kinds[open] != PARSE_KIND_L_PAREN)
++    {
++        while (open > 0 && args < BUSTER_CHECK_WINDOW_CALL_ARGUMENTS)
++        {
++            const uint8_t kind = p->tokens.kinds[open];
++            if (kind != PARSE_KIND_IDENTIFIER && kind != PARSE_KIND_NUMBER) return end;
++            ++args;
++            --open;
++            if (p->tokens.kinds[open] == PARSE_KIND_L_PAREN) break;
++            if (open == 0 || p->tokens.kinds[open] != PARSE_KIND_COMMA) return end;
++            --open;
++        }
++    }
++    if (open == 0 || p->tokens.kinds[open] != PARSE_KIND_L_PAREN || p->tokens.kinds[open-1] != PARSE_KIND_IDENTIFIER) return end;
++    if (statement)
++    {
++        if (root!=close+1 || p->tokens.kinds[root]!=PARSE_KIND_SEMI || reader->conditions[root]!=0 ||
++            p->tree.roles[root]!=PARSE_ROLE_TERMINATOR || p->tree.parents[root]>=p->tokens.count) return end;
++        const uint32_t parent=p->tree.parents[root];
++        if (p->tree.roles[parent]!=PARSE_ROLE_CLOSE_BODY && p->tree.roles[parent]!=PARSE_ROLE_CLOSE_BLOCK) return end;
++        const CheckInput* in=reader->output;
++        const uint32_t region=in->region_count?in->expression_regions[parent]:0;
++        if (region && in->regions[region-1].final_statement==root) return end;
++    }
++    else if (root+2!=open || p->tokens.kinds[root]!=PARSE_KIND_RETURN || close+1>=p->tokens.count || p->tokens.kinds[close+1]!=PARSE_KIND_SEMI)
++        return end;
++    uint32_t first=end-1, expected=close;
++    while (first>start && tokens[first]!=open-1)
++    {
++        --first;
++        uint32_t code=check_input_window_code(classes,first);
++        if (code==CHECK_INPUT_CODE_LIST || code==CHECK_INPUT_CODE_SEPARATOR) continue;
++        if (code!=CHECK_INPUT_CODE_IDENTIFIER && code!=CHECK_INPUT_CODE_LITERAL) return end;
++        const uint32_t want=expected==close ? (args ? close-1 : open-1) : expected==open+1 ? open-1 : expected-2;
++        if (tokens[first]!=want) return end;
++        expected=want;
++    }
++    return expected==open-1 ? first : end;
++}
++
+ // Find a complete expression ending at this candidate. Its source tokens and postorder must agree: a match
+ // cannot consume a sibling or only part of the expression. Return end to give the ordinary path all its actions.
+ static uint32_t check_input_window_first(const CheckInputReader* reader, const uint32_t* tokens, const uint32_t* classes, uint32_t start, uint32_t end)
+@@ -1821,6 +1874,8 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
+     const uint32_t token = tokens[end];
+     const Parser* parser = reader->parser;
+     uint32_t first = end;
++    if (reader->pp->options.node_window_calls && end > start && check_input_window_code(classes, end-1)==CHECK_INPUT_CODE_CALL)
++        return check_input_window_call_first(reader,tokens,classes,start,end);
+     if (check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR)
+     {
+         // A stand-alone assignment ending this block statement. Its two names or literal and its operator
+@@ -1929,6 +1984,119 @@ static uint32_t check_input_window_publish(CheckInputReader* reader, CheckInputB
+     return node;
+ }
+ 
++static bool check_input_window_typed_local(const CheckInputReader* reader, const CheckInputIdentifiers* identifiers, uint32_t i, TypeId type)
++{
++    const uint32_t declaration = identifiers->declarations[i];
++    const CheckInput* input = reader->output;
++    return !reader->pp->options.predefines.debug && !reader->pp->options.predefines.debug_modules &&
++           identifiers->status[i] == (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) &&
++           identifiers->types[i] == (type | ((uint64_t)CHECK_LVALUE << 32)) &&
++           identifiers->flags[i] == (((uint64_t)CHECK_CONSTANT_ADDRESS << 32) | BUSTER_CHECK_NONNULL_ADDRESS) &&
++           declaration < input->token_count && identifiers->objects[i] == (uint64_t)declaration + 1 &&
++           input->declaration_kinds[declaration] == C_BINDING_OBJECT && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
++           check_sparse_get(input->declaration_bodies, declaration) < input->token_count;
++}
++
++// Declarations of the same function can carry separate attributes. The ordinary target-feature pass
++// resolves them by object identity. Its flatten caller check can reject a wholly unannotated callee.
++static bool check_input_window_mark_flattened(CheckInputReader* reader, uint32_t object)
++{
++    const CheckInput* input = reader->output;
++    const uint32_t words = (input->token_count >> 6) + 1;
++    if (reader->window_flattened_bodies == NULL)
++    {
++        reader->window_flattened_bodies = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
++        if (reader->window_flattened_bodies != NULL)
++        {
++            memset(reader->window_flattened_bodies, 0, (size_t)words * sizeof(*reader->window_flattened_bodies));
++        }
++    }
++    const bool room = reader->window_flattened_bodies != NULL;
++    for (uint32_t open = room ? check_sparse_next(input->body_declarations, 0, input->token_count) : input->token_count;
++         open < input->token_count; open = check_sparse_next(input->body_declarations, open + 1, input->token_count))
++    {
++        const uint32_t definition = check_sparse_get(input->body_declarations, open);
++        const uint32_t close = reader->parser->tree.parents[open];
++        if (definition < input->token_count && input->objects[definition] == object && close < input->token_count)
++        {
++            reader->window_flattened_bodies[close >> 6] |= UINT64_C(1) << (close & 63);
++        }
++    }
++    return room;
++}
++
++static bool check_input_window_flattened_at(const CheckInputReader* reader, uint32_t token)
++{
++    const Parser* parser = reader->parser;
++    bool flattened = false;
++    if (reader->window_flattened_bodies != NULL)
++    {
++        for (uint32_t at = token, steps = 0; at < parser->tokens.count && steps < parser->tokens.count; steps += 1)
++        {
++            const uint8_t role = parser->tree.roles[at];
++            const uint32_t parent = parser->tree.parents[at];
++            if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_OPEN_BODY)
++            {
++                const uint32_t close = role == PARSE_ROLE_CLOSE_BODY ? at : parent;
++                flattened = close < parser->tokens.count && (reader->window_flattened_bodies[close >> 6] >> (close & 63) & 1u) != 0;
++                break;
++            }
++            if (parent == at) { break; }
++            at = parent;
++        }
++    }
++    return flattened;
++}
++
++static bool check_input_window_call_attributes(CheckInputReader* reader, uint32_t declaration, uint32_t object, uint32_t call_token)
++{
++    const CheckInput* input = reader->output;
++    if (declaration >= input->token_count || (input->function_flags[declaration] & (CHECK_INPUT_FUNCTION_INLINE | CHECK_INPUT_FUNCTION_NORETURN)) != 0)
++    {
++        return true;
++    }
++    const CheckSparseWide attributes = input->attributes;
++    if (!check_sparse_wide_present(attributes))
++    {
++        return false;
++    }
++    if (object > input->token_count)
++    {
++        return true;
++    }
++    if (reader->window_attributed_objects == NULL)
++    {
++        const uint32_t words = (input->token_count >> 6) + 1;
++        uint64_t* bits = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
++        if (bits == NULL)
++        {
++            return true;
++        }
++        memset(bits, 0, (size_t)words * sizeof(*bits));
++        for (uint32_t first = check_input_attributed_next(attributes, 0, input->token_count); first < input->token_count;
++             first = check_input_attributed_next(attributes, first + 16, input->token_count))
++        {
++            for (uint32_t selected = check_input_attributed_group(attributes, first, input->token_count); selected != 0; selected &= selected - 1)
++            {
++                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
++                const uint32_t attributed = input->objects[token];
++                if (attributed <= input->token_count)
++                {
++                    bits[attributed >> 6] |= UINT64_C(1) << (attributed & 63);
++                    if (check_input_attribute_of(check_input_attributes_at(input, token), CHECK_ATTRIBUTE_FLATTEN) != NULL &&
++                        !check_input_window_mark_flattened(reader, attributed))
++                    {
++                        return true;
++                    }
++                }
++            }
++        }
++        reader->window_attributed_objects = bits;
++    }
++    return (reader->window_attributed_objects[object >> 6] >> (object & 63) & 1u) != 0 ||
++           check_input_window_flattened_at(reader, call_token);
++}
++
+ static bool check_input_window_local(const CheckInputReader* reader, const CheckInputIdentifiers* identifiers, uint32_t i)
+ {
+     const uint32_t declaration = identifiers->declarations[i];
+@@ -2032,13 +2200,97 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
+     return node != BUSTER_CHECK_NONE;
+ }
+ 
++static bool check_input_window_call_type(const TypeTable* types, TypeId type, bool void_ok)
++{
++    if (type == 0 || type != type_unqualified(type)) return false;
++    const uint8_t kind = type_kind(types,type);
++    return (void_ok && type==BUSTER_TYPE_VOID) || (kind==BUSTER_TYPE_KIND_POINTER && type_kind(types,type_element(types,type))!=BUSTER_TYPE_KIND_FUNCTION) ||
++           (kind==BUSTER_TYPE_KIND_INTEGER && type_size(types,type)<=8);
++}
++
++static bool check_input_window_call(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, uint32_t first, uint32_t end,
++                                     bool statement, const CheckInputIdentifiers* identifiers, uint32_t* ids,
++                                     const CheckInputLiterals* literals, uint32_t* lits)
++{
++    const uint32_t id=*ids, root=tokens[end], name=tokens[first], close=tokens[end-1];
++    const uint32_t args=(close-(name+1))/2;
++    const TypeTable* types=reader->types;
++    const TypeId fn=(TypeId)identifiers->types[id];
++    const uint32_t object=(uint32_t)identifiers->objects[id];
++    if (args>BUSTER_CHECK_WINDOW_CALL_ARGUMENTS || identifiers->status[id]!=(BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) ||
++        identifiers->types[id]>>32!=CHECK_FUNCTION || !object || identifiers->objects[id]>>32 || type_kind(types,fn)!=BUSTER_TYPE_KIND_FUNCTION ||
++        ((types->types.flags[type_index(fn)] & (BUSTER_TYPE_FLAG_PROTOTYPE|BUSTER_TYPE_FLAG_VARIADIC))!=BUSTER_TYPE_FLAG_PROTOTYPE) ||
++        type_function_abi_kind(types,fn)!=TYPE_FUNCTION_ABI_SYSV || type_function_keeps_registers(types,fn) ||
++        check_input_library_call(reader,name)!=0 || check_input_window_call_attributes(reader,identifiers->declarations[id],object,name)) return false;
++    const TypeId ret=type_return(types,fn);
++    uint32_t n=0;
++    const TypeId* formal=type_parameters(types,fn,&n);
++    if (n!=args || !check_input_window_call_type(types,ret,true) || (!statement && (reader->return_types[root]!=ret || ret==BUSTER_TYPE_VOID))) return false;
++    CheckInputWindowRow rows[BUSTER_CHECK_WINDOW_CALL_ARGUMENTS+2];
++    uint32_t identifier=id+1,literal=*lits;
++    for (uint32_t a=0;a<n;++a)
++    {
++        const uint32_t token=name+2+2*a;
++        const bool local=reader->parser->tokens.kinds[token]==PARSE_KIND_IDENTIFIER;
++        if (!check_input_window_call_type(types,formal[a],false)) return false;
++        if (local ? !check_input_window_typed_local(reader, identifiers,identifier,formal[a]) : formal[a]!=BUSTER_TYPE_INT || literals->values[literal]==BUSTER_CHECK_NONE) return false;
++        const uint64_t value=local ? identifiers->objects[identifier++] : literals->values[literal++];
++        check_node_window_call_row(rows+a,types,formal[a],value,token,false,false,local);
++    }
++    check_node_window_call_row(rows+n,types,ret,((uint64_t)fn<<32)|object,name,true,false,false);
++    const bool drop=statement && ret!=BUSTER_TYPE_VOID;
++    if (drop) check_node_window_call_row(rows+n+1,types,ret,0,root,false,true,false);
++    // The ordinary void cast restricts constant reads through the discarded pointer.
++    const uint32_t flags=BUSTER_CHECK_SIDE_EFFECT | (statement && type_kind(types,ret)==BUSTER_TYPE_KIND_POINTER ? BUSTER_CHECK_CONST_READ_RESTRICTED : 0);
++    const CheckValue value={.type=statement?BUSTER_TYPE_VOID:ret,.category=CHECK_RVALUE,.flags=flags};
++    CheckInput* input = reader->output;
++    CheckGraph* graph = &input->graph;
++    // Once a pointer exists, or an earlier kept summary requests it, later calls of the same prototype cannot
++    // be the first operation to intern it during graph checking.
++    const uint32_t word = type_index(fn) / 64;
++    const uint64_t bit = UINT64_C(1) << (type_index(fn) % 64);
++    if (word >= input->window_decay_words)
++    {
++        const uint32_t previous = input->window_decay_words;
++        uint64_t* known = check_input_window_room(reader->arena, input->window_known_decays, previous, &input->window_decay_words,
++                                                  word + 1 - previous, sizeof(*known));
++        if (known == NULL) return false;
++        memset(known + previous, 0, (size_t)(input->window_decay_words - previous) * sizeof(*known));
++        input->window_known_decays = known;
++    }
++    const bool needs_decay = (input->window_known_decays[word] & bit) == 0 && type_find_pointer(types, fn) == 0;
++    if (needs_decay)
++    {
++        CheckFunctionDecay* space = check_input_window_room(reader->arena, graph->function_decays, graph->function_decay_count,
++                                                            &input->function_decay_capacity, 1, sizeof(*space));
++        if (space == NULL) return false;
++        graph->function_decays = space;
++    }
++    const uint32_t made=check_input_window_publish(reader,batch,root,value,rows,n+1+drop,n+3);
++    if (made==BUSTER_CHECK_NONE) return false;
++    input->window_known_decays[word] |= bit;
++    if (needs_decay)
++    {
++        graph->function_decays[graph->function_decay_count++] = (CheckFunctionDecay){.node = made, .function = fn};
++    }
++    if (!statement)
++    {
++        reader->output->token_nodes[root]=made; reader->query_types[root]=ret; reader->first_value[root]=BUSTER_CHECK_NONE;
++    }
++    else if (reader->region_roots!=NULL) reader->region_roots[root]=made;
++    *ids=identifier; *lits=literal;
++    if (reader->window_call_log) fprintf(stderr,"plain-call: token=%u callee=%u args=%u rows=%u\n",root,name,n,n+1+drop);
++    return true;
++}
++
+ // Collect candidate ends in one pass over the action classes. Each caller selects its scan once per chunk.
+-static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
++static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments, bool calls)
+ {
+     uint32_t candidates = 0;
+     uint32_t previous_names = 0;
+     uint32_t previous_rhs = 0;
+     uint32_t previous_binary = 0;
++    uint32_t previous_calls = 0;
+     for (uint32_t i = 0; i < acting; i += 16)
+     {
+         const uint32_t run = acting - i < 16 ? acting - i : 16;
+@@ -2046,6 +2298,13 @@ static inline __attribute__((always_inline)) uint32_t check_input_window_ends(ui
+         const __m512i bytes = _mm512_maskz_loadu_epi32(lanes, classes + i);
+         const __m512i codes = _mm512_and_si512(bytes, _mm512_set1_epi32(BUSTER_CHECK_EXPRESSION_CODE_MASK));
+         __mmask16 found = _mm512_mask_cmpeq_epi32_mask(lanes, codes, _mm512_set1_epi32(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++        if (calls)
++        {
++            const uint32_t call_lanes=_mm512_cmpeq_epi32_mask(codes,_mm512_set1_epi32(CHECK_INPUT_CODE_CALL << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            const uint32_t terminators=_mm512_mask_cmpeq_epi32_mask(lanes,codes,_mm512_set1_epi32(CHECK_INPUT_CODE_TERMINATOR << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++            found |= (uint16_t)(terminators & ((call_lanes<<1)|previous_calls));
++            previous_calls=call_lanes>>15;
++        }
+         if (assignments)
+         {
+             // Match the four postorder actions even when they straddle adjacent groups of 16.
+@@ -2074,8 +2333,9 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
+                                                                      uint64_t* visited)
+ {
+     uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+-    const uint32_t candidates = reader->pp->options.node_window_assignments ? check_input_window_ends(ends, classes, acting, true) :
+-                                check_input_window_ends(ends, classes, acting, false);
++    const bool assigns=reader->pp->options.node_window_assignments;
++    const uint32_t candidates = reader->pp->options.node_window_calls ? check_input_window_ends(ends,classes,acting,assigns,true) :
++                                assigns ? check_input_window_ends(ends,classes,acting,true,false) : check_input_window_ends(ends,classes,acting,false,false);
+     uint32_t identifier = 0;
+     uint32_t literal = 0;
+     uint32_t cursor = 0;
+@@ -2091,7 +2351,9 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
+         if (!reader->output->resource && first < end)
+         {
+             const bool statement = check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR;
+-            const bool taken = statement ? check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal) :
++            const bool call=reader->pp->options.node_window_calls && check_input_window_code(classes,end-1)==CHECK_INPUT_CODE_CALL;
++            const bool taken = call ? check_input_window_call(reader,batch,tokens,first,end,statement,identifiers,&identifier,literals,&literal) :
++                               statement ? check_input_window_assign(reader, batch, tokens[end], identifiers, &identifier, literals, &literal) :
+                                check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier);
+             if (taken)
+             {
+@@ -2198,6 +2460,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
+     const bool window = reader->pp->options.node_window && coded && begin == 0 && stop == count && !timed && front == NULL &&
+                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
++    reader->window_call_log=window && reader->pp->options.node_window_calls && getenv("BUSTER_WINDOW_CALL_LOG")!=NULL;
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
+     {
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 21cc2bb2f..15ed65704 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -896,6 +896,7 @@ struct CheckInputMusttail
+ #define BUSTER_CHECK_WINDOW_LOCAL 0x01u
+ #define BUSTER_CHECK_WINDOW_READ 0x02u
+ #define BUSTER_CHECK_WINDOW_WRITE 0x04u
++#define BUSTER_CHECK_WINDOW_CALL 0x08u
+ 
+ typedef struct CheckInputWindowRow CheckInputWindowRow;
+ struct CheckInputWindowRow
+@@ -1305,6 +1306,9 @@ struct CheckInput
+     uint32_t window_row_count;
+     uint32_t window_row_capacity;
+     uint32_t window_capacity;
++    uint32_t function_decay_capacity;
++    uint64_t* window_known_decays;
++    uint32_t window_decay_words;
+     uint32_t window_count;
+     uint32_t window_nodes;
+ };
+@@ -1922,6 +1926,10 @@ struct CheckInputGnuRows
+ 
+ struct CheckInputReader
+ {
++    bool window_call_log;
++    uint64_t* window_attributed_objects;
++    // Closing braces of definitions whose flatten attribute makes even plain callees' target features observable.
++    uint64_t* window_flattened_bodies;
+     CheckInput* output;
+     const Parser* parser;
+     Preprocessor* pp;
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index e46f56dad..4ce9e482c 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -1397,6 +1397,14 @@ void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uin
+ }
+ 
+ // A discarded plain int assignment: store the RHS (the preceding row), then discard the stored value.
++void check_node_window_call_row(CheckInputWindowRow* row, const TypeTable* types, TypeId type, uint64_t value, uint32_t token,
++                                bool call, bool discard, bool local)
++{
++    *row = (CheckInputWindowRow){ .value = value, .token = token,
++        .kind = (uint8_t)(call ? BUSTER_TYPED_CALL : discard ? BUSTER_TYPED_DISCARD : local ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_CONST),
++        .class = check_lower_type_class(types,type), .flags = (uint8_t)(call ? BUSTER_CHECK_WINDOW_CALL : local ? BUSTER_CHECK_WINDOW_LOCAL | BUSTER_CHECK_WINDOW_READ : 0) };
++}
++
+ void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token)
+ {
+     rows[0] = (CheckInputWindowRow){ .value = object, .token = token, .kind = BUSTER_TYPED_STORE_LOCAL, .class = BUSTER_TYPED_CLASS_I32,
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 6298e369f..b64fd58ed 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -3689,6 +3689,19 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
+         if (op == CHECK_OP_VALUE)
+         {
+             const CheckValue value = check_graph_leaf_value(graph, node);
++            if (program->input->window_count != 0 && (value.flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
++            {
++                const CheckInputWindowSummary* summary=check_input_window_summary(program->input,node);
++                for (uint32_t r=0;summary!=NULL && r<summary->count;++r)
++                {
++                    const CheckInputWindowRow* row=program->input->window_rows+summary->first+r;
++                    const uint32_t target=(uint32_t)row->value;
++                    if ((row->flags&BUSTER_CHECK_WINDOW_CALL) && target && target<program->object_count && seen[target]!=epoch)
++                    {
++                        seen[target]=epoch; needed[target]=1; references[reference_count++]=(uint64_t)target<<32;
++                    }
++                }
++            }
+             if (value.overload_head == 0 && value.object != 0 && value.object < program->object_count &&
+                 ((value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0 || check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_STATIC)) && seen[value.object] != epoch)
+             {
+@@ -6594,6 +6607,25 @@ static bool check_program_finish(CheckProgramRun* run)
+     }
+     else
+     {
++        const char* reference_path = getenv("BUSTER_CALL_REFERENCES");
++        if (reference_path != NULL)
++        {
++            FILE* file = fopen(reference_path, "wb");
++            if (file == NULL) abort();
++            const uint32_t header[] = {program->body_count, program->object_count};
++            fwrite(header, sizeof(header), 1, file);
++            for (uint32_t b = 0; b < program->body_count; ++b)
++            {
++                const CheckProgramBody* body = program->bodies + b;
++                const uint32_t fields[] = {body->declaration, body->object, body->reference_count};
++                fwrite(fields, sizeof(fields), 1, file);
++                if (body->reference_count != 0)
++                    fwrite(program->references + body->reference_first, sizeof(uint32_t), body->reference_count, file);
++            }
++            if (program->object_symbols != NULL && program->object_count != 0)
++                fwrite(program->object_symbols, sizeof(*program->object_symbols), program->object_count, file);
++            if (ferror(file) || fclose(file) != 0) abort();
++        }
+         program->output_bytes = output->length - mark;
+     }
+     if (!run->keep_scratch)
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 454a43c96..22b67ed2c 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -2005,6 +2005,8 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
+         _Static_assert(BUSTER_PREDEFINES_FRAME_POINTER_ALL == BUSTER_TIER0_FRAME_POINTER_ALL && BUSTER_PREDEFINES_FRAME_POINTER_NON_LEAF == BUSTER_TIER0_FRAME_POINTER_NON_LEAF &&
+                            BUSTER_PREDEFINES_FRAME_POINTER_NONE == BUSTER_TIER0_FRAME_POINTER_NONE, "the options' frame pointer is Tier 0's");
+         function->frame_pointer = run->program->frame_pointer;
++        if (run->lowered->witness_rows != NULL)
++            check_source_witness_body(run->lowered,b,run->program->bodies[b].declaration,function,run->sources ? run->lowered->entry_tokens[b] : NULL);
+         // Stack-clash protection's probes (#177), which Tier 0's frame and allocations take, and Tier 1's.
+         function->probe_stack = run->program->probe_stack;
+         if (run->inline_table != NULL)
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index c52f6a8c1..ee243814b 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -356,6 +356,8 @@ struct CheckProgramLowered
+     // token of the expression, statement or initializer whose lowering wrote it (a function's first entries the
+     // declaration's, its last its closing brace's), for source rows (#395). Null otherwise.
+     uint32_t** entry_tokens;
++    char** witness_rows;
++    size_t* witness_sizes;
+     CheckDebugBinding** debug_bindings;
+     uint32_t runtime_symbol_count;
+     uint32_t count;
+@@ -15676,6 +15678,15 @@ static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* write
+     {
+         const CheckInputWindowRow* row = program->input->window_rows + summary->first + i;
+         uint64_t native_value = row->value;
++        if ((row->flags & BUSTER_CHECK_WINDOW_CALL) != 0)
++        {
++            const uint32_t target=(uint32_t)row->value;
++            const TypeId fn=(TypeId)(row->value>>32);
++            uint32_t argc=0;
++            const TypeId* args=type_parameters(program->types,fn,&argc);
++            native_value=check_lower_native_call(writer,target<program->object_count?program->object_symbols[target]:0,type_return(program->types,fn),args,argc);
++            if (native_value==BUSTER_CHECK_NONE) break;
++        }
+         if ((row->flags & BUSTER_CHECK_WINDOW_LOCAL) != 0)
+         {
+             native_value = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
+@@ -19897,6 +19908,13 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
+     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
+     lowered->functions = valid && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, Tier0Function, program->body_count) : 0;
++    if (valid && program->body_count != 0 && getenv("NODE_SOURCE_NATIVE_ORACLE") != NULL)
++    {
++        lowered->witness_rows = BUSTER_ARENA_PUSH_ARRAY(output, char*, program->body_count);
++        lowered->witness_sizes = BUSTER_ARENA_PUSH_ARRAY(output, size_t, program->body_count);
++        if (!lowered->witness_rows || !lowered->witness_sizes) abort();
++        memset(lowered->witness_rows, 0, program->body_count * sizeof(char*));
++    }
+     lowered->entry_tokens = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t*, program->body_count) : 0;
+     lowered->debug_bindings = valid && sources && program->body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDebugBinding*, program->body_count) : 0;
+     valid = valid && shared->signatures != 0 && shared->incoming != 0 && shared->opening_bodies != 0 && shared->local_bodies != 0 && shared->local_start != 0 && declaring != 0 &&
+@@ -21289,6 +21307,33 @@ static __attribute__((noinline)) void check_lower_part_sources(CheckLowerWriter*
+ // every label symbol's place), into `lowered`; and without one, the label symbols, the runtime functions' symbols
+ // numbered in the order the bodies first call them and every call of one its symbol, and the entries. A failure at the
+ // label symbols or the convention is at the token source order's writer had after the last body, the last part's.
++static void check_source_witness_body(CheckProgramLowered* lowered, uint32_t b, uint32_t declaration,
++                                      const Tier0Function* f, const uint32_t* tokens)
++{
++    FILE* witness = open_memstream(lowered->witness_rows + b, lowered->witness_sizes + b);
++    if (witness == NULL) abort();
++    const bool sources = tokens != NULL;
++    const uint32_t counts[] = {declaration, f->count, f->local_count, f->call_count,
++                               f->argument_count, sources};
++    fwrite(counts, sizeof(counts), 1, witness);
++#define BUSTER_SOURCE_WITNESS(column, length) do { \
++    if ((length) != 0) fwrite((column), sizeof(*(column)), (length), witness); \
++} while (0)
++    BUSTER_SOURCE_WITNESS(f->kinds, f->count);
++    BUSTER_SOURCE_WITNESS(f->classes, f->count);
++    BUSTER_SOURCE_WITNESS(f->values, f->count);
++    if (sources) BUSTER_SOURCE_WITNESS(tokens, f->count);
++    BUSTER_SOURCE_WITNESS(f->local_classes, f->local_count);
++    BUSTER_SOURCE_WITNESS(f->local_flags, f->local_count);
++    BUSTER_SOURCE_WITNESS(f->call_targets, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->call_first, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->call_argument_counts, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->call_variadic, f->call_count);
++    BUSTER_SOURCE_WITNESS(f->argument_classes, f->argument_count);
++#undef BUSTER_SOURCE_WITNESS
++    if (ferror(witness) || fclose(witness) != 0) abort();
++}
++
+ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerShared* shared, const CheckLowerPart* parts, uint32_t count)
+ {
+     const CheckProgram* program = shared->program;
+@@ -21423,6 +21468,18 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
+             values[table->address] = lowered->case_symbol_base + t;
+         }
+     }
++    if (lowered->witness_rows != NULL)
++    {
++        FILE* witness = fopen(getenv("NODE_SOURCE_NATIVE_ORACLE"), "wb");
++        if (witness == NULL) abort();
++        for (uint32_t b = 0; b < program->body_count; ++b)
++        {
++            if (valid && lowered->witness_rows[b] != NULL)
++                fwrite(lowered->witness_rows[b], 1, lowered->witness_sizes[b], witness);
++            free(lowered->witness_rows[b]);
++        }
++        if (ferror(witness) || fclose(witness) != 0) abort();
++    }
+     return valid;
+ }
+ 
+diff --git a/src/buster/compiler/c_check_transitions.c b/src/buster/compiler/c_check_transitions.c
+index ed8dc97e5..8b7799b3e 100644
+--- a/src/buster/compiler/c_check_transitions.c
++++ b/src/buster/compiler/c_check_transitions.c
+@@ -1022,41 +1022,58 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types,
+     };
+     // The loop's hits, kept here rather than through `run` or `stream`, which the columns' stores could alias.
+     uint32_t hits = 0;
+-    for (uint32_t node = 0; result && node < count; node += 1)
++    uint32_t node = 0;
++    for (uint32_t i = 0; result; i += 1)
+     {
+-        const uint32_t header = statics[node];
+-        if (header == BUSTER_CHECK_TRANSITION_LEAF && check_graph_leaf_overload_head(graph, node) == 0)
+-        {
+-            check_graph_leaf(types, graph, stream, node);
+-            uint32_t template = 0;
+-            classes[node] = check_transitions_intern(&table, stream, node, &template);
+-        }
+-        else
++        const bool last = i == graph->function_decay_count;
++        const uint32_t end = last ? count : graph->function_decays[i].node;
++        for (; node < end; node += 1)
+         {
+-            CheckTransitionMiss miss;
+-            CheckTransitionKind kind = CHECK_TRANSITION_NONE;
+-            uint32_t found = BUSTER_CHECK_NONE;
+-            bool done = false;
+-            if (header > BUSTER_CHECK_TRANSITION_LEAF)
++            const uint32_t header = statics[node];
++            if (header == BUSTER_CHECK_TRANSITION_LEAF && check_graph_leaf_overload_head(graph, node) == 0)
+             {
+-                kind = check_transition_key(graph, stream, classes, node, header, &miss, words);
+-                found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(&table, miss.key, miss.hash, words,
+-                                                                              header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f) : BUSTER_CHECK_NONE;
+-                done = found != BUSTER_CHECK_NONE && check_transition_guards_hold(graph, &table, table.entries + found, node);
++                check_graph_leaf(types, graph, stream, node);
++                uint32_t template = 0;
++                classes[node] = check_transitions_intern(&table, stream, node, &template);
+             }
+-            if (done)
++            else
+             {
+-                hits += 1;
+-                check_transition_write(stream, graph, &table, table.entries + found, node, miss.objects, classes);
+-                if (verify)
++                CheckTransitionMiss miss;
++                CheckTransitionKind kind = CHECK_TRANSITION_NONE;
++                uint32_t found = BUSTER_CHECK_NONE;
++                bool done = false;
++                if (header > BUSTER_CHECK_TRANSITION_LEAF)
+                 {
+-                    check_transition_verify(types, graph, stream, node, arguments, scratch);
++                    kind = check_transition_key(graph, stream, classes, node, header, &miss, words);
++                    found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(&table, miss.key, miss.hash, words,
++                                                                                  header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f) : BUSTER_CHECK_NONE;
++                    done = found != BUSTER_CHECK_NONE && check_transition_guards_hold(graph, &table, table.entries + found, node);
++                }
++                if (done)
++                {
++                    hits += 1;
++                    check_transition_write(stream, graph, &table, table.entries + found, node, miss.objects, classes);
++                    if (verify)
++                    {
++                        check_transition_verify(types, graph, stream, node, arguments, scratch);
++                    }
++                }
++                else
++                {
++                    check_transition_other(&run, node, header, &miss, kind, found);
+                 }
+             }
+-            else
+-            {
+-                check_transition_other(&run, node, header, &miss, kind, found);
+-            }
++        }
++        if (last)
++        {
++            break;
++        }
++        check_transition_flush(types, graph, stream, &table, classes, batch, arguments, scratch);
++        if (type_pointer(types, graph->function_decays[i].function) == 0)
++        {
++            stream->status = CHECK_STATUS_RESOURCE;
++            stream->failed_node = end;
++            break;
+         }
+     }
+     if (result)
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index 2307bc6e2..9998bb1f5 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -259,8 +259,19 @@ static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedM
+     return result;
+ }
+ 
++typedef struct CheckFunctionDecay CheckFunctionDecay;
++struct CheckFunctionDecay
++{
++    uint32_t node;
++    TypeId function;
++};
++
+ struct CheckGraph
+ {
++    // A compacted direct call first requires pointer-to-function when ordinary checking reaches its
++    // position. Intervening type allocations retain their original IDs when these effects run in node order.
++    CheckFunctionDecay* function_decays;
++    uint32_t function_decay_count;
+     // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+     // and 0 for none.
+     const CheckInputMarkedMember* marked_members;
+@@ -4084,6 +4095,17 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         result = false;
+         stream->status = CHECK_STATUS_RESOURCE;
+     }
++    for (uint32_t i = 0; result && i < graph->function_decay_count; i += 1)
++    {
++        const CheckFunctionDecay* decay = graph->function_decays != NULL ? graph->function_decays+i : NULL;
++        result = decay != NULL && decay->node < count && (i == 0 || graph->function_decays[i-1].node < decay->node) &&
++                 graph->ops != NULL && graph->ops[decay->node] == CHECK_OP_VALUE &&
++                 type_is_valid(types,decay->function) && type_kind(types,decay->function) == BUSTER_TYPE_KIND_FUNCTION;
++        if (!result)
++        {
++            stream->status = CHECK_STATUS_INVALID_GRAPH;
++        }
++    }
+     CheckGraphValidation validation = { 0 };
+     if (result)
+     {
+@@ -4204,6 +4226,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+                                  graph->overload_candidate_count == 0 && columns &&
+                                  check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
+         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
++        if (transitions && stream->status == CHECK_STATUS_RESOURCE)
++        {
++            result = false;
++        }
+         if (transitions && stream->statistics.transition_mismatches != 0)
+         {
+             result = false;
+@@ -4214,31 +4240,46 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->zero_columns = zero_output;
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
+-        while (node < count)
++        for (uint32_t i = 0; !transitions && result; i += 1)
+         {
+-            if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+-            {
+-                check_graph_leaf(types, graph, stream, node);
+-                node += 1;
+-            }
+-            else if (!regions || pure[node] == 0)
++            const bool last = i == graph->function_decay_count;
++            const uint32_t end = last ? count : graph->function_decays[i].node;
++            while (node < end)
+             {
+-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
+-                node += 1;
+-            }
+-            else
+-            {
+-                const uint32_t begin = node;
+-                node = check_graph_marked_end(pure, node, count);
+-                if (options->level_order)
++                if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
++                {
++                    check_graph_leaf(types, graph, stream, node);
++                    node += 1;
++                }
++                else if (!regions || pure[node] == 0)
+                 {
+-                    check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
++                    check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
++                    node += 1;
+                 }
+                 else
+                 {
+-                    check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
++                    const uint32_t begin = node;
++                    node = check_graph_marked_end(pure, node, end);
++                    if (options->level_order)
++                    {
++                        check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
++                    }
++                    else
++                    {
++                        check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
++                    }
+                 }
+             }
++            if (last)
++            {
++                break;
++            }
++            if (type_pointer(types, graph->function_decays[i].function) == 0)
++            {
++                result = false;
++                stream->status = CHECK_STATUS_RESOURCE;
++                stream->failed_node = end;
++            }
+         }
+         stream->zero_columns = false;
+         for (uint32_t pass = 0; result && pass < 2; pass += 1)
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 1fc4d83d6..5d6a29c14 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12775,6 +12775,34 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                 };
+                 CheckStream stream;
+                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
++                const char* graph_log = getenv("NODE_SOURCE_GRAPH_ORACLE");
++                if (ready && graph_log != NULL)
++                {
++                    // Differential output only, emitted after this independent invocation has checked its entire graph.
++                    FILE* fp = fopen(graph_log, "wb");
++                    if (fp == NULL) abort();
++                    const CheckGraph* graph = &input.graph;
++                    const uint32_t header[] = {graph->count,graph->argument_count,sizeof(CheckValue),sizeof(CheckNodeConversions),sizeof(CheckConversion),types.types.count};
++                    fwrite(header,sizeof(header),1,fp);
++                    for (uint32_t n=0; n<graph->count; ++n)
++                    {
++                        const bool call = graph->ops[n] == CHECK_OP_CALL;
++                        const uint32_t fields[] = {graph->tokens[n],graph->ops[n],graph->operand0[n],graph->operand1[n],graph->operand2[n],
++                            call ? graph->argument_offsets[n] : 0,call ? graph->argument_counts[n] : 0,
++                            stream.diagnostics[n],stream.warnings[n],stream.warning_ignored[n]};
++                        fwrite(fields,sizeof(fields),1,fp);
++                        CheckValue value=check_stream_value(&stream,n);
++                        if (value.fault != 0 && value.fault_node<graph->count) value.fault_node=graph->tokens[value.fault_node];
++                        value.floating_storage[1] &= 0xffffu;
++                        value.imaginary_storage[1] &= 0xffffu;
++                        fwrite(&value,sizeof(value),1,fp);
++                        fwrite(stream.conversions+n,sizeof(*stream.conversions),1,fp);
++                        fwrite(stream.member_offsets+n,sizeof(*stream.member_offsets),1,fp);
++                    }
++                    fwrite(graph->argument_nodes,sizeof(uint32_t),graph->argument_count,fp);
++                    fwrite(stream.argument_conversions,sizeof(CheckConversion),graph->argument_count,fp);
++                    if (ferror(fp) || fclose(fp)!=0) abort();
++                }
+                 if (stage_clock != NULL)
+                 {
+                     stage_clock->transition_hits += stream.statistics.transition_hits;
+@@ -14107,6 +14135,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     bool check_transitions = false;
+     bool node_window = false;
+     bool node_window_assignments = false;
++    bool node_window_calls = false;
+     bool dump = false;
+     bool dump_static = false;
+     bool emit_object = false;
+@@ -14393,6 +14422,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         {
+             verify = true;
+         }
++        else if (match.exact == C_OPTION_NODE_WINDOW_CALLS)
++        {
++            node_window = true;
++            node_window_calls = true;
++        }
+         else if (match.exact == C_OPTION_NODE_WINDOW_ASSIGNMENTS)
+         {
+             node_window = true;
+@@ -14774,6 +14808,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     options.semantic_pragmas = true;
+     options.timing = time_stages;
+     options.node_window_assignments = node_window_assignments;
++    options.node_window_calls = node_window_calls;
+     options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
+     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
+     // The preprocessor's phases' ticks in pp_run, for the report.
+@@ -14889,7 +14924,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     }
+     else if (!parsed)
+     {
+-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
++        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-calls] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
+     }
+diff --git a/src/buster/compiler/c_option_table.c b/src/buster/compiler/c_option_table.c
+index 0cc618a2b..ef4bfe499 100644
+--- a/src/buster/compiler/c_option_table.c
++++ b/src/buster/compiler/c_option_table.c
+@@ -63,6 +63,7 @@
+     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
+     ENTRY(NODE_WINDOW, "--node-window") \
+     ENTRY(NODE_WINDOW_ASSIGNMENTS, "--node-window-assignments") \
++    ENTRY(NODE_WINDOW_CALLS, "--node-window-calls") \
+     ENTRY(POISON_ARENAS, "--poison-arenas") \
+     ENTRY(PREDEFINES, "--predefines") \
+     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 817123c11..5bcd1ea2d 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -394,6 +394,7 @@ struct PPOptions
+     bool node_window;
+     // --node-window-assignments also considers discarded local assignments.
+     bool node_window_assignments;
++    bool node_window_calls;
+     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
