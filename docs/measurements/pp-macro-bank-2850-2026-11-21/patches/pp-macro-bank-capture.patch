@@ -1,0 +1,95 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 1896e6541..7b76ba25e 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -1679,6 +1679,7 @@ struct Preprocessor
+     // Macros: by IdentId (macro_of, and is_macro's bits), and the records.
+     PPMacroId* macro_of;
+     uint64_t* is_macro;
++    uint32_t file_macro_bank;
+     PPMacro* macros;
+     uint32_t macro_count;
+     PPItem* items;
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index d956fa69f..f76965155 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -3000,6 +3000,27 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
+ // 12,431 of 13,197), and each one stopped a run, and started another unless it was the last token before `limit`.
+ // Returns where it stopped (at a name it doesn't expand, or at `limit`), in `*directs` the expansions it wrote, and in
+ // `*runs` the runs the old path would have started after them.
++#ifdef PP_BANK_COVERAGE
++static uint64_t pp_bank_blocks, pp_bank_partial, pp_bank_tested, pp_bank_visited, pp_bank_bins[5];
++#endif
++
++// Each half of the 128-byte bank encodes 64 current macro-name bits. Values above the bank
++// keep their scalar test. Unsigned saturation retains the high bit for all values above 127.
++BUSTER_INLINE uint64_t pp_file_low_bank(const Preprocessor* pp, const uint32_t* values, uint64_t identifiers)
++{
++    const __m128i a = _mm512_cvtusepi32_epi8(_mm512_loadu_si512(values));
++    const __m128i b = _mm512_cvtusepi32_epi8(_mm512_loadu_si512(values + 16));
++    const __m128i c = _mm512_cvtusepi32_epi8(_mm512_loadu_si512(values + 32));
++    const __m128i d = _mm512_cvtusepi32_epi8(_mm512_loadu_si512(values + 48));
++    __m512i indexes = _mm512_inserti32x4(_mm512_castsi128_si512(a), b, 1);
++    indexes = _mm512_inserti32x4(indexes, c, 2);
++    indexes = _mm512_inserti32x4(indexes, d, 3);
++    const __m512i low = _mm512_movm_epi8(pp->is_macro[0]);
++    const __m512i high = _mm512_movm_epi8(pp->is_macro[1]);
++    const __m512i macro = _mm512_permutex2var_epi8(low, indexes, high);
++    return identifiers & _mm512_movepi8_mask(_mm512_or_si512(indexes, macro));
++}
++
+ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit, uint32_t* directs,
+                                          uint32_t* runs)
+ {
+@@ -3015,9 +3036,14 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
+         const __m512i kinds = _mm512_maskz_loadu_epi8(valid, data->kinds + p);
+         const __m512i plain = _mm512_and_si512(kinds, _mm512_set1_epi8(0x7F));
+         const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++        uint64_t candidate_names = identifiers;
++        if (pp->file_macro_bank != 0 && available == 64)
++        {
++            candidate_names = pp_file_low_bank(pp, data->values + p, identifiers);
++        }
+         uint32_t take = available;
+         uint64_t replaced = 0;
+-        for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
++        for (uint64_t bits = candidate_names; bits != 0; bits &= bits - 1)
+         {
+             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+             const IdentId value = data->values[p + lane];
+@@ -3037,6 +3063,25 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
+                 replaced |= 1ull << lane;
+             }
+         }
++#ifdef PP_BANK_CAPTURE
++        pp_bank_capture(pp->macro_epoch, pp->is_macro, pp->table->count, data->values+p, available,
++                        identifiers & (stopped ? _bzhi_u64(UINT64_MAX, take + 1) : valid));
++#endif
++#ifdef PP_BANK_COVERAGE
++        const uint64_t tested_lanes = stopped ? _bzhi_u64(UINT64_MAX, take + 1) : valid;
++        const uint64_t tested = identifiers & tested_lanes;
++        pp_bank_blocks += available == 64;
++        pp_bank_partial += available != 64;
++        pp_bank_tested += (uint32_t)__builtin_popcountll(tested);
++        pp_bank_visited += (uint32_t)__builtin_popcountll(candidate_names & tested_lanes);
++        for (uint64_t bits = tested; bits != 0; bits &= bits - 1)
++        {
++            const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
++            const uint32_t value = data->values[p + lane];
++            pp_bank_bins[value < 128 ? 0 : value < 256 ? 1 : value < 512 ? 2 : value < 1024 ? 3 : 4] += 1;
++            if (((candidate_names >> lane) & 1) == 0 && pp->macro_of[value] != 0) {abort();}
++        }
++#endif
+         if (take != 0)
+         {
+             pp_store_file_tokens(out, out->count, data, base, p, available, take, kinds, false);
+@@ -13605,6 +13650,8 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
+     pp->predefines_data = BUSTER_PP_NONE;
+     pp->main_file = BUSTER_PP_NONE;
+     pp->options = *options;
++    const char* bank = getenv("BUSTER_TEST_PP_FILE_MACRO_BANK");
++    pp->file_macro_bank = bank == NULL ? 0 : (uint32_t)atoi(bank);
+     pp->table = table;
+     // No warning's command-line severity read yet, and each may be given (#2547).
+     memset(pp->warning_commands, BUSTER_PP_COMMAND_UNREAD, sizeof(pp->warning_commands));
