@@ -4,18 +4,18 @@ The unmodified 232da75f9 compiler and the cumulative source a4e5b1935 run the sa
 
 | Mode | Median cycles/token | Median user instructions | Median wall ms |
 | --- | ---: | ---: | ---: |
-| baseline | 902.5075 | 1,307,159,712.5 | 117.5110 |
-| candidate | 903.5450 | 1,304,304,723.5 | 117.1460 |
+| baseline | 904.8962 | 1,307,159,734.5 | 117.4415 |
+| candidate | 902.7839 | 1,304,304,723.5 | 117.0025 |
 
 | Paired difference | Cycles/token, median [min, max] | User instructions, median | Wall ms, median [min, max] |
 | --- | ---: | ---: | ---: |
-| candidate minus baseline | −0.0448 [−4.0045, +7.3132] | −2,854,645.0 | −0.3650 [−0.6975, −0.0925] |
+| candidate minus baseline | −4.5304 [−8.4404, +7.3132] | −2,854,965.0 | −0.3650 [−0.8845, +0.0520] |
 
-PMU fault counts ranged from 5,652 to 5,655. The independent wall series recorded 5,760 to 5,764 minor faults and zero major faults.
+PMU fault counts ranged from 5,651 to 5,656. The independent wall series recorded 5,760 to 5,764 minor faults and zero major faults.
 
 The comparisons use two observations per mode in each rotated, symmetric round. The paired table takes the median of within-round differences between the two-position means. Cycles include user and kernel execution and use the frozen SQLite denominator of 716,136 preprocessed tokens. All PMU events ran at 100% enabled time.
 
-Each of the 28 successful compiles yielded a 2,061,192-byte object with SHA-256 `efcbc038fe65fd93722230ce222f8d761948b9e59c491ca9ce4ec081cc4ce1aa`. Default diagnostics were empty. All `-Wall -Wextra` compilations had identical output, with 5,846 bytes on stderr.
+Each of the 60 successful compiles yielded a 2,061,192-byte object with SHA-256 `efcbc038fe65fd93722230ce222f8d761948b9e59c491ca9ce4ec081cc4ce1aa`. Default diagnostics were empty. All `-Wall -Wextra` compilations had identical output, with 5,846 bytes on stderr.
 
 | Modes | Source revision | Release executable SHA-256 |
 | --- | --- | --- |
@@ -27,3 +27,5 @@ The [frozen driver method](../paired-driver/README.md), [mode selectors](prep-co
 The [twelve independent native controls](native-preflight.tsv) compare actual artifact, status and stream bytes under ordinary and explicit assignment options. Both builds admitted 8,990 expressions under the assignment option, replacing 26,183 ordinary nodes with 8,990 summaries and retaining 306,430 graph nodes. All twelve objects matched. The disabled-warning streams were empty and each enabled-warning stream contained 5,846 identical bytes. [Preflight reports](native-preflight.tar.xz), [preflight script](prep-combined-preflight.sh), [per-round metrics](paired.tsv) and the [complete compiled patch](implementation.patch) are included.
 
 All 212 independently compiled [focused](correctness/direct.json) and [Lua/musl](correctness/broad.json) parent/candidate status, ELF and diagnostic pairs matched. The separate Develop build passed 848,407 [checker](correctness/checker.txt) and 211,028 [driver](correctness/driver.txt) assertions in all sixteen shards. The [self-host control](correctness/self-host.txt) passed the selected and scalar/vector full-lowering verification commands with identical full-lowering output.
+
+The [first three rounds](https://github.com/buster14a/buster-performance/tree/ae123e965238a54b4222b6a3105d6d85547cd90a/docs/measurements/window-compile-2850-2026-11-21/a4e5b1935) showed lower wall time in each round. The [extension](prep-combined-extend.sh) retained those observations and added four paired rounds per series on the same two executables.
