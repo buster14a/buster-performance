@@ -196,4 +196,7 @@ census's record, the faults' tally, the probes', the generator's and the regress
 `out/all.json`; `fill.py TEMPLATE all.json [KEY=FILE...]` fills a template's expressions (between doubled braces) from it, and
 fails where a verdict's own condition (`must(...)`) does not hold; `wrap.py` wraps the result as the documents are
 wrapped; `assemble-docs.py` places the two sections in the tree. The templates are the `.md` files here, and
-`out/` what they made.
+`out/` what they made. `out/result-note.out.md` is the result note as posted on buster#2850 and
+`out/pr-comment.md` the pull request's comment for this piece, cut from `out/pr-section.out.md` (its summary, what
+the piece is, the fixes, what else was found, the tests and the checks): the pull request kept the description of
+the piece it opened with.
