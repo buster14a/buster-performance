@@ -10,8 +10,9 @@ touches it. No compile change; the patch is an experiment and not for main.
 - **Source:** buster `bcb79bd638171eca64c3ab690a6d9a46cb353625` (main, 21 November) with [`census.patch`](census.patch)
   (`lane.c`, `c_check_clock.c`). Release build with CI's toolchain (LLVM 23.1.4), `-march=native`; executable SHA-256
   `7fc30862fb5fd655242dad71f69549003b22d8fc8ca0896e1cb625c2f10e74b7`.
-- **Host:** a claude.ai cloud container (Intel Xeon, AVX-512), Linux 6.18.44, transparent huge pages `madvise`. Bytes by
-  stage don't depend on the host; the 9700X (THP `always`) rounds more of them up to 2 MB pages. No 9700X time was used.
+- **Host:** a claude.ai cloud container (Intel Xeon, AVX-512), Linux 6.18.44, transparent huge pages `madvise`. What
+  each stage pushes and touches doesn't depend on the host, but what is resident does: the 9700X's THP `always` makes
+  a touched 2 MB stretch resident whole, so its figures read higher. No 9700X time was used.
 - **Workload:** the frozen corpus's `sqlite3.c` (`0a409f16…`) with the 9700X job's `-D` options, `--lanes 1 -c`, and
   Ubuntu's glibc headers: 710,061 tokens where the 9700X's Arch headers give 716,136. The object is the same bytes with
   and without the census.
@@ -24,9 +25,15 @@ touches it. No compile change; the patch is an experiment and not for main.
   - Pushes of 64 KB or more are recorded with their call sites, to name granules' owners.
   - `/proc/self/smaps` is copied at the `check-input` and `static-data` marks.
 - **Caveats.**
-  - A read-modify-write faults as a write, so "read later" is a lower bound and "touched later" an upper bound.
-  - `mincore` counts a page mapped to the zero page as resident; `smaps` doesn't. About 10 MB at the peak is that.
+  - A read-modify-write faults as a write, and only the first access to a granule in each stage is seen, so "read
+    later" is a lower bound and "touched later" an upper bound.
+  - `mincore` counts a page mapped to the zero page as resident; `smaps` doesn't. About 3 MB at the peak is that
+    (170.2 MB of granules against 167.3 MB of arena mappings).
   - Liveness is by stage mark. A stage's own internal peak isn't seen.
+  - The census itself raises the peak: the same executable without `BUSTER_MEMORY_CENSUS` peaks at 210,764 KB
+    (`--time-stages`' `peak-rss-kb`, three runs), with it at 221,072 KB (two runs), 10.3 MB more (4.9%). The arena
+    figures below are the census run's.
+  - MB are 10^6 bytes throughout.
 
 Reproduce: `git apply census.patch`, `./build.sh --config Release`, then
 `BUSTER_MEMORY_CENSUS=$PWD/census.tsv build/compiler --lanes 1 -c <sqlite options> sqlite3.c -o unit.o`;
@@ -35,18 +42,20 @@ Reproduce: `git apply census.patch`, `./build.sh --config Release`, then
 
 ## Coverage
 
-At the RSS peak (the `static-data` mark), `smaps` puts 215.9 MB resident:
+At the RSS peak (the `static-data` mark), `smaps` puts 226.4 MB resident:
 
 | | MB |
 | --- | ---: |
-| the arenas | 159.5 |
-| other anonymous memory (`.bss`, heap, stack) | 10.3 |
-| the executable's file pages | 36.7 |
-| `sqlite3.c`'s mapping | 9.1 |
+| the arenas | 167.3 |
+| other anonymous memory (`.bss`, stack, heap) | 10.8 |
+| the executable's file pages | 38.5 |
+| `sqlite3.c`'s mapping | 9.5 |
+| the headers' mappings | 0.3 |
 
-**The arenas hold 94% of the anonymous memory**, the memory the kernel clears. The file-backed rest costs mapping, not
-clearing. The census's gate asked for 90% of resident bytes. Counting file pages, the arenas hold 72% to 75% of RSS
-from the reader's end on.
+- **The gate as written is missed:** it asked for 90% of resident bytes, and the arenas hold 74% (72% to 75% from the
+  reader's end on).
+- **Restated for fresh memory, it is met:** the arenas hold 94% of the anonymous memory (167.3 of 178.1 MB), the memory
+  the kernel clears. The file-backed rest costs mapping, not clearing.
 
 ## Results
 
@@ -66,7 +75,8 @@ Arena bytes at each mark ([`census-bounds.txt`](census-bounds.txt)), MB:
 - **The most a lifetime plan can save without windows is about 93 to 121 MB:** the arenas holding only what a later
   stage needs, at 86 to 115 MB instead of the 208 MB they touch. At #528's measured price, 25.7 M kernel cycles for
   115,280 KB of peak (about 0.22 M a megabyte), that is 21 to 27 M cycles: **29 to 38 cycles a token, 3.2 to 4.2% of
-  the 9700X's 897** (`window-compile-2850-2026-11-21/46934f02a`, the newest locked record).
+  the 9700X's 906**, main `325883abf`'s, the baseline of the newest locked record
+  (`window-compile-2850-2026-11-21/46934f02a`).
 - **At the peak, 55.4 MB is never touched again** (1.9% at the same price), and 83.8 MB is never read again (2.9%).
   That is between the claim's two lines: under 50 MB meant stop, over 100 MB meant go on to the design's step 2.
 - **What the peak needs is live unit-wide data.** The 115 MB touched later is the graph's columns (19.4 MB, read up
