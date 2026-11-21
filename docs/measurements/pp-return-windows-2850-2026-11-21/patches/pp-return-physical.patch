@@ -1,0 +1,296 @@
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index bb8286349..5e4d09368 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -5161,6 +5161,40 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
+ // The kernel reads declaration lines, type rows and available operand records. The comparison after ordinary checking
+ // reports which named calls and arguments actually had a derivation, including their retained payload fields.
+ static void node_probe_warning_select(NodeFront* front);
++// The ordinary binder/return-conversion policy continues to decide whether the root is eligible.
++static void node_pp_return_payload(CheckInputReader* reader, uint32_t token, uint32_t leaf, NodeWindowNativeTape* tape, CheckValue* value)
++{
++    PPReturnWindow* window = &reader->pp->return_window;
++    const Parser* parser = reader->parser;
++    const uint32_t source = parser->tokens.sources[token];
++    uint32_t low = 0, high = window->count;
++    while (low < high)
++    {
++        const uint32_t mid = low + (high - low) / 2;
++        if (window->rows[mid].statement < source) low = mid + 1;
++        else high = mid;
++    }
++    if (low >= window->count || window->rows[low].statement != source || parser->tokens.sources[leaf] != source + 1) return;
++    const PPReturnRow* row = window->rows + low;
++    const bool names = row->name != 0;
++    if (names && parser->tokens.names[leaf] != row->value) abort();
++    // A converted return of another integer type can legitimately change the value; use only i32 here.
++    const bool literal = !names && value->type == BUSTER_TYPE_INT && value->constant_kind == CHECK_CONSTANT_INTEGER &&
++                         tape->count == 1 && tape->entries[0].class == BUSTER_TYPED_CLASS_I32 && tape->entries[0].kind == BUSTER_TYPED_CONST;
++    if (literal && (value->integer != row->value || tape->entries[0].value != row->value)) abort();
++    if (literal && window->publish != 3)
++    {
++        const bool fault = window->publish == 2 && !window->perturbed;
++        const uint32_t published = row->value ^ (uint32_t)fault;
++        window->perturbed |= fault;
++        value->integer = published;
++        tape->entries[0].value = published;
++    }
++    if (getenv("BUSTER_TEST_PP_RETURN_REPORT") != NULL)
++        fprintf(stderr,"pp-window: source=%u leaf=%u name=%u key=%u native=%u class=%u literal=%u kind=%u type=%u\n",
++                source, parser->tokens.sources[leaf], names, row->value, tape->entries[0].kind, tape->entries[0].class, literal, value->constant_kind, value->type);
++}
++
+ static NodeWindowNativeTape* node_window_compact_candidate(NodeFront* front, uint32_t root, uint32_t top, bool* whole, CheckValue* value)
+ {
+     struct NodeFactsReader* state = front->typer->facts;
+@@ -5196,6 +5230,8 @@ static NodeWindowNativeTape* node_window_compact_candidate(NodeFront* front, uin
+         .object = record->object,
+         .offset = field == BUSTER_NODE_MACHINE_OFFSET ? (int64_t)record->payload : 0,
+     };
++    if (*whole && state->reader->pp->return_window.publish != 0)
++        node_pp_return_payload(state->reader, token, front->tokens[top], tape, value);
+     return tape;
+ }
+ // Populate address and decay answers from pointer types already interned by the shared source/type reader.
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 960fd9ddd..d3f3c4a3a 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -486,6 +486,37 @@ struct PPTokens
+     Arena origin_arena;
+ };
+ 
++// Source-native window probe. The source and leaf positions refer to ordinary PP output; an
++// unresolved identifier keeps its canonical InternTable ID. No parser tree is read by the writer.
++typedef struct PPReturnRow PPReturnRow;
++struct PPReturnRow
++{
++    uint32_t statement;
++    uint32_t value;
++    uint8_t name;
++};
++
++typedef struct PPReturnWindow PPReturnWindow;
++struct PPReturnWindow
++{
++    PPReturnRow* rows;
++    uint32_t count;
++    uint32_t capacity;
++    uint32_t observed;
++    uint32_t publish;
++    bool perturbed;
++    uint32_t pending[2];
++    uint32_t pending_count;
++    uint32_t mode;
++    uint32_t blocks;
++    uint32_t ranges;
++    uint32_t attribute_end;
++    uint32_t attribute_depth;
++    uint8_t attribute_open;
++    bool pragma;
++    bool failed;
++};
++
+ typedef struct Preprocessor Preprocessor;
+ 
+ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table);
+@@ -1768,6 +1799,7 @@ struct Preprocessor
+     // The output's tokens whose keywords have their kinds (pp_resolve_keywords_range): the vectorized kernels resolve a
+     // chunk at a time as the output grows, while its tokens are in the caches, and pp_resolve_keywords the rest.
+     uint32_t keywords_resolved;
++    PPReturnWindow return_window;
+     // The output kind of each identifier id below BUSTER_PP_KEYWORD_TABLE: its keyword's in this language mode, or an
+     // identifier's.
+     uint8_t keyword_kinds[BUSTER_PP_KEYWORD_TABLE] __attribute__((aligned(64)));
+@@ -6023,6 +6055,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions*
+ 
+ static void pp_release_unit(Preprocessor* pp)
+ {
++    free(pp->return_window.rows);
+     pp_tokens_release(&pp->output);
+     pp_tokens_release(&pp->arguments);
+     pp_tokens_release(&pp->captures);
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 92d1b6204..aa701ea86 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -13513,6 +13513,10 @@ static bool pp_initialize_time(Preprocessor* pp)
+ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, InternTable* table)
+ {
+     *pp = (Preprocessor){ 0 };
++    const char* use = getenv("BUSTER_TEST_PP_RETURN_USE");
++    pp->return_window.publish = use != NULL && strcmp(use, "publish") == 0 ? 1 : use != NULL && strcmp(use, "fault") == 0 ? 2 : use != NULL && strcmp(use, "verify") == 0 ? 3 : 0;
++    const char* return_window = getenv("BUSTER_TEST_PP_RETURN_WINDOW");
++    pp->return_window.mode = return_window != NULL && strcmp(return_window, "stream") == 0 ? 1 : return_window != NULL && strcmp(return_window, "replay") == 0 ? 2 : 0;
+     pp->diagnostic_include_range = BUSTER_PP_NONE;
+     pp->diagnostic_position = BUSTER_PP_NONE;
+     pp->diagnostic_run_first = BUSTER_PP_NONE;
+@@ -14605,12 +14609,134 @@ static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, u
+     return visible;
+ }
+ 
++// The bounded grammar accepts one ordinary identifier or a nonnegative decimal int in a return.
++static void pp_return_leaf(Preprocessor* pp, uint32_t statement)
++{
++    const PPTokens* tokens = &pp->output;
++    if (tokens->kinds[statement + 2] != C_TOKEN_SEMI) return;
++    const uint32_t leaf = statement + 1;
++    const uint8_t kind = tokens->kinds[leaf];
++    const bool name = kind == C_TOKEN_RAW_IDENTIFIER;
++    uint32_t value = tokens->values[leaf];
++    if (!name)
++    {
++        if (kind == C_TOKEN_NUMERIC_CONSTANT)
++        {
++            const uint32_t location = tokens->locations[leaf];
++            const uint32_t raw = value - location;
++            if (raw > 10 || raw == 0) return;
++            uint8_t buffer[24];
++            const uint8_t* spelling;
++            const uint32_t length = pp_spelling(pp, kind, value, location, buffer, &spelling);
++            if (length == 0 || (length != 1 && spelling[0] == '0')) return;
++            uint64_t number = 0;
++            for (uint32_t i = 0; i < length; ++i)
++            {
++                const uint32_t digit = (uint32_t)spelling[i] - '0';
++                if (digit > 9) return;
++                number = number * 10 + digit;
++            }
++            if (number > INT32_MAX) return;
++            value = (uint32_t)number;
++        }
++        else if (kind != BUSTER_PP_KIND_INTEGER || value > INT32_MAX) return;
++    }
++    PPReturnWindow* window = &pp->return_window;
++    if (window->count == window->capacity)
++    {
++        const uint32_t next = window->capacity == 0 ? 64 : 2 * window->capacity;
++        PPReturnRow* rows = realloc(window->rows, (size_t)next * sizeof(*rows));
++        if (rows == NULL)
++        {
++            window->failed = true;
++            return;
++        }
++        window->rows = rows;
++        window->capacity = next;
++    }
++    window->rows[window->count++] = (PPReturnRow){.statement = statement, .value = value, .name = name};
++}
++
++// Attribute arguments are balanced tokens and may spell "return 3;" without a statement. Scan only
++// the contents of each attribute; a group extending beyond the available output resumes at its next token.
++static void pp_return_skip_attribute(Preprocessor* pp)
++{
++    PPReturnWindow* window = &pp->return_window;
++    const uint8_t open = window->attribute_open;
++    const uint8_t close = open == C_TOKEN_L_SQUARE ? C_TOKEN_R_SQUARE : C_TOKEN_R_PAREN;
++    for (; window->attribute_end < pp->output.count; ++window->attribute_end)
++    {
++        const uint8_t k = pp->output.kinds[window->attribute_end];
++        if (window->attribute_depth == 0 && k != open)
++        {
++            window->attribute_open = 0;
++            break;
++        }
++        window->attribute_depth += k == open;
++        window->attribute_depth -= k == close;
++        if (window->attribute_depth == 0)
++        {
++            window->attribute_end++;
++            window->attribute_open = 0;
++            break;
++        }
++    }
++}
++
++static void pp_return_block(Preprocessor* pp, uint32_t at, uint32_t length, __m512i resolved)
++{
++    PPReturnWindow* window = &pp->return_window;
++    const uint32_t end = at + length;
++    window->blocks++;
++    // A previous short keyword range (or a return at the end of a block) can leave at most two.
++    uint32_t still = 0;
++    for (uint32_t p = 0; p < window->pending_count; ++p)
++    {
++        const uint32_t t = window->pending[p];
++        if (t + 2 < end) pp_return_leaf(pp, t);
++        else window->pending[still++] = t;
++    }
++    window->pending_count = still;
++    const __mmask64 live = _bzhi_u64(UINT64_MAX, length);
++    const uint8_t keyword = BUSTER_PP_KIND_KEYWORD + C_NAME_RETURN - 1;
++    const uint64_t returns = _mm512_mask_cmpeq_epi8_mask(live, resolved, _mm512_set1_epi8((char)keyword));
++    const uint64_t hashes = _mm512_mask_cmpeq_epi8_mask(live, resolved, _mm512_set1_epi8(C_TOKEN_HASH));
++    const uint64_t ends = _mm512_mask_cmpeq_epi8_mask(live, resolved, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
++    const uint64_t squares = _mm512_mask_cmpeq_epi8_mask(live, resolved, _mm512_set1_epi8(C_TOKEN_L_SQUARE));
++    const uint64_t standard = squares & ((squares << 1) | (at != 0 && pp->output.kinds[at - 1] == C_TOKEN_L_SQUARE));
++    const uint64_t gnu = _mm512_mask_cmpeq_epi8_mask(live, resolved, _mm512_set1_epi8((char)(BUSTER_PP_KIND_KEYWORD + C_NAME_GNU_ATTRIBUTE - 1))) |
++                         _mm512_mask_cmpeq_epi8_mask(live, resolved, _mm512_set1_epi8((char)(BUSTER_PP_KIND_KEYWORD + C_NAME_GNU_ATTRIBUTE2 - 1)));
++    if (window->attribute_open != 0 && at + length > window->attribute_end) pp_return_skip_attribute(pp);
++    for (uint64_t events = returns | hashes | ends | standard | gnu; events != 0; events &= events - 1)
++    {
++        const uint32_t lane = (uint32_t)__builtin_ctzll(events);
++        const uint32_t t = at + lane;
++        const uint64_t bit = UINT64_C(1) << lane;
++        if (ends & bit) window->pragma = false;
++        else if (hashes & bit) window->pragma |= pp->output.locations[t] == pp->hash_location;
++        else if (!window->pragma && t >= window->attribute_end && ((standard | gnu) & bit))
++        {
++            window->attribute_open = standard & bit ? C_TOKEN_L_SQUARE : C_TOKEN_L_PAREN;
++            window->attribute_depth = standard & bit ? 2 : 0;
++            window->attribute_end = t + 1;
++            pp_return_skip_attribute(pp);
++        }
++        else if (!window->pragma && t >= window->attribute_end && (returns & bit))
++        {
++            window->observed++;
++            if (t + 2 < end) pp_return_leaf(pp, t);
++            else window->pending[window->pending_count++] = t;
++        }
++    }
++}
++
+ // Gives each identifier of output tokens [begin, end) that is a keyword in the language mode its keyword's kind, 64 tokens
+ // at a time: one compare finds the identifiers, and for each 16, one compare their ids below the table's size, and two
+ // vpermi2b look their kinds up in pp->keyword_kinds's halves, one picked by bit 7 of the id.
+ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t end)
+ {
+     PPTokens* out = &pp->output;
++    pp->return_window.ranges += pp->return_window.mode == 1;
+     const __m512i table0 = _mm512_loadu_si512(pp->keyword_kinds);
+     const __m512i table1 = _mm512_loadu_si512(pp->keyword_kinds + 64);
+     const __m512i table2 = _mm512_loadu_si512(pp->keyword_kinds + 128);
+@@ -14619,6 +14745,7 @@ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t
+     {
+         const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, end - i);
+         const __m512i kinds = _mm512_maskz_loadu_epi8(valid, out->kinds + i);
++        __m512i resolved = kinds;
+         const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+         if (identifiers != 0)
+         {
+@@ -14641,7 +14768,9 @@ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t
+                 small |= (uint64_t)keywords << (group * 16);
+             }
+             _mm512_mask_storeu_epi8(out->kinds + i, small, looked);
++            if (pp->return_window.mode == 1) resolved = _mm512_mask_mov_epi8(kinds, small, looked);
+         }
++        if (pp->return_window.mode == 1) pp_return_block(pp, i, end - i < 64 ? end - i : 64, resolved);
+     }
+ }
+ 
+@@ -14650,6 +14779,15 @@ static void pp_resolve_keywords(Preprocessor* pp)
+ {
+     pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+     pp->keywords_resolved = pp->output.count;
++    if (pp->return_window.mode == 2)
++    {
++        pp->return_window.ranges++;
++        for (uint32_t at = 0; at < pp->output.count; at += 64)
++        {
++            const uint32_t live = pp->output.count - at < 64 ? pp->output.count - at : 64;
++            pp_return_block(pp, at, live, _mm512_maskz_loadu_epi8(_bzhi_u64(UINT64_MAX, live), pp->output.kinds + at));
++        }
++    }
+ }
+ 
+ // The markers' state before the first token: the stack is the main file's, at its first line, which the text gives
