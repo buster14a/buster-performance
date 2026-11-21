@@ -28,3 +28,5 @@ tar -xJf runs.tar.xz
 python3 ../../tests-holes-2850-2026-11-21/9700x/xh-table.py refbit costbit -costbit 7 reproduced.json
 cmp summary.json reproduced.json
 ```
+
+The [four-corpus H3/O2 comparisons](acceptance/corpus-counts.tsv) on SQLite, Lua, musl and the compiler source under default and `-Wall -Wextra` retained all 154 reported counts versus #3213. Six optional refusal fields were absent on both sides. [Verdicts](acceptance/corpus-checks.txt)

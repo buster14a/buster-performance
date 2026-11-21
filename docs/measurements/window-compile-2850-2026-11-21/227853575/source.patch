@@ -1,0 +1,443 @@
+diff --git a/docs/commands/lowering.md b/docs/commands/lowering.md
+index dcbe42652..69e43e722 100644
+--- a/docs/commands/lowering.md
++++ b/docs/commands/lowering.md
+@@ -2708,6 +2708,16 @@ native CONST entry. The lowering emits this entry in the ordinary body's tape.
+ For example, `return 18 + 24;` replaces two literal nodes, the addition and the
+ return conversion with one summary carrying 42.
+ 
++The reader also accepts `return x;` and `return +x;` for an unqualified,
++ordinary automatic int or int parameter. The LOCAL entry keeps the declared
++object. The lowering relocates it to the enclosing body's local number.
++The entry records the source identifier's token offset within the return.
++The uninitialized pass uses the summary node's reach and order together with
++that token, so that it still reports the first evaluated read of an
++uninitialized variable, including its source position and note. An
++unreachable read still counts as a syntactic use of a written parameter.
++Other storage classes, special registers and qualified types keep their graph.
++
+ Admission requires the entire expression in the same coded chunk. Other types,
+ operators and spellings, debug information, deferred parts, and units requiring
+ musttail validation use the existing graph. The window checks the coded tokens
+diff --git a/src/buster/compiler/c_check_common_warnings.c b/src/buster/compiler/c_check_common_warnings.c
+index 6fc42bb28..903901087 100644
+--- a/src/buster/compiler/c_check_common_warnings.c
++++ b/src/buster/compiler/c_check_common_warnings.c
+@@ -11312,6 +11312,36 @@ static bool check_common_sizeof_operand(const uint8_t* roles, const uint32_t* pa
+     return answer == 2;
+ }
+ 
++// A full expression collapsed to a window summary still reads its local at the identifier's token.
++// The summary node supplies its order and reachability in the graph. Its tape's LOCAL holds the object
++// before the lowering maps that object to the body's register slot.
++typedef struct CheckCommonRead CheckCommonRead;
++struct CheckCommonRead
++{
++    uint32_t object;
++    uint32_t token;
++};
++
++static CheckCommonRead check_common_local_read(const CheckInput* input, const CheckStream* stream, uint32_t node)
++{
++    const CheckGraph* graph = &input->graph;
++    CheckCommonRead read = { .token = graph->tokens[node] };
++    if (graph->ops[node] == CHECK_OP_VALUE)
++    {
++        const CheckInputWindowEntry* row = check_input_window_row(input, node);
++        if (row != NULL && row->read_offset != 0)
++        {
++            read.object = (uint32_t)row->value;
++            read.token += row->read_offset;
++        }
++        else if (check_stream_category(stream, node) == CHECK_LVALUE)
++        {
++            read.object = check_stream_object(stream, node);
++        }
++    }
++    return read;
++}
++
+ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
+                                        TypeTable* types, const CheckCommonFacts* facts, Arena* scratch)
+ {
+@@ -11597,9 +11627,9 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
+             }
+             if (op == CHECK_OP_VALUE)
+             {
+-                const uint32_t object = check_stream_object(stream, node);
+-                const uint32_t declaration = object != 0 ? object - 1 : BUSTER_CHECK_NONE;
+-                if (declaration < count && check_stream_category(stream, node) == CHECK_LVALUE)
++                const CheckCommonRead read = check_common_local_read(input, stream, node);
++                const uint32_t declaration = read.object != 0 ? read.object - 1 : BUSTER_CHECK_NONE;
++                if (declaration < count)
+                 {
+                     if (evaluated[node] != 0 && nonread[node] == 0)
+                     {
+@@ -11636,7 +11666,7 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
+             const uint32_t name = parser->tokens.names[declaration];
+             const uint32_t initializer_begin = check_common_sparse_get(input->initializer_begins, declaration);
+             const uint32_t initializer_end = check_common_sparse_get(input->initializer_ends, declaration);
+-            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? graph->tokens[first_read[declaration]] : BUSTER_CHECK_NONE;
++            uint32_t read_token = first_read[declaration] != BUSTER_CHECK_NONE ? check_common_local_read(input, stream, first_read[declaration]).token : BUSTER_CHECK_NONE;
+             // A lone identifier in a brace initializer (`int x = { x };`) is a self-read the graph's value column does
+             // not retain; the declaration's own token range finds it. An expression initializer's reads are the
+             // graph's, so only a braced range is scanned, and not through a sizeof operand.
+@@ -11727,11 +11757,9 @@ static void check_common_uninitialized(const Parser* parser, Preprocessor* pp, c
+                     bool later = false;
+                     for (uint32_t node = 0; !later && node < graph->count; node += 1)
+                     {
+-                        const uint32_t object = graph->ops[node] == CHECK_OP_VALUE ? check_stream_object(stream, node) : 0;
+-                        const uint32_t token = object != 0 ? graph->tokens[node] : BUSTER_CHECK_NONE;
+-                        later = object == declaration + 1 && evaluated[node] != 0 && nonread[node] == 0 &&
+-                                check_stream_category(stream, node) == CHECK_LVALUE &&
+-                                token < parser->tokens.count && (token < self_begin || token >= self_end);
++                        const CheckCommonRead read = check_common_local_read(input, stream, node);
++                        later = read.object == declaration + 1 && evaluated[node] != 0 && nonread[node] == 0 &&
++                                read.token < parser->tokens.count && (read.token < self_begin || read.token >= self_end);
+                     }
+                     self_bare_alone = !later;
+                 }
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 6996a8d94..4e902d1b9 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1800,13 +1800,13 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
+ #endif
+ }
+ 
+-// --node-window's first complete expressions have one native CONST each and no references, events, calls or
+-// relocations. Admit them from the chunk's coded postorder and the reader's int literals, before the walk numbers
+-// any of their nodes. Their return type is already bound. For other spellings or a fault the walk sees the
++// --node-window's first complete expressions have one native CONST or LOCAL each. The chunk's coded postorder,
++// decoded int literals, bound names and return type establish admission before the walk numbers their nodes.
++// A LOCAL carries its read event and its object for relocation. For other spellings or a fault the walk sees the
+ // original tokens, including the original literal cursor. The node machine's fold lives in the checker unit.
+ bool check_node_window_prepare(void);
+ bool check_node_window_fold_int(CheckOp op, uint32_t left, uint32_t right, bool binary, uint32_t* result);
+-void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value);
++void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value, uint16_t read_offset);
+ 
+ static uint32_t check_input_window_code(const uint32_t* classes, uint32_t i)
+ {
+@@ -1823,14 +1823,17 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
+     if (reader->return_types[token] == BUSTER_TYPE_INT && token < parser->tokens.count && parser->tokens.count - token >= 3 &&
+         parser->tokens.kinds[token] == PARSE_KIND_RETURN)
+     {
+-        if (end - start >= 1 && tokens[end - 1] == token + 1 && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL &&
++        if (end - start >= 1 && tokens[end - 1] == token + 1 &&
++            (check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_LITERAL || check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_IDENTIFIER) &&
+             parser->tokens.kinds[token + 2] == PARSE_KIND_SEMI)
+         {
+             first = end - 1;
+         }
+         else if (end - start >= 2 && parser->tokens.count - token >= 4 && tokens[end - 2] == token + 2 && tokens[end - 1] == token + 1 &&
+-                 check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
+-                 parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS && parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
++                 check_input_window_code(classes, end - 1) == CHECK_INPUT_CODE_PREFIX &&
++                 ((check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL && parser->tokens.kinds[token + 1] == PARSE_KIND_MINUS) ||
++                  (check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_IDENTIFIER && parser->tokens.kinds[token + 1] == PARSE_KIND_PLUS)) &&
++                 parser->tokens.kinds[token + 3] == PARSE_KIND_SEMI)
+         {
+             first = end - 2;
+         }
+@@ -1870,16 +1873,37 @@ static CheckInputWindowEntry* check_input_window_entry(CheckInputReader* reader)
+ }
+ 
+ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, uint32_t first, uint32_t end,
+-                                    const CheckInputLiterals* literals, uint32_t* literal)
++                                    const CheckInputLiterals* literals, uint32_t* literal, const CheckInputIdentifiers* identifiers, uint32_t* identifier)
+ {
+     const uint32_t returned = tokens[end];
+     const uint32_t operands = end - first;
+     const bool binary = operands == 3;
+-    const uint32_t left = literals->values[*literal];
+-    const uint32_t right = binary ? literals->values[*literal + 1] : 0;
+-    uint32_t value = left;
+-    const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
+-    const bool admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
++    const bool name = reader->parser->tokens.kinds[tokens[first]] == PARSE_KIND_IDENTIFIER;
++    uint32_t value = 0;
++    bool admitted;
++    if (name)
++    {
++        const uint32_t i = *identifier;
++        const uint32_t declared = identifiers->declarations[i];
++        const CheckInput* input = reader->output;
++        // Only an ordinary automatic int, with the reader's own lvalue classification, object and declaration.
++        // Static storage, thread-local storage, special registers, qualifiers and constexpr all keep their walk.
++        admitted = identifiers->status[i] == (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) &&
++                   identifiers->types[i] == (BUSTER_TYPE_INT | ((uint64_t)CHECK_LVALUE << 32)) &&
++                   identifiers->flags[i] == (((uint64_t)CHECK_CONSTANT_ADDRESS << 32) | BUSTER_CHECK_NONNULL_ADDRESS) && declared < input->token_count &&
++                   identifiers->objects[i] == (uint64_t)declared + 1 && input->declaration_kinds[declared] == C_BINDING_OBJECT &&
++                   !check_input_bit(input->declaration_bits, declared, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
++                   check_sparse_get(input->declaration_bodies, declared) < input->token_count;
++        value = (uint32_t)identifiers->objects[i];
++    }
++    else
++    {
++        const uint32_t left = literals->values[*literal];
++        const uint32_t right = binary ? literals->values[*literal + 1] : 0;
++        const CheckOp op = binary ? check_input_binary(reader->parser->tokens.kinds[tokens[end - 1]]) : CHECK_OP_NEGATIVE;
++        value = left;
++        admitted = left != BUSTER_CHECK_NONE && right != BUSTER_CHECK_NONE && (operands == 1 || check_node_window_fold_int(op, left, right, binary, &value));
++    }
+     CheckInputWindowEntry* entry = admitted ? check_input_window_entry(reader) : NULL;
+     bool published = false;
+     if (entry != NULL)
+@@ -1888,9 +1912,22 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
+         const uint32_t node = check_input_batch_add(reader, batch, CHECK_OP_VALUE, returned, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, CHECK_INPUT_FORM_LEAF);
+         if (node != BUSTER_CHECK_NONE)
+         {
+-            const CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = value };
++            CheckValue summary = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
++            if (name)
++            {
++                // The direct lvalue-to-rvalue conversion retains its object even after losing its
++                // address-constant kind. Unary plus produces a new arithmetic value with no object.
++                summary.flags = operands == 1 ? BUSTER_CHECK_NONNULL_ADDRESS : 0;
++                summary.object = operands == 1 ? value : 0;
++            }
++            else
++            {
++                summary.flags = BUSTER_CHECK_ICE;
++                summary.constant_kind = CHECK_CONSTANT_INTEGER;
++                summary.integer = value;
++            }
+             check_input_batch_set_leaf(reader, batch, node, &summary);
+-            check_node_window_int_entry(entry, value);
++            check_node_window_int_entry(entry, value, name ? (uint16_t)(tokens[first] - returned) : 0);
+             entry->node = node;
+             CheckInput* input = reader->output;
+             input->window_count += 1;
+@@ -1899,7 +1936,8 @@ static bool check_input_window_take(CheckInputReader* reader, CheckInputBatch* b
+             input->token_nodes[returned] = node;
+             reader->query_types[returned] = BUSTER_TYPE_INT;
+             reader->first_value[returned] = BUSTER_CHECK_NONE;
+-            *literal += binary ? 2 : 1;
++            *literal += name ? 0 : binary ? 2 : 1;
++            *identifier += name ? 1 : 0;
+             published = true;
+         }
+     }
+@@ -1939,7 +1977,7 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
+         {
+             check_input_expression_coded(reader, batch, tokens[cursor], (uint8_t)classes[cursor], true, identifiers, &identifier, literals, &literal, visited);
+         }
+-        if (!reader->output->resource && first < end && check_input_window_take(reader, batch, tokens, first, end, literals, &literal))
++        if (!reader->output->resource && first < end && check_input_window_take(reader, batch, tokens, first, end, literals, &literal, identifiers, &identifier))
+         {
+             cursor = end + 1;
+         }
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 3ebc4093a..9398117b0 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -891,7 +891,7 @@ struct CheckInputMusttail
+ 
+ #include "c_check_noderef_types.c"
+ 
+-// A taken expression's typed tape. The first accepted class, a return of a plain int constant, has one entry.
++// A taken int return's single native entry. A LOCAL's value is its declared object until lowering.
+ typedef struct CheckInputWindowEntry CheckInputWindowEntry;
+ struct CheckInputWindowEntry
+ {
+@@ -899,6 +899,8 @@ struct CheckInputWindowEntry
+     uint32_t node;
+     uint8_t kind;
+     uint8_t class;
++    // The read of a local, in tokens from its return (zero for a constant).
++    uint16_t read_offset;
+ };
+ 
+ struct CheckInput
+@@ -1294,6 +1296,14 @@ struct CheckInput
+     uint32_t window_nodes;
+ };
+ 
++// The tape row owned by this graph node. VALUE is the only operator whose members index can name a
++// summary, and the row records its owner to distinguish the graph's other uses of that column.
++static inline __attribute__((unused)) const CheckInputWindowEntry* check_input_window_row(const CheckInput* input, uint32_t node)
++{
++    const uint32_t slot = input->window_count != 0 && input->graph.ops[node] == CHECK_OP_VALUE ? input->graph.members[node] : 0;
++    return slot != 0 && slot <= input->window_count && input->window_entries[slot - 1].node == node ? input->window_entries + slot - 1 : NULL;
++}
++
+ static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)
+ {
+     return token < input->token_count && check_sparse_present(input->target_candidates) ? check_sparse_get(input->target_candidates, token) : BUSTER_CHECK_NONE;
+diff --git a/src/buster/compiler/c_check_node_census_test.c b/src/buster/compiler/c_check_node_census_test.c
+index 7efc3b379..f19232e93 100644
+--- a/src/buster/compiler/c_check_node_census_test.c
++++ b/src/buster/compiler/c_check_node_census_test.c
+@@ -6130,11 +6130,12 @@ static void node_window_test_compile(CheckTest* test)
+     {
+         const CheckInput* reference = &plain.path.input;
+         CheckInput* input = &window.path.input;
+-        check_test_expect(test, reference->window_count == 0 && input->window_count == 7 && input->window_nodes == 23,
+-                          "node-window admits each of the seven returns on baked and runtime-initialized transition tables");
++        check_test_expect(test, reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28,
++                          "node-window admits nine returns on baked and runtime-initialized transition tables");
+         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
+-                          "node-window replaces the 23 ordinary nodes by the seven return summaries");
++                          "node-window replaces 28 ordinary nodes by nine return summaries");
+         bool same = true;
++        uint32_t reads = 0;
+         for (uint32_t i = 0; same && i < input->window_count; i += 1)
+         {
+             const CheckInputWindowEntry* row = input->window_entries + i;
+@@ -6148,11 +6149,20 @@ static void node_window_test_compile(CheckTest* test)
+             }
+             const CheckValue value = check_stream_value(&window.path.stream, node);
+             const CheckValue regular = check_stream_value(&plain.path.stream, other);
+-            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && check_test_value_equal(&value, &regular) &&
+-                   row->kind == BUSTER_TYPED_CONST && row->class == BUSTER_TYPED_CLASS_I32 &&
+-                   row->value == (uint64_t)(int64_t)(int32_t)value.integer;
++            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 &&
++                   check_test_value_equal(&value, &regular) && row->class == BUSTER_TYPED_CLASS_I32;
++            if (row->read_offset != 0)
++            {
++                const uint32_t token = returned + row->read_offset;
++                same &= row->kind == BUSTER_TYPED_LOCAL && token < input->token_count && input->declarations[token] + 1 == row->value;
++                reads += 1;
++            }
++            else
++            {
++                same &= row->kind == BUSTER_TYPED_CONST && row->value == (uint64_t)(int64_t)(int32_t)value.integer;
++            }
+         }
+-        check_test_expect(test, same, "node-window publishes the full ordinary checked value and native row for each admitted return");
++        check_test_expect(test, same && reads == 2, "node-window publishes each complete ordinary checked value and its native row, including two local read events");
+         CheckProgramLowered original = { 0 };
+         CheckProgramLowered first = { 0 };
+         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index 85631d66b..16fe7210e 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -1385,11 +1385,12 @@ static inline __attribute__((always_inline)) uint64_t node_rows_extend(uint64_t
+ 
+ 
+ // The CONST row has no conversion or relocation: its payload is the sign-extended i32 the native tape uses.
+-void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value)
++void check_node_window_int_entry(CheckInputWindowEntry* entry, uint32_t value, uint16_t read_offset)
+ {
+-    entry->kind = BUSTER_TYPED_CONST;
++    entry->kind = read_offset != 0 ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_CONST;
+     entry->class = BUSTER_TYPED_CLASS_I32;
+-    entry->value = node_rows_extend(value, entry->class);
++    entry->value = read_offset != 0 ? value : node_rows_extend(value, entry->class);
++    entry->read_offset = read_offset;
+ }
+ 
+ // A floating constant's CONST's value of class `class` (F32 or F64: C takes no other's, node_machine_constant_takes)
+diff --git a/src/buster/compiler/c_check_operand_diagnostic_driver_test.c b/src/buster/compiler/c_check_operand_diagnostic_driver_test.c
+index 7d647168b..f30556d9b 100644
+--- a/src/buster/compiler/c_check_operand_diagnostic_driver_test.c
++++ b/src/buster/compiler/c_check_operand_diagnostic_driver_test.c
+@@ -93,7 +93,7 @@ static void check_test_driver_operand_diagnostics(CheckTest* test, const char* c
+         bool node_window;
+     } files[] =
+     {
+-        { .name = "node_window_warnings", .option = "-Wall", .warnings = 5, .notes = 1, .node_window = true },
++        { .name = "node_window_warnings", .option = "-Wall", .warnings = 8, .notes = 3, .node_window = true },
+         { .name = "unary", .errors = 9 },
+         { .name = "binary", .errors = 12 },
+         { .name = "conditional", .errors = 13 },
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 2bc8812ad..968422ad8 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -15708,12 +15708,10 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
+         else if (!discard)
+         {
+             const uint32_t before = writer->count;
+-            const CheckInput* input = writer->program->input;
+-            const uint32_t entry = input->window_count != 0 && op == CHECK_OP_VALUE ? graph->members[node] : 0;
+-            if (__builtin_expect(entry != 0 && entry <= input->window_count && input->window_entries[entry - 1].node == node, 0))
++            const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
++            if (__builtin_expect(row != NULL, 0))
+             {
+-                const CheckInputWindowEntry row = input->window_entries[entry - 1];
+-                check_lower_emit(writer, row.kind, row.class, row.value);
++                check_lower_emit(writer, row->kind, row->class, row->value);
+             }
+             else
+             {
+@@ -15729,8 +15727,21 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
+     }
+     else if (op == CHECK_OP_VALUE)
+     {
++        const CheckInputWindowEntry* row = check_input_window_row(program->input, node);
+         const uint32_t object = value->object;
+-        if (value->type == BUSTER_TYPE_VOID)
++        if (__builtin_expect(row != NULL, 0))
++        {
++            const uint32_t local = row->value < program->object_count ? check_lower_local_of(writer, (uint32_t)row->value) : BUSTER_CHECK_NONE;
++            if (row->kind == BUSTER_TYPED_LOCAL && local < writer->local_count)
++            {
++                check_lower_emit(writer, row->kind, row->class, local);
++            }
++            else
++            {
++                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
++            }
++        }
++        else if (value->type == BUSTER_TYPE_VOID)
+         {
+             // The final value of a statement region without an expression statement is void.
+         }
+diff --git a/tests/checker/node-window.c b/tests/checker/node-window.c
+index cb768f877..ae59b9c00 100644
+--- a/tests/checker/node-window.c
++++ b/tests/checker/node-window.c
+@@ -15,3 +15,4 @@ int suffixed(void) { return 7u + 8; }
+ int division(void) { return 42 / 7; }
+ int overflow(void) { return 999999999 * 7; }
+ int mixed(int x) { if (x) return x; return 1 + 4; }
++int local_read(int x) { int y = x; return +y; }
+diff --git a/tests/driver/operand_diagnostics/node_window_warnings.c b/tests/driver/operand_diagnostics/node_window_warnings.c
+index 6d9e50fe0..2f8578128 100644
+--- a/tests/driver/operand_diagnostics/node_window_warnings.c
++++ b/tests/driver/operand_diagnostics/node_window_warnings.c
+@@ -41,3 +41,41 @@ int muted(void) { return 1 / 0; }
+ #pragma clang diagnostic pop
+ 
+ int restored(void) { return 3 / 0; }
++
++int local_uninitialized(void)
++{
++    int value;
++    return +value;
++}
++
++int initialized_parameter(int parameter, int new_value)
++{
++    parameter = new_value;
++    return parameter;
++}
++
++#pragma clang diagnostic push
++#pragma clang diagnostic warning "-Wunused-but-set-parameter"
++int syntactic_use(int parameter)
++{
++    parameter = 4;
++    return 8;
++    return parameter;
++}
++#pragma clang diagnostic pop
++
++int bare_self_initialize(void)
++{
++    int value = value;
++    return value;
++}
++
++int earliest(int branch)
++{
++    int value;
++    if (branch)
++    {
++        return +value;
++    }
++    return value;
++}
