@@ -1,0 +1,110 @@
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index 2307bc6e2..e2965c6cf 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -261,6 +261,9 @@ static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedM
+ 
+ struct CheckGraph
+ {
++    const TypeId* effect_types;
++    const char* effect_trace;
++    bool effect_replay;
+     // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+     // and 0 for none.
+     const CheckInputMarkedMember* marked_members;
+@@ -4212,10 +4215,19 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         // The main loop writes each node once, first: in a fresh output it writes no zero (CheckStream.zero_columns), which the
+         // passes after it, which may write a node again, do.
+         stream->zero_columns = zero_output;
++        FILE* effect_file = graph->effect_trace ? fopen(graph->effect_trace,"a") : NULL;
++        if (graph->effect_trace && !effect_file) abort();
++        if (effect_file) fprintf(effect_file,"begin graph=%u types=%u transitions=%u regions=%u level=%u\n",count,types->types.count,transitions,options->regions,options->level_order);
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
+         while (node < count)
+         {
++            const uint32_t first_row=node, first_type=types->types.count;
++            if (graph->effect_replay && graph->effect_types && graph->effect_types[node])
++            {
++                if (regions || transitions) abort();
++                if (!type_pointer(types,graph->effect_types[node])) abort();
++            }
+             if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+             {
+                 check_graph_leaf(types, graph, stream, node);
+@@ -4239,7 +4251,15 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+                     check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
+                 }
+             }
++            if (effect_file)
++            {
++                for (uint32_t id=first_type;id<types->types.count;id++)
++                    fprintf(effect_file,"new token=%u op=%u node=%u through=%u id=%u kind=%u base=%u code=%u flags=%u hash=%" PRIu64 "\n",
++                            graph->tokens[first_row],graph->ops[first_row],first_row,node-1,id,types->types.kind[id],types->types.base[id],
++                            types->types.code[id],types->types.flags[id],types->types.hash[id]);
++            }
+         }
++        if (effect_file) { fprintf(effect_file,"end graph=%u types=%u\n",count,types->types.count);fclose(effect_file); }
+         stream->zero_columns = false;
+         for (uint32_t pass = 0; result && pass < 2; pass += 1)
+         {
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 4339710b6..59e1cba1b 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12774,7 +12774,55 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                     .fresh_output = true,
+                 };
+                 CheckStream stream;
++                const char* effect_trace = getenv("NODE_CALL_EFFECT_TRACE");
++                if (effect_trace)
++                {
++                    TypeId* named=BUSTER_ARENA_PUSH_ARRAY(output_arena,TypeId,(uint64_t)input.graph.count+1);
++                    if (!named) abort();
++                    memset(named,0,((size_t)input.graph.count+1)*sizeof(TypeId));
++                    FILE* log=fopen(effect_trace,"w"); if (!log) abort();
++                    for (uint32_t i=0;i<input.window_count;i++)
++                    {
++                        const CheckInputWindowSummary* sum=input.window_summaries+i;
++                        for (uint32_t k=0;k<sum->count;k++)
++                        {
++                            const CheckInputWindowRow* row=input.window_rows+sum->first+k;
++                            if (row->kind!=BUSTER_TYPED_CALL) continue;
++                            const TypeId fn=(TypeId)(row->value>>32);
++                            if (named[sum->node] || type_kind(&types,fn)!=BUSTER_TYPE_KIND_FUNCTION) abort();
++                            named[sum->node]=fn;
++                            fprintf(log,"site node=%u root=%u callee=%u fn=%u pointer=%u\n",sum->node,input.graph.tokens[sum->node],row->token,fn,type_find_pointer(&types,fn));
++                        }
++                    }
++                    fclose(log);
++                    input.graph.effect_types=named;input.graph.effect_replay=getenv("NODE_CALL_EFFECT_REPLAY")!=NULL;input.graph.effect_trace=effect_trace;
++                }
+                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
++                if (ready && effect_trace)
++                {
++                    FILE* log=fopen(effect_trace,"a");if (!log) abort();
++                    for (uint32_t i=1;i<types.types.count;i++)
++                        fprintf(log,"type %u %u %u %u %u %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",i,types.types.kind[i],types.types.code[i],types.types.flags[i],
++                                types.types.base[i],types.types.extent[i],types.types.size[i],types.types.hash[i]);
++                    fclose(log);
++                    const char* values=getenv("NODE_CALL_EFFECT_VALUES");
++                    if (values)
++                    {
++                        FILE* val=fopen(values,"wb");if (!val) abort();
++                        for (uint32_t n=0;n<input.graph.count;n++)
++                        {
++                            const CheckValue v=check_stream_value(&stream,n);
++                            const uint32_t head[4]={input.graph.tokens[n],input.graph.ops[n],input.graph.ops[n] == CHECK_OP_CALL ? input.graph.argument_counts[n] : 0,0};
++                            fwrite(head,sizeof(head),1,val);
++                            fwrite(&v,sizeof(v),1,val);
++                            fwrite(stream.conversions+n,sizeof(*stream.conversions),1,val);
++                            fwrite(stream.member_offsets+n,sizeof(*stream.member_offsets),1,val);
++                            const uint32_t start=input.graph.argument_offsets[n];
++                            for (uint32_t a=0;a<head[2];a++) fwrite(stream.argument_conversions+start+a,sizeof(*stream.argument_conversions),1,val);
++                        }
++                        if (fclose(val)) abort();
++                    }
++                }
+                 if (stage_clock != NULL)
+                 {
+                     stage_clock->transition_hits += stream.statistics.transition_hits;

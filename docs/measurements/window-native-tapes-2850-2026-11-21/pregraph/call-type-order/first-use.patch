@@ -1,0 +1,262 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index ffdb21e2b..6a5b862b5 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2184,8 +2184,36 @@ static bool check_input_window_call(CheckInputReader* reader, CheckInputBatch* b
+     const bool drop=statement && ret!=BUSTER_TYPE_VOID;
+     if (drop) check_node_window_call_row(rows+n+1,types,ret,0,root,false,true,false);
+     const CheckValue value={.type=statement?BUSTER_TYPE_VOID:ret,.category=CHECK_RVALUE,.flags=BUSTER_CHECK_SIDE_EFFECT};
++    CheckInput* input = reader->output;
++    CheckGraph* graph = &input->graph;
++    // Once a pointer exists, or an earlier kept summary requests it, later calls of the same prototype cannot
++    // be the first operation to intern it during graph checking.
++    const uint32_t word = type_index(fn) / 64;
++    const uint64_t bit = UINT64_C(1) << (type_index(fn) % 64);
++    if (word >= input->window_decay_words)
++    {
++        const uint32_t previous = input->window_decay_words;
++        uint64_t* known = check_input_window_room(reader->arena, input->window_known_decays, previous, &input->window_decay_words,
++                                                  word + 1 - previous, sizeof(*known));
++        if (known == NULL) return false;
++        memset(known + previous, 0, (size_t)(input->window_decay_words - previous) * sizeof(*known));
++        input->window_known_decays = known;
++    }
++    const bool needs_decay = (input->window_known_decays[word] & bit) == 0 && type_find_pointer(types, fn) == 0;
++    if (needs_decay)
++    {
++        CheckFunctionDecay* space = check_input_window_room(reader->arena, graph->function_decays, graph->function_decay_count,
++                                                            &input->function_decay_capacity, 1, sizeof(*space));
++        if (space == NULL) return false;
++        graph->function_decays = space;
++    }
+     const uint32_t made=check_input_window_publish(reader,batch,root,value,rows,n+1+drop,n+3);
+     if (made==BUSTER_CHECK_NONE) return false;
++    input->window_known_decays[word] |= bit;
++    if (needs_decay)
++    {
++        graph->function_decays[graph->function_decay_count++] = (CheckFunctionDecay){.node = made, .function = fn};
++    }
+     if (!statement)
+     {
+         reader->output->token_nodes[root]=made; reader->query_types[root]=ret; reader->first_value[root]=BUSTER_CHECK_NONE;
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index bb98bf170..4868df0b4 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1306,6 +1306,9 @@ struct CheckInput
+     uint32_t window_row_count;
+     uint32_t window_row_capacity;
+     uint32_t window_capacity;
++    uint32_t function_decay_capacity;
++    uint64_t* window_known_decays;
++    uint32_t window_decay_words;
+     uint32_t window_count;
+     uint32_t window_nodes;
+ };
+diff --git a/src/buster/compiler/c_check_transitions.c b/src/buster/compiler/c_check_transitions.c
+index ed8dc97e5..8b7799b3e 100644
+--- a/src/buster/compiler/c_check_transitions.c
++++ b/src/buster/compiler/c_check_transitions.c
+@@ -1022,41 +1022,58 @@ static __attribute__((noinline)) bool check_graph_transitions(TypeTable* types,
+     };
+     // The loop's hits, kept here rather than through `run` or `stream`, which the columns' stores could alias.
+     uint32_t hits = 0;
+-    for (uint32_t node = 0; result && node < count; node += 1)
++    uint32_t node = 0;
++    for (uint32_t i = 0; result; i += 1)
+     {
+-        const uint32_t header = statics[node];
+-        if (header == BUSTER_CHECK_TRANSITION_LEAF && check_graph_leaf_overload_head(graph, node) == 0)
+-        {
+-            check_graph_leaf(types, graph, stream, node);
+-            uint32_t template = 0;
+-            classes[node] = check_transitions_intern(&table, stream, node, &template);
+-        }
+-        else
++        const bool last = i == graph->function_decay_count;
++        const uint32_t end = last ? count : graph->function_decays[i].node;
++        for (; node < end; node += 1)
+         {
+-            CheckTransitionMiss miss;
+-            CheckTransitionKind kind = CHECK_TRANSITION_NONE;
+-            uint32_t found = BUSTER_CHECK_NONE;
+-            bool done = false;
+-            if (header > BUSTER_CHECK_TRANSITION_LEAF)
++            const uint32_t header = statics[node];
++            if (header == BUSTER_CHECK_TRANSITION_LEAF && check_graph_leaf_overload_head(graph, node) == 0)
+             {
+-                kind = check_transition_key(graph, stream, classes, node, header, &miss, words);
+-                found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(&table, miss.key, miss.hash, words,
+-                                                                              header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f) : BUSTER_CHECK_NONE;
+-                done = found != BUSTER_CHECK_NONE && check_transition_guards_hold(graph, &table, table.entries + found, node);
++                check_graph_leaf(types, graph, stream, node);
++                uint32_t template = 0;
++                classes[node] = check_transitions_intern(&table, stream, node, &template);
+             }
+-            if (done)
++            else
+             {
+-                hits += 1;
+-                check_transition_write(stream, graph, &table, table.entries + found, node, miss.objects, classes);
+-                if (verify)
++                CheckTransitionMiss miss;
++                CheckTransitionKind kind = CHECK_TRANSITION_NONE;
++                uint32_t found = BUSTER_CHECK_NONE;
++                bool done = false;
++                if (header > BUSTER_CHECK_TRANSITION_LEAF)
+                 {
+-                    check_transition_verify(types, graph, stream, node, arguments, scratch);
++                    kind = check_transition_key(graph, stream, classes, node, header, &miss, words);
++                    found = kind == CHECK_TRANSITION_KEYED ? check_transitions_find(&table, miss.key, miss.hash, words,
++                                                                                  header >> BUSTER_CHECK_KEY_ARGUMENTS_SHIFT & 0x7f) : BUSTER_CHECK_NONE;
++                    done = found != BUSTER_CHECK_NONE && check_transition_guards_hold(graph, &table, table.entries + found, node);
++                }
++                if (done)
++                {
++                    hits += 1;
++                    check_transition_write(stream, graph, &table, table.entries + found, node, miss.objects, classes);
++                    if (verify)
++                    {
++                        check_transition_verify(types, graph, stream, node, arguments, scratch);
++                    }
++                }
++                else
++                {
++                    check_transition_other(&run, node, header, &miss, kind, found);
+                 }
+             }
+-            else
+-            {
+-                check_transition_other(&run, node, header, &miss, kind, found);
+-            }
++        }
++        if (last)
++        {
++            break;
++        }
++        check_transition_flush(types, graph, stream, &table, classes, batch, arguments, scratch);
++        if (type_pointer(types, graph->function_decays[i].function) == 0)
++        {
++            stream->status = CHECK_STATUS_RESOURCE;
++            stream->failed_node = end;
++            break;
+         }
+     }
+     if (result)
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index 2307bc6e2..9998bb1f5 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -259,8 +259,19 @@ static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedM
+     return result;
+ }
+ 
++typedef struct CheckFunctionDecay CheckFunctionDecay;
++struct CheckFunctionDecay
++{
++    uint32_t node;
++    TypeId function;
++};
++
+ struct CheckGraph
+ {
++    // A compacted direct call first requires pointer-to-function when ordinary checking reaches its
++    // position. Intervening type allocations retain their original IDs when these effects run in node order.
++    CheckFunctionDecay* function_decays;
++    uint32_t function_decay_count;
+     // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+     // and 0 for none.
+     const CheckInputMarkedMember* marked_members;
+@@ -4084,6 +4095,17 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         result = false;
+         stream->status = CHECK_STATUS_RESOURCE;
+     }
++    for (uint32_t i = 0; result && i < graph->function_decay_count; i += 1)
++    {
++        const CheckFunctionDecay* decay = graph->function_decays != NULL ? graph->function_decays+i : NULL;
++        result = decay != NULL && decay->node < count && (i == 0 || graph->function_decays[i-1].node < decay->node) &&
++                 graph->ops != NULL && graph->ops[decay->node] == CHECK_OP_VALUE &&
++                 type_is_valid(types,decay->function) && type_kind(types,decay->function) == BUSTER_TYPE_KIND_FUNCTION;
++        if (!result)
++        {
++            stream->status = CHECK_STATUS_INVALID_GRAPH;
++        }
++    }
+     CheckGraphValidation validation = { 0 };
+     if (result)
+     {
+@@ -4204,6 +4226,10 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+                                  graph->overload_candidate_count == 0 && columns &&
+                                  check_graph_transitions(types, graph, stream, pure, levels, order, arguments, scratch, batch_size, options->verify_transitions);
+         // A verified run's hits each ran their actions too: a mismatch fails the run, as an invalid graph.
++        if (transitions && stream->status == CHECK_STATUS_RESOURCE)
++        {
++            result = false;
++        }
+         if (transitions && stream->statistics.transition_mismatches != 0)
+         {
+             result = false;
+@@ -4214,31 +4240,46 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->zero_columns = zero_output;
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
+-        while (node < count)
++        for (uint32_t i = 0; !transitions && result; i += 1)
+         {
+-            if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+-            {
+-                check_graph_leaf(types, graph, stream, node);
+-                node += 1;
+-            }
+-            else if (!regions || pure[node] == 0)
++            const bool last = i == graph->function_decay_count;
++            const uint32_t end = last ? count : graph->function_decays[i].node;
++            while (node < end)
+             {
+-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
+-                node += 1;
+-            }
+-            else
+-            {
+-                const uint32_t begin = node;
+-                node = check_graph_marked_end(pure, node, count);
+-                if (options->level_order)
++                if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
++                {
++                    check_graph_leaf(types, graph, stream, node);
++                    node += 1;
++                }
++                else if (!regions || pure[node] == 0)
+                 {
+-                    check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
++                    check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
++                    node += 1;
+                 }
+                 else
+                 {
+-                    check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
++                    const uint32_t begin = node;
++                    node = check_graph_marked_end(pure, node, end);
++                    if (options->level_order)
++                    {
++                        check_graph_region(types, graph, stream, pure, begin, node, batch_size, levels, counts, order);
++                    }
++                    else
++                    {
++                        check_graph_region_postorder(types, graph, stream, pure, begin, node, batch_size);
++                    }
+                 }
+             }
++            if (last)
++            {
++                break;
++            }
++            if (type_pointer(types, graph->function_decays[i].function) == 0)
++            {
++                result = false;
++                stream->status = CHECK_STATUS_RESOURCE;
++                stream->failed_node = end;
++            }
+         }
+         stream->zero_columns = false;
+         for (uint32_t pass = 0; result && pass < 2; pass += 1)
