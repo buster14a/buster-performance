@@ -1,0 +1,189 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 50f42e11e..dd7ca33da 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -2106,6 +2106,116 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
+     return node != BUSTER_CHECK_NONE;
+ }
+ 
++// The unused top class bit marks a potential terminal in the diagnostic source-order gate.
++#define BUSTER_CHECK_WINDOW_END 0x80u
++
++static uint32_t check_regular_window_class(const CheckInputReader* reader, uint32_t token)
++{
++    return (reader->visits[token] & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
++}
++
++static uint32_t check_regular_window_seed(const CheckInputReader* reader, uint32_t token, bool returned)
++{
++    const Parser* parser = reader->parser;
++    const uint32_t count = parser->tokens.count;
++    const uint8_t* kinds = parser->tokens.kinds;
++    if (returned && reader->query_types[token] == BUSTER_TYPE_INT && count - token >= 3)
++    {
++        const uint32_t next = check_regular_window_class(reader, token + 1);
++        const bool name = !reader->pp->options.predefines.debug && !reader->pp->options.predefines.debug_modules;
++        if (kinds[token + 2] == PARSE_KIND_SEMI && (next == CHECK_INPUT_CODE_LITERAL || (name && next == CHECK_INPUT_CODE_IDENTIFIER)))
++        {
++            return token;
++        }
++        if (count - token >= 4 && kinds[token + 3] == PARSE_KIND_SEMI && next == CHECK_INPUT_CODE_PREFIX)
++        {
++            const uint32_t arg = check_regular_window_class(reader, token + 2);
++            if ((kinds[token + 1] == PARSE_KIND_MINUS && arg == CHECK_INPUT_CODE_LITERAL) ||
++                (kinds[token + 1] == PARSE_KIND_PLUS && name && arg == CHECK_INPUT_CODE_IDENTIFIER))
++            {
++                return token;
++            }
++        }
++        if (count - token >= 5 && kinds[token + 4] == PARSE_KIND_SEMI && next == CHECK_INPUT_CODE_LITERAL &&
++            check_regular_window_class(reader, token + 3) == CHECK_INPUT_CODE_LITERAL &&
++            (kinds[token + 2] == PARSE_KIND_PLUS || kinds[token + 2] == PARSE_KIND_MINUS || kinds[token + 2] == PARSE_KIND_STAR))
++        {
++            return token;
++        }
++    }
++    else if (!returned && reader->query_types[token] == BUSTER_TYPE_VOID && token >= 2 &&
++             kinds[token - 2] == PARSE_KIND_L_PAREN && kinds[token - 1] == PARSE_KIND_TYPE)
++    {
++        uint32_t leaf = token + 1;
++        while (leaf < count && kinds[leaf] == PARSE_KIND_L_PAREN)
++        {
++            ++leaf;
++        }
++        if (leaf < count && check_regular_window_class(reader, leaf) == CHECK_INPUT_CODE_LITERAL)
++        {
++            uint32_t parent = parser->tree.parents[token];
++            while (parent < count && check_regular_window_class(reader, parent) == CHECK_INPUT_CODE_GROUP)
++            {
++                parent = parser->tree.parents[parent];
++            }
++            if (parent < count && check_regular_window_class(reader, parent) == CHECK_INPUT_CODE_TERMINATOR &&
++                kinds[parent] == PARSE_KIND_SEMI && reader->conditions[parent] == 0)
++            {
++                return parent;
++            }
++        }
++    }
++    return BUSTER_CHECK_NONE;
++}
++
++static bool check_regular_window_unit(CheckInputReader* reader, uint32_t limit, bool marked, bool report)
++{
++    const uint32_t count = reader->parser->tokens.count;
++    uint32_t seeds = 0;
++    for (uint32_t at = 0; at < count && (marked || report || seeds < limit); at += 64)
++    {
++        const uint64_t lanes = _bzhi_u64(UINT64_MAX, count - at < 64 ? count - at : 64);
++        const __m512i visits = _mm512_maskz_loadu_epi8(lanes, reader->visits + at);
++        const __m512i codes = _mm512_and_si512(visits, _mm512_set1_epi8(BUSTER_CHECK_EXPRESSION_CODE_MASK));
++        const uint64_t returns = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_RETURN << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++        const uint64_t casts = _mm512_cmpeq_epi8_mask(codes, _mm512_set1_epi8(CHECK_INPUT_CODE_CAST << BUSTER_CHECK_EXPRESSION_CODE_SHIFT));
++        for (uint64_t bits = (returns | casts) & lanes; bits != 0; bits &= bits - 1)
++        {
++            const uint32_t bit = (uint32_t)__builtin_ctzll(bits);
++            const uint32_t token = check_regular_window_seed(reader, at + bit, ((returns >> bit) & 1) != 0);
++            if (token < count)
++            {
++                seeds += 1;
++                if (marked)
++                {
++                    reader->visits[token] |= BUSTER_CHECK_WINDOW_END;
++                }
++            }
++        }
++    }
++    if (report)
++    {
++        fprintf(stderr, "regular-window-unit: tokens=%u seeds=%u limit=%u marked=%u\n", count, seeds, limit, marked);
++    }
++    return seeds >= limit;
++}
++
++static uint32_t check_regular_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t count)
++{
++    uint32_t n = 0;
++    for (uint32_t at = 0; at < count; at += 16)
++    {
++        const uint16_t lanes = (uint16_t)_bzhi_u32(UINT32_MAX, count - at < 16 ? count - at : 16);
++        const __m512i fields = _mm512_maskz_loadu_epi32(lanes, classes + at);
++        for (uint32_t bits = _mm512_test_epi32_mask(fields, _mm512_set1_epi32(BUSTER_CHECK_WINDOW_END)); bits != 0; bits &= bits - 1)
++        {
++            ends[n++] = at + (uint32_t)__builtin_ctz(bits);
++        }
++    }
++    ends[n] = count;
++    return n;
++}
++
+ // Collect candidate ends in one pass over the action classes. Each caller selects its scan once per chunk.
+ static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
+ {
+@@ -2150,10 +2260,10 @@ static inline __attribute__((always_inline)) uint32_t check_input_window_ends(ui
+ // return whose operands crossed the chunk boundary. The chunk and all its cursors are local to this reader.
+ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputReader* reader, CheckInputBatch* batch, const uint32_t* tokens, const uint32_t* classes,
+                                                                      uint32_t acting, const CheckInputIdentifiers* identifiers, const CheckInputLiterals* literals,
+-                                                                     uint64_t* visited)
++                                                                     uint64_t* visited, bool marked)
+ {
+     uint32_t ends[BUSTER_CHECK_EXPRESSION_CHUNK + 1];
+-    const uint32_t candidates = reader->pp->options.node_window_assignments ? check_input_window_ends(ends, classes, acting, true) :
++    const uint32_t candidates = marked ? check_regular_window_ends(ends, classes, acting) : reader->pp->options.node_window_assignments ? check_input_window_ends(ends, classes, acting, true) :
+                                 check_input_window_ends(ends, classes, acting, false);
+     uint32_t identifier = 0;
+     uint32_t literal = 0;
+@@ -2288,8 +2398,12 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     const bool timed = coded && reader->pp->options.expression_timing;
+     // Deferred parts publish their graphs separately; they do not own a unit's tape. A musttail check needs the
+     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
++    const uint32_t limit = reader->pp->options.regular_window_min;
++    const bool marked = reader->pp->options.regular_window_marked;
++    const bool report = reader->pp->options.regular_window_report;
+     const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed && front == NULL &&
+-                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
++                        reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 &&
++                        ((limit == 0 && !marked && !report) || check_regular_window_unit(reader, limit, marked, report)) && check_node_window_prepare();
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
+     {
+@@ -2316,7 +2430,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+         {
+             i = reader->pp->options.node_window_constants ?
+                 check_integer_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited) :
+-                check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited);
++                check_input_window_actions(reader, batch, tokens, classes, acting, &identifiers, &literals, &visited, marked);
+         }
+         else if (!timed)
+         {
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 4f7de0092..543827fc7 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -14889,6 +14889,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     options.timing = time_stages;
+     options.node_window_assignments = node_window_assignments;
+     options.node_window_constants = node_window_constants;
++    if (node_window && !node_window_assignments && !node_window_constants)
++    {
++        const char* limit = getenv("BUSTER_REGULAR_WINDOW_UNIT_SEEDS");
++        options.regular_window_min = limit != NULL ? (uint32_t)strtoul(limit, NULL, 10) : 0;
++        options.regular_window_marked = getenv("BUSTER_REGULAR_WINDOW_MARK_ENDS") != NULL;
++        options.regular_window_report = getenv("BUSTER_REGULAR_WINDOW_REPORT") != NULL;
++    }
+     options.node_window = node_window && !options.predefines.debug && !options.predefines.debug_modules;
+     CheckClock* stage_clock = time_stages ? &clock_storage : NULL;
+     // The preprocessor's phases' ticks in pp_run, for the report.
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index ab29d237c..491d85bbb 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -395,6 +395,9 @@ struct PPOptions
+     // --node-window-assignments also considers discarded local assignments.
+     bool node_window_assignments;
+     bool node_window_constants;
++    bool regular_window_marked;
++    bool regular_window_report;
++    uint32_t regular_window_min;
+     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
