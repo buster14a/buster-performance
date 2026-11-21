@@ -1,0 +1,537 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 454a43c..125047f 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1200,6 +1200,9 @@ struct CheckEmitLane
+     CheckTier1Lane* tier1;
+     // With Tier 0's inlining (CheckEmitRun.tier0_inline), its cache of expanded callees; null without.
+     CheckTier0InlineLane* tier0_inline;
++    // The Tier 0 code of the body it is emitting, whose frame check_program_emit_code describes at its final offsets
++    // where EmittedCode.frame_direct says so.
++    Tier0Code frame_code;
+     bool prepared;
+     bool ready;
+ };
+@@ -1331,16 +1334,28 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
+ #endif
+ // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
+ // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
+-// room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
+-// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, a function an asm
+-// statement's template returns from, and a rule a form
+-// x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
+-// (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
+-// internal error; no room is a resource failure,
+-// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason. Where
+-// provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never printed on a lane.
+-static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
+-                                                           Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
++// room, which the tables read once the lanes are done); or, for a Tier 0 frame of the fixed shape alone
++// (EmittedCode.frame_direct, which has no events), from the frame Tier 0 published, `direct`, at the final offsets
++// (unwind_tier0_frame_tails, which checks each of its prologue's and epilogue's records). With `verify`, the events are
++// proved against the records and their control flow too (emitted_verify_frames: but an assembly template's code, the
++// user's, a function an asm statement's template returns from, and a rule a form x86_semantics.c doesn't cover leaves
++// unproven), and where Tier 0's fixed-frame analyzer takes the records (unwind_tier0, which reads them alone), its frame
++// must be the same CFI, a direct frame's too. Code past 2 GB is unsupported, not an internal error; no room is a
++// resource failure, which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its
++// reason. Where provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never
++// printed on a lane.
++static int row_exp_repeat_state;
++static int row_exp_repeat(void)
++{
++    if (row_exp_repeat_state == 0)
++    {
++        const char* text = getenv("BUSTER_EXP_FRAME_REPEAT");
++        row_exp_repeat_state = text != NULL && atoi(text) > 0 ? atoi(text) : 1;
++    }
++    return row_exp_repeat_state;
++}
++static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, const Tier0Code* direct, uint32_t* offsets, int64_t length, bool verify, bool scalar,
++                                                           EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
+ {
+     if (failed != NULL)
+     {
+@@ -1357,11 +1372,17 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
+     if (status == CHECK_PROGRAM_OK)
+     {
+         offsets[code->count] = (uint32_t)length;
+-        const UnwindError error = emitted_unwind(code, offsets, (uint32_t)length, scalar, rows, frame);
++        const UnwindError error = direct != NULL ? unwind_tier0_frame_tails(direct, offsets, (uint32_t)length, frame, 0) : emitted_unwind(code, offsets, (uint32_t)length, scalar, rows, frame);
++        for (int k = 1; direct != NULL && k < row_exp_repeat(); k += 1)
++        {
++            UnwindFunction extra;
++            (void)unwind_tier0_frame_tails(direct, offsets, (uint32_t)length, &extra, 0);
++            __asm__ volatile("" : : "r"(&extra) : "memory");
++        }
+         status = error == UNWIND_OK ? status : CHECK_PROGRAM_BACKEND;
+-        *reason = error == UNWIND_OK ? 0 : "internal compiler error: a function's frame events don't resolve to an unwind table";
++        *reason = error == UNWIND_OK ? 0 : direct != NULL ? mismatch : "internal compiler error: a function's frame events don't resolve to an unwind table";
+     }
+-    if (status == CHECK_PROGRAM_OK && verify && !code->assembly)
++    if (status == CHECK_PROGRAM_OK && verify && !code->assembly && direct == NULL)
+     {
+         // A frame the verifier can't prove past a form x86_semantics.c doesn't cover (an x86 builtin's leaf of one)
+         // stands, as Tier 0's analyzer below leaves it.
+@@ -1399,7 +1420,7 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
+ static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar,
+                                                                            EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason)
+ {
+-    return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
++    return check_program_emit_frame_checked(code, NULL, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
+ }
+ #if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
+ // A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
+@@ -1698,6 +1719,76 @@ static uint32_t check_program_emit_inline_of(const EmittedCode* code, uint32_t o
+     return found;
+ }
+ 
++// Experiment (#2874, step 4's design): each body's row ticks, by part, logged where BUSTER_ROW_LOG names a file.
++typedef struct RowLogEntry
++{
++    uint32_t body;
++    uint32_t entries;
++    uint32_t records;
++    uint32_t branches;
++    uint32_t references;
++    uint32_t bytes;
++    uint64_t tier0;
++    uint64_t sizing;
++    uint64_t encode;
++    uint64_t debug;
++    uint64_t unwind;
++    uint64_t rest;
++    uint64_t passes[16];
++    uint32_t direct;
++} RowLogEntry;
++static int row_exp_events_state;
++static bool row_exp_events(void)
++{
++    if (row_exp_events_state == 0)
++    {
++        row_exp_events_state = getenv("BUSTER_EXP_FRAME_EVENTS") != NULL ? 1 : 2;
++    }
++    return row_exp_events_state == 1;
++}
++static RowLogEntry row_log[1u << 18];
++static uint32_t row_log_count;
++static int row_log_state;
++static void row_log_dump(void)
++{
++    const char* path = getenv("BUSTER_ROW_LOG");
++    FILE* file = path != NULL ? fopen(path, "a") : NULL;
++    for (uint32_t i = 0; file != NULL && i < row_log_count; i += 1)
++    {
++        const RowLogEntry* e = row_log + i;
++        fprintf(file, "%u\t%u\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", e->body, e->entries, e->records, e->branches, e->references, e->bytes,
++                (unsigned long long)e->tier0, (unsigned long long)e->sizing, (unsigned long long)e->encode, (unsigned long long)e->debug,
++                (unsigned long long)e->unwind, (unsigned long long)e->rest);
++        for (uint32_t k = 0; k < 16; k += 1)
++        {
++            fprintf(file, "\t%llu", (unsigned long long)e->passes[k]);
++        }
++        fprintf(file, "\t%u\n", e->direct);
++    }
++    if (file != NULL)
++    {
++        fclose(file);
++    }
++}
++static RowLogEntry* row_log_begin(uint32_t b, uint32_t entries)
++{
++    if (row_log_state == 0)
++    {
++        row_log_state = getenv("BUSTER_ROW_LOG") != NULL ? 1 : 2;
++        if (row_log_state == 1)
++        {
++            atexit(row_log_dump);
++        }
++    }
++    RowLogEntry* e = row_log_state == 1 && row_log_count < (1u << 18) ? row_log + row_log_count++ : NULL;
++    if (e != NULL)
++    {
++        *e = (RowLogEntry){ .body = b, .entries = entries };
++    }
++    return e;
++}
++static RowLogEntry* row_log_current;
++
+ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b)
+ {
+     const CheckProgram* program = run->program;
+@@ -1707,6 +1798,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+     Arena* bytes = lane->bytes;
+     const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+     *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
++    RowLogEntry* row = row_log_current;
++    row_log_current = NULL;
++    uint64_t row_last = __rdtsc();
+     // What the merge reads stays on the lane's scratch; the offsets don't.
+     body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
+     body->label_offsets = code->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, code->label_count) : 0;
+@@ -1763,8 +1857,24 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+         const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
+         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
++        uint64_t row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->sizing = row_now - row_last;
++            row->records = code->count;
++            row->branches = code->branch_count;
++            row->references = code->reference_count;
++        }
++        row_last = row_now;
+         const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
++        row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->encode = row_now - row_last;
++            row->bytes = length > 0 ? (uint32_t)length : 0;
++        }
++        row_last = row_now;
+         valid = length >= 0;
+         if (valid && run->sources)
+         {
+@@ -1807,6 +1917,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+             }
+             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
+         }
++        row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->debug = row_now - row_last;
++        }
++        row_last = row_now;
+         if (valid && sled != 0 && (uint64_t)length + sled > INT32_MAX)
+         {
+             body->reason = "a function of 2 GB of code or more, past its unwind table's offsets";
+@@ -1816,16 +1932,24 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+         if (valid && run->unwind)
+         {
+             // Its frame events resolved after sizing (a naked function's code is its templates', which say nothing of
+-            // its frame: no events, so its unwind entry, as clang's, has the call's rule alone, whatever they push). A
++            // its frame: no events, so its unwind entry, as clang's, has the call's rule alone, whatever they push), or
++            // a frame of the fixed shape alone (EmittedCode.frame_direct) described from the frame Tier 0 published. A
+             // frame its producer couldn't describe is the compiler's own failure; and with --verify, so are events its
+             // records don't establish.
+             const char* reason = 0;
+-            failure = check_program_emit_frame_checked(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
++            const Tier0Code* direct = code->frame_direct ? &lane->frame_code : NULL;
++            failure = check_program_emit_frame_checked(code, direct, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
+             valid = failure == CHECK_PROGRAM_OK;
+             failure = valid ? CHECK_PROGRAM_BACKEND : failure;
+             body->reason = valid ? body->reason : reason;
+             check_clock_lap(run->stage_clock, CHECK_STAGE_UNWIND);
+         }
++        row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->unwind = row_now - row_last;
++        }
++        row_last = row_now;
+         if (valid)
+         {
+             const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length + sled;
+@@ -1873,6 +1997,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+         }
+     }
+     check_clock_lap(run->stage_clock, CHECK_STAGE_CODE_ATOMS);
++    if (row != NULL)
++    {
++        row->rest = __rdtsc() - row_last;
++    }
+     return valid;
+ }
+ 
+@@ -2081,6 +2209,9 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+         }
+         else
+         {
++            const uint64_t row_start = __rdtsc();
++            memset(row_pass_ticks, 0, sizeof(row_pass_ticks));
++            row_pass_last = row_start;
+             if (!tier1 && !forbidden)
+             {
+                 // Tier 0's code as the emission takes it (emitted_from_tier0), with its frame's events where the tables
+@@ -2097,11 +2228,23 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+                 }
+                 // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
+                 // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
+-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources,
+-                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source),
+-                                                   lane->code);
++                // A frame of the fixed shape alone has no events: its descriptor is made from the frame at its final offsets
++                // (check_program_emit_frame_checked).
++                const bool direct = naked == 0 && emitted_tier0_frame_direct(&compiled) && !row_exp_events();
++                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0 && !direct, run->sources,
++                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source), lane->code);
++                run->codes[b].frame_direct = direct;
++                lane->frame_code = compiled;
+             }
+             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
++            row_pass_lap(15);
++            row_log_current = row_log_begin(b, function->count);
++            if (row_log_current != NULL)
++            {
++                row_log_current->tier0 = __rdtsc() - row_start;
++                row_log_current->direct = run->codes[b].frame_direct ? 1 : 0;
++                memcpy(row_log_current->passes, row_pass_ticks, sizeof(row_pass_ticks));
++            }
+             if (forbidden || run->codes[b].error != TIER0_OK)
+             {
+                 part->tier0_failed = b;
+@@ -5512,7 +5655,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+                 if (encodes && unwind)
+                 {
+                     const char* reason = 0;
+-                    failure = check_program_emit_frame_checked(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
++                    failure = check_program_emit_frame_checked(code, NULL, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
+                     body->frame_verdict = helper_verdict.error != EMITTED_VERIFY_OK ? &helper_verdict : NULL;
+                     encodes = failure == CHECK_PROGRAM_OK;
+                     failure = encodes ? CHECK_PROGRAM_BACKEND : failure;
+diff --git a/src/buster/compiler/emitted_code.c b/src/buster/compiler/emitted_code.c
+index 5ee33b8..b1a6002 100644
+--- a/src/buster/compiler/emitted_code.c
++++ b/src/buster/compiler/emitted_code.c
+@@ -136,6 +136,9 @@ struct EmittedCode
+     // An assembly template's code (a naked function's, an asm statement's helper's): its frame events, if any, are the
+     // frame the compiler built around the templates, whose own instructions the verifier doesn't read.
+     bool assembly;
++    // A Tier 0 body whose frame is the fixed shape alone (emitted_tier0_frame_direct): it has no frame events, and its
++    // unwind descriptor is made from its Tier0Code at its final offsets (unwind_tier0_frame_tails), once it is encoded.
++    bool frame_direct;
+     // The producer's failure (Tier 0's Tier0Error, which the emission reports; 0 for none) and its node.
+     uint32_t error;
+     uint32_t node;
+@@ -385,6 +388,14 @@ static uint32_t emitted_tier0_preserve_rows(const Tier0Code* code, EmissionFrame
+     return count + 3 * registers;
+ }
+ 
++// Whether a Tier 0 frame's probed reservation (#177) has a loop, whose CFA is in r11 (emitted_tier0_probe_rows): a frame
++// without a frame pointer that probes whole pages.
++static bool emitted_tier0_probe_loop(const Tier0Code* code)
++{
++    const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
++    return !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
++}
++
+ // A probed reservation's loop without a frame pointer (#177, tier0_emit_probed_reservation): its CFA in r11 from the end
+ // of r11's subtraction to the loop's bound, which no record of the loop changes, and back in rsp at the loop's exit,
+ // where rsp equals it, as Tier 1's frame events have it (tier1_frame_emit.c). The fixed shape's rows (`rows`, `count` of
+@@ -394,7 +405,7 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
+ {
+     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
+     const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+-    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
++    const bool loop = emitted_tier0_probe_loop(code);
+     uint32_t result = count;
+     if (loop && count + 2 <= room)
+     {
+@@ -415,6 +426,17 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
+     return loop && count + 2 > room ? UINT32_MAX : result;
+ }
+ 
++// Whether a Tier 0 body's unwind descriptor can be its frame's fixed shape at its final offsets, with no frame events
++// (EmittedCode.frame_direct): pushes, a reservation, a frame pointer and a realignment, each transition the end of its
++// prologue's or epilogue's record (unwind_tier0_frame_tails), and none of what emitted_from_tier0 adds rows to that
++// shape for: a probed reservation's loop, preserved registers (every interrupt service routine's frame has some) or
++// tail calls' teardowns, an eh_return function's among them (the lowering makes __builtin_eh_return a tail call). Tier
++// 0's frames are never open (Tier 1's are).
++static __attribute__((unused)) bool emitted_tier0_frame_direct(const Tier0Code* code)
++{
++    return !emitted_tier0_probe_loop(code) && emitted_tier0_preserved(code) == 0 && code->tail_count == 0;
++}
++
+ // Tier 0's code as the emission takes it: its records, columns, references and labels as they are; with `sources` its
+ // entries' first records as source events (an event per typed entry, the epilogue's first record after them); and with
+ // `frames` its frame's events, from the frame it published (Tier0Code.frame_*, tail_records) and the records that make
+diff --git a/src/buster/compiler/tier0.c b/src/buster/compiler/tier0.c
+index 959ac5d..21fd24f 100644
+--- a/src/buster/compiler/tier0.c
++++ b/src/buster/compiler/tier0.c
+@@ -11638,6 +11638,16 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
+     }
+ }
+ 
++// Experiment (#2874, step 4's design): Tier 0's passes' ticks for the emission's row log (c_check_program_emit.c).
++static uint64_t row_pass_ticks[16];
++static uint64_t row_pass_last;
++static inline void row_pass_lap(uint32_t pass)
++{
++    const uint64_t now = __rdtsc();
++    row_pass_ticks[pass] += now - row_pass_last;
++    row_pass_last = now;
++}
++
+ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* segments, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code,
+                                  bool vector)
+ {
+@@ -11651,6 +11661,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+     // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
+     frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
+     const uint32_t unsupported = error == TIER0_OK ? (BUSTER_VECTOR_PATH(vector) ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
++    row_pass_lap(5);
+     if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
+     {
+         error = tier0_select_deep(function, entries, &frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
+@@ -11707,6 +11718,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+         entries->snapshot_depths = error == TIER0_OK ? frame.snapshot_depths : 0;
+         entries->snapshot = error == TIER0_OK && frame.snapshot_bytes != 0;
+     }
++    row_pass_lap(6);
+     if (error == TIER0_OK)
+     {
+         Tier0Counts counts;
+@@ -11753,11 +11765,13 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+             error = tier0_push_asm_labels(function, asm_labels, output, code) ? error : TIER0_ERROR_MEMORY;
+         }
+     }
++    row_pass_lap(7);
+     if (error == TIER0_OK)
+     {
+         if (BUSTER_VECTOR_PATH(vector))
+         {
+             tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
++            row_pass_lap(8);
+             error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
+             x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
+         }
+@@ -11770,6 +11784,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+         if (BUSTER_VECTOR_PATH(vector))
+         {
+             tier0_apply_choices_vector(code->records, &choices);
++            row_pass_lap(9);
+         }
+         else
+         {
+@@ -11814,6 +11829,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+         code->frame_preserve_mask_bytes = frame.preserve_bytes != 0 ? function->preserve_mask_bytes : 0;
+         code->frame_interrupt = frame.interrupt;
+     }
++    row_pass_lap(10);
+     return error;
+ }
+ 
+@@ -14663,17 +14679,22 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
+     }
+     bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
+     Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
++    row_pass_lap(0);
+     if (error == TIER0_OK)
+     {
+         tier0_vector_labels(function, bits.labels);
+         entries.labels = bits.labels;
++        row_pass_lap(1);
+         tier0_vector_values(function, &bits);
++        row_pass_lap(2);
+         tier0_vector_fuse(function, &bits, &entries);
++        row_pass_lap(3);
+         if (function->vectors)
+         {
+             tier0_operation_effects(function, &entries);
+         }
+         tier0_vector_depths(function, &bits, &entries);
++        row_pass_lap(4);
+         if (function->masks)
+         {
+             entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
+@@ -14689,6 +14710,7 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
+     }
+     code = tier0_conclude(code, error, output, output_length);
+     scratch_end(scratch);
++    row_pass_lap(11);
+     return code;
+ }
+ 
+diff --git a/src/buster/compiler/unwind_tier0.c b/src/buster/compiler/unwind_tier0.c
+index 6c8f423..35ba8c9 100644
+--- a/src/buster/compiler/unwind_tier0.c
++++ b/src/buster/compiler/unwind_tier0.c
+@@ -469,27 +469,23 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
+         events[count++] = 1;
+     }
+     uint32_t at = pointer ? 2 : 0;
+-    for (uint32_t r = 0; records != 0 && error == UNWIND_OK && r < BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); r += 1)
++    // Each kept register's push, in its bit's order, the set bits alone: `saved` is under 64, its bits
++    // unwind_tier0_saved_registers' six, and `preserved` within UNWIND_TIER0_PRESERVABLE, both checked above.
++    for (uint32_t bits = records != 0 ? saved : 0; error == UNWIND_OK && bits != 0; bits &= bits - 1)
+     {
+-        if ((saved & (1u << r)) != 0)
+-        {
+-            error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, unwind_tier0_saved_registers[r]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+-            events[count++] = at;
+-            at += 1;
+-        }
++        error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, unwind_tier0_saved_registers[__builtin_ctz(bits)]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
++        events[count++] = at;
++        at += 1;
+     }
+     if (records != 0 && error == UNWIND_OK && eh)
+     {
+         error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, X86_REGISTER_RDX) && unwind_tier0_stack(&records[at + 1], X86_FORM_PUSH_R64, X86_REGISTER_RAX) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+         at += 2;
+     }
+-    for (uint32_t r = 0; records != 0 && error == UNWIND_OK && r < 16; r += 1)
++    for (uint32_t bits = records != 0 ? preserved : 0; error == UNWIND_OK && bits != 0; bits &= bits - 1)
+     {
+-        if ((preserved & (1u << r)) != 0)
+-        {
+-            error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, (uint8_t)r) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+-            at += 1;
+-        }
++        error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, (uint8_t)__builtin_ctz(bits)) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
++        at += 1;
+     }
+     if (records != 0 && error == UNWIND_OK && block != 0)
+     {
+@@ -540,22 +536,17 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
+         }
+         at += 1;
+     }
+-    for (uint32_t r = 16; records != 0 && error == UNWIND_OK && r > 0; r -= 1)
++    // The pops, in the pushes' reverse order: each kept register's highest bit first.
++    for (uint32_t bits = records != 0 ? preserved : 0; error == UNWIND_OK && bits != 0; bits &= ~(1u << (31 - __builtin_clz(bits))))
+     {
+-        if ((preserved & (1u << (r - 1))) != 0)
+-        {
+-            error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, (uint8_t)(r - 1)) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+-            at += 1;
+-        }
++        error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, (uint8_t)(31 - __builtin_clz(bits))) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
++        at += 1;
+     }
+-    for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); records != 0 && error == UNWIND_OK && !open && r > 0; r -= 1)
++    for (uint32_t bits = records != 0 && !open ? saved : 0; error == UNWIND_OK && bits != 0; bits &= ~(1u << (31 - __builtin_clz(bits))))
+     {
+-        if ((saved & (1u << (r - 1))) != 0)
+-        {
+-            error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, unwind_tier0_saved_registers[r - 1]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+-            events[count++] = at;
+-            at += 1;
+-        }
++        error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, unwind_tier0_saved_registers[31 - __builtin_clz(bits)]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
++        events[count++] = at;
++        at += 1;
+     }
+     if (records != 0 && error == UNWIND_OK && !open && pointer)
+     {
+@@ -628,14 +619,11 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
+                         ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+             record += 2;
+         }
+-        for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); error == UNWIND_OK && r > 0; r -= 1)
++        for (uint32_t bits = saved; error == UNWIND_OK && bits != 0; bits &= ~(1u << (31 - __builtin_clz(bits))))
+         {
+-            if ((saved & (1u << (r - 1))) != 0)
+-            {
+-                error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, unwind_tier0_saved_registers[r - 1]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+-                ends[ended++] = record;
+-                record += 1;
+-            }
++            error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, unwind_tier0_saved_registers[31 - __builtin_clz(bits)]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
++            ends[ended++] = record;
++            record += 1;
+         }
+         if (error == UNWIND_OK && pointer)
+         {
