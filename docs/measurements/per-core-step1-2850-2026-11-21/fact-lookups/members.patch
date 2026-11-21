@@ -1,0 +1,202 @@
+diff --git a/src/buster/compiler/c_check_node_machine_facts.c b/src/buster/compiler/c_check_node_machine_facts.c
+index 2d7ed85f4..e0715bcce 100644
+--- a/src/buster/compiler/c_check_node_machine_facts.c
++++ b/src/buster/compiler/c_check_node_machine_facts.c
+@@ -313,6 +313,18 @@ struct NodeFactsMember
+     uint32_t result_flags;
+ };
+ 
++typedef struct NodeResolvedMember {
++    uint64_t key;
++    NodeFactsMember member;
++    TypeId converted;
++    uint32_t complete_at;
++    uint32_t arrow;
++    uint32_t present;
++    uint64_t padding;
++} NodeResolvedMember;
++_Static_assert(sizeof(NodeResolvedMember)==64,"one combined member row");
++#define NODE_RESOLVED_SLOTS 2048u
++
+ _Static_assert(sizeof(NodeFactsMember) == 32, "a member's slot is half a line of the cache");
+ 
+ // A type's side row, the operators' kernel's (by type index): the pointer types to it, unqualified and const
+@@ -471,6 +483,7 @@ struct NodeFacts
+     // made again at every use (node_facts_front_line).
+     uint32_t* numbers;
+     NodeFactsMember* members;
++    NodeResolvedMember* resolved;
+     NodeFactsMember no_member;
+     uint32_t row_count;
+     // The rows' room: the unit's types after the pipeline; at reader time the machine's room for the types made as it
+@@ -865,6 +878,12 @@ static bool node_facts_begin(NodeFacts* facts, NodeMachine* machine, uint32_t ca
+     facts->argument_slots = arena_push_array(arena, UINT64_C(1) << BUSTER_NODE_FACTS_ARGUMENT_BITS, sizeof(NodeFactsArgumentSlot), 64);
+     facts->lines = arena_push_array(arena, 4 * (uint64_t)facts->line_capacity, sizeof(uint64_t), 64);
+     facts->numbers = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)input->token_count + 1);
++    // The after-pipeline shadow owns a fixed type table. Reader-time windows use
++    // their live rows as types and record definitions are added.
++    if(literal_lines==0 && !operators){
++        facts->resolved=arena_push_array(arena,NODE_RESOLVED_SLOTS,sizeof(NodeResolvedMember),64);
++        if(facts->resolved) memset(facts->resolved,0,NODE_RESOLVED_SLOTS*sizeof(NodeResolvedMember));
++    }
+     facts->members = arena_push_array(arena, UINT64_C(1) << member_bits, sizeof(NodeFactsMember), 64);
+     facts->ops = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
+     facts->kinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, records);
+@@ -1388,6 +1407,7 @@ struct NodeFactsView
+     const uint64_t* lines;
+     const NodeFactsRow* rows;
+     NodeFactsMember* members;
++    NodeResolvedMember* resolved;
+     const NodeFactsSide* sides;
+     const NodeFactsPair* pairs;
+     const uint64_t* targets;
+@@ -3183,6 +3203,28 @@ static inline __attribute__((always_inline)) uint32_t node_facts_unfit(TypeId ty
+ 
+ // `->`'s short path: a pointer value, no constant, to a struct or union complete at the node, and a member that is no
+ // bit-field.
++// A cache hit proves the type and name. The caller still tests the operand's
++// flags and standing and the source position of each individual access.
++static __attribute__((noinline)) const NodeResolvedMember* node_resolved_member_fill(
++    NodeResolvedMember* dest,const NodeFactsView* view,TypeId type,uint32_t name,bool arrow)
++{
++    const NodeFactsRow* row=node_facts_row_of(view,type);
++    if(!(row->flags & (arrow?BUSTER_NODE_FACTS_ARROW:BUSTER_NODE_FACTS_RECORD))) return NULL;
++    const NodeFactsMember* member=node_facts_member_kept(view,arrow?row->element:type,name);
++    const uint32_t mask=BUSTER_NODE_FACTS_MEMBER_FOUND|BUSTER_NODE_FACTS_MEMBER_BIT_FIELD;
++    if((member->flags&mask)!=BUSTER_NODE_FACTS_MEMBER_FOUND) return NULL;
++    *dest=(NodeResolvedMember){.key=((uint64_t)type<<32)|name,.member=*member,.converted=row->value,
++            .complete_at=arrow?row->element_complete_at:row->complete_at,.arrow=arrow,.present=1};
++    return dest;
++}
++static inline const NodeResolvedMember* node_resolved_member(const NodeFactsView* view,TypeId type,uint32_t name,bool arrow)
++{
++    const uint64_t key=(uint64_t)type<<32|name;
++    const uint32_t at=(uint32_t)(((key*UINT64_C(0x9e3779b97f4a7c15))>>53)^arrow)&(NODE_RESOLVED_SLOTS-1);
++    NodeResolvedMember* slot=view->resolved+at;
++    return slot->present && slot->key==key && slot->arrow==(uint32_t)arrow ? slot : node_resolved_member_fill(slot,view,type,name,arrow);
++}
++
+ static inline __attribute__((always_inline)) bool node_facts_arrow_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
+ {
+     const TypeId type = records[a].type;
+@@ -3217,6 +3259,41 @@ static inline __attribute__((always_inline)) bool node_facts_arrow_fast(NodeFact
+     return fast;
+ }
+ 
++static inline __attribute__((always_inline)) bool node_facts_arrow_resolved(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
++{
++    const TypeId type = records[a].type;
++    const uint32_t standing = records[a].standing;
++    const uint32_t flags = records[a].flags;
++    const NodeResolvedMember* answer=node_resolved_member(view,type,view->inputs[w],true);
++    if(!answer) return false;
++    const uint32_t lvalue = 0u - (standing & 0x01u);
++    const uint32_t unfit = node_facts_unfit(type, standing, flags, lvalue, true);
++    bool fast = unfit == 0 && answer->complete_at <= view->positions[w];
++    if (fast)
++    {
++        const NodeFactsMember* slot = &answer->member;
++        fast = (slot->flags & (BUSTER_NODE_FACTS_MEMBER_FOUND | BUSTER_NODE_FACTS_MEMBER_BIT_FIELD)) == BUSTER_NODE_FACTS_MEMBER_FOUND;
++        if (fast)
++        {
++            // Its base's inherited flags and its object's; a read through an inactive union's address is one of an
++            // inactive union (the flag below the address's).
++            _Static_assert(BUSTER_CHECK_INACTIVE_UNION_ADDRESS >> 1 == BUSTER_CHECK_INACTIVE_UNION_READ, "an inactive union's address's flag shifts to its read's");
++            const uint32_t kept = BUSTER_CHECK_INHERITED | BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS;
++            const uint32_t result = (flags & kept) | ((flags >> 1) & BUSTER_CHECK_INACTIVE_UNION_READ) | slot->result_flags;
++            node_facts_record(records, w, slot->type, slot->word, BUSTER_NODE_MACHINE_STANDING(CHECK_LVALUE, CHECK_CONSTANT_NONE), result, 0, 0);
++            if (lean)
++            {
++                node_facts_store(records + w, 48, slot->offset);
++            }
++            else
++            {
++                node_facts_conversions(records, w, lvalue != 0 ? answer->converted : type, lvalue & 1u, 0, 0, slot->offset);
++            }
++        }
++    }
++    return fast;
++}
++
+ // `.`'s short path: a struct or union complete at the node, no constant or an address constant, and a member that is no
+ // bit-field, an address constant's at a whole byte.
+ static inline __attribute__((always_inline)) bool node_facts_dot_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
+@@ -3266,6 +3343,54 @@ static inline __attribute__((always_inline)) bool node_facts_dot_fast(NodeFactsR
+     return fast;
+ }
+ 
++static inline __attribute__((always_inline)) bool node_facts_dot_resolved(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
++{
++    const TypeId type = records[a].type;
++    const uint32_t standing = records[a].standing;
++    const uint32_t flags = records[a].flags;
++    const NodeResolvedMember* answer=node_resolved_member(view,type,view->inputs[w],false);
++    if(!answer) return false;
++    const uint32_t kind = (standing >> 2) & 0x07u;
++    const bool address = kind == CHECK_CONSTANT_ADDRESS;
++    const uint32_t unfit = (standing & BUSTER_NODE_MACHINE_WIDE) | (kind != CHECK_CONSTANT_NONE && !address ? 1u : 0u);
++    bool fast = unfit == 0 && answer->complete_at <= view->positions[w];
++    if (fast)
++    {
++        // The operand's payload and object are read whether it is an address constant or not, and chosen by masks: a
++        // choice with a load behind it is compiled as a branch, and whether a record is an address constant's (a static
++        // object's member) is one the predictor misses.
++        const NodeFactsMember* slot = &answer->member;
++        const uint64_t offset = slot->offset;
++        const uint64_t payload = records[a].payload;
++        const uint32_t object = records[a].object;
++        const uint64_t addressed = 0 - (uint64_t)(address ? 1u : 0u);
++        const uint64_t based = 0 - (uint64_t)((standing & BUSTER_NODE_MACHINE_FIELD) == BUSTER_NODE_MACHINE_OFFSET ? 1u : 0u);
++        int64_t moved = 0;
++        const bool overflow = __builtin_add_overflow((int64_t)(payload & based), (int64_t)(offset / 8), &moved);
++        const uint32_t misplaced = (uint32_t)addressed & ((offset % 8 != 0 ? 1u : 0u) | (overflow ? 1u : 0u));
++        fast = (((slot->flags ^ BUSTER_NODE_FACTS_MEMBER_FOUND) & (BUSTER_NODE_FACTS_MEMBER_FOUND | BUSTER_NODE_FACTS_MEMBER_BIT_FIELD)) | misplaced) == 0;
++        if (fast)
++        {
++            const int64_t addend = (int64_t)((uint64_t)moved & addressed);
++            const uint32_t kept = BUSTER_CHECK_INHERITED | BUSTER_CHECK_STATIC_OBJECT | BUSTER_CHECK_CONST_READ_RESTRICTED | BUSTER_CHECK_NONNULL_ADDRESS | BUSTER_CHECK_REGISTER;
++            const uint32_t category = (standing & 0x03u) == CHECK_LVALUE ? CHECK_LVALUE : CHECK_RVALUE;
++            _Static_assert(CHECK_CONSTANT_NONE == 0, "a standing with no constant is its category alone");
++            const uint8_t made = (uint8_t)(BUSTER_NODE_MACHINE_STANDING(category, CHECK_CONSTANT_NONE) | ((uint32_t)addressed & BUSTER_NODE_MACHINE_STANDING(0, CHECK_CONSTANT_ADDRESS)) |
++                                           (addend != 0 ? BUSTER_NODE_MACHINE_OFFSET : 0));
++            node_facts_record(records, w, slot->type, slot->word, made, (flags & kept) | slot->result_flags, object & (uint32_t)addressed, (uint64_t)addend);
++            if (lean)
++            {
++                node_facts_store(records + w, 48, offset);
++            }
++            else
++            {
++                node_facts_conversions(records, w, type, 0, 0, 0, offset);
++            }
++        }
++    }
++    return fast;
++}
++
+ // A dereference's short path: a pointer's value. Its record is its operand's with the pointee's type, an lvalue or a
+ // function's designator (node_facts_dereference's steps).
+ static inline __attribute__((always_inline)) bool node_facts_dereference_fast(NodeFactsRecord* records, const NodeFactsView* view, uint32_t w, uint32_t a, bool lean)
+@@ -3466,6 +3591,7 @@ static inline __attribute__((always_inline)) NodeFactsView node_facts_view(const
+         .lines = facts->lines,
+         .rows = facts->rows,
+         .members = facts->members,
++        .resolved = facts->resolved,
+         .sides = facts->sides,
+         .pairs = facts->pairs,
+         .targets = facts->targets,
+@@ -3755,6 +3881,7 @@ static inline __attribute__((always_inline)) void node_facts_arrows_of(NodeFacts
+         const uint32_t w = batch[i];
+         const uint32_t a = w - left[w];
+         const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_arrow_load(records, &view, w, a)
++                                                           : view.resolved ? node_facts_arrow_resolved(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN)
+                                                            : node_facts_arrow_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
+         if (__builtin_expect(!taken, 0))
+         {
+@@ -3782,6 +3909,7 @@ static inline __attribute__((always_inline)) void node_facts_dots_of(NodeFacts*
+         const uint32_t w = batch[i];
+         const uint32_t a = w - left[w];
+         const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_dot_load(records, &view, w, a)
++                                                           : view.resolved ? node_facts_dot_resolved(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN)
+                                                            : node_facts_dot_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
+         if (__builtin_expect(!taken, 0))
+         {
