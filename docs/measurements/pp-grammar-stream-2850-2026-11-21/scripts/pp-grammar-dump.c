@@ -54,7 +54,7 @@ int main(int argc, char** argv)
         dump_column(counts, sizeof(counts));
         dump_column(pp.output.kinds,p); dump_column(pp.output.flags,p); dump_column(pp.output.values,4ul*p); dump_column(pp.output.locations,4ul*p);
         dump_column(pp.history_runs, pp.history_run_count*sizeof(PPHistoryRun));
-        dump_column(parser.tokens.kinds,n); dump_column(parser.tokens.flags,n); dump_column(parser.tokens.names,4ul*n);  
+        dump_column(parser.tokens.kinds,n); dump_column(parser.tokens.flags,n); dump_column(parser.tokens.names,4ul*n);
 #ifdef PROBE_IDENTITY
         for (uint32_t t=0;t<n;t++) {uint32_t source=parse_source_index(&parser.tokens,t); dump_column(&source,sizeof(source));}
         for (uint32_t pad=0;pad<BUSTER_PARSE_TOKEN_PADDING;pad++)

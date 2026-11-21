@@ -1,0 +1,100 @@
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index 15e597e3c..e8f441962 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -176,13 +176,15 @@ static void parse_tokens_pad(ParseTokens* tokens)
+ // table lookup (two vpermi2b for the table's halves, picked by the kind's bit 7) and masked stores; each of those
+ // three goes through parse_convert_token. `tokens` has room for twice the output's tokens (every one a `::`) and its
+ // pragmas, with the padding on both sides.
+-static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
++BUSTER_INLINE bool parse_tokens_and_scope(const PPTokens* output, ParseTokens* tokens, bool inspect_scope)
+ {
+     const __m512i table0 = _mm512_load_si512(parse_kind_table);
+     const __m512i table1 = _mm512_load_si512(parse_kind_table + 64);
+     const __m512i table2 = _mm512_load_si512(parse_kind_table + 128);
+     const __m512i table3 = _mm512_load_si512(parse_kind_table + 192);
+     const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
++    uint64_t adjacent_squares = 0;
++    uint64_t last_square = 0;
+     uint32_t written = 0;
+     tokens->pragma_count = 0;
+     bool identity = true;
+@@ -193,6 +195,14 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
+         const uint32_t left = output->count - i;
+         const __mmask64 live = left >= 64 ? ~(__mmask64)0 : _bzhi_u64(~0ull, left);
+         const __m512i kinds = _mm512_maskz_loadu_epi8(live, output->kinds + i);
++        if (inspect_scope)
++        {
++            // If a special changes the stream, use the usual scan. On straight output every
++            // 64-row block but the last is full, so bit 63 is exactly the carry into the next.
++            const uint64_t square = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_L_SQUARE));
++            adjacent_squares |= square & ((square << 1) | last_square);
++            last_square = square >> 63;
++        }
+         const uint64_t special = _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_HASH)) |
+                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END)) |
+                                  _mm512_mask_cmpeq_epi8_mask(live, kinds, _mm512_set1_epi8(C_TOKEN_COLONCOLON));
+@@ -239,6 +249,31 @@ static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens
+     tokens->count = written;
+     tokens->identity_sources = identity;
+     parse_tokens_pad(tokens);
++    return !identity || adjacent_squares != 0;
++}
++
++static void parse_tokens_from_output(const PPTokens* output, ParseTokens* tokens)
++{
++    (void)parse_tokens_and_scope(output, tokens, false);
++}
++
++// Read only the grammar-kind column until a double square is present. Here these are
++// the actual converted rows, including adjacency created by the removal of a pragma.
++static bool parse_grammar_has_scope(const ParseTokens* tokens)
++{
++    uint64_t last_square = 0;
++    for (uint32_t first = 0; first < tokens->count; first += 64)
++    {
++        // Grammar padding is initialized to END; a partial last block has no false opening.
++        const __m512i kinds = _mm512_loadu_si512(tokens->kinds + first);
++        const uint64_t square = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_L_SQUARE));
++        if ((square & ((square << 1) | last_square)) != 0)
++        {
++            return true;
++        }
++        last_square = square >> 63;
++    }
++    return false;
+ }
+ 
+ static const char* const parse_role_names[PARSE_ROLE_COUNT] =
+@@ -11415,9 +11450,29 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+     }
+     if (result)
+     {
+-        parse_tokens_from_output(output, &parser->tokens);
++        const char* setting = getenv("BUSTER_TEST_SCOPE_ADMISSION");
++        const int mode = setting == NULL ? 0 : atoi(setting);
++        bool possible = true;
++        if (mode == 1 || mode == 2)
++        {
++            possible = parse_tokens_and_scope(output, &parser->tokens, true);
++        }
++        else
++        {
++            parse_tokens_from_output(output, &parser->tokens);
++        }
+         parse_mark_pragma_packs(pp, &parser->tokens);
+-        const bool normalized = parse_clang_scope_numbers(parser, pp);
++        if (mode == 3)
++        {
++            possible = parse_grammar_has_scope(&parser->tokens);
++        }
++        const bool scan = (mode != 2 && mode != 3) || possible;
++        const bool normalized = !scan || parse_clang_scope_numbers(parser, pp);
++        if (getenv("BUSTER_TEST_SCOPE_REPORT") != NULL)
++        {
++            fprintf(stderr, "scope-admission mode=%d pp=%u rows=%u identity=%u possible=%u scan=%u deferred=%u\n",
++                    mode, output->count, parser->tokens.count, parser->tokens.identity_sources, possible, scan, pp->history_deferred);
++        }
+         const uint32_t count = parser->tokens.count;
+         parser->diagnostic_capacity = count + 16;
+         parser->diagnostics = parser->diagnostic_column != 0 ? parser->diagnostic_column :
