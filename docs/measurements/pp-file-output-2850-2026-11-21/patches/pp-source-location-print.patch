@@ -1,0 +1,256 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 817123c11..98a97ddfd 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -1540,6 +1540,10 @@ struct Preprocessor
+     // The output, and the three stacks of buffers. Once released (pp_release_output), the output keeps its count but not
+     // its columns until a replay gives them back (pp_output_ensure).
+     PPTokens output;
++    // Experimental borrowed location runs. The starts are stable until prepared file columns are released.
++    struct PPFileLocationRun* location_runs;
++    uint32_t location_run_count, location_capacity, location_rows, location_mode;
++    bool location_report;
+     bool output_released;
+     PPTokens arguments;
+     // Lazy delimiter links for immutable raw argument slices, indexed through argument_indexed. A write after a
+@@ -6050,6 +6054,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions*
+ 
+ static void pp_release_unit(Preprocessor* pp)
+ {
++    free(pp->location_runs);
++    pp->location_runs = NULL;
+     pp_tokens_release(&pp->output);
+     pp_tokens_release(&pp->arguments);
+     pp_tokens_release(&pp->captures);
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index d956fa69f..100b8e380 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -2882,7 +2882,7 @@ BUSTER_INLINE uint32_t pp_run_limit(const PPFileData* data, const PPContext* con
+ // values and locations that hold the first `stored` tokens (at most `available`) are written: a run that stops at a
+ // macro's name keeps only the tokens before it.
+ BUSTER_INLINE void pp_store_file_tokens(PPTokens* out, uint32_t index, const PPFileData* data, uint32_t base, uint32_t p, uint32_t available, uint32_t stored, __m512i kinds,
+-                                        bool from_macro)
++                                        bool from_macro, bool store_locations)
+ {
+     const __mmask64 valid = _bzhi_u64(~0ull, available);
+     const __m512i plain = _mm512_and_si512(kinds, _mm512_set1_epi8(0x7F));
+@@ -2906,9 +2906,12 @@ BUSTER_INLINE void pp_store_file_tokens(PPTokens* out, uint32_t index, const PPF
+         const __mmask16 lanes = (__mmask16)(valid >> (group * 16));
+         const __mmask16 others = (__mmask16)~(identifiers >> (group * 16));
+         const __m512i values = _mm512_maskz_loadu_epi32(lanes, data->values + p + group * 16);
+-        const __m512i starts = _mm512_maskz_loadu_epi32(lanes, data->starts + p + group * 16);
+         _mm512_storeu_si512(out->values + index + group * 16, _mm512_mask_add_epi32(values, others, values, bases));
+-        _mm512_storeu_si512(out->locations + index + group * 16, _mm512_add_epi32(starts, bases));
++        if (store_locations)
++        {
++            const __m512i locations = _mm512_maskz_loadu_epi32(lanes, data->starts + p + group * 16);
++            _mm512_storeu_si512(out->locations + index + group * 16, _mm512_add_epi32(locations, bases));
++        }
+     }
+ }
+ 
+@@ -2923,7 +2926,7 @@ static bool pp_append_file_tokens(Preprocessor* pp, PPTokens* out, const PPFileD
+         for (uint32_t p = begin; p < end; p += 64)
+         {
+             const uint32_t available = end - p < 64 ? end - p : 64;
+-            pp_store_file_tokens(out, count, data, base, p, available, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), from_macro);
++            pp_store_file_tokens(out, count, data, base, p, available, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), from_macro, true);
+             count += available;
+         }
+         pp_history_fill(pp, out, out->count, count, from_macro ? pp->history_current : 0);
+@@ -2985,7 +2988,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
+         }
+         if (take != 0)
+         {
+-            pp_store_file_tokens(target, target->count, data, base, p, available, take, kinds, false);
++            pp_store_file_tokens(target, target->count, data, base, p, available, take, kinds, false, true);
+         }
+         target->count += take;
+         p += take;
+@@ -2993,6 +2996,82 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
+     return p;
+ }
+ 
++// A complete unmodified 64-row slice of a prepared source file. Adjacent compatible slices share one descriptor.
++typedef struct PPFileLocationRun
++{
++    const uint32_t* starts;
++    uint32_t output, count, base;
++} PPFileLocationRun;
++
++static bool pp_borrow_file_locations(Preprocessor* pp, uint32_t at, const uint32_t* starts, uint32_t base)
++{
++    PPFileLocationRun* previous = pp->location_run_count ? &pp->location_runs[pp->location_run_count - 1] : NULL;
++    if (previous != NULL && previous->output + previous->count == at && previous->base == base && previous->starts + previous->count == starts)
++    {
++        previous->count += 64;
++    }
++    else
++    {
++        if (pp->location_run_count == pp->location_capacity)
++        {
++            const uint32_t capacity = pp->location_capacity ? pp->location_capacity * 2 : 64;
++            PPFileLocationRun* rows = realloc(pp->location_runs, sizeof(*rows) * (size_t)capacity);
++            if (rows == NULL) return false;
++            pp->location_runs = rows;
++            pp->location_capacity = capacity;
++        }
++        pp->location_runs[pp->location_run_count++] = (PPFileLocationRun){starts, at, 64, base};
++    }
++    pp->location_rows += 64;
++    return true;
++}
++
++// Expose one ordered consumer block into fixed scratch, advancing over the immutable source runs.
++static const uint32_t* pp_file_location_block(const Preprocessor* pp, uint32_t* cursor, uint32_t begin, uint32_t count, uint32_t tmp[64])
++{
++    const uint32_t end = begin + count;
++    uint32_t row = *cursor;
++    while (row < pp->location_run_count && pp->location_runs[row].output + pp->location_runs[row].count <= begin) ++row;
++    *cursor = row;
++    if (row == pp->location_run_count || pp->location_runs[row].output >= end) return pp->output.locations + begin;
++    uint32_t t = begin;
++    while (t < end && row < pp->location_run_count && pp->location_runs[row].output < end)
++    {
++        const PPFileLocationRun* r = &pp->location_runs[row];
++        if (t < r->output)
++        {
++            memcpy(tmp + t - begin, pp->output.locations + t, (r->output - t) * sizeof(*tmp));
++            t = r->output;
++        }
++        const uint32_t last = r->output + r->count < end ? r->output + r->count : end;
++        for (; t < last;)
++        {
++            const uint32_t width = last - t < 16 ? last - t : 16;
++            const __mmask16 live = (__mmask16)_bzhi_u32(UINT32_MAX, width);
++            const __m512i starts = _mm512_maskz_loadu_epi32(live, r->starts + t - r->output);
++            _mm512_mask_storeu_epi32(tmp + t - begin, live, _mm512_add_epi32(starts, _mm512_set1_epi32(r->base)));
++            t += width;
++        }
++        row += t == r->output + r->count;
++    }
++    if (t < end) memcpy(tmp + t - begin, pp->output.locations + t, (end - t) * sizeof(*tmp));
++    *cursor = row;
++    return tmp;
++}
++
++static void pp_materialize_file_locations(Preprocessor* pp)
++{
++    for (uint32_t i = 0; i < pp->location_run_count; ++i)
++    {
++        const PPFileLocationRun* run = &pp->location_runs[i];
++        for (uint32_t j = 0; j < run->count; j += 16)
++        {
++            const __m512i starts = _mm512_loadu_si512(run->starts + j);
++            _mm512_storeu_si512(pp->output.locations + run->output + j, _mm512_add_epi32(starts, _mm512_set1_epi32(run->base)));
++        }
++    }
++}
++
+ // pp_copy_file_run_vector for a file's text read straight into the output (pp_step_file's `text`), which doesn't stop at
+ // the name of an object-like macro whose body is one token that names no macro: it writes the expansion in the name's
+ // place, as pp_expand_file_direct would after the run stopped there (the expansion's record, its token with the name's
+@@ -3039,7 +3118,10 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
+         }
+         if (take != 0)
+         {
+-            pp_store_file_tokens(out, out->count, data, base, p, available, take, kinds, false);
++            const bool borrowed = pp->location_mode != 0 && take == 64 && replaced == 0 &&
++                                  pp_borrow_file_locations(pp, out->count, data->starts + p, base);
++            pp_store_file_tokens(out, out->count, data, base, p, available, take, kinds, false, !borrowed || pp->location_mode == 1);
++            if (borrowed && pp->location_mode == 4) memset(out->locations + out->count, 0xcd, 64 * sizeof(*out->locations));
+         }
+         // Each name replaced, in order, by its body's token, which takes the name's flags as stored (its leading space
+         // and line start) in place of its own space.
+@@ -5251,7 +5333,7 @@ static void pp_emit_body_run(Preprocessor* pp, const PPFileData* data, uint32_t
+     for (uint32_t p = begin; p < end; p += 64)
+     {
+         const uint32_t available = end - p < 64 ? end - p : 64;
+-        pp_store_file_tokens(out, count, data, base, p, available, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), true);
++        pp_store_file_tokens(out, count, data, base, p, available, available, _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), data->kinds + p), true, true);
+         count += available;
+     }
+     out->count = count;
+@@ -13599,6 +13681,9 @@ static bool pp_initialize_time(Preprocessor* pp)
+ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, InternTable* table)
+ {
+     *pp = (Preprocessor){ 0 };
++    const char* view = getenv("BUSTER_TEST_PP_FILE_LOCATIONS");
++    pp->location_mode = view == NULL ? 0 : strcmp(view, "record") == 0 ? 1 : strcmp(view, "restore") == 0 ? 2 : strcmp(view, "view") == 0 ? 3 : strcmp(view, "poison") == 0 ? 4 : 0;
++    pp->location_report = getenv("BUSTER_TEST_PP_FILE_LOCATION_REPORT") != NULL;
+     pp->diagnostic_include_range = BUSTER_PP_NONE;
+     pp->diagnostic_position = BUSTER_PP_NONE;
+     pp->diagnostic_run_first = BUSTER_PP_NONE;
+@@ -14435,6 +14520,7 @@ static void pp_forget_prepared(PPFileData* data, bool whole)
+ 
+ BUSTER_PREPROCESSOR_ENTRY void pp_release_file_columns(Preprocessor* pp, bool poison)
+ {
++    if (pp->location_mode >= 3) pp_materialize_file_locations(pp);
+     if (pp->owns_cache && pp->history_replay == NULL)
+     {
+         FileCache* cache = pp->cache;
+@@ -14696,6 +14782,10 @@ static void pp_resolve_keywords(Preprocessor* pp)
+ {
+     pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+     pp->keywords_resolved = pp->output.count;
++    if (pp->location_report)
++        fprintf(stderr,"pp-location-views: count=%u runs=%u covered=%u capacity=%u mode=%u record=%zu\n",
++                pp->output.count,pp->location_run_count,pp->location_rows,pp->location_capacity,pp->location_mode,sizeof(PPFileLocationRun));
++    if (pp->location_mode == 2) pp_materialize_file_locations(pp);
+ }
+ 
+ // The markers' state before the first token: the stack is the main file's, at its first line, which the text gives
+@@ -15603,7 +15693,8 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
+     const uint8_t* out_kinds = pp->output.kinds;
+     const uint8_t* out_flags = pp->output.flags;
+     const uint32_t* out_values = pp->output.values;
+-    const uint32_t* out_locations = pp->output.locations;
++    uint32_t location_cursor = 0;
++    uint32_t temp_locations[64] __attribute__((aligned(64)));
+     const uint32_t count = pp->output.count;
+     const uint8_t* records = pp->table->records;
+     const InternSpan* spans = pp->table->spans;
+@@ -15659,6 +15750,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
+     {
+         const uint32_t available = count - c < 64 ? count - c : 64;
+         const __mmask64 valid = _bzhi_u64(~0ull, available);
++        const uint32_t* chunk_locations = !markers && pp->location_mode >= 3 ? pp_file_location_block(pp, &location_cursor, c, available, temp_locations) : pp->output.locations + c;
+         const __m512i kinds = _mm512_maskz_loadu_epi8(valid, out_kinds + c);
+         // 0. The identifiers of pragma lines after their names, which -E spells as written (pp_pragma_state's
+         // BUSTER_PP_PRAGMA_TOKENS): a line from its '#' (a hash at the scratch "#") to its end, which alternate, is the bits
+@@ -15667,7 +15759,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
+         for (uint32_t q = 0; q < 4; q += 1)
+         {
+             const __mmask16 lanes = (__mmask16)(valid >> (16 * q));
+-            const __m512i locations = _mm512_maskz_loadu_epi32(lanes, out_locations + c + 16 * q);
++            const __m512i locations = _mm512_maskz_loadu_epi32(lanes, chunk_locations + 16 * q);
+             pragma_starts |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(lanes, locations, hash_location) << (16 * q);
+         }
+         pragma_starts &= _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_HASH));
+@@ -15689,7 +15781,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
+         const uint64_t spare_mark = scratch.arena->length;
+         const uint64_t internal = _mm512_mask_cmpge_epu8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
+         bool general = per_token || (written | internal) != 0 ||
+-                       !pp_print_spellings(pp, directory, out_kinds + c, out_values + c, out_locations + c, identifiers, valid, !markers, records, spans, spellings,
++                       !pp_print_spellings(pp, directory, out_kinds + c, out_values + c, chunk_locations, identifiers, valid, !markers, records, spans, spellings,
+                                            lengths, firsts, lasts);
+         const uint64_t embeds = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
+         // With markers, the unknown tokens, whose line breaks the printer's line counts (pp_print_token_lines).
+@@ -15720,7 +15812,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
+                 const uint32_t i = c + k;
+                 const uint8_t kind = out_kinds[i];
+                 const uint32_t value = out_values[i];
+-                const uint32_t location = out_locations[i];
++                const uint32_t location = chunk_locations[i - c];
+                 const uint8_t* spelling = 0;
+                 uint32_t length = 0;
+                 if (BUSTER_UNLIKELY((written >> k) & 1))
+@@ -16046,6 +16138,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
+ 
+ BUSTER_PREPROCESSOR_ENTRY bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
+ {
++    if (markers && pp->location_mode >= 3) pp_materialize_file_locations(pp);
+     return markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
+ }
+ 
