@@ -1,0 +1,459 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index fc65220..4b37740 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -327,6 +327,7 @@ static inline void check_clock_lower(CheckClock* stage_clock, CheckClockLower ph
+ // A lap that also charges the resource use since the last mark to `stage`; nothing without a clock.
+ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ {
++    census_mark((uint32_t)stage, check_stage_names[stage], stage == CHECK_STAGE_PARSE, stage == CHECK_STAGE_OBJECT_BUILD, stage == CHECK_STAGE_RELEASE);
+     check_clock_lap(stage_clock, stage);
+     if (stage_clock != NULL)
+     {
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 42f1bdf..7199d63 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -1275,8 +1275,400 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+     return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------------------
++// #1701's lifetime census (an experiment patch, not for main). With BUSTER_MEMORY_CENSUS=PATH every owned arena's
++// pushed extent is followed in 64 KB granules: at each stage mark (census_mark, from check_clock_mark) the pages resident
++// in each granule are counted (mincore) and, from the parse mark to object-build's, the arena's whole pushed extent is
++// protected, so that the first read and the first write of each granule in each later stage are recorded by the SIGSEGV
++// handler, which gives the granule back. Pushes of 64 KB or more are recorded with their call sites, to name the
++// granules' owners. The table is written at the release mark.
++#include <ucontext.h>
++#define BUSTER_CENSUS_MAX 32768u
++#define BUSTER_CENSUS_ARENAS 2048u
++#define BUSTER_CENSUS_MIN_BYTES (64u << 10)
++#define BUSTER_CENSUS_GRANULE (64u << 10)
++#define BUSTER_CENSUS_MARKS 48u
++typedef struct CensusPush
++{
++    uintptr_t begin;
++    uintptr_t end;
++    uintptr_t site;
++    uintptr_t arena_base;
++    uint64_t offset;
++    uint32_t pushed;
++    uint32_t popped;
++} CensusPush;
++typedef struct CensusArena
++{
++    uintptr_t base;
++    uint64_t end;
++    uintptr_t first_site;
++    uint32_t created;
++    uint32_t released;
++    uint64_t granules;
++    uint64_t protected_end;
++    uint64_t* reads;
++    uint64_t* writes;
++    uint8_t* resident;
++} CensusArena;
++typedef struct BusterCensus
++{
++    bool on;
++    bool protecting;
++    bool tracking;
++    bool written;
++    uint32_t epoch;
++    uint32_t count;
++    uint32_t arena_count;
++    uint32_t dropped;
++    uint32_t stages[BUSTER_CENSUS_MARKS];
++    const char* names[BUSTER_CENSUS_MARKS];
++    uint64_t rss_kb[BUSTER_CENSUS_MARKS];
++    uint64_t hwm_kb[BUSTER_CENSUS_MARKS];
++    uint64_t faults;
++    char path[512];
++    CensusArena arenas[BUSTER_CENSUS_ARENAS];
++    CensusPush pushes[BUSTER_CENSUS_MAX];
++} BusterCensus;
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern BusterCensus buster_census;
++#elif defined(BUSTER_UNIT)
++BusterCensus buster_census;
++#else
++static BusterCensus buster_census;
++#endif
++
++static __attribute__((unused)) uintptr_t census_page_up(uintptr_t a)
++{
++    return (a + 4095) & ~(uintptr_t)4095;
++}
++
++static __attribute__((unused)) uintptr_t census_page_down(uintptr_t a)
++{
++    return a & ~(uintptr_t)4095;
++}
++
++static __attribute__((unused)) void census_say(const char* text, int length)
++{
++    if (length > 0)
++    {
++        ssize_t ignored = write(2, text, (size_t)length);
++        (void)ignored;
++    }
++}
++
++static __attribute__((unused)) void census_fault(int signal_number, siginfo_t* info, void* context)
++{
++    const uintptr_t address = (uintptr_t)info->si_addr;
++    const ucontext_t* frame = context;
++    const bool is_write = (frame->uc_mcontext.gregs[19] & 2) != 0;
++    bool handled = false;
++    for (uint32_t i = 0; !handled && i < buster_census.arena_count; i += 1)
++    {
++        CensusArena* arena = &buster_census.arenas[i];
++        if (arena->released == UINT32_MAX && address >= arena->base && address < arena->base + arena->protected_end)
++        {
++            const uint64_t granule = (address - arena->base) / BUSTER_CENSUS_GRANULE;
++            const uint64_t bit = buster_census.epoch < 64 ? UINT64_C(1) << buster_census.epoch : 0;
++            if (granule < arena->granules)
++            {
++                arena->writes[granule] |= is_write ? bit : 0;
++                arena->reads[granule] |= is_write ? 0 : bit;
++            }
++            const uintptr_t begin = arena->base + granule * BUSTER_CENSUS_GRANULE;
++            const uintptr_t stop = begin + BUSTER_CENSUS_GRANULE < arena->base + arena->protected_end ? begin + BUSTER_CENSUS_GRANULE : arena->base + arena->protected_end;
++            mprotect((void*)begin, stop - begin, PROT_READ | PROT_WRITE);
++            buster_census.faults += 1;
++            handled = true;
++        }
++    }
++    if (!handled)
++    {
++        char text[160];
++        census_say(text, snprintf(text, sizeof(text), "census: unhandled fault at %llx rip %llx write %d epoch %u\n", (unsigned long long)address,
++                                  (unsigned long long)frame->uc_mcontext.gregs[16], is_write, buster_census.epoch));
++        signal(signal_number, SIG_DFL);
++    }
++}
++
++// Only main.c's units, which share one census; a benchmark's own unit has a census of its own and never turns it on.
++__attribute__((constructor)) static void census_start(void)
++{
++#if defined(BUSTER_UNIT)
++    const char* path = getenv("BUSTER_MEMORY_CENSUS");
++#else
++    const char* path = NULL;
++#endif
++    if (path != NULL && path[0] != 0 && !buster_census.on)
++    {
++        snprintf(buster_census.path, sizeof(buster_census.path), "%s", path);
++        struct sigaction action = { 0 };
++        action.sa_sigaction = census_fault;
++        action.sa_flags = SA_SIGINFO;
++        sigemptyset(&action.sa_mask);
++        sigaction(SIGSEGV, &action, NULL);
++        buster_census.on = true;
++        buster_census.protecting = true;
++    }
++}
++
++static __attribute__((unused)) CensusArena* census_arena(uintptr_t base)
++{
++    CensusArena* result = NULL;
++    for (uint32_t i = buster_census.arena_count; result == NULL && i > 0; i -= 1)
++    {
++        CensusArena* arena = &buster_census.arenas[i - 1];
++        result = arena->base == base && arena->released == UINT32_MAX ? arena : NULL;
++    }
++    return result;
++}
++
++static __attribute__((unused)) void census_unprotect_arena(CensusArena* arena)
++{
++    if (arena->protected_end != 0)
++    {
++        mprotect((void*)arena->base, arena->protected_end, PROT_READ | PROT_WRITE);
++        arena->protected_end = 0;
++    }
++}
++
++// Every live push of the arena at `arena_base` that starts at `length` or past it ends at this epoch.
++static __attribute__((unused)) void census_pop(uintptr_t arena_base, uint64_t length)
++{
++    if (buster_census.on && arena_base != 0)
++    {
++        for (uint32_t i = buster_census.count; i > 0; i -= 1)
++        {
++            CensusPush* push = &buster_census.pushes[i - 1];
++            if (push->popped == UINT32_MAX && push->arena_base == arena_base && push->offset >= length)
++            {
++                push->popped = buster_census.epoch;
++            }
++        }
++    }
++}
++
++static __attribute__((unused)) void census_release(uintptr_t arena_base)
++{
++    census_pop(arena_base, 0);
++    CensusArena* arena = buster_census.on && arena_base != 0 ? census_arena(arena_base) : NULL;
++    if (arena != NULL)
++    {
++        census_unprotect_arena(arena);
++        arena->released = buster_census.epoch;
++    }
++}
++
++static __attribute__((unused)) void census_push(const Arena* arena, uintptr_t begin, uint64_t size, uintptr_t site)
++{
++    if (buster_census.on && arena->mapping_bytes != 0 && size != 0)
++    {
++        const uintptr_t base = (uintptr_t)arena->base;
++        CensusArena* tracked = census_arena(base);
++        if (tracked == NULL && buster_census.arena_count < BUSTER_CENSUS_ARENAS)
++        {
++            tracked = &buster_census.arenas[buster_census.arena_count++];
++            *tracked = (CensusArena){ .base = base, .first_site = site, .created = buster_census.epoch, .released = UINT32_MAX };
++        }
++        if (tracked != NULL)
++        {
++            const uint64_t end = begin + size - base;
++            tracked->end = end > tracked->end ? end : tracked->end;
++        }
++        if (size >= BUSTER_CENSUS_MIN_BYTES)
++        {
++            // A live push this one overlaps was given back without a pop (a length set directly): it ends here.
++            for (uint32_t i = 0; i < buster_census.count; i += 1)
++            {
++                CensusPush* push = &buster_census.pushes[i];
++                if (push->popped == UINT32_MAX && push->begin < begin + size && begin < push->end)
++                {
++                    push->popped = buster_census.epoch;
++                }
++            }
++            if (buster_census.count < BUSTER_CENSUS_MAX)
++            {
++                buster_census.pushes[buster_census.count++] = (CensusPush){ .begin = begin, .end = begin + size, .site = site, .arena_base = base,
++                                                                            .offset = begin - base, .pushed = buster_census.epoch, .popped = UINT32_MAX };
++            }
++            else
++            {
++                buster_census.dropped += 1;
++            }
++        }
++    }
++}
++
++static __attribute__((unused)) void census_status(uint64_t* rss_kb, uint64_t* hwm_kb)
++{
++    *rss_kb = 0;
++    *hwm_kb = 0;
++    FILE* status = fopen("/proc/self/status", "r");
++    char line[256];
++    while (status != NULL && fgets(line, sizeof(line), status) != NULL)
++    {
++        unsigned long long value = 0;
++        if (sscanf(line, "VmRSS: %llu", &value) == 1)
++        {
++            *rss_kb = value;
++        }
++        if (sscanf(line, "VmHWM: %llu", &value) == 1)
++        {
++            *hwm_kb = value;
++        }
++    }
++    if (status != NULL)
++    {
++        fclose(status);
++    }
++}
++
++static __attribute__((unused)) void* census_grow(void* old, uint64_t old_bytes, uint64_t bytes)
++{
++    void* fresh = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (fresh != MAP_FAILED && old != NULL)
++    {
++        memcpy(fresh, old, old_bytes);
++        munmap(old, old_bytes);
++    }
++    return fresh != MAP_FAILED ? fresh : NULL;
++}
++
++static __attribute__((unused)) void census_write(void)
++{
++    FILE* out = fopen(buster_census.path, "w");
++    if (out != NULL)
++    {
++        fprintf(out, "census\tpushes=%u\tarenas=%u\tdropped=%u\tfaults=%llu\tmarks=%u\n", buster_census.count, buster_census.arena_count,
++                buster_census.dropped, (unsigned long long)buster_census.faults, buster_census.epoch);
++        for (uint32_t m = 0; m < buster_census.epoch && m < BUSTER_CENSUS_MARKS; m += 1)
++        {
++            fprintf(out, "mark\t%u\t%s\t%llu\t%llu\n", m, buster_census.names[m], (unsigned long long)buster_census.rss_kb[m],
++                    (unsigned long long)buster_census.hwm_kb[m]);
++        }
++        for (uint32_t i = 0; i < buster_census.count; i += 1)
++        {
++            const CensusPush* push = &buster_census.pushes[i];
++            fprintf(out, "push\t%u\t%llx\t%llu\t%llx\t%llx\t%llu\t%u\t%d\n", i, (unsigned long long)push->begin, (unsigned long long)(push->end - push->begin),
++                    (unsigned long long)push->site, (unsigned long long)push->arena_base, (unsigned long long)push->offset, push->pushed,
++                    push->popped == UINT32_MAX ? -1 : (int)push->popped);
++        }
++        for (uint32_t i = 0; i < buster_census.arena_count; i += 1)
++        {
++            const CensusArena* arena = &buster_census.arenas[i];
++            fprintf(out, "arena\t%u\t%llx\t%llu\t%llx\t%u\t%d\t%llu\n", i, (unsigned long long)arena->base, (unsigned long long)arena->end,
++                    (unsigned long long)arena->first_site, arena->created, arena->released == UINT32_MAX ? -1 : (int)arena->released,
++                    (unsigned long long)arena->granules);
++            for (uint64_t g = 0; g < arena->granules; g += 1)
++            {
++                bool any = arena->reads[g] != 0 || arena->writes[g] != 0;
++                for (uint32_t m = 0; !any && m < buster_census.epoch && m < BUSTER_CENSUS_MARKS; m += 1)
++                {
++                    any = arena->resident[g * BUSTER_CENSUS_MARKS + m] != 0;
++                }
++                if (any)
++                {
++                    fprintf(out, "granule\t%u\t%llu\t%llx\t%llx\t", i, (unsigned long long)g, (unsigned long long)arena->reads[g], (unsigned long long)arena->writes[g]);
++                    for (uint32_t m = 0; m < buster_census.epoch && m < BUSTER_CENSUS_MARKS; m += 1)
++                    {
++                        fprintf(out, "%s%u", m == 0 ? "" : ",", arena->resident[g * BUSTER_CENSUS_MARKS + m]);
++                    }
++                    fputc('\n', out);
++                }
++            }
++        }
++        fclose(out);
++    }
++}
++
++// A stage mark: the stage `name` ends here. Accesses after it are the next epoch's. Protection starts at the parse
++// mark, once the files are read, and ends at `last_protected`'s, before the object is written.
++static __attribute__((unused)) void census_mark(uint32_t stage, const char* name, bool start_protecting, bool last_protected, bool final)
++{
++    if (buster_census.on && buster_census.epoch < BUSTER_CENSUS_MARKS)
++    {
++        const uint32_t m = buster_census.epoch;
++        buster_census.stages[m] = stage;
++        buster_census.names[m] = name;
++        census_status(&buster_census.rss_kb[m], &buster_census.hwm_kb[m]);
++        if (strcmp(name, "static-data") == 0 || strcmp(name, "check-input") == 0)
++        {
++            char path[600];
++            snprintf(path, sizeof(path), "%s.smaps-%s", buster_census.path, name);
++            FILE* in = fopen("/proc/self/smaps", "r");
++            FILE* out = fopen(path, "w");
++            char buffer[4096];
++            size_t got = 0;
++            while (in != NULL && out != NULL && (got = fread(buffer, 1, sizeof(buffer), in)) != 0)
++            {
++                fwrite(buffer, 1, got, out);
++            }
++            if (in != NULL)
++            {
++                fclose(in);
++            }
++            if (out != NULL)
++            {
++                fclose(out);
++            }
++        }
++        buster_census.tracking = buster_census.tracking || start_protecting;
++        static unsigned char vector[BUSTER_CENSUS_GRANULE / 4096];
++        for (uint32_t i = 0; i < buster_census.arena_count; i += 1)
++        {
++            CensusArena* arena = &buster_census.arenas[i];
++            if (arena->released == UINT32_MAX)
++            {
++                const uint64_t granules = (arena->end + BUSTER_CENSUS_GRANULE - 1) / BUSTER_CENSUS_GRANULE;
++                if (granules > arena->granules)
++                {
++                    arena->reads = census_grow(arena->reads, arena->granules * 8, granules * 8);
++                    arena->writes = census_grow(arena->writes, arena->granules * 8, granules * 8);
++                    arena->resident = census_grow(arena->resident, arena->granules * BUSTER_CENSUS_MARKS, granules * BUSTER_CENSUS_MARKS);
++                    arena->granules = arena->reads != NULL && arena->writes != NULL && arena->resident != NULL ? granules : 0;
++                }
++                for (uint64_t g = 0; g < arena->granules; g += 1)
++                {
++                    const uintptr_t at = arena->base + g * BUSTER_CENSUS_GRANULE;
++                    const uintptr_t stop = at + BUSTER_CENSUS_GRANULE < arena->base + arena->end ? at + BUSTER_CENSUS_GRANULE : census_page_up(arena->base + arena->end);
++                    uint32_t resident = 0;
++                    if (stop > at && mincore((void*)at, stop - at, vector) == 0)
++                    {
++                        for (uint64_t page = 0; page < (stop - at) / 4096; page += 1)
++                        {
++                            resident += vector[page] & 1;
++                        }
++                    }
++                    arena->resident[g * BUSTER_CENSUS_MARKS + m] = (uint8_t)resident;
++                }
++            }
++        }
++        buster_census.epoch = m + 1;
++        for (uint32_t i = 0; i < buster_census.arena_count; i += 1)
++        {
++            CensusArena* arena = &buster_census.arenas[i];
++            if (arena->released == UINT32_MAX)
++            {
++                census_unprotect_arena(arena);
++                const uint64_t extent = census_page_down(arena->base + arena->end) - arena->base;
++                if (buster_census.protecting && buster_census.tracking && !last_protected && extent != 0 && arena->granules != 0)
++                {
++                    arena->protected_end = mprotect((void*)arena->base, extent, PROT_NONE) == 0 ? extent : 0;
++                }
++            }
++        }
++        buster_census.protecting = buster_census.protecting && !last_protected;
++        if (final && !buster_census.written)
++        {
++            census_write();
++            buster_census.written = true;
++        }
++    }
++}
++
+ static void arena_release(Arena* arena)
+ {
++    census_release((uintptr_t)arena->base);
+     if (arena->base != 0 && arena->grows)
+     {
+         // Its mapping as far as its slot says a copy of it may have grown it, unmapped whole, and its slot freed: under the
+@@ -1484,7 +1876,7 @@ static bool arena_commit(Arena* arena, uint64_t end)
+     return result;
+ }
+ 
+-static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
++__attribute__((noinline)) static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+     void* result = 0;
+     const uintptr_t base = (uintptr_t)arena->base;
+@@ -1500,6 +1892,7 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            census_push(arena, aligned, size, (uintptr_t)__builtin_return_address(0));
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+@@ -1509,7 +1902,7 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+     return result;
+ }
+ 
+-static void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment)
++__attribute__((always_inline)) static inline void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment)
+ {
+     void* result = 0;
+     uint64_t size = 0;
+@@ -1524,6 +1917,7 @@ static void arena_pop_to(Arena* arena, uint64_t length)
+ {
+     assert(length <= arena->length);
+     arena->length = length;
++    census_pop((uintptr_t)arena->base, length);
+ }
+ 
+ static bool arena_untouched(const Arena* arena)
+@@ -1587,6 +1981,7 @@ static void arena_poison(Arena* arena, uint8_t value)
+         memset(arena->base, value, written < arena->capacity ? written : arena->capacity);
+     }
+     arena->length = 0;
++    census_pop((uintptr_t)arena->base, 0);
+ }
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
