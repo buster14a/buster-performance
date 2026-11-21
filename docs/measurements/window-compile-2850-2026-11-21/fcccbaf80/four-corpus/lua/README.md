@@ -1,0 +1,5 @@
+# lua input and measurements
+
+One fresh process compiled 34 source file(s) containing 571,543 preprocessed tokens. Every one of 45 recorded compilation commands produced the identical [per-file object manifest](objects.tsv). The default and `-Wall -Wextra` batch invocations checked ordinary and option output on all inputs. Each input also ran alone in the enabled mode with stage counters. Its [per-source ELF and token receipts](per-source-qualification.tsv.gz) and [independent admission counts](admissions.tsv) preserve that second check. [Checks](checks.tsv) · [Run order](order.tsv) · [Samples](samples.tsv) · [Paired differences](paired.tsv) · [Raw reports](reports.tar.xz).
+
+The [scheduler receipt](scheduling.tsv) records the completion time of each process output and whether the hardware lease was busy before that process. The largest interval between adjacent positions within one round was 0.108 s (pmu), 1.050 s (wall). These intervals also include other jobs that obtained the hardware lease between compiler invocations. All measured commands themselves ran with exclusive access.
