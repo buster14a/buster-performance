@@ -496,6 +496,10 @@ without its attested declarations' tokens, and a mask holds the view off, so the
 in the unit's own parse; and an asm statement that leaves no row in its function (an empty template's barrier) still
 numbers the unit's asm helpers, so any asm statement refuses its body.
 
+Again at `37c096c36` (the scaffold with main `e20c6ff98` merged in, which has the unit-end warnings' fix of
+buster#3274 that the scaffold carried as a cherry-pick): 0 differences in both flag modes on the four corpora
+(`boundary-b1/37c096c36/`), with 2,588, 1,081, 1,357 and 2,158 bodies supplied.
+
 ### B2, what the unit costs with its bodies supplied (`boundary-6bc8d41a5/`, `boundary-bbe80f1a9/`)
 
 The 9700X, Release, CPU 2, one lane, under the lock, `scripts/boundary.sh`: seven rounds, each the ordinary compile
