@@ -1,0 +1,3 @@
+# Combined source-native and live checker path
+
+The complete Develop compiler produced the ordinary SQLite and Buster objects both with validation and with discarded body workspaces poisoned. All 6,860 source and warning-policy comparisons across SQLite, Buster, Lua, and musl matched the ordinary output bytes, diagnostics and exit status. A linked SQLite shell supplied directly by this executable matched Clang on all four scripts. This record covers correctness. [Complete source diff against 0e1d5b825](source.patch), [policy counts](source-policy.tsv), [harnesses and local outcomes](local-records.tar.gz), [build and available checker logs](develop-build.tar.gz), [linked runtime](linked-runtime.log).

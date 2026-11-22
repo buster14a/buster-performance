@@ -1,0 +1,3 @@
+# Physical source literal payloads in the ordinary expression reader
+
+The preprocessor and parser published packed decimal and synthetic integer results in complete token blocks. The SQLite expression reader used 45,284 payloads and needed four ordinary lookups at the tail. Buster used 336,087 with zero fallback. An independent scalar spelling decoder verified each consumed value. At the last nonfinal window the two compilations had produced 55,532 and 355,057 payloads. Counts include slow-form markers. Full SQLite and Buster ELF, default and maximum warnings and 57 forced-window language/policy observations matched ordinary. [SQLite](sqlite.stderr), [Buster](main.stderr), [source against 40ae34f9d](source.patch), [tests and commands](native-tests.tar.gz).

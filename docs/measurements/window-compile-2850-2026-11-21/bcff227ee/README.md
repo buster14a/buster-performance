@@ -1,0 +1,3 @@
+# Reusing checked identifier leaves in the ordinary expression graph
+
+The active SQLite prefix retained 8,889 declaration templates for ordinary identifier expressions. The final ordinary reader validated each distinct template on first use and reused it for 47,510 expression leaves, while 49,962 took the canonical decoder. The audit recomputed each reused leaf through the scalar implementation. Buster captured 15,697 templates and consumed zero under the conservative whole-unit gate. Both frozen native objects were exact and four linked SQLite shell scripts matched Clang. [SQLite](sqlite.stderr), [Buster](main.stderr), [source against 40ae34f9d](source.patch), [commands and tests](commands-and-tests.tar.gz).
