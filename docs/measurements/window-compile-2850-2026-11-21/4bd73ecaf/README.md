@@ -107,3 +107,11 @@ On one leased Ryzen 9 7940HS core, normal Develop build `ef95f4686` took longer 
 A separate sampling run of Buster's local/default command attributed 30.28% of sampled user cycles to `check_sparse_next` and 9.14% to `check_program_static_initializers`. The live control writer at this revision prepares initializer marks by scanning a unit-wide sparse column when it sees a function's first initializer. [Buster local profile](diagnostics/stage-ef95/buster-local.txt.xz), [Buster ordinary profile](diagnostics/stage-ef95/buster-whole.txt.xz), [SQLite local profile](diagnostics/stage-ef95/local.txt.xz) and [SQLite ordinary profile](diagnostics/stage-ef95/whole.txt.xz)
 
 Rebuild the `diagnostic-consumer.patch` revision in normal Develop configuration and run `diagnostic-stages.py` with the same `--compiler`, `--sqlite`, `--self-source` and a separate `--output` directory. [Reproducer](diagnostic-stages.py)
+
+## Five warning policies across all 1,372 input files
+
+The live publisher now builds the ordinary enum definition index once and runs the ordinary enum arithmetic consumer per declaration. It retains enum events for constant expressions that produce no graph node, including two array bounds in Buster. This gives the publisher the original macro expansion locations at the final diagnostic boundary. [Enum source changes](diagnostic-enum-events.patch)
+
+Every one of 6,860 comparisons matched ordinary status, stdout and raw stderr. All 6,860 source-local executions reached the live publisher. Each of 1,372 fresh source units ran under five policies, including `-Weverything`, `-w` and warnings promoted to errors. Buster’s everything run produced 11,818 diagnostic bytes and SQLite’s 7,425. The per-file table includes hashes and source-local control coverage. [Results by source and policy](diagnostics/enum-events/totals.tsv), [SQLite](diagnostics/enum-events/sqlite-policies.tsv.xz), [Buster](diagnostics/enum-events/buster-policies.tsv.xz), [Lua](diagnostics/enum-events/lua-policies.tsv.xz) and [musl](diagnostics/enum-events/musl-policies.tsv.xz)
+
+Apply `diagnostic-enum-events.patch` after `diagnostic-case-controls.patch` and supply `--policy default --policy wall --policy strict --policy quiet --policy everything` to the real-source reproducer with all four source paths. [Reproducer](diagnostic-corpora.py)
