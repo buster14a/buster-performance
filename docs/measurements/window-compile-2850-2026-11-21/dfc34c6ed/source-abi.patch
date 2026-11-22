@@ -1,0 +1,129 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index ed5612881..b664d2232 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -28,6 +28,7 @@ typedef struct CheckSourceControlUnit
+     uint32_t* object_declarations;
+     uint32_t* object_symbols;
+     uint8_t* defined_functions;
++    uint64_t* special_functions;
+     uint32_t* plan_first;
+     uint32_t* parent_cache;
+     uint32_t* case_first;
+diff --git a/src/buster/compiler/c_check_live_control_native.c b/src/buster/compiler/c_check_live_control_native.c
+index e2226b0d8..982ea58cc 100644
+--- a/src/buster/compiler/c_check_live_control_native.c
++++ b/src/buster/compiler/c_check_live_control_native.c
+@@ -134,11 +134,6 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+     p->target=reader->pp->options.target;
+     const uint32_t declaration=check_sparse_get(in->body_declarations,opening);
+     if(declaration>=in->token_count) return;
+-    const CheckInputAttributes* attributes=check_input_attributes_at(in,declaration);
+-    if (attributes!=NULL && (check_input_attribute_of(attributes,CHECK_ATTRIBUTE_TARGET)!=NULL ||
+-        check_input_attribute_of(attributes,CHECK_ATTRIBUTE_TARGET_CLONES)!=NULL || check_input_attribute_of(attributes,CHECK_ATTRIBUTE_CPU_SPECIFIC)!=NULL ||
+-        check_input_attribute_of(attributes,CHECK_ATTRIBUTE_CPU_DISPATCH)!=NULL || check_input_attribute_of(attributes,CHECK_ATTRIBUTE_NAKED)!=NULL))
+-    { check_source_control_decline(in,close,"special-target",0);return; }
+     const uint32_t own=in->objects[declaration];
+     if(own==0 || own>=p->object_count) return;
+     CheckProgramBody body={.opening=opening,.declaration=declaration,.object=own,.first=0,.count=count,.entry_count=entry_count,.reference_count=ref_count};
+@@ -163,6 +158,40 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+         for (uint32_t object=0;object<p->object_count;object+=1) unit->object_declarations[object]=object-1;
+         unit->declaring_count=check_program_declaring(in->declarations,&in->initializer_nodes,0,in->token_count,unit->declaring,false);
+         arena_pop_to(arena,(uint64_t)((uint8_t*)(unit->declaring+unit->declaring_count)-arena->base));
++        const uint32_t limit = in->token_count;
++        const uint32_t needs_unit = BUSTER_CHECK_PROGRAM_ATTRIBUTE_NAKED | BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET |
++                                    BUSTER_CHECK_PROGRAM_ATTRIBUTE_INTERRUPT | BUSTER_CHECK_PROGRAM_ATTRIBUTE_REALIGN |
++                                    BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE | BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE;
++        for (uint32_t first = check_sparse_wide_present(in->attributes) ? check_input_attributed_next(in->attributes, 0, limit) : limit; first < limit;
++             first = check_input_attributed_next(in->attributes, first + 16, limit))
++        {
++            uint32_t lanes = check_input_attributed_group(in->attributes, first, limit);
++            for (; lanes != 0; lanes &= lanes - 1)
++            {
++                const uint32_t token = first + (uint32_t)__builtin_ctz(lanes);
++                if (in->declaration_kinds[token] != C_BINDING_FUNCTION) continue;
++                const CheckInputAttributes* attributes = check_input_attributes_at(in, token);
++                bool special = (check_program_attribute_bits(attributes) & needs_unit) != 0;
++                for (uint32_t n = 0; !special && attributes != NULL && n < attributes->count; n += 1)
++                {
++                    const CheckInputAttribute* attribute = attributes->records + n;
++                    special = !attribute->ignored && !attribute->subject_ignored && attribute->kind == CHECK_ATTRIBUTE_CALLING_CONVENTION &&
++                              attribute->value == CHECK_CALL_NO_CALLER_SAVED;
++                }
++                const uint32_t object = in->objects[token];
++                if (special && object != 0 && object < p->object_count)
++                {
++                    if (unit->special_functions == NULL)
++                    {
++                        const uint64_t words = ((uint64_t)p->object_count + 63) / 64;
++                        unit->special_functions = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
++                        if (unit->special_functions == NULL) abort();
++                        memset(unit->special_functions, 0, words * sizeof(uint64_t));
++                    }
++                    unit->special_functions[object / 64] |= UINT64_C(1) << (object % 64);
++                }
++            }
++        }
+         for(uint32_t t=0;t<in->token_count;t+=1)
+         {
+             if(reader->parser->tree.roles[t]!=PARSE_ROLE_OPEN_BODY) continue;
+@@ -170,6 +199,17 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+             if(decl<in->token_count && in->objects[decl]<p->object_count) unit->defined_functions[in->objects[decl]]=1;
+         }
+     }
++    // The unit-level program owns frame, target and redeclaration attributes that are absent from a local function.
++    // Include earlier declarations in the lookup so a definition or call cannot lose its inherited ABI.
++    if (unit->special_functions != NULL)
++    {
++        if ((unit->special_functions[own / 64] >> (own % 64)) & 1) return;
++        for (uint32_t r = 0; r < ref_count; r += 1)
++        {
++            const uint32_t object = refs[r];
++            if (object < p->object_count && ((unit->special_functions[object / 64] >> (object % 64)) & 1)) return;
++        }
++    }
+     if (unit->local_map==NULL)
+     {
+         unit->local_map=BUSTER_ARENA_PUSH_ARRAY(unit->native_metadata,uint32_t,p->object_count);
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 94f2ca3a1..c5bf2327e 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -6937,13 +6937,17 @@ static void check_live_control_warnings(CheckSourceControlUnit* unit, CheckProgr
+                                         uint32_t opening, uint32_t closing, Arena* scratch)
+ {
+     Preprocessor* pp = reader->pp;
+-    if (pp->fatal || (pp->options.suppress_warnings && !program->input->relaxed_tokens) || program->input->graph.count == 0)
++    const bool semantic_errors = program->input->marked_member_count != 0 || program->input->condition_declaration_count != 0 ||
++                                 program->input->marked_overload_count != 0;
++    if (pp->fatal || (pp->options.suppress_warnings && !program->input->relaxed_tokens && !semantic_errors) || program->input->graph.count == 0)
+     {
+         return;
+     }
+     const Parser* parser = reader->parser;
+     CheckInput input = *program->input;
+     // Source-owned bodies at this boundary exclude GNU statement expressions.
++    // Interrupt functions, their direct callers and the translation-unit constant-expression calls have a single ordinary owner.
++    input.interrupt_calls = false;
+     input.regions = NULL;
+     input.region_count = 0;
+     const uint64_t mark = scratch->length;
+@@ -6990,15 +6994,15 @@ static void check_live_control_warnings(CheckSourceControlUnit* unit, CheckProgr
+     CheckCommonShiftWarnings shifts = { 0 };
+     check_common_contexts = (CheckCommonContexts){ 0 };
+     check_driver_default_error_warnings(parser, pp, &input, program->stream, reader->types, program, false, scratch);
+-    if (!pp->options.suppress_warnings &&
++    if ((!pp->options.suppress_warnings || semantic_errors) &&
+         (!check_input_warning_graph_range(&input, parser, reader->types, program->stream, reader->arena, scratch, opening, closing + 1, &unit->persistent_reader->source_warning_keys) ||
+          !check_driver_warning_events_from(parser, pp, &input, reader->types, program->stream, &input.warning_events, NULL, pp->output.count, scratch) ||
+          !check_driver_warning_events_from(parser, pp, &input, reader->types, program->stream, &program->stream->warning_events, NULL, pp->output.count, scratch)))
+     {
+         check_common_exhausted(pp);
+     }
+-    if (!pp->options.suppress_warnings && !check_driver_reports_from(parser, parser, pp, pp->output.count, &input, program->stream, reader->types, NULL,
+-                                   NULL, NULL, 0, NULL, 0, false, &shifts, opening, scratch))
++    if ((!pp->options.suppress_warnings || semantic_errors) && !check_driver_reports_from(parser, parser, pp, pp->output.count, &input, program->stream, reader->types, NULL,
++                                   NULL, NULL, 0, NULL, 0, pp->options.suppress_warnings, &shifts, opening, scratch))
+     {
+         check_common_exhausted(pp);
+     }

@@ -1,0 +1,3 @@
+# Incremental fresh SQLite compilation
+
+The baseline was the source-indexed precedence implementation at 18eca8d81. The candidate at 85e09e838 added direct publication of reader-visible parameter roles from the 64-token syntax check and eliminated whole-unit class and group writes. The same Release binaries appear in the stock comparisons. Each PMU or wall observation acquired and released the 9700X hardware lock on CPU 2. The complete SQLite object and default and warning streams matched. [Paired results](paired-summary.tsv) · [Samples](samples.tsv) · [Reports and manifests](reports.tar.xz) · [Build identities](builds.tsv)

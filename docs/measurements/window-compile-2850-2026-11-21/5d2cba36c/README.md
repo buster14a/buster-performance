@@ -14,6 +14,6 @@ The [experiment command](ordinary-compare-one.sh), [schedule](ordinary-compare.s
 
 ## Parser stage and complete compilation
 
-The SQLite parser took 6.803 ms in the baseline and 6.790 ms in the candidate. The median paired change was -0.025 ms, with a shorter candidate time in 5 of 7 rounds. Each round used four fresh compiler processes and verified the complete emitted object. The [stage samples](parser-stages/samples.tsv) retain each process.
+In the exploratory stage screen, the SQLite parser took 6.803 ms in the baseline and 6.790 ms in the candidate. The median paired change was -0.025 ms, with a shorter candidate time in 5 of 7 rounds. Each round used four fresh compiler processes and verified the complete emitted object. The [stage samples](parser-stages/samples.tsv) retain each process.
 
 In the independent wall series, ordinary SQLite compilation took 113.305 ms and 113.338 ms respectively. Its paired change was -0.112 ms over 7 rounds, with 6 shorter. Paired total cycles per token changed by +0.020. The [complete compilation measurements](sqlite/paired-summary.tsv) include the range and fault counters.
