@@ -1,0 +1,472 @@
+diff --git a/src/buster/compiler/foreign_strings.c b/src/buster/compiler/foreign_strings.c
+index e38d0b476..f0d08272d 100644
+--- a/src/buster/compiler/foreign_strings.c
++++ b/src/buster/compiler/foreign_strings.c
+@@ -146,32 +146,39 @@ static ForeignStringsError foreign_strings_count(const ForeignStringInput* input
+     return error;
+ }
+ 
+-// Fill the byte-pointer/length hash input columns and the consumer's ordered offset map in the same scan.
++// Fill the byte-pointer/length hash input columns and the consumer's ordered offset map in the same scan. The columns
++// and the section's fields are locals: under -fno-strict-aliasing each store through a column could otherwise make the
++// compiler reload them from `strings` and `inputs`, which it does wherever `strings` escapes the build (#3044).
+ static void foreign_strings_entries(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, ForeignStrings* strings,
+                                     const uint8_t** pointers, uint32_t* sections)
+ {
++    uint32_t* const section_begin = strings->section_begin;
++    uint32_t* const input_offset = strings->input_offset;
++    uint32_t* const lengths = strings->lengths;
+     uint32_t next = 0;
+     for (uint32_t section = 0; section < input_count; section += 1)
+     {
+-        const ForeignStringInput* input = &inputs[section];
++        const uint8_t* const bytes = inputs[section].bytes;
++        const uint32_t size = inputs[section].size;
++        const uint8_t unit_log2 = inputs[section].unit_log2;
+         uint32_t begin = 0;
+-        strings->section_begin[section] = next;
+-        for (uint64_t at = 0; at < input->size; at += 64)
++        section_begin[section] = next;
++        for (uint64_t at = 0; at < size; at += 64)
+         {
+-            const uint32_t left = input->size - (uint32_t)at;
+-            for (uint64_t zeros = foreign_strings_zeros(input->bytes + at, left < 64 ? left : 64, input->unit_log2, path); zeros != 0; zeros &= zeros - 1)
++            const uint32_t left = size - (uint32_t)at;
++            for (uint64_t zeros = foreign_strings_zeros(bytes + at, left < 64 ? left : 64, unit_log2, path); zeros != 0; zeros &= zeros - 1)
+             {
+-                const uint32_t end = (uint32_t)at + (((uint32_t)__builtin_ctzll(zeros) + 1) << input->unit_log2);
+-                pointers[next] = input->bytes + begin;
++                const uint32_t end = (uint32_t)at + (((uint32_t)__builtin_ctzll(zeros) + 1) << unit_log2);
++                pointers[next] = bytes + begin;
+                 sections[next] = section;
+-                strings->input_offset[next] = begin;
+-                strings->lengths[next] = end - begin;
++                input_offset[next] = begin;
++                lengths[next] = end - begin;
+                 begin = end;
+                 next += 1;
+             }
+         }
+     }
+-    strings->section_begin[input_count] = next;
++    section_begin[input_count] = next;
+ }
+ 
+ // No group, entry or head.
+@@ -384,8 +391,8 @@ static bool foreign_strings_groups(const ForeignStringInput* inputs, uint32_t in
+ 
+ // The BUSTER_FOREIGN_STRINGS_KEY_BYTES content bytes that end `depth` bytes before the terminator, read by one load
+ // that starts at or after the entry's first byte, the one nearest the terminator most significant and zeros below a
+-// shorter tail: a plain 8-byte load when that many bytes remain (cheaper than the masked form, which the prefilter's
+-// long level reads once an entry and pass), else a masked load of the rest, shifted up. Content bytes are nonzero, so
++// shorter tail: a plain 8-byte load when that many bytes remain (cheaper than the masked form; the prefilter's long
++// level gathers the same 8 bytes, foreign_strings_long_slots), else a masked load of the rest, shifted up. Content bytes are nonzero, so
+ // unsigned key order is reversed content order, a suffix first; past the entry's start the key is zero, as the empty
+ // load's zero kept by the shift of (64 - 0) & 63.
+ static uint64_t foreign_strings_key(const uint8_t* bytes, uint32_t content, uint32_t depth)
+@@ -433,15 +440,30 @@ static bool foreign_strings_heads_ready(ForeignStringsBlocks* blocks)
+     return blocks->heads != 0;
+ }
+ 
++// The long-level slots H(g, 8, T_8), in a bitmap of 2^bits_log2 bits, of the 8 entries from `pointers` whose lengths
++// are `length` and which `is_long` holds (at least BUSTER_FOREIGN_STRINGS_KEY_BYTES content bytes): each key is the
++// last 8 content bytes, gathered by a load that ends at the terminator, as foreign_strings_key reads it.
++static __m512i foreign_strings_long_slots(const uint8_t* const* pointers, __m512i length, __mmask8 is_long, __m512i mix, uint32_t bits_log2)
++{
++    const __m512i pointer = _mm512_maskz_loadu_epi64(is_long, pointers);
++    const __m512i tail = _mm512_sub_epi64(_mm512_add_epi64(pointer, length), _mm512_set1_epi64(BUSTER_FOREIGN_STRINGS_KEY_BYTES + 1));
++    const __m512i key = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), is_long, tail, (const void*)0, 1);
++    const __m512i product = _mm512_mullo_epi64(_mm512_add_epi64(key, mix), _mm512_set1_epi64((long long)BUSTER_FOREIGN_STRINGS_FILTER_GOLDEN));
++    return _mm512_srlv_epi64(product, _mm512_set1_epi64(64 - bits_log2));
++}
++
+ // The prefilter over the one-byte entries of sorted groups, in input order, with k content bytes, its key's last j
+-// bytes T_j and its sorted group g. Long level: P1 marks seen and twice-seen (g, T_8) for k >= 8, and P2 flags an
+-// entry whose (g, T_8) was seen twice. Short levels: P1 marks each receiver's (g, k, T_k) for 1 <= k <= 7; P2 flags a
+-// donor whose (g, j, T_j) is marked, for every receiver length j < k (j <= 7), marking it hit; P3 flags a receiver
+-// whose mark was hit. Every content with a proper extension in its group is flagged with its whole block, since its
+-// block shares its last min(k, 8) bytes. Empty strings are never flagged; those after their group's first one-byte
+-// entry take it as head. The flags are a bitset, gathered a register word at a time and compacted into the
+-// input-ordered list 16 entries a step; the empty strings fill the list from its back. The list comes first, so popping
+-// the bitmaps and the bitset leaves their pages to the heads and the sort.
++// bytes T_j and its sorted group g. Long level: P1 marks seen and twice-seen (g, T_8) for k >= 8, an entry at a time
++// (a zmm's slots, stored and read back a lane at a time, stalled every step on the 9700X); P2 lists as candidates the
++// entries whose mark was seen twice, 8 a step, their keys gathered and hashed in a zmm and their bitmap words gathered,
++// and each candidate that shares its (g, T_8) with another, found through a hash table of the candidates' keys, is
++// flagged: a bitmap collision flags nothing. Short levels: P1 marks each receiver's
++// (g, k, T_k) for 1 <= k <= 7; P2 flags a donor whose (g, j, T_j) is marked, for every receiver length j < k (j <= 7),
++// marking it hit; P3 flags a receiver whose mark was hit. Every content with a proper extension in its group is
++// flagged with its whole block, since its block shares its last min(k, 8) bytes. Empty strings are never flagged; those
++// after their group's first one-byte entry take it as head. The flags are a bitset, written 8 entries a step and
++// compacted into the input-ordered list 16 entries a step; the empty strings fill the list from its back. The list
++// comes first, so popping the bitmaps, the bitset and the candidates leaves their pages to the heads and the sort.
+ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* const* pointers, const uint32_t* sections, ForeignStringsBlocks* blocks)
+ {
+     Arena* arena = blocks->arena;
+@@ -455,7 +477,7 @@ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* c
+     const uint32_t short_log2 = foreign_strings_filter_log2(blocks->short_count);
+     const uint64_t long_words = blocks->long_count != 0 ? (1ull << long_log2) / 64 : 0;
+     const uint64_t short_words = blocks->short_count != 0 ? (1ull << short_log2) / 64 : 0;
+-    // A word past the last entry's, which a 16-entry step may read.
++    // A word past the last entry's, which an 8- or 16-entry step may write or read.
+     const uint64_t flag_words = (uint64_t)blocks->count / 64 + 2;
+     uint32_t* flagged = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, considered);
+     const uint64_t mark = arena->length;
+@@ -464,7 +486,8 @@ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* c
+     uint64_t* receivers = short_words != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, short_words) : 0;
+     uint64_t* hit = short_words != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, short_words) : 0;
+     uint64_t* flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, flag_words);
+-    bool valid = flagged != 0 && (long_words == 0 || (seen != 0 && twice != 0)) && (short_words == 0 || (receivers != 0 && hit != 0)) && flags != 0;
++    uint32_t* candidates = blocks->long_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, blocks->long_count) : 0;
++    bool valid = flagged != 0 && (long_words == 0 || (seen != 0 && twice != 0 && candidates != 0)) && (short_words == 0 || (receivers != 0 && hit != 0)) && flags != 0;
+     if (valid && long_words != 0)
+     {
+         memset(seen, 0, long_words * sizeof(uint64_t));
+@@ -480,6 +503,9 @@ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* c
+         memset(flags, 0, flag_words * sizeof(uint64_t));
+     }
+     const uint64_t long_level = BUSTER_FOREIGN_STRINGS_KEY_BYTES * BUSTER_FOREIGN_STRINGS_FILTER_LEVEL;
++    const __m256i lanes = _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7);
++    // Lengths with at least BUSTER_FOREIGN_STRINGS_KEY_BYTES content bytes.
++    const __m512i long_length = _mm512_set1_epi64(BUSTER_FOREIGN_STRINGS_KEY_BYTES + 1);
+     uint32_t present = 0;
+     for (uint32_t section = 0; valid && section < input_count; section += 1)
+     {
+@@ -506,54 +532,102 @@ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* c
+         }
+     }
+     uint32_t empties = 0;
+-    uint64_t word = 0;
+-    uint32_t word_index = 0;
++    uint32_t candidate_count = 0;
+     for (uint32_t section = 0; valid && section < input_count; section += 1)
+     {
+         const uint32_t group = section_groups[section];
+         const uint64_t mix = (uint64_t)group * BUSTER_FOREIGN_STRINGS_FILTER_GROUP;
++        const __m512i long_mix = _mm512_set1_epi64((long long)(mix + long_level));
+         const uint32_t first = group != BUSTER_FOREIGN_STRINGS_NONE ? group_first[group] : 0;
+         const uint32_t end = group != BUSTER_FOREIGN_STRINGS_NONE ? section_begin[section + 1] : 0;
+-        for (uint32_t entry = section_begin[section]; entry < end; entry += 1)
++        for (uint32_t at = section_begin[section]; at < end; at += 8)
+         {
+-            const uint32_t content = lengths[entry] - 1;
+-            const uint64_t key = foreign_strings_key(pointers[entry], content, 0);
+-            uint64_t flag = 0;
+-            uint32_t levels = present & ((1u << (content < BUSTER_FOREIGN_STRINGS_KEY_BYTES ? content : BUSTER_FOREIGN_STRINGS_KEY_BYTES)) - 1);
+-            while (levels != 0)
++            const __mmask8 step = (__mmask8)(end - at >= 8 ? 0xffu : (1u << (end - at)) - 1);
++            const __m512i length = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(step, lengths + at));
++            const __mmask8 is_long = _mm512_mask_cmpge_epu64_mask(step, length, long_length);
++            const __m512i slots = foreign_strings_long_slots(pointers + at, length, is_long, long_mix, long_log2);
++            const __m512i words = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), is_long, _mm512_srli_epi64(slots, 6), (const void*)twice, 8);
++            const __mmask8 seen_twice = _mm512_mask_test_epi64_mask(is_long, _mm512_srlv_epi64(words, _mm512_and_si512(slots, _mm512_set1_epi64(63))),
++                                                                    _mm512_set1_epi64(1));
++            if (seen_twice != 0)
+             {
+-                const uint32_t level = (uint32_t)__builtin_ctz(levels);
+-                const uint64_t slot = foreign_strings_filter_slot(key >> (64 - 8 * level), mix + level * BUSTER_FOREIGN_STRINGS_FILTER_LEVEL, short_log2);
+-                const uint64_t found = receivers[slot / 64] & (1ull << (slot % 64));
+-                hit[slot / 64] |= found;
+-                flag |= found != 0 ? 1 : 0;
+-                levels &= levels - 1;
++                _mm256_mask_compressstoreu_epi32(candidates + candidate_count, seen_twice, _mm256_add_epi32(lanes, _mm256_set1_epi32((int)at)));
++                candidate_count += (uint32_t)__builtin_popcount(seen_twice);
+             }
+-            if (content >= BUSTER_FOREIGN_STRINGS_KEY_BYTES)
++            uint32_t donors = 0;
++            for (uint32_t lane = 0; present != 0 && lane < (uint32_t)__builtin_popcount(step); lane += 1)
+             {
+-                const uint64_t slot = foreign_strings_filter_slot(key, mix + long_level, long_log2);
+-                flag |= (twice[slot / 64] >> (slot % 64)) & 1;
+-            }
+-            if (entry / 64 != word_index)
+-            {
+-                flags[word_index] |= word;
+-                word = 0;
+-                word_index = entry / 64;
++                const uint32_t entry = at + lane;
++                const uint32_t content = lengths[entry] - 1;
++                uint32_t levels = present & ((1u << (content < BUSTER_FOREIGN_STRINGS_KEY_BYTES ? content : BUSTER_FOREIGN_STRINGS_KEY_BYTES)) - 1);
++                const uint64_t key = levels != 0 ? foreign_strings_key(pointers[entry], content, 0) : 0;
++                while (levels != 0)
++                {
++                    const uint32_t level = (uint32_t)__builtin_ctz(levels);
++                    const uint64_t slot = foreign_strings_filter_slot(key >> (64 - 8 * level), mix + level * BUSTER_FOREIGN_STRINGS_FILTER_LEVEL, short_log2);
++                    const uint64_t found = receivers[slot / 64] & (1ull << (slot % 64));
++                    hit[slot / 64] |= found;
++                    donors |= found != 0 ? 1u << lane : 0;
++                    levels &= levels - 1;
++                }
+             }
+-            word |= flag << (entry % 64);
+-            if (content == 0 && first < entry)
++            const uint32_t shift = at % 64;
++            flags[at / 64] |= (uint64_t)donors << shift;
++            flags[at / 64 + 1] |= shift > 56 ? (uint64_t)donors >> (64 - shift) : 0;
++            for (uint32_t bits = _mm512_mask_cmpeq_epu64_mask(step, length, _mm512_set1_epi64(1)); bits != 0; bits &= bits - 1)
+             {
+-                empties += 1;
+-                flagged[considered - empties] = entry;
++                const uint32_t entry = at + (uint32_t)__builtin_ctz(bits);
++                if (first < entry)
++                {
++                    empties += 1;
++                    flagged[considered - empties] = entry;
++                }
+             }
+         }
+     }
+-    if (valid)
++    // The candidates' exact (g, T_8), through an open-addressed table of their indices + 1 at most half full: a
++    // candidate that finds an equal one flags both, and any other is inserted. One probe sequence a candidate.
++    uint32_t table_log2 = 4;
++    while ((1ull << table_log2) < 2 * (uint64_t)candidate_count)
+     {
+-        flags[word_index] |= word;
++        table_log2 += 1;
+     }
+-    word = 0;
+-    word_index = 0;
++    uint64_t* keys = valid && candidate_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, candidate_count) : 0;
++    uint32_t* candidate_groups = valid && candidate_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, candidate_count) : 0;
++    uint32_t* table = valid && candidate_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 1ull << table_log2) : 0;
++    valid = valid && (candidate_count == 0 || (keys != 0 && candidate_groups != 0 && table != 0));
++    if (valid && candidate_count != 0)
++    {
++        memset(table, 0, (1ull << table_log2) * sizeof(uint32_t));
++    }
++    for (uint32_t index = 0; valid && index < candidate_count; index += 1)
++    {
++        const uint32_t entry = candidates[index];
++        const uint32_t group = section_groups[sections[entry]];
++        keys[index] = foreign_strings_key(pointers[entry], lengths[entry] - 1, 0);
++        candidate_groups[index] = group;
++        const uint64_t mix = (uint64_t)group * BUSTER_FOREIGN_STRINGS_FILTER_GROUP + long_level;
++        uint64_t slot = foreign_strings_filter_slot(keys[index], mix, table_log2);
++        uint32_t equal = BUSTER_FOREIGN_STRINGS_NONE;
++        while (table[slot] != 0 && equal == BUSTER_FOREIGN_STRINGS_NONE)
++        {
++            const uint32_t other = table[slot] - 1;
++            equal = keys[other] == keys[index] && candidate_groups[other] == group ? other : BUSTER_FOREIGN_STRINGS_NONE;
++            slot = equal == BUSTER_FOREIGN_STRINGS_NONE ? (slot + 1) & ((1ull << table_log2) - 1) : slot;
++        }
++        if (equal != BUSTER_FOREIGN_STRINGS_NONE)
++        {
++            const uint32_t partner = candidates[equal];
++            flags[entry / 64] |= 1ull << (entry % 64);
++            flags[partner / 64] |= 1ull << (partner % 64);
++        }
++        else
++        {
++            table[slot] = index + 1;
++        }
++    }
++    uint64_t word = 0;
++    uint32_t word_index = 0;
+     for (uint32_t section = 0; valid && present != 0 && section < input_count; section += 1)
+     {
+         const uint32_t group = section_groups[section];
+@@ -580,7 +654,7 @@ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* c
+     {
+         flags[word_index] |= word;
+     }
+-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++    const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+     uint32_t flagged_count = 0;
+     for (uint32_t section = 0; valid && section < input_count; section += 1)
+     {
+@@ -593,7 +667,7 @@ static bool foreign_strings_flag(const ForeignStrings* strings, const uint8_t* c
+             bits |= shift > 48 ? flags[at / 64 + 1] << (64 - shift) : 0;
+             const __mmask16 sorted = (__mmask16)(bits & (left >= 16 ? 0xffffu : (1u << left) - 1));
+             const uint32_t taken = (uint32_t)__builtin_popcount(sorted);
+-            const __m512i entries = _mm512_maskz_compress_epi32(sorted, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)at)));
++            const __m512i entries = _mm512_maskz_compress_epi32(sorted, _mm512_add_epi32(lanes16, _mm512_set1_epi32((int)at)));
+             _mm512_mask_storeu_epi32(flagged + flagged_count, (__mmask16)((1u << taken) - 1), entries);
+             flagged_count += taken;
+         }
+@@ -1100,8 +1174,9 @@ static bool foreign_strings_sort(const ForeignStrings* strings, const uint8_t* c
+ }
+ 
+ // Block heads of the one-byte entries (#3044), in scratch: none when no group is sorted, and blocks->heads stays null
+-// unless a head is written.
+-static bool foreign_strings_block_heads(const ForeignStringInput* inputs, const ForeignStrings* strings, const uint8_t* const* pointers, const uint32_t* sections,
++// unless a head is written. Out of line: inlined, its stages made foreign_strings_build_below's interning and entry
++// loops reload and spill what main's keep in registers, and cost every input on the 9700X, the one-length ones too.
++static __attribute__((noinline)) bool foreign_strings_block_heads(const ForeignStringInput* inputs, const ForeignStrings* strings, const uint8_t* const* pointers, const uint32_t* sections,
+                                         ForeignStringsBlocks* blocks)
+ {
+     bool valid = foreign_strings_groups(inputs, strings->input_count, strings, blocks);
+@@ -1116,15 +1191,23 @@ static bool foreign_strings_block_heads(const ForeignStringInput* inputs, const
+     return valid;
+ }
+ 
++// The columns are locals, as in foreign_strings_entries. A one-byte entry that no suitable owner equals takes its block
++// head's end where that meets its alignment (#3044): a head is an earlier owner, and every other entry's is
++// BUSTER_FOREIGN_STRINGS_NONE. Only an entry that equals no owner reads its head, and with no heads (no sorted group)
++// none does.
+ static ForeignStringsError foreign_strings_intern(const ForeignStringInput* inputs, ForeignStrings* strings, const uint8_t* const* pointers,
+                                                   const uint32_t* sections, const uint64_t* hashes, uint32_t* table, uint64_t slots, const uint32_t* heads)
+ {
++    const uint32_t count = strings->count;
++    const uint32_t* const input_offset = strings->input_offset;
++    const uint32_t* const lengths = strings->lengths;
++    uint32_t* const output_offset = strings->output_offset;
+     ForeignStringsError error = FOREIGN_STRINGS_ERROR_NONE;
+     uint64_t size = 0;
+-    for (uint32_t entry = 0; error == FOREIGN_STRINGS_ERROR_NONE && entry < strings->count; entry += 1)
++    for (uint32_t entry = 0; error == FOREIGN_STRINGS_ERROR_NONE && entry < count; entry += 1)
+     {
+         const ForeignStringInput* input = &inputs[sections[entry]];
+-        const uint32_t offset = strings->input_offset[entry];
++        const uint32_t offset = input_offset[entry];
+         const uint32_t trailing = offset != 0 ? (uint32_t)__builtin_ctz(offset) : 32;
+         const uint32_t alignment = 1u << (trailing < input->alignment_log2 ? trailing : input->alignment_log2);
+         uint64_t slot = (hashes[entry] ^ ((uint64_t)input->group * 0x9e3779b97f4a7c15ull)) & (slots - 1);
+@@ -1133,37 +1216,34 @@ static ForeignStringsError foreign_strings_intern(const ForeignStringInput* inpu
+         {
+             const uint32_t prior = table[slot] - 1;
+             same = hashes[prior] == hashes[entry] && inputs[sections[prior]].group == input->group && inputs[sections[prior]].unit_log2 == input->unit_log2 &&
+-                   strings->lengths[prior] == strings->lengths[entry] && (strings->output_offset[prior] & (alignment - 1)) == 0 &&
+-                   memcmp(pointers[prior], pointers[entry], strings->lengths[entry]) == 0;
++                   lengths[prior] == lengths[entry] && (output_offset[prior] & (alignment - 1)) == 0 &&
++                   memcmp(pointers[prior], pointers[entry], lengths[entry]) == 0;
+             if (!same)
+             {
+                 slot = (slot + 1) & (slots - 1);
+             }
+         }
+-        // A one-byte entry that no suitable owner equals takes its block head's end where that meets its alignment
+-        // (#3044). A head is an earlier owner; every other entry's is BUSTER_FOREIGN_STRINGS_NONE.
+-        const uint32_t head = !same && heads != 0 ? heads[entry] : BUSTER_FOREIGN_STRINGS_NONE;
+-        const uint32_t shared = head < entry ? strings->output_offset[head] + strings->lengths[head] - strings->lengths[entry] : 0;
+-        const bool suffix = head < entry && (shared & (alignment - 1)) == 0;
+         if (same)
+         {
+-            strings->output_offset[entry] = strings->output_offset[table[slot] - 1];
+-        }
+-        else if (suffix)
+-        {
+-            strings->output_offset[entry] = shared;
++            output_offset[entry] = output_offset[table[slot] - 1];
+         }
+         else
+         {
++            const uint32_t head = heads != 0 ? heads[entry] : BUSTER_FOREIGN_STRINGS_NONE;
++            const uint32_t shared = head < entry ? output_offset[head] + lengths[head] - lengths[entry] : 0;
+             const uint64_t aligned = (size + alignment - 1) & ~(uint64_t)(alignment - 1);
+-            const uint64_t end = aligned + strings->lengths[entry];
+-            if (end > UINT32_MAX)
++            const uint64_t end = aligned + lengths[entry];
++            if (head < entry && (shared & (alignment - 1)) == 0)
++            {
++                output_offset[entry] = shared;
++            }
++            else if (end > UINT32_MAX)
+             {
+                 error = FOREIGN_STRINGS_ERROR_CAPACITY;
+             }
+             else
+             {
+-                strings->output_offset[entry] = (uint32_t)aligned;
++                output_offset[entry] = (uint32_t)aligned;
+                 size = end;
+                 table[slot] = entry + 1;
+             }
+@@ -1180,7 +1260,10 @@ static bool foreign_strings_path_valid(ForeignPath path)
+ 
+ // The final linker needs the pool only below its original byte count. Finish interning first: alignment can grow
+ // the pool and offset overflow is an error even if the linker would discard it. An empty result reports no saving.
+-static ForeignStringsError foreign_strings_build_below(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output, uint64_t limit)
++// Without `suffixes` entries share whole entries only (no block heads): the consumer passes false when it refuses
++// every pool (foreign_strings_refused), so that it pays for no head it would discard (#3044).
++static ForeignStringsError foreign_strings_build_below(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output, uint64_t limit,
++                                                       bool suffixes)
+ {
+     ForeignStringsError error = arena == 0 || output == 0 || (input_count != 0 && inputs == 0) || !foreign_strings_path_valid(path) ?
+                                 FOREIGN_STRINGS_ERROR_INPUT : FOREIGN_STRINGS_ERROR_NONE;
+@@ -1237,7 +1320,7 @@ static ForeignStringsError foreign_strings_build_below(const ForeignStringInput*
+             }
+         }
+         memset(table, 0, slots * sizeof(uint32_t));
+-        error = foreign_strings_block_heads(inputs, &strings, pointers, sections, &blocks) ? FOREIGN_STRINGS_ERROR_NONE : FOREIGN_STRINGS_ERROR_MEMORY;
++        error = !suffixes || foreign_strings_block_heads(inputs, &strings, pointers, sections, &blocks) ? FOREIGN_STRINGS_ERROR_NONE : FOREIGN_STRINGS_ERROR_MEMORY;
+     }
+     if (error == FOREIGN_STRINGS_ERROR_NONE)
+     {
+@@ -1276,7 +1359,7 @@ static ForeignStringsError foreign_strings_build_below(const ForeignStringInput*
+ 
+ static ForeignStringsError foreign_strings_build(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output)
+ {
+-    return foreign_strings_build_below(inputs, input_count, path, arena, output, UINT64_MAX);
++    return foreign_strings_build_below(inputs, input_count, path, arena, output, UINT64_MAX, true);
+ }
+ 
+ static bool foreign_strings_entry(const ForeignStrings* strings, uint32_t input, uint64_t offset, uint32_t* entry)
+diff --git a/src/buster/compiler/foreign_strings_link.c b/src/buster/compiler/foreign_strings_link.c
+index 627bbea41..f57afe190 100644
+--- a/src/buster/compiler/foreign_strings_link.c
++++ b/src/buster/compiler/foreign_strings_link.c
+@@ -39,6 +39,32 @@ static bool foreign_strings_direct(uint8_t kind)
+     return kind == BUSTER_LINK_FIXUP_ABS64 || kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS32S;
+ }
+ 
++// Whether foreign_strings_apply refuses every pool of the selected atoms (#3044): a PC32 or CALL fixup targets one,
++// which it refuses whatever the pool's offsets. The fixups' kinds are compared 64 at a time; a hit's target atom is
++// read by its two dependent loads, scalar (a three-level gather costs more than the few hits a scan takes before one
++// targets a pooled atom, and a link without one has a hit a code or data reference of those kinds).
++static bool foreign_strings_refused(const Link* link, const uint32_t* atom_inputs)
++{
++    const __m512i kinds_mask = _mm512_set1_epi8(BUSTER_LINK_FIXUP_KIND);
++    const __m512i pc32 = _mm512_set1_epi8(BUSTER_LINK_FIXUP_PC32);
++    const __m512i call = _mm512_set1_epi8(BUSTER_LINK_FIXUP_CALL);
++    bool refused = false;
++    for (uint32_t at = 1; !refused && at < link->fixups.count; at += 64)
++    {
++        const uint32_t left = link->fixups.count - at;
++        const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
++        const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, link->fixups.kind + at), kinds_mask);
++        uint64_t hits = _mm512_mask_cmpeq_epi8_mask(valid, kinds, pc32) | _mm512_mask_cmpeq_epi8_mask(valid, kinds, call);
++        while (hits != 0 && !refused)
++        {
++            const FixupId fixup = at + (uint32_t)__builtin_ctzll(hits);
++            refused = atom_inputs[link->symbols.atom[link->fixups.target[fixup]]] != 0;
++            hits &= hits - 1;
++        }
++    }
++    return refused;
++}
++
+ static ForeignStringsError foreign_strings_apply(Link* link, const ForeignStrings* strings,
+                                                  const uint32_t* atom_inputs, const uint8_t* section_symbols)
+ {
+@@ -250,7 +276,8 @@ static ForeignStringsError foreign_strings_select(const ForeignLink* converted,
+     return error;
+ }
+ 
+-static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, const Foreign* foreign, uint32_t count, Arena* arena, ForeignStringsMerge* merged)
++static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, const Foreign* foreign, uint32_t count, bool suffixes, Arena* arena,
++                                               ForeignStringsMerge* merged)
+ {
+     const Link* link = &converted->link;
+     ForeignStringsError error = FOREIGN_STRINGS_ERROR_NONE;
+@@ -346,7 +373,7 @@ static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, co
+     }
+     if (error == FOREIGN_STRINGS_ERROR_NONE)
+     {
+-        error = foreign_strings_build_below(inputs, count, foreign->path, arena, &merged->strings, merged->input_bytes);
++        error = foreign_strings_build_below(inputs, count, foreign->path, arena, &merged->strings, merged->input_bytes, suffixes);
+     }
+     scratch_end(scratch);
+     return error;
+@@ -362,7 +389,10 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
+     ForeignStringsError error = foreign_strings_select(converted, foreign, arena, &merged.atom_inputs, &count);
+     if (error == FOREIGN_STRINGS_ERROR_NONE && count != 0)
+     {
+-        error = foreign_strings_plan(converted, foreign, count, arena, &merged);
++        // A pool the consumer refuses whatever it holds is built by whole entries alone, main's rule before #3044, whose
++        // result (a pool too large to use, or the same refusal) is the same.
++        const bool suffixes = !foreign_strings_refused(&converted->link, merged.atom_inputs);
++        error = foreign_strings_plan(converted, foreign, count, suffixes, arena, &merged);
+     }
+     else if (error == FOREIGN_STRINGS_ERROR_NONE && !foreign_strings_path_valid(foreign->path))
+     {
