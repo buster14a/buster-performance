@@ -756,13 +756,15 @@ take it to 80%.
 ## The machine with no node of the walk's (`machine-alone/`, buster branch `claude/2850-machine-alone`)
 
 The stream's first piece as [specified](https://github.com/buster14a/buster/issues/2850#issuecomment-7081094449):
-`measure-node-machine --shadow --front-alone`. For each function body, before the coded walk acts at its first token,
-a front of the piece's own makes the body's records from its postorder positions, each record is written to a graph
-of the piece's own, and the reference machine (T, the census's tests, C and X) runs on each root with that graph for
-its own. After the pipeline each root's results are compared with the ones the machine made of the walk's nodes.
+`measure-node-machine --shadow --front-alone`, at the branch's `8f8fe98cd`. For each function body, before the coded
+walk acts at its first token, a front of the piece's own makes the body's records from its postorder positions, each
+record is written to a graph of the piece's own, and the reference machine (T, the census's tests, C and X) runs on
+each root with that graph for its own, the reader's graph without its columns of nodes while it does. After the
+pipeline each root's results are compared with the ones the machine made of the walk's nodes.
 
-**V1, exact** (`machine-alone/develop/`, Develop builds on this session's machine, `scripts/alone.sh`; and the 9700X's
-17 Release runs, `machine-alone/9700x/alone-089225001/`, every one's status 0):
+**V1, exact** (`machine-alone/develop/head-8f8fe98cd/`, Develop builds on this session's machine, `scripts/alone.sh`,
+with the default warnings, with `-g` and with `-Wall -Wextra`; and the 9700X's 17 Release runs,
+`machine-alone/9700x-head/alone-8f8fe98cd/`, every one's status 0):
 
 | | bodies read before the walk | roots compared | differ | roots only one of the two ran on |
 | --- | ---: | ---: | ---: | ---: |
@@ -772,21 +774,22 @@ its own. After the pipeline each root's results are compared with the ones the m
 | musl, 1,336 units | 18,584 | 43,196 | 0 | 0 |
 
 A root's records' count, T's refusal, the records' digest, the tests' bits and the root's kind, C's and X's refusal,
-the root's target and object, the tape and the side's digest are the same, with the default warnings, with `-g`
-(`alone-g/`) and with `-Wall -Wextra` (`alone-wall/`). On the way: a node's columns that the walk's flush fills from
-its token alone had to be filled the same way (musl's floating-point pragmas: 243 roots T refused for their context
-on the walk's nodes and took on the others); and the records' digest held a fault's node as the graph's number, which
-is now its record of the expression's (3 roots).
+the root's target and object, the tape and the side's digest are the same in each of the three flag sets, and nothing
+faults with the reader's node columns taken away. On the way: a node's columns that the walk's flush fills from its
+token alone had to be filled the same way (musl's floating-point pragmas: 243 roots T refused for their context on the
+walk's nodes and took on the others); and the records' digest held a fault's node as the graph's number, which is now
+its record of the expression's (3 roots). Two departures from the specification: a condition's root is not made
+early (the piece's graph keeps a body's records, so the operand's are there when the root comes); and the poison is
+the reader's own graph's columns set to null for the machine's run.
 
-**V2, no diagnostic missed.** No root taken before the walk had an event of the walk's at one of its tokens after it:
-0 on the four corpora, with the default warnings and with `-Wall -Wextra`. And by the code: of 114 call sites of the
-reader's three warning functions, 32 can run while the walk acts at a token, through four doors: the literal's action
-(a floating constant out of range, a character constant of several characters or with an escape, a `_BitInt`
-suffix), each a literal the front leaves to the walk; the walk's own visit (`_Alignof` of an expression, a
-`_Static_assert`'s message, the builtins' evidence, and the constant evaluator from there), each at a token the front
-leaves; the string's action, whose strings the resolution has decoded already; and the call's, whose decode reports
-nothing. An expression with a token the front left has no root, so none is taken. The fixture has one of each of the
-first two.
+**V2, no diagnostic missed: on the corpora.** Two counts, each 0 in every run above: the roots taken before the walk
+that had an event of the walk's at one of their tokens after it; and the roots taken with, among their expression's
+tokens, one the walk's class actions left to its visit, which the walk marks (`expression_declined`) and the piece
+reads after the walk's last chunk: 0 of 141,223 taken roots with the default warnings and with `-g`, 0 of 130,008 with
+`-Wall -Wextra`. A reading of the code says why: of 114 call sites of the reader's three warning functions, 32 can
+run while the walk acts at a token, through the literal's action (a literal the front leaves), the walk's own visit
+(tokens the front leaves), the string's action (strings the resolution has decoded) and the call's (which reports
+nothing). The fixture has one of each of the first three.
 
 **V3, by body.** Each body's verdict is kept as it stands before the walk acts at the body. On `sqlite3.c`'s 2,668
 lowered bodies: every root taken in 1,856 (35.62% of the body tokens), a root the front lost in 514 (48.99%), T's
@@ -795,27 +798,43 @@ the walk's nodes (every root the lowering popped taken there): 1,852 whole for b
 initializer's elements are roots of the lowering's and none of the front's), 1 for the other alone and 2 more with a
 block's static declaration (a root the front lost or refused that the lowering never pops). Lua: 630 whole (29.71%),
 the same 630 for both. musl: 1,871 (31.76%), 1,329 for both, 542 for it alone, 7 and 1 for the other. The compiler's
-own source: 222 (3.62%; a token left in 77% of its body tokens).
+own source: 222 (3.62%). With `-Wall -Wextra`: 23.62%, 25.29%, 24.21% and 2.80%.
 
-**V4, its cost in place: over its gate, under what refutes it** (`machine-alone/9700x/alone-089225001/`,
-`scripts/alone-9700x.sh`; the 9700X, CPU 2, Release, under the lock; medians of 7 runs, musl's of 3; TSC ticks at
-3,792.9 MHz):
+**V4, its cost in place: over its gate, under what refutes it** (`machine-alone/9700x-head/alone-8f8fe98cd/`,
+`scripts/alone-9700x.sh`, `scripts/job-alone4.sh`; the 9700X, CPU 2, Release, under the lock; medians of 7 runs,
+musl's of 3; TSC ticks at 3,792.9 MHz):
 
 | | `sqlite3.c` | Lua | musl |
 | --- | ---: | ---: | ---: |
 | postorder positions of the bodies | 568,641 | 203,029 | 1,424,367 |
-| its reading, M ticks (ms) | 52.7 (13.91) | 15.7 (4.15) | 96.3 (25.39) |
-| … the compaction and the entries | 10.1 (2.65) | 2.3 (0.61) | 16.2 (4.28) |
-| … the front | 21.4 (5.63) | 6.2 (1.63) | 49.5 (13.04) |
-| … its graph's writing | 18.0 (4.76) | 6.3 (1.65) | 22.7 (5.98) |
-| the machine's first run on the roots: T, the tests, C and X | 100.9 (26.62) | 28.1 (7.42) | 130.5 (34.40) |
-| **ticks a position** | **270.3** (268.8 to 274.8) | **216.1** (215.3 to 218.5) | **159.2** (154.7 to 245.7) |
+| its reading, M ticks (ms) | 53.0 (13.97) | 15.9 (4.19) | 97.3 (25.65) |
+| … the compaction and the entries | 10.2 (2.68) | 2.4 (0.64) | 18.5 (4.87) |
+| … the front | 21.3 (5.61) | 6.2 (1.64) | 50.8 (13.38) |
+| … its graph's writing | 18.0 (4.76) | 6.2 (1.64) | 19.5 (5.15) |
+| the machine's first run on the roots: T, the tests, C and X | 100.8 (26.59) | 28.0 (7.39) | 125.9 (33.20) |
+| **ticks a position** | **270.5** (269.3 to 271.5) | **216.4** (215.9 to 218.0) | **156.7** (155.3 to 157.6) |
+| of them the compaction, the entries and the front | 55.3 | 42.6 | 48.6 |
 
-The gate was 180 and the refutation 295. On `sqlite3.c` the piece is 40.5 ms a unit whose every body is swept: 13.9
+The gate was 180 and the refutation 295. On `sqlite3.c` the piece is 40.6 ms a unit whose every body is swept: 14.0
 to read the bodies (4.8 of them a copy of the front's records into a graph, which a T that read the records would
 not make), and 26.6 for the reference's sweeps with the census's tests, where the parts read separately had 16 to 22.
 A taken body token is worth 295 ticks, so this machine as it stands gains 25 ticks a token it takes and loses 270 a
-token it sweeps and refuses: nothing at a third of the tokens taken. What its parts were measured at in their own
-pieces says where it goes: the tests in the machine's own form are half the census's, and on the window a fifth; the
-window's kernel, C and X are 39 ticks a record, where the reference's four sweeps here are 345 a record together (the
-run is not split by sweep).
+token it sweeps and refuses: with every token of `sqlite3.c`'s bodies taken, 3.7 ms. The specification's forecast
+for the compile that takes bodies (5.6 to 8.5 ms at 53% taken, a gate of 4) was built on 141 to 178 ticks and does
+not stand. What its parts were measured at in their own pieces says where it goes: the tests in the machine's own
+form are half the census's, and on the window a fifth; the window's kernel, C and X are 39 ticks a record, where the
+reference's four sweeps here are 345 a record together (the run is not split by sweep).
+
+**V5, nothing else moves** (`machine-alone/9700x-head/pair2-*-0a408b6a3-8f8fe98cd/`: main `0a408b6a3` against the
+piece's head, the ordinary compile, seven paired rounds a workload, the objects and diagnostics one set):
+
+| | main | the piece's head | paired | range | user instructions M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, wall ms | 111.771 | 111.635 | -0.165 | -0.508 to +0.476 | 1,215.937 and 1,215.364 |
+| `main.c` | 602.330 | 600.270 | -1.395 | -3.135 to +3.640 | 8,929.771 and 8,927.312 |
+| Lua | 64.206 | 64.218 | -0.028 | -0.316 to +0.149 | 724.553 and 724.335 |
+| musl | 663.786 | 663.166 | -0.138 | -1.909 to +17.103 | 6,635.856 and 6,634.508 |
+
+**Its fixture's faults** (`machine-alone/faults/`, `scripts/alone-faults.py`): fifteen single changes to the piece
+and to the two functions it leans on, each built and run against the fixture at `eda9d7b51` (its fixture then had 17
+of the head's 18 bodies): each fails it.
