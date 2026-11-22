@@ -1,0 +1,625 @@
+diff --git a/docs/arena-memory.md b/docs/arena-memory.md
+index e5a063f7..1321e8d8 100644
+--- a/docs/arena-memory.md
++++ b/docs/arena-memory.md
+@@ -325,14 +325,40 @@ capacity; `committed` is an offset from its original mapping address. A zero
+ `mapping_bytes` denotes borrowed writable memory, including the measuring
+ arena. Such views do not change protections or unmap their owner's storage.
+ 
+-A pooled arena (`arena_pool`, which only the C driver's units lanes set) is
+-discarded with `MADV_DONTNEED`, and its committed prefix stays writable for the
+-next reservation that takes it (#1128): every `mprotect` takes the address
+-space's lock for writing, which the other lanes' reservations, commits and
+-page faults then wait for, while the discard takes it only for reading. Where
+-commit charge is bounded, under strict overcommit (`vm.overcommit_memory` 2)
+-or a finite `RLIMIT_DATA`, release reprotects the prefix inaccessible first,
+-returning its charge. The pool reads both once, with the `RLIMIT_AS` share its
++A pooled arena (`arena_pool`, which only the C driver's units lanes set) keeps
++its committed prefix writable for the next reservation that takes it (#1128):
++every `mprotect` takes the address space's lock for writing, which the other
++lanes' reservations, commits and page faults then wait for. Its pages are
++zero again when it is taken, as a fresh mapping's are, in one of two ways:
++
++- **Cleared and kept (#3070).** The release asks the kernel which of the
++  mapping's pages hold anything (`PAGEMAP_SCAN` of `/proc/self/pagemap`,
++  Linux 6.7: pages present, but for the kernel's shared zero page, which a
++  read maps, and pages swapped out) and clears those in place with `memset`
++  (`arena_pool_clear`). For a private anonymous mapping that is exact, not a
++  sample: a page can hold a byte other than zero only while its page table
++  entry is present or holds a swap or migration entry, and the scan reads
++  those entries. So it finds what a push through a copy of the arena wrote
++  past the arena's own peak, and the scattered pages of a table pushed whole.
++  A release clears at most `BUSTER_ARENA_POOL_CLEAR_BYTES` (4 MB), and the
++  pool keeps at most `BUSTER_ARENA_POOL_KEPT_BYTES` (64 MB) of such pages;
++  `arena_pool_trim` frees them, which a units lane does when another lane
++  waits for memory (#1109), and `arena_pool_release` unmaps them with the
++  arenas.
++- **Freed.** Past those bounds, where the scan fails, or where the kernel has
++  none, the release discards the mapping with `MADV_DONTNEED`, which takes
++  the address space's lock only for reading, and the next user faults its
++  pages in again, cleared by the kernel.
++
++A unit of musl's releases about 19 arenas (an empty unit 14), with about
++720 KB resident in all at the mean, in mappings of up to 64 GB each (the
++preprocessor's tables: 9.6 GB).
++Discarding them made the kernel walk those mappings' page tables
++(`unmap_page_range`, 20% of an empty unit's cycles in one command on the
++9700X), flush the other lanes' TLBs, and fault every page in again for the
++next unit. Where commit charge is bounded, under strict overcommit
++(`vm.overcommit_memory` 2) or a finite `RLIMIT_DATA`, release reprotects the
++prefix inaccessible first, returning its charge, and frees the pages. The pool reads both once, with the `RLIMIT_AS` share its
+ thread's reservations admit (`arena_pool_limits`), and again after
+ `arena_pool_release`. A reservation takes the pooled arena with the smallest
+ mapping that holds its capacity with the same base pages and page layout (huge
+@@ -364,8 +390,9 @@ So a lane's first unit reserves the preprocessor's 27 tables of records, its
+ stacks' 12 columns and its file cache, all of them base pages (#652), with one
+ `mmap`, one `mprotect` and one advice call, where they took up to four calls
+ each, every one of which takes the address space's lock for writing; and each
+-unit discards them with one `MADV_DONTNEED`, one TLB flush sent to the other
+-lanes rather than one for each table. The pool matches it by
++unit clears the few pages it wrote of them in place (#3070, above), or else
++discards them with one `MADV_DONTNEED`, one TLB flush sent to the other lanes
++rather than one for each table. The pool matches it by
+ `Arena.layout`, a hash of its tables' sizes and base pages: only a reservation
+ of the same tables takes it, and no ordinary reservation does. The parser's
+ columns follow their unit's token count, so where the address space is
+diff --git a/docs/commands/lanes.md b/docs/commands/lanes.md
+index ad7d9f83..48005b8b 100644
+--- a/docs/commands/lanes.md
++++ b/docs/commands/lanes.md
+@@ -41,7 +41,15 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
+   back; an arena's base pages committed at once and then four times what is
+   committed where commit isn't charged, 64 KB and within twice where it is;
+   and a full half, compact reservations and limits that aren't fixed each
+-  leaving a reservation a mapping of its own;
++  leaving a reservation a mapping of its own; and, in a child, a pool's
++  releases that keep their arenas' pages (#3070, `arena_pool_clear`): the
++  pages an arena wrote, through a copy of it past its own peak too, kept
++  resident and taken again zero, a page it only read left the kernel's zero
++  page and counted as nothing kept, an arena of tables' three scattered pages
++  the same, and the same arena's pages freed once it writes more than a
++  release clears or is released past what the pool keeps, and by
++  `arena_pool_trim` (where the kernel has no `PAGEMAP_SCAN`, every release
++  frees them, and reuse reads zero all the same);
+ - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
+   seven cost patterns: the parts must cover the items in lane order, and each
+   item must go to the lane whose share of the total cost holds its midpoint;
+diff --git a/src/buster/compiler/c_checker_units.c b/src/buster/compiler/c_checker_units.c
+index 4e88402c..3ace7b85 100644
+--- a/src/buster/compiler/c_checker_units.c
++++ b/src/buster/compiler/c_checker_units.c
+@@ -2159,7 +2159,8 @@ static void check_units_memory_return(CheckUnitsLane* lane)
+ }
+ 
+ // What `lane` held of the run's memory, given back (#1109): its three arenas' pages from the first huge page boundary past
+-// their lengths (arena_discard; none after its release), and its part of the run's memory (check_units_memory_return).
++// their lengths (arena_discard; none after its release), the cleared pages its pool's arenas keep (arena_pool_trim,
++// #3070), and its part of the run's memory (check_units_memory_return).
+ static void check_units_memory_give(CheckUnitsLane* lane)
+ {
+     if (lane->held != 0)
+@@ -2167,6 +2168,7 @@ static void check_units_memory_give(CheckUnitsLane* lane)
+         arena_discard(&lane->arena);
+         arena_discard(&lane->scratch);
+         arena_discard(&lane->output);
++        arena_pool_trim(&lane->pool);
+         check_units_memory_return(lane);
+     }
+ }
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 42f1bdfe..5dd77c7c 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -78,6 +78,7 @@
+ #include <signal.h>
+ #include <unistd.h>
+ #include <time.h>
++#include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
+@@ -215,11 +216,25 @@ static _Thread_local uint64_t arena_small_floor;
+ // The arenas a thread keeps, emptied, for its next reservations (#152). Reusing a mapping avoids repeating its
+ // allocation, alignment and page advice, and keeping its committed prefix writable avoids repeating its commits (#1128):
+ // each of those calls takes the address space's lock for writing, which the other lanes' reservations, commits and
+-// faults wait for. Release frees the pages with MADV_DONTNEED, which takes the lock only for reading, so that reuse finds
+-// them zero. Where commit charge is bounded (arena_commit_unbounded), release reprotects the prefix first, returning its
+-// charge, and reuse starts inaccessible. A reservation takes the arena of the smallest mapping that holds its capacity
+-// with the same base pages and page layout, the latest released of those; a full pool evicts its oldest arena.
++// faults wait for. Reuse finds an arena's pages zero, as a fresh mapping's: a release clears what the arena's user wrote
++// and keeps the pages (#3070, arena_pool_clear), or else frees them with MADV_DONTNEED, which takes the lock only for
++// reading. Where commit charge is bounded (arena_commit_unbounded), release reprotects the prefix first, returning its
++// charge, frees the pages, and reuse starts inaccessible. A reservation takes the arena of the smallest mapping that
++// holds its capacity with the same base pages and page layout, the latest released of those; a full pool evicts its
++// oldest arena.
++//
++// Kept pages, cleared (#3070, "warm lanes"): a units lane's unit releases about 14 arenas of its own (the preprocessor's,
++// its tables', the parser's, the type table's), a few kilobytes resident in each for most units (720 KB in all at
++// musl's mean), in mappings of up to 64 GB each. Freeing them made the kernel walk those mappings' page tables
++// (unmap_page_range: a fifth of an empty unit's cycles on the 9700X) and fault every page in again for the next unit,
++// cleared by the kernel. A release that keeps them finds the pages its arena holds (PAGEMAP_SCAN of /proc/self/pagemap,
++// Linux 6.7: present or swapped out) and clears them in place, as many as BUSTER_ARENA_POOL_CLEAR_BYTES, with the pool's
++// kept pages at most BUSTER_ARENA_POOL_KEPT_BYTES; an arena that holds more, or a kernel without the scan, frees them
++// as before. The scan finds what was written whatever the arena's own record says (a push through a copy of an arena
++// moves the copy's peak, not the arena's), and a page that was only read, the kernel's shared zero page, needs nothing.
+ #define BUSTER_ARENA_POOL_SLOTS 256
++#define BUSTER_ARENA_POOL_CLEAR_BYTES (4ull << 20)
++#define BUSTER_ARENA_POOL_KEPT_BYTES (64ull << 20)
+ typedef struct ArenaPool ArenaPool;
+ struct ArenaPool
+ {
+@@ -229,10 +244,18 @@ struct ArenaPool
+     // prefixes writable.
+     bool limits;
+     bool keeps_commits;
++    // /proc/self/pagemap (`pagemap`), opened at the pool's first release that keeps pages (`opened`), or -1 where it can't
++    // be or the kernel has no PAGEMAP_SCAN: then the pool's releases free their arenas' pages, as before. Closed by
++    // arena_pool_release.
++    bool opened;
++    int pagemap;
+     uint64_t address_share;
+     // The releases so far, and the one that put each arena here.
+     uint64_t clock;
++    // The bytes of cleared pages each arena keeps (arena_pool_clear), and theirs in all.
++    uint64_t kept;
+     uint64_t released[BUSTER_ARENA_POOL_SLOTS];
++    uint64_t resident[BUSTER_ARENA_POOL_SLOTS];
+     Arena arenas[BUSTER_ARENA_POOL_SLOTS];
+ };
+ // The thread's pool, or null for none: set by the code that owns the pool (a units lane), which unmaps what it holds with
+@@ -247,6 +270,9 @@ static _Thread_local ArenaPool* arena_pool;
+ #endif
+ // Unmaps the arenas `pool` holds, and leaves it empty.
+ static __attribute__((unused)) void arena_pool_release(ArenaPool* pool);
++// Frees the cleared pages `pool`'s arenas keep (#3070), for a thread whose memory another needs (#1109: a units lane that
++// gives back what it holds): the arenas stay in the pool, as a release that freed their pages would have left them.
++static __attribute__((unused)) void arena_pool_trim(ArenaPool* pool);
+ // The process's pages (#1109), set once at its start, before any arena is reserved: on a virtual machine (CPUID's
+ // hypervisor bit), transparent huge pages off for the whole process (PR_SET_THP_DISABLE, which MADV_HUGEPAGE doesn't
+ // override, and which the processes it starts inherit), so that the arenas take base pages. `setting`,
+@@ -303,7 +329,7 @@ static __attribute__((unused)) void arena_release(Arena* arena);
+ // `size` bytes at the first address from base + length that is a multiple of `alignment`, a power of two. Returns 0 and
+ // leaves the arena as it was if they don't fit or the alignment isn't a power of two. The bytes aren't cleared: they
+ // are zero only where no push since the arena's reservation took them (past its peak): a fresh mapping's pages are
+-// zero, and so are a pooled arena's, whose pages the pool discards.
++// zero, and so are a pooled arena's, whose pages the pool clears or frees.
+ static __attribute__((unused)) void* arena_push(Arena* arena, uint64_t size, uint64_t alignment);
+ // `count` elements of `element_bytes` each; 0, as from arena_push, if count * element_bytes overflows.
+ static __attribute__((unused)) void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment);
+@@ -315,7 +341,7 @@ static __attribute__((unused)) void arena_pop_to(Arena* arena, uint64_t length);
+ static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
+ // Whether every byte past the arena's length is still as the kernel mapped it, zero: the arena owns its mapping (not
+ // borrowed storage, whose owner may have written it), and no push through it has reached past its length since its pages
+-// were mapped, or discarded by the pool. A push through a copy of the arena doesn't move its peak, so only a caller that
++// were mapped, or cleared or freed by the pool. A push through a copy of the arena doesn't move its peak, so only a caller that
+ // knows no copy pushed past its length may take the answer for its next pushes' bytes (#628: the C driver's arena).
+ static __attribute__((unused)) bool arena_untouched(const Arena* arena);
+ // Gives the kernel back the pages that pushes touched past the arena's length, from the first huge page boundary past it,
+@@ -626,12 +652,113 @@ static Arena arena_pool_take(ArenaPool* pool, uint32_t slot, uint64_t capacity,
+     Arena result = pool->arenas[slot];
+     result.capacity = capacity;
+     result.requested_capacity = requested;
++    pool->kept -= pool->resident[slot];
+     pool->count -= 1;
+     pool->arenas[slot] = pool->arenas[pool->count];
+     pool->released[slot] = pool->released[pool->count];
++    pool->resident[slot] = pool->resident[pool->count];
+     return result;
+ }
+ 
++// PAGEMAP_SCAN (Linux 6.7), which the C library's headers may not name: the ioctl of /proc/PID/pagemap, its argument
++// (struct pm_scan_arg) and its answer's regions (struct page_region), and the categories asked of it: a page that is
++// mapped, one swapped out, one that is the kernel's shared zero page, and one mapped by a huge page.
++#define BUSTER_PAGEMAP_SCAN UINT64_C(0xc0606610)
++#define BUSTER_PAGE_IS_PRESENT (UINT64_C(1) << 3)
++#define BUSTER_PAGE_IS_SWAPPED (UINT64_C(1) << 4)
++#define BUSTER_PAGE_IS_PFNZERO (UINT64_C(1) << 5)
++#define BUSTER_PAGE_IS_HUGE (UINT64_C(1) << 6)
++typedef struct PagemapScan PagemapScan;
++struct PagemapScan
++{
++    uint64_t size;
++    uint64_t flags;
++    uint64_t start;
++    uint64_t end;
++    uint64_t walk_end;
++    uint64_t vector;
++    uint64_t vector_length;
++    uint64_t max_pages;
++    uint64_t category_inverted;
++    uint64_t category_mask;
++    uint64_t category_anyof_mask;
++    uint64_t return_mask;
++};
++typedef struct PagemapRegion PagemapRegion;
++struct PagemapRegion
++{
++    uint64_t start;
++    uint64_t end;
++    uint64_t categories;
++};
++_Static_assert(sizeof(PagemapScan) == 96 && sizeof(PagemapRegion) == 24, "PAGEMAP_SCAN's argument and region are the kernel's");
++// The regions one scan of a release answers, on the releasing thread's stack.
++#define BUSTER_ARENA_POOL_SCAN_REGIONS 32
++
++// The pool's /proc/self/pagemap, opened at its first use, or -1.
++static int arena_pool_pagemap(ArenaPool* pool)
++{
++    if (!pool->opened)
++    {
++        pool->pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
++        pool->opened = true;
++    }
++    return pool->pagemap;
++}
++
++// Clears in place the pages of the mapping of `bytes` at `mapping` that hold anything (#3070): its pages that are
++// present but for the kernel's zero page, which a read maps and a write would replace, and those swapped out. Returns
++// the bytes of the pages it cleared, or UINT64_MAX where they are more than `limit` bytes or the scan fails, which
++// leaves some of them as they were: the caller then frees them. A kernel without PAGEMAP_SCAN, or a process that can't
++// open its pagemap, fails every scan of the pool's. The scan stops a page past the limit (max_pages), where it may
++// count the zero page's too: the next one goes on from there.
++static uint64_t arena_pool_clear(ArenaPool* pool, uint8_t* mapping, uint64_t bytes, uint64_t limit)
++{
++    const int pagemap = arena_pool_pagemap(pool);
++    // Zeroed, so that a sanitizer, which doesn't see the kernel fill them, takes what is read of them for written.
++    PagemapRegion regions[BUSTER_ARENA_POOL_SCAN_REGIONS] = { 0 };
++    const uint64_t end = (uint64_t)(uintptr_t)mapping + bytes;
++    uint64_t at = (uint64_t)(uintptr_t)mapping;
++    uint64_t found = 0;
++    bool valid = pagemap >= 0;
++    while (valid && at < end)
++    {
++        // One page more than the limit allows, so that a mapping past it says so.
++        PagemapScan scan = {
++            .size = sizeof(scan),
++            .start = at,
++            .end = end,
++            .vector = (uint64_t)(uintptr_t)regions,
++            .vector_length = BUSTER_ARENA_POOL_SCAN_REGIONS,
++            .max_pages = (limit - found) / BUSTER_ARENA_PAGE_BYTES + 1,
++            .category_anyof_mask = BUSTER_PAGE_IS_PRESENT | BUSTER_PAGE_IS_SWAPPED,
++            .return_mask = BUSTER_PAGE_IS_PFNZERO,
++        };
++        const long count = ioctl(pagemap, BUSTER_PAGEMAP_SCAN, &scan);
++        valid = count >= 0 && count <= BUSTER_ARENA_POOL_SCAN_REGIONS && scan.walk_end > at && scan.walk_end <= end;
++        for (long r = 0; valid && r < count; r += 1)
++        {
++            const PagemapRegion region = regions[r];
++            const bool zero = (region.categories & BUSTER_PAGE_IS_PFNZERO) != 0;
++            valid = region.start >= at && region.end > region.start && region.end <= scan.walk_end;
++            found += valid && !zero ? region.end - region.start : 0;
++            valid = valid && found <= limit;
++            if (valid && !zero)
++            {
++                memset((void*)(uintptr_t)region.start, 0, region.end - region.start);
++            }
++        }
++        // A kernel without the scan refuses it as an ioctl it doesn't know: no later release of the pool's asks again.
++        if (count < 0 && (errno == ENOTTY || errno == EINVAL))
++        {
++            close(pagemap);
++            pool->pagemap = -1;
++        }
++        at = valid ? scan.walk_end : end;
++    }
++    return valid ? found : UINT64_MAX;
++}
++
+ // The flags of the mapping (`mapping_bytes`) that reserves an arena of `capacity` bytes, the first `small` of them base
+ // pages: with arena_stack_base_pages, MAP_STACK, which maps it VM_NOHUGEPAGE throughout, where arena_reserve_policy
+ // would advise MADV_NOHUGEPAGE (base pages of 2 MB or more, or a busy host's arena of 2 MB or more). Its huge pages past
+@@ -1302,7 +1429,14 @@ static void arena_release(Arena* arena)
+         }
+         const bool protected = pool != 0 && !arena->unaccounted &&
+                                (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
+-        const bool pooled = protected && madvise(mapping, bytes, MADV_DONTNEED) == 0;
++        // Its pages cleared and kept, where its prefix stays writable and they are few enough (#3070), or else freed.
++        uint64_t kept = UINT64_MAX;
++        if (protected && pool->keeps_commits && pool->kept < BUSTER_ARENA_POOL_KEPT_BYTES)
++        {
++            const uint64_t room = BUSTER_ARENA_POOL_KEPT_BYTES - pool->kept;
++            kept = arena_pool_clear(pool, mapping, bytes, room < BUSTER_ARENA_POOL_CLEAR_BYTES ? room : BUSTER_ARENA_POOL_CLEAR_BYTES);
++        }
++        const bool pooled = protected && (kept != UINT64_MAX || madvise(mapping, bytes, MADV_DONTNEED) == 0);
+         if (pooled)
+         {
+             // A free slot, or else the one whose arena was released longest ago, which is unmapped.
+@@ -1316,6 +1450,7 @@ static void arena_release(Arena* arena)
+                 }
+                 const Arena* old = pool->arenas + slot;
+                 munmap(old->base - old->mapping_offset, old->mapping_bytes);
++                pool->kept -= pool->resident[slot];
+             }
+             else
+             {
+@@ -1323,6 +1458,8 @@ static void arena_release(Arena* arena)
+             }
+             pool->clock += 1;
+             pool->released[slot] = pool->clock;
++            pool->resident[slot] = kept != UINT64_MAX ? kept : 0;
++            pool->kept += pool->resident[slot];
+             pool->arenas[slot] = (Arena){
+                 .base = arena->base,
+                 .capacity = arena->capacity,
+@@ -1350,8 +1487,28 @@ static void arena_pool_release(ArenaPool* pool)
+     {
+         munmap(pool->arenas[i].base - pool->arenas[i].mapping_offset, pool->arenas[i].mapping_bytes);
+     }
++    if (pool->opened && pool->pagemap >= 0)
++    {
++        close(pool->pagemap);
++    }
+     pool->count = 0;
+     pool->limits = false;
++    pool->opened = false;
++    pool->kept = 0;
++}
++
++static void arena_pool_trim(ArenaPool* pool)
++{
++    for (uint32_t i = 0; i < pool->count; i += 1)
++    {
++        if (pool->resident[i] != 0)
++        {
++            const Arena* arena = pool->arenas + i;
++            madvise(arena->base - arena->mapping_offset, arena->mapping_bytes, MADV_DONTNEED);
++            pool->resident[i] = 0;
++        }
++    }
++    pool->kept = 0;
+ }
+ 
+ // Undoes a commit attempt that may have applied to a leading part of [committed, target) before refusing across a
+@@ -3641,37 +3798,14 @@ static __attribute__((unused)) long lane_exit_syscall(long number, long first, l
+ // asked for: otherwise every process would look. A process with transparent huge pages off or on a kernel before 6.7
+ // (arena_executable_huge_pages) neither probes nor looks, nor does one started with BUSTER_EXECUTABLE_HUGE_PAGES=0.
+ 
+-// MADV_COLLAPSE and PAGEMAP_SCAN, which the C library's headers may not name: the ioctl of /proc/PID/pagemap, its
+-// argument (struct pm_scan_arg) and its answer's regions (struct page_region), and the categories asked of it: a page
+-// that is mapped, and one mapped by a huge page.
++// MADV_COLLAPSE, which the C library's headers may not name, and PAGEMAP_SCAN's ioctl, argument and regions, as the
++// arena pool asks it (PagemapScan), and the categories asked of it: a page that is mapped, and one mapped by a huge page.
+ #define BUSTER_LANE_EXIT_MADV_COLLAPSE 25
+-#define BUSTER_LANE_EXIT_PAGEMAP_SCAN UINT64_C(0xc0606610)
+-#define BUSTER_LANE_EXIT_PAGE_PRESENT (UINT64_C(1) << 3)
+-#define BUSTER_LANE_EXIT_PAGE_HUGE (UINT64_C(1) << 6)
+-typedef struct LaneExitScan LaneExitScan;
+-struct LaneExitScan
+-{
+-    uint64_t size;
+-    uint64_t flags;
+-    uint64_t start;
+-    uint64_t end;
+-    uint64_t walk_end;
+-    uint64_t vector;
+-    uint64_t vector_length;
+-    uint64_t max_pages;
+-    uint64_t category_inverted;
+-    uint64_t category_mask;
+-    uint64_t category_anyof_mask;
+-    uint64_t return_mask;
+-};
+-typedef struct LaneExitRegion LaneExitRegion;
+-struct LaneExitRegion
+-{
+-    uint64_t start;
+-    uint64_t end;
+-    uint64_t categories;
+-};
+-_Static_assert(sizeof(LaneExitScan) == 96 && sizeof(LaneExitRegion) == 24, "PAGEMAP_SCAN's argument and region are the kernel's");
++#define BUSTER_LANE_EXIT_PAGEMAP_SCAN BUSTER_PAGEMAP_SCAN
++#define BUSTER_LANE_EXIT_PAGE_PRESENT BUSTER_PAGE_IS_PRESENT
++#define BUSTER_LANE_EXIT_PAGE_HUGE BUSTER_PAGE_IS_HUGE
++typedef PagemapScan LaneExitScan;
++typedef PagemapRegion LaneExitRegion;
+ 
+ // The whole 2 MB ranges of a read-only segment of the executable, from `begin` to `end`.
+ typedef struct LaneExitSegment LaneExitSegment;
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index e2a70ab8..8366bea8 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -133,9 +133,11 @@
+ #include <fcntl.h>
+ #include <dirent.h>
+ #include <errno.h>
++#include <sys/ioctl.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
++#include <sys/utsname.h>
+ #include <sys/wait.h>
+ #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+ #include <execinfo.h>
+@@ -823,11 +825,190 @@ static void lane_test_arena_regions(LaneTestTally* tally)
+     lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of reservations taken together failed in their process");
+ }
+ 
++// Whether the page at `address` is the kernel's shared zero page (PAGEMAP_SCAN's PAGE_IS_PFNZERO): mapped by a read,
++// never written. False where the scan can't say.
++static bool lane_test_zero_page(const uint8_t* address)
++{
++    bool result = false;
++    const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
++    if (pagemap >= 0)
++    {
++        PagemapRegion region = { 0 };
++        PagemapScan scan = {
++            .size = sizeof(scan),
++            .start = (uint64_t)(uintptr_t)address,
++            .end = (uint64_t)(uintptr_t)address + BUSTER_ARENA_PAGE_BYTES,
++            .vector = (uint64_t)(uintptr_t)&region,
++            .vector_length = 1,
++            .category_mask = BUSTER_PAGE_IS_PRESENT,
++            .return_mask = BUSTER_PAGE_IS_PFNZERO,
++        };
++        result = ioctl(pagemap, BUSTER_PAGEMAP_SCAN, &scan) == 1 && (region.categories & BUSTER_PAGE_IS_PFNZERO) != 0;
++        close(pagemap);
++    }
++    return result;
++}
++
++// Whether `count` bytes at `bytes` are all zero.
++static bool lane_test_zero(const uint8_t* bytes, uint64_t count)
++{
++    bool zero = bytes != 0;
++    for (uint64_t i = 0; zero && i < count; i += 1)
++    {
++        zero = bytes[i] == 0;
++    }
++    return zero;
++}
++
++// A pool's releases that keep their arenas' pages, cleared (#3070, arena_pool_clear). A released arena keeps the pages
++// it wrote, those a copy of it wrote past its own peak too, resident, and a reservation takes it again with every byte
++// zero; a page it only read stays the kernel's zero page, counted as nothing kept. The same arena, once it writes more
++// than BUSTER_ARENA_POOL_CLEAR_BYTES, or once it is released past the pool's BUSTER_ARENA_POOL_KEPT_BYTES, frees its
++// pages as before, and is taken again zero. An arena of tables' scattered writes are kept as an arena's, and
++// arena_pool_trim frees what the pool keeps. Where the kernel has no PAGEMAP_SCAN (before Linux 6.7) every release frees
++// its pages, and reuse still reads zero. In a process of its own (lane_test_arena_pool_clear), as the regions' checks
++// are: its reservations' regions count against the address-space limit that later checks lower.
++static void lane_test_arena_pool_clear_child(LaneTestTally* tally)
++{
++    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
++    struct utsname kernel;
++    const bool scans = uname(&kernel) == 0 && arena_kernel_maps_stack_base_pages(kernel.release);
++    arena_limits = (ArenaLimits){
++        .fixed = true,
++        .address_share = BUSTER_ARENA_MAX_CAPACITY,
++        .commit_unbounded = true,
++    };
++    static ArenaPool pool;
++    arena_pool = &pool;
++    // Three pages written, then a copy of the arena writes two more past them and reads a sixth.
++    Arena arena = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    uint8_t* const bytes = arena.base != 0 ? arena_push(&arena, 3 * page, page) : 0;
++    Arena copy = arena;
++    uint8_t* const beyond = bytes != 0 ? arena_push(&copy, 3 * page, page) : 0;
++    lane_test_expect(tally, beyond == bytes + 3 * page && arena.peak == 3 * page, "an arena and its copy couldn't be pushed");
++    if (beyond != 0)
++    {
++        memset(bytes, 0x5a, 3 * page);
++        memset(beyond, 0xa5, 2 * page);
++        volatile const uint8_t* const read = beyond + 2 * page;
++        lane_test_expect(tally, *read == 0, "a page that was only read wasn't zero");
++    }
++    const uint8_t* const base = arena.base;
++    arena_release(&arena);
++    const uint64_t resident = pool.count == 1 ? pool.resident[0] : UINT64_MAX;
++    const uint64_t kept_pages = scans ? 5 * page : 0;
++    if (scans)
++    {
++        const bool kept = resident == kept_pages && pool.kept == resident && lane_test_resident(bytes) && lane_test_resident(beyond + page) &&
++                          lane_test_zero(bytes, 5 * page) && lane_test_zero_page(beyond + 2 * page);
++        if (!kept)
++        {
++            printf("  arena pool: a release kept %llu bytes resident, %llu in all\n", (unsigned long long)resident, (unsigned long long)pool.kept);
++        }
++        lane_test_expect(tally, kept, "a pooled arena's written pages weren't kept resident and cleared, or a page it only read was written");
++    }
++    else
++    {
++        lane_test_expect(tally, resident == 0 && pool.kept == 0, "a pool kept pages where the kernel has no PAGEMAP_SCAN");
++    }
++    // Taken again: every byte zero, and its release keeps the same five pages, cleared again.
++    Arena again = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uint8_t* const again_bytes = again.base == base && base != 0 ? arena_push(&again, 6 * page, page) : 0;
++    lane_test_expect(tally, again_bytes == bytes && pool.count == 0 && pool.kept == 0 && lane_test_zero(again_bytes, 6 * page),
++                     "a pooled arena wasn't taken again with every byte zero");
++    arena_release(&again);
++    lane_test_expect(tally, pool.count == 1 && pool.resident[0] == kept_pages && pool.kept == kept_pages, "a pooled arena's second release didn't keep its pages");
++    // More than a release clears: its pages are freed, and the arena is taken again zero.
++    Arena large = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    const uint64_t large_bytes = BUSTER_ARENA_POOL_CLEAR_BYTES + page;
++    uint8_t* const large_base = large.base == base && base != 0 ? arena_push(&large, large_bytes, page) : 0;
++    if (large_base != 0)
++    {
++        memset(large_base, 0x33, large_bytes);
++    }
++    arena_release(&large);
++    const bool large_freed = large_base != 0 && pool.count == 1 && pool.resident[0] == 0 && pool.kept == 0 && !lane_test_resident(large_base) &&
++                             !lane_test_resident(large_base + large_bytes - page);
++    lane_test_expect(tally, large_freed, "a pooled arena that wrote more than a release clears kept its pages");
++    large = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
++    uint8_t* const large_again = large.base == large_base && large_base != 0 ? arena_push(&large, large_bytes, page) : 0;
++    lane_test_expect(tally, large_again != 0 && large_again[0] == 0 && large_again[large_bytes / 2] == 0 && large_again[large_bytes - 1] == 0,
++                     "a pooled arena whose pages were freed wasn't taken again zero");
++    // A release past what the pool keeps frees its pages, few as they are.
++    if (large_again != 0)
++    {
++        memset(large_again, 0x44, 2 * page);
++    }
++    pool.kept = BUSTER_ARENA_POOL_KEPT_BYTES - page;
++    arena_release(&large);
++    const bool capped_freed = large_again != 0 && pool.count == 1 && pool.resident[0] == 0 && pool.kept == BUSTER_ARENA_POOL_KEPT_BYTES - page &&
++                              !lane_test_resident(large_base);
++    lane_test_expect(tally, capped_freed, "a release past what the pool keeps kept its pages");
++    pool.kept = 0;
++    // An arena of tables, written at three scattered pages.
++    ArenaTable tables[] = {
++        { .bytes = 1ull << 20, .small = 1ull << 20 },
++        { .bytes = 1ull << 20, .small = 1ull << 20 },
++    };
++    Arena held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
++    uint8_t* const first_table = tables[0].base;
++    uint8_t* const second_table = tables[1].base;
++    if (held.base != 0)
++    {
++        first_table[0] = 1;
++        first_table[700 << 10] = 2;
++        second_table[tables[1].bytes - 1] = 3;
++    }
++    const uint8_t* const held_base = held.base;
++    arena_release(&held);
++    lane_test_expect(tally, held_base != 0 && pool.count == 2 && pool.resident[1] == (scans ? 3 * page : 0) &&
++                     (!scans || lane_test_resident(first_table + (700 << 10))),
++                     "a pooled arena of tables didn't keep its three written pages");
++    held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
++    lane_test_expect(tally, held.base == held_base && held_base != 0 && first_table[0] == 0 && first_table[700 << 10] == 0 && second_table[tables[1].bytes - 1] == 0,
++                     "a pooled arena of tables wasn't taken again zero");
++    second_table[5] = 4;
++    arena_release(&held);
++    // arena_pool_trim frees what the pool keeps; its arenas stay in it.
++    const uint32_t count = pool.count;
++    arena_pool_trim(&pool);
++    bool trimmed = pool.kept == 0 && pool.count == count && !lane_test_resident(second_table) && !lane_test_resident(first_table);
++    for (uint32_t i = 0; i < pool.count; i += 1)
++    {
++        trimmed &= pool.resident[i] == 0;
++    }
++    lane_test_expect(tally, trimmed, "arena_pool_trim left pages the pool kept");
++    held = arena_reserve_tables(tables, BUSTER_ARRAY_LENGTH(tables));
++    lane_test_expect(tally, held.base == held_base && held_base != 0 && second_table[5] == 0, "a trimmed pool's arena wasn't taken again zero");
++    arena_release(&held);
++    arena_pool = 0;
++    arena_pool_release(&pool);
++    lane_test_expect(tally, !pool.opened && pool.count == 0 && pool.kept == 0, "a released pool kept its pagemap or its pages");
++}
++
++// lane_test_arena_pool_clear_child in a process of its own: one check here, that every check of its passed.
++static void lane_test_arena_pool_clear(LaneTestTally* tally)
++{
++    fflush(stdout);
++    const pid_t child = fork();
++    if (child == 0)
++    {
++        LaneTestTally own = { 0 };
++        lane_test_arena_pool_clear_child(&own);
++        fflush(stdout);
++        _exit(own.failures == 0 && own.checks != 0 ? 0 : 1);
++    }
++    int status = 0;
++    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
++    lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of a pool's kept pages failed in their process");
++}
++
+ static bool lane_test_arenas(void)
+ {
+     LaneTestTally tally = { 0 };
+     lane_test_stack_base_pages(&tally);
+     lane_test_arena_regions(&tally);
++    lane_test_arena_pool_clear(&tally);
+ 
+     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+     static const struct
