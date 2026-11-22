@@ -11,6 +11,8 @@ The producer keeps token identities, declarations, bindings and a shared mutable
 
 The oracle checks graph operators, source identities, all three fixed operands, call argument edges and tokens, source ranges, FP context, warning suppression, types, leaves and constant-evaluation flags. For checked output it includes every value, conversion, member offset, primary diagnostic, warning and typed report. It includes all fields of the store, varargs, misc, floating, query, atomic, vector, x86, bit-cast, overload and overload-address effect records. It also checks constant-warning requests and published checker warning events. Every row is keyed by its closing parser token. Each compressed TSV carries both fingerprints. The accompanying compressed stderr files preserve the original process output in each mode. [SQLite receipts](oracle/sqlite/) and [Buster receipts](oracle/buster/)
 
+The supplemental observer computed an independent field fingerprint for each side record in source order. The source-local sequence and whole-unit sequence match byte-for-byte for all 1,597 SQLite entries and all 11,446 Buster entries. These include zero counts for unexercised families. Each record names its closing source token, family and normalized owner node. The observer adds only receipt emission under an environment switch. [Counts by effect kind](effects/counts.tsv), [SQLite records](effects/sqlite/) and [Buster records](effects/buster/)
+
 ## Resident memory
 
 The per-process Linux smaps audit ran at the same source-reader boundary, immediately after producing and checking all declarations. Both paths used fresh processes on a Ryzen 9 7940HS with zero anonymous huge pages in the captured mappings. The checker translation unit used an unoptimized debugging build for this attribution. Counts are live KiB at that boundary. [Per-mapping RSS and huge pages](residency/mapping.tsv)
@@ -22,7 +24,7 @@ The per-process Linux smaps audit ran at the same source-reader boundary, immedi
 
 SQLite's largest function, sqlite3VdbeExec, contains 28,599 tokens. Its local graph, stream and scratch mappings retained 1,708,032, 2,326,528 and 106,496 bytes respectively after all functions. Buster's largest function by node count is lane_test_arenas. The corresponding mappings retained 831,488, 851,968 and 94,208 bytes. Buster's monolithic static initializer accounts for the 347,286-node external declaration and increases the three all-declaration mappings to 25,481,216, 49,303,552 and 348,160 bytes. [Raw source-mode summaries](oracle/buster/declarations.source.stderr.xz)
 
-The parser and token-indexed declaration passes still own whole-unit state. At the SQLite source-mode exit the reader's output and scratch alone held 31,544 and 70,896 KiB. Buster retained 335,628 and 251,372 KiB respectively. The source-first witness ends before the remaining source finalizers, driver warning rendering, lowering and ELF writing. [SQLite mapping capture](residency/sqlite/mapping-source.stderr) and [Buster mapping capture](residency/buster/mapping-source.stderr)
+The parser and token-indexed declaration passes still own whole-unit state. At the SQLite source-mode exit the reader's output and scratch alone held 31,544 and 70,896 KiB. Buster retained 335,624 and 251,372 KiB respectively. The source-first witness ends before the remaining source finalizers, driver warning rendering, lowering and ELF writing. [SQLite mapping capture](residency/sqlite/mapping-source.stderr) and [Buster mapping capture](residency/buster/mapping-source.stderr)
 
 ## Reproduction
 
@@ -43,3 +45,5 @@ python3 stages.py --compiler "$PATCHED_BUSTER/build/compiler" --self-source "$FR
 ```
 
 The oracle and mapping files above used a local one-core functional witness with an unoptimized checker translation unit and the ordinary Develop build for the other partitions. The baseline executable came from commit `fbef2d68dfc952c269d7a2fd008220341428e727`, whose source directory matches the patch base. The driver used normal source compilation and one lane in all cases. [Exact binary hashes](oracle/binaries.json)
+
+To reproduce the side-record files from the same checkout, apply `effect-observer.patch` on top of `implementation.patch`, rebuild and run `effects.py` with the same `--compiler`, `--sqlite` and `--self-source` paths and a new output directory. The supplemental patch reconstructs commit `804a88de19c8ca325609b0286208b3483a4927c7`. [Observer patch](effect-observer.patch) and [verification script](effects.py)

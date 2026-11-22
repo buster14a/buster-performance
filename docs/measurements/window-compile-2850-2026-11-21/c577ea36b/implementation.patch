@@ -1,0 +1,337 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 60bd42a86..35e1a6761 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -252,10 +252,15 @@ static inline __attribute__((always_inline)) void check_input_batch_record(Check
+     const __mmask16 reorderable = _mm512_mask_test_epi32_mask(lanes & (__mmask16)~(leaves | query), classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_REORDERABLE));
+     const __mmask16 typed = _mm512_test_epi32_mask(classes, _mm512_set1_epi32(BUSTER_CHECK_CLASS_TYPED));
+     const __mmask16 type = check_input_batch_builtin(lanes, requested) | _mm512_cmpeq_epi32_mask(requested, _mm512_set1_epi32((int32_t)BUSTER_TYPE_VOID));
+-    const __m512i words = _mm512_slli_epi32(slots, 3);
+-    const __m512i leaf_types = _mm512_mask_i32gather_epi32(zero, leaves, words, graph->leaf_records, 4);
+-    const __m512i heads = _mm512_mask_i32gather_epi32(zero, leaves, _mm512_add_epi32(words, _mm512_set1_epi32(3)), graph->leaf_records, 4);
+-    const __mmask16 leaf_pure = check_input_batch_builtin(leaves, leaf_types) & _mm512_testn_epi32_mask(heads, heads);
++    // Both record forms expose type and presence of an overload directly, including an extended compact leaf.
++    const bool small = graph->small_leaves != NULL;
++    const void* records = small ? (const void*)graph->small_leaves : (const void*)graph->leaf_records;
++    const __m512i words = _mm512_sllv_epi32(slots, _mm512_set1_epi32(small ? 2 : 3));
++    const __m512i leaf_types = _mm512_mask_i32gather_epi32(zero, leaves, words, records, 4);
++    const __m512i details = _mm512_mask_i32gather_epi32(zero, leaves, _mm512_add_epi32(words, _mm512_set1_epi32(3)), records, 4);
++    const __mmask16 without_head = small ? _mm512_cmplt_epu32_mask(details, _mm512_set1_epi32((int32_t)(BUSTER_CHECK_LEAF_EXTENDED | BUSTER_CHECK_LEAF_HEAD))) :
++                                           _mm512_testn_epi32_mask(details, details);
++    const __mmask16 leaf_pure = check_input_batch_builtin(leaves, leaf_types) & without_head;
+     uint32_t pure = (uint32_t)(leaf_pure | query | (reorderable & ((__mmask16)~typed | type)));
+     // The operands each case reads: sizeof's first, a reordered operator's three. An absent one is pure.
+     const __mmask16 used[3] =
+diff --git a/src/buster/compiler/c_check_graph_test.c b/src/buster/compiler/c_check_graph_test.c
+index 50bc85a01..f2c2002a3 100644
+--- a/src/buster/compiler/c_check_graph_test.c
++++ b/src/buster/compiler/c_check_graph_test.c
+@@ -676,6 +676,43 @@ static void check_test_graph_break(CheckTest* test, CheckGraph* graph, uint32_t
+ 
+ #define BUSTER_CHECK_TEST_GRAPH_RULES 19u
+ 
++static void check_test_graph_small_leaves(CheckTest* test, Arena* storage)
++{
++    enum { count = 17, changed = 13 };
++    const uint64_t mark = storage->length;
++    CheckGraph graph;
++    CheckGraphSmallLeaf leaves[count] = { 0 };
++    const bool ready = check_graph_initialize(&graph, storage, count, 0);
++    check_test_expect(test, ready, "compact leaf graph storage");
++    if (ready)
++    {
++        graph.small_leaves = leaves;
++        for (uint32_t i = 0; i < count; i += 1)
++        {
++            check_test_leaf(&graph, i, check_test_integer(BUSTER_TYPE_INT, i));
++        }
++        const CheckValue wide = check_test_integer(BUSTER_TYPE_LONG, UINT32_MAX);
++        const CheckValue small = check_test_integer(BUSTER_TYPE_INT, 19);
++        check_graph_set_leaf_at(&graph, changed, &wide);
++        const CheckValue decoded = check_graph_leaf_at(&graph, changed);
++        check_test_expect(test, decoded.type == wide.type && decoded.integer == wide.integer && graph.extended_leaf_count == 1,
++                          "wide value is preserved by the compact leaf overflow table");
++        check_graph_set_leaf_at(&graph, changed, &small);
++        uint8_t pure[count + 1];
++        CheckGraphValidation state;
++        uint32_t failed;
++        check_test_expect(test, graph.extended_leaf_count == 1 && check_graph_leaf_at(&graph, changed).integer == small.integer &&
++                          check_graph_validate(&graph, pure, &state, &failed), "rewriting a widened leaf preserves its slot");
++        leaves[changed].detail ^= BUSTER_CHECK_LEAF_HEAD;
++        check_test_expect(test, !check_graph_validate(&graph, pure, &state, &failed) && failed == changed,
++                          "the inline overload flag agrees with the extended value");
++        leaves[changed].detail = UINT32_MAX;
++        check_test_expect(test, !check_graph_validate(&graph, pure, &state, &failed) && failed == changed,
++                          "an invalid wide leaf index is rejected at its own node");
++    }
++    arena_pop_to(storage, mark);
++}
++
+ // #530: check_graph_validate against its definition (check_test_graph_validate_definition), on random graphs of every count to 70
+ // and of 4,099 nodes, with and without the exact path's sideband nodes, the optional byte columns and tag history: each
+ // graph whole, and once per rule broken at a random node.
+@@ -1147,6 +1184,7 @@ static __attribute__((noinline)) void check_test_graph_regressions(CheckTest* te
+     check_test_int_conditions(test, table, storage, output, scratch);
+     check_test_graph_report_order(test, table, storage, output, scratch);
+     check_test_graph_updates(test, table, storage, output, scratch);
++    check_test_graph_small_leaves(test, storage);
+     check_test_graph_validation(test, storage);
+     check_test_graph_validation_edges(test, table, storage, output, scratch);
+ }
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..f5cf92fcf 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -17301,6 +17301,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+     valid &= warning_suppressed != NULL;
+     valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
++    if (valid && output_zero && complete_translation_unit && deferred_tokens == NULL && deferred == NULL && attested == NULL &&
++        count >= 8192 && graph_capacity <= BUSTER_CHECK_LEAF_INDEX)
++    {
++        input->graph.small_leaves = BUSTER_CHECK_GRAPH_COLUMN(arena, CheckGraphSmallLeaf, graph_capacity);
++    }
+     const uint8_t fp_contract = predefines_fp_contract(&pp->options.predefines);
+     input->graph.fp_contract_default = fp_contract == BUSTER_PREDEFINES_CONTRACT_ON ? BUSTER_CHECK_FP_CONTRACT_ON :
+                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
+diff --git a/src/buster/compiler/c_check_node_machine_type.c b/src/buster/compiler/c_check_node_machine_type.c
+index fa24ba42c..df144525f 100644
+--- a/src/buster/compiler/c_check_node_machine_type.c
++++ b/src/buster/compiler/c_check_node_machine_type.c
+@@ -2192,7 +2192,8 @@ static inline __attribute__((always_inline)) uint32_t node_machine_leaf(NodeMach
+ {
+     const CheckGraph* graph = machine->graph;
+     const uint32_t slot = graph->leaf_slots[node];
+-    const CheckGraphLeaf* leaf = graph->dense_leaves == NULL ? graph->leaf_records + slot : NULL;
++    CheckGraphLeaf decoded;
++    const CheckGraphLeaf* leaf = graph->dense_leaves == NULL ? check_graph_record_at(graph, slot, &decoded) : NULL;
+     uint32_t overload = 0;
+     if (__builtin_expect(leaf != NULL && leaf->row == 0 && leaf->overload_head == 0 && leaf->category <= CHECK_FUNCTION && leaf->constant_kind <= CHECK_CONSTANT_LABEL_DIFFERENCE, 1))
+     {
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 4aa93ef49..cb4d0cbb3 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -5631,6 +5631,10 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
+         // the leaves of static objects, few, take the scalar step that finds their body. An object within 3 tokens of the
+         // end, whose bit a dword gather would read past, takes it too; so does every leaf of a graph whose values are dense.
+         const uint32_t count = input->token_count;
++        const void* records = graph->small_leaves != NULL ? (const void*)graph->small_leaves : (const void*)graph->leaf_records;
++        const uint32_t stride = graph->small_leaves != NULL ? sizeof(CheckGraphSmallLeaf) : sizeof(CheckGraphLeaf);
++        _Static_assert(offsetof(CheckGraphSmallLeaf, flags) == offsetof(CheckGraphLeaf, flags) &&
++                       offsetof(CheckGraphSmallLeaf, object) == offsetof(CheckGraphLeaf, object), "both records have adjacent flags and object");
+         const bool gathered = !BUSTER_SCALAR_PATH(scalar) && graph->dense_leaves == NULL && graph->leaf_count < (UINT32_C(1) << 26) && count >= 4;
+         const __m512i zero = _mm512_setzero_si512();
+         const uint64_t limit = node_count & ~UINT32_C(15);
+@@ -5640,10 +5644,10 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
+             const __m512i slots = _mm512_loadu_si512(graph->leaf_slots + node);
+             const __mmask16 leaves = _mm512_cmpneq_epi32_mask(slots, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+             // Each record's flags and object, adjacent, as one qword: 8 lanes a gather, then the halves apart.
+-            const __m512i offsets = _mm512_add_epi32(_mm512_mullo_epi32(slots, _mm512_set1_epi32((int)sizeof(CheckGraphLeaf))),
++            const __m512i offsets = _mm512_add_epi32(_mm512_mullo_epi32(slots, _mm512_set1_epi32((int)stride)),
+                                                      _mm512_set1_epi32((int)offsetof(CheckGraphLeaf, flags)));
+-            const __m512i low = _mm512_mask_i32gather_epi64(zero, (__mmask8)leaves, _mm512_castsi512_si256(offsets), graph->leaf_records, 1);
+-            const __m512i high = _mm512_mask_i32gather_epi64(zero, (__mmask8)(leaves >> 8), _mm512_extracti64x4_epi64(offsets, 1), graph->leaf_records, 1);
++            const __m512i low = _mm512_mask_i32gather_epi64(zero, (__mmask8)leaves, _mm512_castsi512_si256(offsets), records, 1);
++            const __m512i high = _mm512_mask_i32gather_epi64(zero, (__mmask8)(leaves >> 8), _mm512_extracti64x4_epi64(offsets, 1), records, 1);
+             const __m512i flags = _mm512_permutex2var_epi32(low, _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0), high);
+             const __m512i objects = _mm512_permutex2var_epi32(low, _mm512_set_epi32(31, 29, 27, 25, 23, 21, 19, 17, 15, 13, 11, 9, 7, 5, 3, 1), high);
+             __mmask16 named = leaves & _mm512_cmpneq_epi32_mask(objects, zero) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int)program->object_count));
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..db1665b6c 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -126,6 +126,23 @@ struct CheckGraphLeaf
+ 
+ _Static_assert(sizeof(CheckGraphLeaf) == 32, "a graph's leaf record is half a cache line");
+ 
++// Four leaves share a cache line. The low bytes encode category and constant kind, and
++// bits 16 through 30 an unsigned immediate. Bit 31 selects a full leaf for all other values.
++// An extended leaf keeps its overload presence in bit 30 and indexes its full record with the remaining bits.
++typedef struct CheckGraphSmallLeaf CheckGraphSmallLeaf;
++struct CheckGraphSmallLeaf
++{
++    TypeId type;
++    uint32_t flags;
++    uint32_t object;
++    uint32_t detail;
++};
++
++#define BUSTER_CHECK_LEAF_EXTENDED UINT32_C(0x80000000)
++#define BUSTER_CHECK_LEAF_HEAD UINT32_C(0x40000000)
++#define BUSTER_CHECK_LEAF_INDEX UINT32_C(0x3fffffff)
++_Static_assert(sizeof(CheckGraphSmallLeaf) == 16, "four ordinary graph leaves per cache line");
++
+ typedef struct CheckConstWarning CheckConstWarning;
+ struct CheckConstWarning
+ {
+@@ -286,6 +303,8 @@ struct CheckGraph
+     // hand-built one may hold each leaf's whole value in `dense_leaves` instead. Readers and writers take them through
+     // check_graph_leaf and check_graph_set_leaf, whichever the graph holds.
+     CheckGraphLeaf* leaf_records;
++    CheckGraphSmallLeaf* small_leaves;
++    uint32_t extended_leaf_count;
+     CheckValue* leaf_payloads;
+     uint32_t leaf_payload_count;
+     // The rows `leaf_payloads` has room for: the graph's capacity, or a deferred lane's part's leaves.
+@@ -942,6 +961,24 @@ static inline __attribute__((always_inline)) bool check_graph_leaf_rest(const Ch
+     return rest != 0;
+ }
+ 
++static inline __attribute__((always_inline)) const CheckGraphLeaf* check_graph_record_at(const CheckGraph* graph, uint32_t slot, CheckGraphLeaf* decoded)
++{
++    if (graph->small_leaves == NULL)
++    {
++        return graph->leaf_records + slot;
++    }
++    const CheckGraphSmallLeaf leaf = graph->small_leaves[slot];
++    if ((leaf.detail & BUSTER_CHECK_LEAF_EXTENDED) != 0)
++    {
++        return graph->leaf_records + (leaf.detail & BUSTER_CHECK_LEAF_INDEX);
++    }
++    *decoded = (CheckGraphLeaf){
++        .type = leaf.type, .flags = leaf.flags, .object = leaf.object, .category = (uint8_t)leaf.detail,
++        .constant_kind = (uint8_t)(leaf.detail >> 8), .integer = leaf.detail >> 16,
++    };
++    return decoded;
++}
++
+ // The leaf in slot `slot`: its whole value, from the dense leaves, its row, or its record's fields.
+ // Always inlined (#880), as profile-guided builds do; hot callers: check_graph_leaf and the scalar VALUE action.
+ static inline __attribute__((always_inline)) CheckValue check_graph_leaf_at(const CheckGraph* graph, uint32_t slot)
+@@ -953,7 +990,8 @@ static inline __attribute__((always_inline)) CheckValue check_graph_leaf_at(cons
+     }
+     else
+     {
+-        const CheckGraphLeaf* leaf = graph->leaf_records + slot;
++        CheckGraphLeaf decoded;
++        const CheckGraphLeaf* leaf = check_graph_record_at(graph, slot, &decoded);
+         const uint32_t row = leaf->row;
+         if (__builtin_expect(row != 0, 0) && row <= graph->leaf_payload_count)
+         {
+@@ -985,24 +1023,28 @@ static inline CheckValue check_graph_leaf_value(const CheckGraph* graph, uint32_
+ static inline TypeId check_graph_leaf_type(const CheckGraph* graph, uint32_t node)
+ {
+     const uint32_t slot = graph->leaf_slots[node];
+-    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].type : graph->leaf_records[slot].type;
++    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].type :
++           graph->small_leaves != NULL ? graph->small_leaves[slot].type : graph->leaf_records[slot].type;
+ }
+ 
+ static inline uint32_t check_graph_leaf_flags(const CheckGraph* graph, uint32_t node)
+ {
+     const uint32_t slot = graph->leaf_slots[node];
+-    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].flags : graph->leaf_records[slot].flags;
++    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].flags :
++           graph->small_leaves != NULL ? graph->small_leaves[slot].flags : graph->leaf_records[slot].flags;
+ }
+ 
+ static inline uint32_t check_graph_leaf_object(const CheckGraph* graph, uint32_t node)
+ {
+     const uint32_t slot = graph->leaf_slots[node];
+-    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].object : graph->leaf_records[slot].object;
++    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].object :
++           graph->small_leaves != NULL ? graph->small_leaves[slot].object : graph->leaf_records[slot].object;
+ }
+ 
+ static inline uint32_t check_graph_leaf_head_at(const CheckGraph* graph, uint32_t slot)
+ {
+-    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].overload_head : graph->leaf_records[slot].overload_head;
++    CheckGraphLeaf decoded;
++    return graph->dense_leaves != NULL ? graph->dense_leaves[slot].overload_head : check_graph_record_at(graph, slot, &decoded)->overload_head;
+ }
+ 
+ static inline uint32_t check_graph_leaf_overload_head(const CheckGraph* graph, uint32_t node)
+@@ -1024,9 +1066,29 @@ static bool check_graph_leaf_row_agrees(const CheckGraphLeaf* leaf, const CheckV
+ static inline bool check_graph_leaf_valid_at(const CheckGraph* graph, uint32_t slot)
+ {
+     bool valid = true;
++    if (graph->small_leaves != NULL)
++    {
++        const uint32_t key = graph->small_leaves[slot].detail;
++        if ((key & BUSTER_CHECK_LEAF_EXTENDED) != 0)
++        {
++            const uint32_t index = key & BUSTER_CHECK_LEAF_INDEX;
++            if (index >= graph->extended_leaf_count)
++            {
++                return false;
++            }
++            const CheckGraphLeaf* full = graph->leaf_records + index;
++            const CheckGraphSmallLeaf* small = graph->small_leaves + slot;
++            if (full->type != small->type || full->flags != small->flags || full->object != small->object ||
++                (full->overload_head != 0) != ((key & BUSTER_CHECK_LEAF_HEAD) != 0))
++            {
++                return false;
++            }
++        }
++    }
+     if (graph->dense_leaves == NULL)
+     {
+-        const CheckGraphLeaf* leaf = graph->leaf_records + slot;
++        CheckGraphLeaf decoded;
++        const CheckGraphLeaf* leaf = check_graph_record_at(graph, slot, &decoded);
+         valid = leaf->row <= graph->leaf_payload_count &&
+                 (leaf->row == 0 || check_graph_leaf_row_agrees(leaf, graph->leaf_payloads + leaf->row - 1));
+     }
+@@ -1047,6 +1109,25 @@ static inline __attribute__((always_inline)) void check_graph_write_leaf(CheckGr
+     }
+     else
+     {
++        if (graph->small_leaves != NULL)
++        {
++            CheckGraphSmallLeaf* small = graph->small_leaves + slot;
++            const uint32_t previous = small->detail;
++            const bool extended = (previous & BUSTER_CHECK_LEAF_EXTENDED) != 0;
++            uint32_t detail;
++            if (!extended && value->integer < UINT32_C(0x8000) && value->overload_head == 0 && !check_graph_leaf_rest(value))
++            {
++                detail = ((uint32_t)value->integer << 16) | ((uint32_t)value->constant_kind << 8) | (uint32_t)value->category;
++                *small = (CheckGraphSmallLeaf){ value->type, value->flags, value->object, detail };
++                return;
++            }
++            // Initially zero. A physical slot keeps its wide record for every subsequent write,
++            // so the wide table contains at most as many records as the graph has physical slots.
++            slot = extended ? previous & BUSTER_CHECK_LEAF_INDEX : graph->extended_leaf_count++;
++            detail = BUSTER_CHECK_LEAF_EXTENDED | (value->overload_head != 0 ? BUSTER_CHECK_LEAF_HEAD : 0) | slot;
++            *small = (CheckGraphSmallLeaf){ value->type, value->flags, value->object, detail };
++            keep &= extended;
++        }
+         CheckGraphLeaf* leaf = graph->leaf_records + slot;
+         uint32_t row = keep ? leaf->row : 0;
+         row = row <= graph->leaf_payload_count ? row : 0;
+@@ -1446,6 +1527,7 @@ static bool check_graph_validate_lists(const CheckGraph* graph)
+     result = result && (graph->fp_contract_default & ~BUSTER_CHECK_FP_CONTRACT_MASK) == 0 && graph->fp_contract_default != BUSTER_CHECK_FP_CONTRACT_MASK;
+     // Records' rows (#628): no more than their room, and a column of them where there is any. Each record's row is
+     // checked at its node (check_graph_leaf_valid_at), so that every row a reader takes is a row of the column.
++    result = result && (graph->small_leaves == NULL || (graph->leaf_records != NULL && graph->extended_leaf_count <= graph->capacity));
+     result = result && (graph->dense_leaves != NULL || graph->leaf_records == NULL ||
+                         (graph->leaf_payload_count <= graph->leaf_payload_capacity && (graph->leaf_payload_count == 0 || graph->leaf_payloads != NULL)));
+     result = result && graph->varargs_count <= graph->varargs_capacity && graph->varargs_count <= graph->count &&
+@@ -1681,13 +1763,13 @@ static bool check_graph_validate_block(const CheckGraph* graph, uint32_t node, u
+         const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
+         const uint32_t slot = graph->leaf_slots[node + lane];
+         const bool next = slot == expected && slot < graph->leaf_count;
+-        heads &= next;
++        const bool valid = next && check_graph_leaf_valid_at(graph, slot);
++        heads &= valid;
+         expected += 1;
+-        if (next)
++        if (valid)
+         {
+             const uint32_t head = check_graph_leaf_head_at(graph, slot);
+-            const TypeId type = graph->dense_leaves != NULL ? graph->dense_leaves[slot].type : graph->leaf_records[slot].type;
+-            heads &= check_graph_leaf_valid_at(graph, slot);
++            const TypeId type = check_graph_leaf_type(graph, node + lane);
+             reorderable_leaves |= (uint32_t)(head == 0 && check_graph_builtin(type)) << lane;
+         }
+     }
+@@ -2087,7 +2169,8 @@ static inline __attribute__((always_inline)) uint32_t check_graph_marked_end(con
+ static inline __attribute__((always_inline)) void check_graph_leaf(const TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node)
+ {
+     const uint32_t slot = graph->leaf_slots[node];
+-    const CheckGraphLeaf* record = graph->dense_leaves == NULL ? graph->leaf_records + slot : NULL;
++    CheckGraphLeaf decoded;
++    const CheckGraphLeaf* record = graph->dense_leaves == NULL ? check_graph_record_at(graph, slot, &decoded) : NULL;
+     const TypeId type = record != NULL ? record->type : graph->dense_leaves[slot].type;
+     const bool valid = type_is_valid(types, type);
+     if (record != NULL && valid && record->row == 0 && record->integer == 0 && record->overload_head == 0)

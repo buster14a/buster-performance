@@ -7,3 +7,5 @@ The [depth-boundary cases](deep.tsv.gz) checked 756 pairs of native compiles wit
 The [independent C17 error comparisons](clang-diagnostics.tsv) matched complete Buster diagnostic streams in all 40 cases. The first error text, line and column matched Clang in 30 cases. Clang used a bracket limit of 8,192 to reach the tested expressions. [Raw diagnostic streams](clang-diagnostic-streams.tar.xz)
 
 The full-word fallback was observed on paren-257 (depth 258), paren-2060 (depth 2061). The role and parent sequences also matched in each complete capture.
+
+The ordinary typed dump comparison compiled both SQLite and Buster with `--dump-typed --lanes 1 -c`. Each complete dump, diagnostic stream and ELF object matched the baseline. The [stream and object sizes and hashes](typed-object-and-output.tsv) record each source.
