@@ -64,3 +64,125 @@ The table gives the medians over the 6 rounds. Each spread is the largest round'
   - 2,233,584 input tokens and 2,499,063 output tokens, comments among them.
 
 Nothing was optimized after this measurement.
+
+## Second section: placement controls, and the default path's fix
+
+The first section's runs used one placement of each build. Every run here holds the lock alone and is pinned to CPU 2,
+with the load and the busiest processes logged inside each hold (`scripts/lockps.sh`). The scripts are in
+`placements/scripts`, the readings in `placements/results`, and the patches the trees were built from in
+`placements/patches`.
+
+### How it was measured
+
+- **Placements:** `scripts/shifts.sh` links each tree's Release executable at six placements of the `-E` unit's code,
+  `./build.sh shifts DIR main_unit_frontend.c 0 704 1408 2112 2816 3520`.
+- **Whole processes** (`scripts/placements.sh`): `time-runs --runs 3 --copies 3` of `-E -P` (list 1) and `-E` (list 2)
+  of `main.c` with `-march=native -Isrc -fwrapv -funsigned-char`.
+  - Each run takes the six placements of `base`, the tree measured and `base` again (`base-again`, the comparison's own
+    floor), three fresh copies of each, in a Williams order.
+  - `ab --rounds 3` runs it three times, each under the lock alone. Its output is `placements/results/placements-*.log`.
+- **In-process** (`scripts/inproc.sh`): `benchmark-preprocessor --only vectorized` of the same `main.c`, plain (`P`:
+  `-E -P`'s printing) and `--markers` (`-E`'s printing with line markers).
+  - Each run takes one of the 18 placement executables of `base`, the tree measured and `base-again`, in a Williams
+    order, over 2 rounds.
+  - `scripts/extract2.awk` and `scripts/summary2.awk` give the medians over the 12 runs of each build, and the range of
+    its placements' medians (`placements/results/inproc-*.tsv`).
+- **Trees:** `base` is main `d5fbf14e`; `head` is the branch `570138a07`. `fix1` to `fix4` are `570138a07` with
+  `patches/fixN.patch`. `fix4` is the commit pushed to the branch, `13e20bb17` (its source equals `fix4.patch`), which
+  was then merged with main `ef3d3769a` (`638b77a09`).
+
+### Before: `head` against `base`, over placements
+
+In-process, each build's median, with the range of its placements' medians in brackets:
+
+| `main.c` | base | head | base-again |
+| --- | ---: | ---: | ---: |
+| `-E -P` run | 44.567 ms [44.456–44.731] | 45.028 [44.879–45.094], +1.03% | 44.520 [44.361–44.593], -0.10% |
+| `-E -P` printing | 6.181 ms [6.154–6.219] | 6.418 [6.407–6.509], +3.83% | 6.176 [6.132–6.190], -0.08% |
+| `-E -P` with printing | 50.758 ms [50.631–50.948] | 51.448 [51.319–51.551], +1.36% | 50.711 [50.499–50.809], -0.09% |
+| `-E` run (`--markers`) | 37.884 ms [37.656–38.138] | 38.229 [38.062–38.366], +0.91% | 37.952 [37.862–38.132], +0.18% |
+| `-E` printing, markers | 8.555 ms [8.499–8.584] | 8.589 [8.484–8.706], +0.40% | 8.556 [8.532–8.623], +0.01% |
+| `-E` with printing | 46.447 ms [46.249–46.683] | 46.784 [46.733–46.931], +0.73% | 46.508 [46.421–46.714], +0.13% |
+| instructions an input token (`P` / markers) | 388.55 / 327.17 | 388.99 / 327.57 | 388.55 / 327.17 |
+
+- **In-process:** the regression is code, not placement. `head`'s placements don't overlap `base`'s in the `-E -P`
+  run, the printing or the total.
+- **Whole processes, by round:** `head` against `base`, user cycles:
+  - `-E -P`: -0.57%, -0.72%, -0.62%;
+  - `-E`: -0.41%, -0.70%, -0.80%;
+  - `base-again`: between -0.25% and +0.13%.
+
+  The `-E` driver defers the expansion history (`defer_history`), which the benchmark records. A cycles profile
+  (`perf-base.report.txt`, `perf-head.report.txt`) put the largest rise in `pp_history_fill`, +283 of about 32,000
+  cycle samples.
+
+### What cost, and the fix
+
+`layout-*.txt` (gdb) and the executables' symbol sizes showed three causes:
+
+- **Struct layout:** the new fields moved the fields after them. `PPOptions` grew from 816 to 824 bytes,
+  `Preprocessor` from 15,552 to 15,616, `PPPrepare` from 24 to 32 and `PPMarkers` from 96 to 112.
+- **The printer's default instances** kept the modes' work: the `-CC` mask and its line starts, and the directives'
+  tests.
+- **Inlining:** the compiler's inlining changed where the modes' code went into hot functions. `pp_spelling` grew from
+  347 to 1,131 bytes, and the printer's helpers were called out of line once the modes' instance became a second caller.
+
+The patches, in turn:
+
+- `fix1`: restores the layouts (new fields in holes or at the end) and gives the modes an instance of the printer of
+  their own (`pp_print_modes`).
+- `fix2`: also makes the printer's helpers `BUSTER_INLINE`, and moves the modes' work in `pp_paste`,
+  `pp_collect_step`, `pp_without_splices`, the include guard and preparation out of line, behind a test of the option.
+- `fix3`: guards the directives' cursor by the instance's `modes`, splits `pp_paste` (`pp_paste_with`), and moves
+  `pp_without_splices`' comment test to its callers.
+- `fix4`: `fix3` with `fix2`'s `pp_without_splices`.
+
+In-process, against `base`, with `base-again` in the same runs in brackets:
+
+| `main.c` | fix1 | fix2 | fix3 | fix4 |
+| --- | ---: | ---: | ---: | ---: |
+| `-E -P` run | +1.10% (-0.01%) | -0.21% (-0.21%) | +0.38% (+0.15%) | +0.18% (-0.02%) |
+| `-E -P` printing | -0.13% (-0.09%) | -0.68% (+0.14%) | -0.09% (+0.14%) | -0.60% (-0.21%) |
+| `-E -P` with printing | +0.97% (-0.04%) | -0.19% (-0.10%) | +0.38% (+0.12%) | +0.16% (-0.12%) |
+| `-E` run | +0.90% (-0.04%) | +0.19% (+0.02%) | +0.11% (+0.08%) | -0.23% (-0.03%) |
+| `-E` printing, markers | +1.60% (+0.37%) | +0.12% (+0.48%) | -0.11% (+0.16%) | -0.47% (+0.31%) |
+| `-E` with printing | +1.12% (+0.07%) | +0.21% (+0.06%) | +0.03% (+0.06%) | -0.35% (-0.03%) |
+| instructions (`P` / markers) | +0.11% / +0.12% | +0.19% / +0.20% | -0.56% / -0.63% | -0.56% / -0.64% |
+
+Whole processes, user cycles against `base` in each of the 3 rounds, with `base-again` in brackets:
+
+| | `-E -P` | `-E` |
+| --- | --- | --- |
+| fix1 | -0.57, -0.65, -0.79 (-0.04, +0.14, -0.18) | -0.59, -0.52, -0.36 (+0.04, +0.03, +0.26) |
+| fix2 | -0.44, -0.52, -0.43 (+0.02, +0.10, -0.14) | -0.80, -0.94, -0.68 (-0.10, -0.28, -0.10) |
+| fix3 | +0.43, +0.15, +0.23 (+0.12, -0.06, -0.12) | -0.10, -0.33, +0.21 (+0.12, -0.28, +0.03) |
+| fix4 | +0.10, -0.08, +0.06 (+0.09, +0.01, -0.05) | +0.04, -0.18, -0.12 (-0.09, -0.06, -0.08) |
+
+- **`fix4`, the pushed fix,** is within `base-again`'s floor on every row, in-process and in whole processes.
+- **Instructions:** its whole processes run 779,269,783 against `base`'s 776,572,071 for `-E -P` (+0.35%), and
+  825,240,863 against 831,525,020 for `-E` (-0.76%), at the same cycles.
+- **Disassembly** (`disasm-fix4.txt`, `scripts/disasm.sh`, with addresses and rip-relative offsets normalized):
+  - These are instruction for instruction main's: `pp_print_spellings`, `pp_history_fill`, `pp_history_change`,
+    `pp_append_tokens`, `pp_emit_simple_write`, `pp_expand_current`, `pp_continue_invocation`, `pp_compile_macro`,
+    `pp_stringize`, `tokenize_c_raw_no_separators`, `refine_pass_b_64_plain` and `pp_scan_arguments`.
+  - These still differ, each inlining one test of an option: `pp_print` (the default instances call
+    `pp_comment_as_written` behind `keep_comments` and `pp_trailing_splice` out of line, but no `pp_print_events`),
+    `pp_substitute`, `pp_paste_in_place`, `pp_run_contexts`, `pp_invoke`, `pp_spelling` and `pp_without_splices`.
+
+### Correctness on the 9700X
+
+Each tree's Develop build ran `scripts/tests.sh` with CI's Clang 23.1.4: 17 CI blocks (`tests-final.list`: the
+preprocessor's, the carets', the lexers' and the frozen preprocessor corpus's), `test-preprocessor` and
+`test-checker --requests`. On `fix4` and on the merge with main (`final`):
+
+- 15 of the 17 blocks pass.
+- `test-preprocessor`: 0 of 419 cases fail.
+- The lexer's kept comments: 0 of 80,020 inputs fail, in each of the 7 lexer blocks.
+- `test-checker --requests`: 227 checks, 0 failures.
+- The two blocks that fail, the repository's units against clang and the cases part 2 of 4, give the same failing
+  items with main `ef3d3769a`'s Develop build (`two-maindev.log`, `two-final.log`):
+  - 45 of 66 files;
+  - 41 of 41 taken option sets.
+
+  The cause is the resource directory's path in the line markers: clang's staged toolchain is under `~/.cache`.
+- `build/dco audit` of the merge: 7 signed, 0 missing (`dco-final.log`).
