@@ -1017,3 +1017,33 @@ initialization's root is always listed, and so are an assignment of a constant, 
 the tests still read T's records for. So the window's forms as they stand decide 4% of `sqlite3.c`'s body tokens
 without the reference: a body-level machine made of them needs T behind it for the listed expressions (8,877 of the
 49,839 expressions with a whole tape, 19.6% of their records), or those tests moved to the window first.
+
+## What a body-level proof of silence leaves (`silence-bodies/`)
+
+The machine's verdicts are of expressions. A body it takes whole runs none of the stages after the reader, so every
+diagnostic those stages decide of a body and not of one expression has to be proved absent, or the body refused. An
+inventory of them from the sources (this session's reading, by an agent; not a measurement): with the default
+warnings the one that stands is the return flow's ("non-void function does not return a value", from
+`check_program_return_flow` over the controls); a `switch`'s are in bodies the machine does not take yet; the
+uninitialized read's and the unused-but-set parameter's are `-Wall`'s and `-Wextra`'s; the unused objects' and labels'
+come from the resolution's events and the token passes, which a taken body keeps.
+
+`scripts/experiment-window-bodies.patch` prints, for each lowered body, the tokens' facts the most conservative proof
+of the return flow's silence reads (`experiment-silence`): the result is void, or the function is `main`, or the
+body's last statement at its own level is a return with a value. `measure-node-machine --shadow --front-alone
+--passes 0` on `sqlite3.c`, a Develop build on this session's machine (counts); `scripts/silence-bodies.py`,
+`silence-bodies/sqlite-reduced.txt`:
+
+| of `sqlite3.c`'s 568,438 body tokens | bodies | their tokens |
+| --- | ---: | ---: |
+| whole before the walk | 1,856 | 35.62% |
+| … whose result is void | 664 | 12.61% |
+| … void, or `main`, or ending in a return with a value | 1,303 | 22.28% |
+| … none of the three: the return flow's proof is owed | 553 | 13.34% |
+| whole, the test holds, with no `switch` and no `goto` | 1,267 | 18.64% |
+
+So the boundary's 77.7 ns a taken token, read with a recorder that refused a body with a diagnostic by hindsight, is
+owed a proof that the token test gives for 63% of the whole bodies' tokens. The rest end in an `if` whose arms return,
+a loop or a block: the return flow itself, run on the controls a statement layer has to make anyway, decides them, and
+needs each condition's truth where it folds and each call's callee's contract, which the window's summary facts have
+in the shadow and nothing has before the walk.
