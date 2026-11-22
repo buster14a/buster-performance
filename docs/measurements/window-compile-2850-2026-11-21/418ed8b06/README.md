@@ -10,14 +10,20 @@ Each row compares fresh processes using the same Release executable on Ryzen 7 9
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |
 | 1a552aaf7 | SQLite | legacy → fields | 128.926 | 128.314 | -0.610 | 7/8 | -643,658 |
 | 1a552aaf7 | SQLite | fields → both | 128.314 | 129.642 | +0.898 | 0/8 | +954,256 |
+| 1a552aaf7 | Buster | legacy → fields | 652.499 | 653.116 | +0.978 | 3/8 | +1,016,968 |
+| 1a552aaf7 | Buster | fields → both | 653.116 | 653.379 | +0.749 | 3/8 | +1,670,505 |
 | 418ed8b06 | SQLite | legacy → fields | 130.114 | 129.509 | -0.276 | 7/8 | -494,024 |
 | 418ed8b06 | SQLite | fields → stream | 129.509 | 129.789 | +0.112 | 4/8 | +1,158,765 |
 | 418ed8b06 | SQLite | stream → packed | 129.789 | 129.928 | +0.061 | 3/8 | +1,314,777 |
 | 418ed8b06 | SQLite | legacy → packed | 130.114 | 129.928 | -0.204 | 5/8 | +1,979,309 |
+| 418ed8b06 | Buster | legacy → fields | 658.195 | 658.384 | +0.630 | 2/8 | +1,146,827 |
+| 418ed8b06 | Buster | fields → stream | 658.384 | 658.900 | +1.227 | 3/8 | +1,877,921 |
+| 418ed8b06 | Buster | stream → packed | 658.900 | 659.832 | +0.013 | 4/8 | +2,279,188 |
+| 418ed8b06 | Buster | legacy → packed | 658.195 | 659.832 | +1.359 | 3/8 | +5,310,411 |
 
 In both builds the independent ordinary compiler used revision `0e1d5b825`. The `legacy` timing arm activates the integrated source-local checker and early native encoder with the existing ELF writer. `fields` selects compact relocations, `text` selects per-atom scatter alone, `both` and `stream` select those two together, and `packed` also encodes adjacent native functions in contiguous storage. All 15 source-backend environment switches are identical across each within-build comparison. The compiler identifies its input file in ELF, so the absolute paths on the two machines give different complete-file digests. Every comparison uses the paths of its own host. The local Develop wall samples use a smaller set of source switches and a shared machine. [Local SQLite observations](local-sqlite.tsv) and [local Buster observations](local-main.tsv).
 
-The completed target rows above cover SQLite. Its whole-process packed median is 129.928 ms for a 9,507,037-byte source input (73.2 MB/s). At this revision one packed stage sample spent 0.420 ms building the ELF, 0.407 ms writing it and 104.140 ms in check-input including early function production. Buster’s completed local correctness and Develop controls are included below. [Raw locked SQLite runs](target-raw.tar.xz).
+The completed target sample includes 128 wall observations, 48 PMU invocations and 16 stage censuses across the two builds. On SQLite, compact fields alone reduced paired wall time in 7/8 rounds in both builds. At 418ed8b06 the packed writer was 0.204 ms faster on SQLite and 1.359 ms slower on Buster by the median paired difference. It retired 1.98 million more user instructions on SQLite and 5.31 million more on Buster. The paired median RSS change was zero KiB on SQLite and −2 KiB on Buster. One packed SQLite sample spent 0.420 ms in ELF construction, 0.407 ms in file publication and 104.140 ms in check-input including early native code production. The 129.928 ms packed process median corresponds to 73.2 MB/s on the 9,507,037-byte SQLite source. [All raw controlled observations](target-raw.tar.xz).
 
 ## What each revision carries
 
