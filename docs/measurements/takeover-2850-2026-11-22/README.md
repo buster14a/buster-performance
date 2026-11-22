@@ -1227,3 +1227,89 @@ return flow run in the shadow's pipeline for this) is read beside it. `measure-n
 So the first row of the inventory costs a producer nearly nothing, where the token test cost a third. The corpora have
 no body the return flow warns of, so they say nothing of the proof's soundness; the fixture has one (a body that falls
 off its end), which the proof leaves unproved and the test asserts.
+
+## Beside a body's entries: its locals, its references, `-c`'s own path, and a producer's two sets (`bodies-beside/`, buster branch `claude/2850-bodies-before` at `c97543811`)
+
+The two comparisons of the sections above ran in a pipeline that was not `-c`'s own, compared a lowered function's
+entries and not what its locals hold beside them, and said nothing of a body's references. Each has an exact oracle in
+the shadow. `measure-node-machine --shadow --front-alone --bodies --passes 0` (`scripts/beside-run.sh`: plain with the
+default warnings, `-Wall -Wextra` and `-g`; and with `--statement-controls`, the default warnings and `-Wall -Wextra`);
+Develop builds on this session's machine (counts), twenty runs, each status 0; `bodies-beside/develop-c97543811/`.
+
+- **Read as `-c` reads a unit.** `--statement-controls` asks the reader for the statement controls' path wherever a
+  compile takes it (a complete unit of 8,192 tokens and more), and counts the units it took it in.
+- **A local beside the entries.** A temporary's class against the class of the entries that read and set it; a plain
+  local's taken address (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`) against whether an entry of the body is its
+  `LOCAL_ADDRESS`. A difference is one of the body's.
+- **The references.** The objects the kept tapes name (a global's entry's object, a call's callee) against the
+  program's references of the body (`CheckProgram.references`).
+- **A producer's two sets.** What it reads and sweeps: a body that the scan, the twin's gates and the body's own
+  reasons do not refuse (the last read here from the program's controls and plans: a producer has to make each from
+  the tokens). What it takes of them: a body both comparisons attempt and find the same, its return flow proved silent.
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| units the reader takes the path in, with `--statement-controls` | 1 of 1 | 29 of 34 | 1 of 1 | 196 of 1,336 |
+| bodies compared after the pipeline; before the walk; that differ, with the path and without | 2,086; 1,814; 0 | 671; 580; 0 | 271; 205; 0 | 1,447; 1,287; 0 |
+| plain locals of the bodies compared after the pipeline; with their address taken | 9,193; 295 | 2,337; 52 | 1,016; 27 | 4,050; 98 |
+| bodies whose kept tapes name the program's references; with an object more; with a reference fewer | 1,814; 0; 0 | 580; 0; 0 | 205; 0; 0 | 1,287; 0; 0 |
+| a producer reads and sweeps: bodies; body tokens; of the lowered bodies' | 2,070; 260,940; 45.90% | 741; 78,341; 38.59% | 564; 48,379; 12.11% | 1,470; 83,694; 27.81% |
+| a producer takes: bodies; body tokens; of the lowered bodies' | 1,786; 182,105; 32.04% | 557; 44,689; 22.01% | 200; 10,621; 2.66% | 1,256; 61,120; 20.31% |
+| … with `-Wall -Wextra` | 1,480; 119,791; 21.07% | 504; 37,573; 18.51% | 173; 7,660; 1.92% | 1,142; 44,384; 14.75% |
+
+- **Exact in `-c`'s own pipeline.** With the path and without, the same bodies, none differing; with `-g` the same
+  rows; with `-Wall -Wextra` 1,704, 602, 226 and 1,286 bodies after the pipeline and 1,505, 525, 176 and 1,167 before
+  the walk, none differing.
+- **What the first runs found.** The reader took the path only where its output is a compile's fresh one, which the
+  shadow's is not: `PPOptions.statement_controls_anywhere` (no compile sets it). With the path, the numbering's check
+  of the expressions counts a node a discarded value, which the path does not make: the shadow asks for no numbering
+  there. And the taken address's rule had one exception: a volatile local, which the lowering's own setup marks from
+  its declaration (1 body of Lua's, `aux_close`; 52 of musl's, `fp_force_eval` in each unit that includes it); the
+  rule leaves a volatile local to the setup, which is the lowering's in a compile too.
+- **What a producer sweeps and leaves:** 78,835 of the 260,940 body tokens it sweeps on `sqlite3.c`, three in ten, are
+  in bodies it then leaves to the walk.
+
+**Its faults** (`bodies-beside/faults-c97543811.txt`, `faults-6d8f5b664.txt`; `scripts/bodies-faults.py`,
+`before-faults.py`, `beside-faults.py`): the 36 single faults of the two earlier pieces, seven of them aimed again at
+the splice both comparisons now share, each fail the fixtures at `c97543811`; and eleven of this piece (the taken
+address's rule, the volatile local's, a temporary's class, a callee and a global not named, each of the producer's four
+conditions, the path's two switches). The first run of the eleven had two that did not build as written and one that
+no test caught: the fixture had no body that the twin attempts and only the kept tapes refuse. It has one since
+(`6d8f5b664`: an `if` of a constant the program does not fold), and the eleven each fail it there.
+
+**Nothing else moves** (`bodies-beside/9700x/pair2-*`, `0d055f9af` against `c97543811`, seven rounds a workload, the
+9700X, CPU 2, Release, under the lock; ms):
+
+| | the commit before | this | paired | least; most | user instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 111.553 | 111.480 | +0.061 | -0.937; +19.245 | 1,215.364; -0.051 |
+| the compiler's own source | 599.515 | 600.530 | +1.015 | -1.332; +4.610 | 8,927.318; -0.561 |
+| Lua | 64.083 | 64.093 | +0.072 | -1.384; +0.137 | 724.334; +1.047 |
+| musl | 659.890 | 661.803 | +2.202 | +0.194; +4.288 | 6,634.066; +8.071 |
+
+One object set and one set of diagnostics a workload. musl reads 0.33% slower in all seven rounds, with 0.12% more
+instructions, and Lua 0.14% more instructions at the same wall time; `sqlite3.c` and the compiler's own source have
+fewer. **Why was not read.** No compile runs a line of the piece but the reader's one condition, whose second term a
+compile never reaches; the compiler is one translation unit, so its code may move with any change, and musl's paired
+reading was -2.425 and -1.976 for the two pieces before this one. That is a guess at the cause, not a reading of it.
+
+### The run's keeping, timed (`bodies-beside/9700x/alone-keep-c97543811/`, `scripts/experiment-alone-keep.patch`)
+
+The shadow's machine runs each chunk twice: the first run is timed and keeps nothing, the second keeps the results. A
+compile has one run, which keeps. An experiment's patch (not for merge) makes the first run of the machine with no
+node of the walk's keep what a compile's would of each root: its records' place, its verdicts, its tape and what is
+beside it, with no digest and no count (`BUSTER_EXPERIMENT_ALONE_KEEP`; the second run writes the same again over
+it). The same binary with and without, seven rounds in turn on the frozen `sqlite3.c`, `--front-alone-split`, the
+9700X, CPU 2, Release, under the lock; medians (`scripts/keep-reduce.py`); all fourteen runs status 0, the same 51,306
+roots compared and none differing:
+
+| 568,641 positions, 51,306 roots | reading, ms | the machine's first run, ms | T | the tests | C | X | the rest of the run | ticks a position |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| as it is | 14.73 | 26.42 | 6.11 | 13.40 | 2.70 | 2.45 | 1.73 | 274.4 |
+| its first run keeping | 14.67 | 31.20 | 6.89 | 13.93 | 2.80 | 2.49 | 5.10 | 306.0 |
+
+**Keeping costs 4.78 ms over all the bodies: 31.9 ticks a position, 354 ticks a root.** Most is where the keeping is
+(the rest of the run, +3.37 ms); T and the tests read 0.78 and 0.53 more. For the bodies a producer sweeps (45.9% of
+the body tokens) that is 2.2 ms. **Where the 354 ticks a root go was not read.** The columns it writes are indexed by
+node (313 thousand of them for 51 thousand roots) and are first written in this run, so the first touch of their pages
+may be much of it, and a compile's columns indexed by root would touch fewer; neither is measured here.
