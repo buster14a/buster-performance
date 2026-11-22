@@ -1,0 +1,344 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 60bd42a86..953515154 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -1165,6 +1165,8 @@ static bool check_input_expression_ternary(CheckInputReader* reader, CheckInputB
+     return acted;
+ }
+ 
++static bool check_input_window_member(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint32_t base);
++
+ // A member access: one value and the member's name after the operator, a vector's member for `.`.
+ static bool check_input_expression_member(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckInputValues values)
+ {
+@@ -1173,6 +1175,11 @@ static bool check_input_expression_member(CheckInputReader* reader, CheckInputBa
+     if (acted)
+     {
+         const bool arrow = parser->tokens.kinds[token] == PARSE_KIND_ARROW;
++        if (arrow && reader->pp->options.node_window && check_input_window_member(reader, batch, token, values.first))
++        {
++            check_input_expression_value(reader, token, values.first);
++            return true;
++        }
+         const uint32_t node = check_input_expression_operator(reader, batch, arrow ? CHECK_OP_ARROW : CHECK_OP_MEMBER, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+         if (node != BUSTER_CHECK_NONE)
+         {
+@@ -1978,6 +1985,121 @@ static uint32_t check_input_window_publish(CheckInputReader* reader, CheckInputB
+     return node;
+ }
+ 
++// Record which local pointer this field reads. The ordinary parent chooses to load the field or take its address.
++void check_node_window_member_pointer(CheckInputWindowRow* row, uint32_t object, uint32_t token);
++
++// Builtin evidence may inspect an argument's entire lvalue path for its alignment or extent. Leave that path in the
++// graph, along with expressions that expose the field's address. An unusually deep source path takes the same fallback.
++static bool check_input_window_member_context(const CheckInputReader* reader, uint32_t parent)
++{
++    const Parser* parser = reader->parser;
++    for (uint32_t steps = 0; parent < reader->output->token_count && steps < 64; steps += 1)
++    {
++        const uint32_t role = parser->tree.roles[parent];
++        if ((reader->builtins != NULL && reader->builtins[parent] != 0) ||
++            (role == PARSE_ROLE_PREFIX && parser->tokens.kinds[parent] == PARSE_KIND_AMP))
++        {
++            return false;
++        }
++        if (role == PARSE_ROLE_RETURN || role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY)
++        {
++            return true;
++        }
++        parent = parser->tree.parents[parent];
++    }
++    return parent >= reader->output->token_count;
++}
++
++static bool check_input_window_member(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint32_t base)
++{
++    const Parser* parser = reader->parser;
++    CheckInput* input = reader->output;
++    const uint32_t parent = parser->tree.parents[token];
++    const uint32_t position = check_input_batch_place(batch, base);
++    if (position == BUSTER_CHECK_NONE || position + 1 != batch->count || batch->forms[position] != CHECK_INPUT_FORM_LEAF ||
++        batch->members[position] != 0 || token == 0 || batch->tokens[position] != token - 1 || parent >= input->token_count ||
++        parser->tokens.kinds[token - 1] != PARSE_KIND_IDENTIFIER || parser->tree.parents[token - 1] != token ||
++        input->diagnostic_limits != NULL || input->deferred_tokens != NULL || reader->pp->options.expression_timing || reader->pp->options.node_front != 0 ||
++        !reader->pp->options.published_unused_only || (reader->constant_contexts != NULL && reader->constant_contexts[token] != 0) ||
++        reader->lane || reader->expression_declined != NULL || input->graph.fp_environments != NULL ||
++        input->overload_heads != NULL || input->noderef_member_count != 0 || input->noderef_declaration_count != 0 ||
++        reader->pp->options.predefines.debug || reader->pp->options.predefines.debug_modules ||
++        input->musttail_count != 0 || reader->expression_limit < input->token_count || parser->errors != 0)
++    {
++        return false;
++    }
++    const uint32_t role = parser->tree.roles[parent];
++    const bool expression = (role >= PARSE_ROLE_PREFIX && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA ||
++                            role == PARSE_ROLE_RETURN || role == PARSE_ROLE_OPEN_CALL || role == PARSE_ROLE_OPEN_SUBSCRIPT ||
++                            role == PARSE_ROLE_OPEN_GROUP || role == PARSE_ROLE_OPEN_CONDITION || role == PARSE_ROLE_SEPARATOR;
++    if (!expression)
++    {
++        return false;
++    }
++    const uint32_t leaf = batch->leaf_slots[position];
++    const CheckGraphLeaf* pointer = input->graph.leaf_records + leaf;
++    const uint32_t declared = input->declarations[token - 1];
++    if (pointer->object == 0 || declared >= input->token_count || pointer->object != declared + 1 ||
++        pointer->category != CHECK_LVALUE || pointer->constant_kind != CHECK_CONSTANT_ADDRESS ||
++        pointer->flags != BUSTER_CHECK_NONNULL_ADDRESS || pointer->row != 0 || pointer->integer != 0 || pointer->overload_head != 0 ||
++        !type_is_valid(reader->types, pointer->type) || type_kind(reader->types, pointer->type) != BUSTER_TYPE_KIND_POINTER || type_qualifiers(pointer->type) != 0 ||
++        input->declaration_kinds[declared] != C_BINDING_OBJECT || check_sparse_get(input->declaration_bodies, declared) >= input->token_count ||
++        check_input_bit(input->declaration_bits, declared, BUSTER_CHECK_BITS_THREAD_LOCAL) || check_input_attributes_at(input, declared) != NULL)
++    {
++        return false;
++    }
++    const TypeTable* types = reader->types;
++    const TypeId record = type_element(types, pointer->type);
++    const uint8_t kind = type_kind(types, record);
++    if ((kind != BUSTER_TYPE_KIND_STRUCT && kind != BUSTER_TYPE_KIND_UNION) || type_qualifiers(record) != 0 ||
++        !type_is_complete(types, record) || reader->tag_completions[types->types.index[type_index(record)]] > token)
++    {
++        return false;
++    }
++    uint64_t bits = 0;
++    uint32_t qualifiers = 0;
++    const uint32_t name = parser->tokens.names[token + 1];
++    const uint32_t member = type_lookup_member(types, record, name, &bits, &qualifiers);
++    const uint32_t tag = types->types.index[type_index(record)];
++    if (member == 0 || member == BUSTER_TYPE_MEMBER_UNKNOWN || member - types->tags.member_begin[tag] >= types->tags.member_count[tag] ||
++        types->members.name[member] != name || types->members.flags[member] != 0 ||
++        qualifiers != 0 || (bits & 7) != 0 || check_marked_member(input->marked_members, input->marked_member_count, member) != NULL)
++    {
++        return false;
++    }
++    const TypeId field = types->members.type[member];
++    const uint8_t field_kind = type_kind(types, field);
++    if (type_qualifiers(field) != 0 || ((field < BUSTER_TYPE_BOOL || field > BUSTER_TYPE_ULLONG) && field_kind != BUSTER_TYPE_KIND_POINTER) ||
++        !check_input_window_member_context(reader, parent))
++    {
++        return false;
++    }
++    CheckInputWindowSummary* summaries = check_input_window_room(reader->arena, input->window_summaries, input->window_count,
++                                                                 &input->window_capacity, 1, sizeof(*summaries));
++    if (summaries == NULL)
++    {
++        return false;
++    }
++    input->window_summaries = summaries;
++    CheckInputWindowRow* tape = check_input_window_room(reader->arena, input->window_rows, input->window_row_count,
++                                                        &input->window_row_capacity, 1, sizeof(*tape));
++    if (tape == NULL)
++    {
++        return false;
++    }
++    input->window_rows = tape;
++    check_node_window_member_pointer(tape + input->window_row_count, pointer->object, token - 1);
++    summaries[input->window_count] = (CheckInputWindowSummary){ .node = base, .first = input->window_row_count, .count = 1, .member = member };
++    input->window_row_count += 1;
++    input->window_count += 1;
++    input->window_nodes += 2;
++    batch->members[position] = input->window_count;
++    batch->tokens[position] = token;
++    const CheckValue value = { .type = field, .category = CHECK_LVALUE, .flags = BUSTER_CHECK_NONNULL_ADDRESS };
++    check_input_batch_set_leaf(reader, batch, base, &value);
++    return true;
++}
++
+ static bool check_input_window_local(const CheckInputReader* reader, const CheckInputIdentifiers* identifiers, uint32_t i)
+ {
+     const uint32_t declaration = identifiers->declarations[i];
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..92a2cbb77 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -914,6 +914,8 @@ struct CheckInputWindowSummary
+     uint32_t node;
+     uint32_t first;
+     uint32_t count;
++    // The declaration's field index for a source-resolved member operand, or zero for other windows.
++    uint32_t member;
+ };
+ 
+ struct CheckInput
+diff --git a/src/buster/compiler/c_check_node_machine_rows.c b/src/buster/compiler/c_check_node_machine_rows.c
+index 2b3f41f9d..6f4aaff99 100644
+--- a/src/buster/compiler/c_check_node_machine_rows.c
++++ b/src/buster/compiler/c_check_node_machine_rows.c
+@@ -1396,6 +1396,13 @@ void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uin
+     };
+ }
+ 
++// A field location starts with the value of its source pointer. Its member declaration keeps the offset and type.
++void check_node_window_member_pointer(CheckInputWindowRow* row, uint32_t object, uint32_t token)
++{
++    *row = (CheckInputWindowRow){ .value = object, .token = token, .kind = BUSTER_TYPED_LOCAL,
++                                  .class = BUSTER_TYPED_CLASS_U64, .flags = BUSTER_CHECK_WINDOW_LOCAL | BUSTER_CHECK_WINDOW_READ };
++}
++
+ // An explicit (void) cast discards the value at its closing parenthesis.
+ void check_node_window_void_rows(CheckInputWindowRow* rows, uint32_t value, uint32_t literal, uint32_t cast)
+ {
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 5447b2fc5..debd48a5f 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -15664,9 +15664,25 @@ static bool check_lower_global_register_update(CheckLowerWriter* writer, uint32_
+     return reg >= 0;
+ }
+ 
++// The pointer is on the native expression stack. Apply the source-visible offset and load only when the parent reads a scalar.
++static __attribute__((noinline)) void check_lower_window_field(CheckLowerWriter* writer, uint64_t offset, uint32_t token, TypeId type, uint8_t class, bool load)
++{
++    writer->token = token;
++    check_lower_source(writer, token);
++    if (offset != 0)
++    {
++        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, offset);
++        check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
++    }
++    if (load)
++    {
++        check_lower_emit(writer, BUSTER_TYPED_LOAD, class, check_lower_access(writer, class, type));
++    }
++}
++
+ // Splice the prechecked expression's tape, map local objects in the current body and give each entry its
+ // own source token. The next ordinary task resumes the source and failure context active at this splice.
+-static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* writer, uint32_t node, const CheckValue* value, const CheckInputWindowSummary* summary)
++static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* writer, uint32_t node, const CheckValue* value, const CheckInputWindowSummary* summary, uint8_t class, bool load)
+ {
+     const CheckProgram* program = writer->program;
+     const uint32_t before = writer->count;
+@@ -15691,6 +15707,11 @@ static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* write
+             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+         }
+     }
++    if (summary->member != 0 && writer->output->status == CHECK_PROGRAM_OK)
++    {
++        const uint64_t offset = program->types->members.offset[summary->member] / 8;
++        check_lower_window_field(writer, offset, program->input->graph.tokens[node], value->type, class, load);
++    }
+     writer->token = outer;
+     check_lower_source(writer, source);
+     if (value->constant_kind == CHECK_CONSTANT_INTEGER && writer->count == before + 1)
+@@ -15730,7 +15751,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
+     const CheckInputWindowSummary* summary = op == CHECK_OP_VALUE ? check_input_window_summary(program->input, node) : NULL;
+     if (__builtin_expect(summary != NULL, 0))
+     {
+-        check_lower_window(writer, node, value, summary);
++        check_lower_window(writer, node, value, summary, class, !address && !address_value);
+     }
+     else if (__builtin_expect(writer->segments, 0) && check_lower_segment_access(writer, node, value, address))
+     {
+diff --git a/src/buster/compiler/c_check_semantic_diagnostic.c b/src/buster/compiler/c_check_semantic_diagnostic.c
+index 04b2bd342..3caf42db0 100644
+--- a/src/buster/compiler/c_check_semantic_diagnostic.c
++++ b/src/buster/compiler/c_check_semantic_diagnostic.c
+@@ -1875,8 +1875,10 @@ static uint32_t check_semantic_operand_spelling(const Parser* parser, const Chec
+     {
+         const CheckOp op = graph->ops[at];
+         const uint32_t token = graph->tokens[at];
+-        const bool member = op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+-        const uint32_t selected = member ? check_semantic_member_of(parser, input, stream, types, at) : 0;
++        const CheckInputWindowSummary* summary = op == CHECK_OP_VALUE ? check_input_window_summary(input, at) : NULL;
++        const uint32_t recorded = summary != NULL ? summary->member : 0;
++        const bool member = recorded != 0 || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
++        const uint32_t selected = recorded != 0 ? recorded : member ? check_semantic_member_of(parser, input, stream, types, at) : 0;
+         const uint32_t declaration = member ? (selected != 0 ? check_semantic_member_token(parser, input, types, selected) : BUSTER_CHECK_NONE) :
+                                      token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
+                                      input->declarations[token] : 0;
+diff --git a/src/buster/compiler/c_check_unsequenced.c b/src/buster/compiler/c_check_unsequenced.c
+index 6a5dcc5b9..0e91f9c60 100644
+--- a/src/buster/compiler/c_check_unsequenced.c
++++ b/src/buster/compiler/c_check_unsequenced.c
+@@ -77,6 +77,7 @@ struct CheckUnseqReport
+ typedef enum CheckUnseqVisit
+ {
+     CHECK_UNSEQ_READ,
++    CHECK_UNSEQ_MEMBER_POINTER,
+     // A node's visit before its mode is chosen.
+     CHECK_UNSEQ_VISIT,
+     CHECK_UNSEQ_SKIP,
+@@ -112,6 +113,7 @@ struct CheckUnseqFrame
+ typedef struct CheckUnseq CheckUnseq;
+ struct CheckUnseq
+ {
++    const CheckInput* input;
+     const CheckGraph* graph;
+     const CheckStream* stream;
+     const uint8_t* marks;
+@@ -557,6 +559,13 @@ static void check_unseq_push_child(CheckUnseq* checker, const Parser* parser, ui
+     }
+ }
+ 
++// A compact field's pointer is read even if its parent needs the field's address. A field itself never names that variable.
++static const CheckInputWindowRow* check_unseq_member_pointer(const CheckUnseq* checker, uint32_t node)
++{
++    const CheckInputWindowSummary* summary = check_input_window_summary(checker->input, node);
++    return summary != NULL && summary->member != 0 ? checker->input->window_rows + summary->first : NULL;
++}
++
+ // The mode `node`'s visit takes: clang's visit of its operator.
+ static uint8_t check_unseq_mode(const CheckUnseq* checker, const Parser* parser, uint32_t node, uint32_t* entry_object, uint32_t* entry_name)
+ {
+@@ -565,7 +574,17 @@ static uint8_t check_unseq_mode(const CheckUnseq* checker, const Parser* parser,
+     uint8_t result = CHECK_UNSEQ_CHILDREN;
+     *entry_object = 0;
+     *entry_name = 0;
+-    if (op == CHECK_OP_STATEMENT_VALUE || check_unseq_unevaluated(graph, node))
++    if (op == CHECK_OP_VALUE)
++    {
++        const CheckInputWindowRow* pointer = check_unseq_member_pointer(checker, node);
++        if (pointer != NULL)
++        {
++            *entry_object = (uint32_t)pointer->value;
++            *entry_name = pointer->token;
++            result = CHECK_UNSEQ_MEMBER_POINTER;
++        }
++    }
++    else if (op == CHECK_OP_STATEMENT_VALUE || check_unseq_unevaluated(graph, node))
+     {
+         result = CHECK_UNSEQ_SKIP;
+     }
+@@ -631,6 +650,13 @@ static void check_unseq_step(CheckUnseq* checker, const Parser* parser)
+             }
+             break;
+         }
++        case CHECK_UNSEQ_MEMBER_POINTER:
++        {
++            check_unseq_pre_use(checker, frame->entry, node);
++            check_unseq_post_use(checker, frame->entry, node);
++            done = true;
++            break;
++        }
+         case CHECK_UNSEQ_CHOSEN:
+         {
+             // A static selection's chosen operand alone.
+@@ -957,10 +983,18 @@ static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser,
+                 {
+                     token = BUSTER_CHECK_NONE;
+                 }
+-                if (pass == 1 && op == CHECK_OP_VALUE && graph->tokens[node] < parser->tokens.count &&
+-                    parser->tokens.kinds[graph->tokens[node]] == PARSE_KIND_IDENTIFIER)
++                if (pass == 1 && op == CHECK_OP_VALUE && graph->tokens[node] < parser->tokens.count)
+                 {
+-                    token = graph->tokens[node];
++                    const uint32_t source = graph->tokens[node];
++                    if (parser->tokens.kinds[source] == PARSE_KIND_IDENTIFIER)
++                    {
++                        token = source;
++                    }
++                    else
++                    {
++                        const CheckInputWindowRow* pointer = check_unseq_member_pointer(checker, node);
++                        token = pointer != NULL ? pointer->token : BUSTER_CHECK_NONE;
++                    }
+                 }
+                 const uint32_t name = token < parser->tokens.count ? parser->tokens.names[token] : BUSTER_CHECK_NONE;
+                 uint32_t k = 0;
+@@ -1129,6 +1163,7 @@ static void check_unseq_check(CheckCommonEmission* emission, CheckUnseqStorage*
+     if (modifies)
+     {
+         CheckUnseq* checker = &storage->checker;
++        checker->input = emission->input;
+         checker->graph = graph;
+         checker->stream = emission->stream;
+         checker->marks = marks;
