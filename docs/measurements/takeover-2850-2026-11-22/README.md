@@ -628,3 +628,31 @@ Fitted against default training on `sqlite3.c`, paired: -2.056 ms (-3.054 to -1.
 instructions. So a profile is worth 3.3 ms of the frozen compile as the build trains it today and 5.3 at most; the
 fitted one gives up 21 ms of `main.c` and 11 of musl for its 2. One round of the first pair read +8.9 ms (its range's
 upper end); the cycles' range has no such reading.
+
+## What the bodies cost each stage (`profile-bodies.txt`, `scripts/profile-bodies.py`)
+
+The ordinary compile's profile (`profile-whole-bbe80f1a9/`) less the one with every body masked
+(`profile-masked-0b150b71b/`), by symbol, summed by stage; cycles a token of the frozen `sqlite3.c` and ms at 5.49
+GHz. The two profiles are of two trees, so each line is an estimate; their sum is the two runs' difference.
+
+| | ordinary | every body masked | the bodies | ms |
+| --- | ---: | ---: | ---: | ---: |
+| the program, the warnings, the data | 168.8 | 22.7 | 146.2 | 19.1 |
+| the lowering | 86.8 | 2.4 | 84.3 | 11.0 |
+| the reader: the expressions' walk | 89.3 | 15.1 | 74.2 | 9.7 |
+| the graph run | 64.6 | 2.5 | 62.1 | 8.1 |
+| Tier 0 and the emission | 48.3 | 0.1 | 48.2 | 6.3 |
+| the kernel, libc and the rest | 147.9 | 104.4 | 43.6 | 5.7 |
+| the reader: the names' resolution | 52.5 | 10.9 | 41.6 | 5.4 |
+| the reader: declarations, types and the rest | 101.8 | 70.9 | 30.9 | 4.0 |
+| the reader: literals and constants | 14.8 | 5.0 | 9.8 | 1.3 |
+| the preprocessor and the parser | 107.3 | 106.6 | 0.7 | 0.1 |
+| all | 882.1 | 340.5 | 541.6 | 70.6 |
+
+- A stream that keeps the reader's resolution, declarations and literals for a body it takes keeps 10.7 ms of the
+  bodies' 70.6 and what they make: the uses the unused analysis reads, a block's static objects, the strings in
+  their order, the unit's end's warnings. One that reads a body from its tokens alone owes all four.
+- What a taken body can leave is the walk, the graph run, the program and the lowering: 47.9 ms, with Tier 0 and the
+  emission owed either way.
+- With every body masked the unit is still 340 cycles a token, 44 ms: the preprocessor and the parser 14, the
+  reader's file scope 11, the kernel and the rest 14.
