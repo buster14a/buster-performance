@@ -1047,3 +1047,31 @@ owed a proof that the token test gives for 63% of the whole bodies' tokens. The 
 a loop or a block: the return flow itself, run on the controls a statement layer has to make anyway, decides them, and
 needs each condition's truth where it folds and each call's callee's contract, which the window's summary facts have
 in the shadow and nothing has before the walk.
+
+## A body's entries from its controls and its roots' tapes (`bodies-entries/`, buster branch `claude/2850-bodies-entries`)
+
+The statements' first piece as [specified](https://github.com/buster14a/buster/issues/2850#issuecomment-7083062068):
+`measure-node-machine --shadow --bodies`, at the branch's `eec7ca784`. After the pipeline, each lowered body the piece
+attempts is made again from the program's controls and the tapes the machine makes of the body's roots (a temporary's
+local absolute, a branch's target an entry, a call's row the body's, each control's own entries after its root's, the
+implicit return last), and compared with the lowered function's, entry for entry: kind, class and value.
+
+**Exact** (`bodies-entries/develop-eec7ca784/`, Develop builds on this session's machine, `scripts/bodies.sh` and
+`scripts/main-only.sh`: the default warnings, `-g`, and `-Wall -Wextra`; every run's status 0):
+
+| | `sqlite3.c` | Lua, 34 units | the compiler's own source | musl, 1,336 units |
+| --- | ---: | ---: | ---: | ---: |
+| lowered bodies; their tokens | 2,668; 568,438 | 1,096; 203,029 | 1,498; 399,421 | 2,756; 300,990 |
+| every popped root the machine's: bodies; of the tokens | 2,134; 48.58% | 728; 38.35% | 281; 4.82% | 1,499; 33.15% |
+| attempted: bodies; of the tokens; their entries | 2,086; 44.35%; 159,437 | 671; 29.94%; 29,079 | 271; 4.18%; 11,997 | 1,447; 29.38%; 54,399 |
+| the lowered function's; that differ | 2,086; 0 | 671; 0 | 271; 0 | 1,447; 0 |
+| left out with every root the machine's: a control of another kind | 48 (4.23% of the tokens) | 57 (8.41%) | 8 (0.61%) | 51 (3.72%) |
+| … an initialization of another form; a result of another class | 0; 0 | 0; 0 | 1; 1 | 1; 0 |
+| `-g`: attempted; that differ | 2,086; 0 | 671; 0 | 271; 0 | 1,447; 0 |
+| `-Wall -Wextra`: attempted; that differ | 1,704; 0 | 602; 0 | 226; 0 | 1,286; 0 |
+
+12,768 bodies in the three flag sets, none differing, on the piece's first run on each: no change was made to it
+between a difference and this table, since there was none. The lowered bodies here are the selected ones (musl's
+headers' unreferenced inline functions are not lowered), and the machine is the one after the pipeline, on the walk's
+nodes: before the walk the machine with no node of the walk's takes every root of 35.6% of `sqlite3.c`'s body tokens,
+where this one takes 48.58%.
