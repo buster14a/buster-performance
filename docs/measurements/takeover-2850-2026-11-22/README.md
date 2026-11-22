@@ -85,3 +85,101 @@ round, and the wall clock doesn't resolve it.
 
 A load average of 4.1 at the first rounds is this session's own build of the candidate, just before (`*.load`); the
 lock's `busy` lines, if any, are in `lock.log`.
+
+## #3270 on four workloads
+
+`pair2-WORKLOAD-d541430bf-afde6c1c9/`: `pair2.sh`, the same pairing for `sqlite3.c`, the compiler's own source
+(`main.c` at `84a7d3d76`, 2,433,563 tokens), Lua's 34 units as one command and musl's 1,336 as one command; a wall
+run is timed by `wallrun.py`, which records its faults too. Seven rounds each; the paired medians (`summary.txt`):
+
+| | wall, ms | paired | rounds lower | user instructions, M, paired | rounds lower |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 111.914 | -0.057 | 4 of 7 | -0.100 | 7 of 7 |
+| the compiler's own source | 601.222 | -1.655 | 4 of 7 | -2.318 | 7 of 7 |
+| Lua | 64.004 | +0.057 | 3 of 7 | -0.050 | 7 of 7 |
+| musl | 668.459 | -0.321 | 4 of 7 | -0.937 | 7 of 7 |
+
+Every run's objects are one set a workload and its diagnostics one stream. An earlier form of the change (buster#3262)
+cost musl 3.0 ms; this one costs no workload anything the wall clock resolves, and retires fewer instructions on all four.
+
+## `codex/2850-packed-comma-contexts` on four workloads
+
+`pair2-WORKLOAD-d541430bf-comma-ctx/`: main against the branch's one commit (`7e5a53d39`, the comma contexts as a bit
+a token where they were a byte) merged with it on the 9700X (`fbb4c1739`, a local merge).
+
+| | wall, ms | paired | rounds lower | user cycles, M, paired | rounds lower | user instructions, M, paired |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 112.146 | +0.080 | 3 of 7 | -0.993 | 4 of 7 | +0.232 |
+| the compiler's own source | 601.486 | -0.540 | 4 of 7 | -14.193 | 5 of 7 | +2.115 |
+| Lua | 64.112 | -0.238 | 7 of 7 | -0.960 | 7 of 7 | +0.079 |
+| musl | 668.601 | -2.287 | 6 of 7 | -5.147 | 5 of 7 | +1.113 |
+
+It retires a few more instructions everywhere and takes less time on the two workloads of small units. One of
+`sqlite3.c`'s wall runs took 25,430 faults more than its pair's (base pages): the +20.9 ms in that summary's range.
+
+## The window's options at main
+
+`pair-d541430bf-d541430bf-__node_window_assignments_/` (seven rounds; its wall runs failed, for want of
+`/usr/bin/time` on the host, and only its counters stand) and `pair2-sqlite-d541430bf-d541430bf-__node_window/` (one
+round): main against itself with the option. `--node-window-assignments` takes 8,990 expressions and replaces 26,183
+graph nodes, and costs 10.69 M user instructions and 9.3 cycles a token more, in every round; `--node-window` (7,617
+expressions, 20,691 nodes) 14.3 M instructions and 1.4 ms more in its one round. Either option also turns off the
+statement controls' path main has had since buster#3267, so these don't price a node.
+
+## What a first compile could take: the slice count
+
+`slice-count-sqlite.txt`: `measure-node-machine --shadow --window-rows --passes 0` with `scripts/slice-count.patch`
+(an experiment's counter, not for merge), which sorts each expression whose tape X makes whole on the window by what
+the tests said of it and by what its tape names of its function's. Of 321,434 records swept, in records:
+
+| the tests | plain | with a call | with a label of its own, a temporary or a branch to its control's label | all |
+| --- | ---: | ---: | ---: | ---: |
+| nothing listed, silent | 126,473 (39.3%) | 77,522 | 20,255 | 224,250 (69.8%) |
+| listed, then silent on T's records | 27,816 | 12,679 | 14,052 | 54,547 (17.0%) |
+| refused | | | | 45 |
+
+(49,839 tapes, 278,842 records; "plain" is no call, no label of its own, no temporary and no branch to the
+control's label; a tape with a call and a label is counted under the label's column.)
+
+## The flip's ceiling: the middle without its taken expressions
+
+`bound-d541430bf/`. The question: if every expression the window's machine takes cost the compile one leaf, what
+would the stages between the parser and Tier 0 take? It is what step 2 can save at most, before any of it is built.
+
+- `sqlite3.c` preprocessed by main (`-E`, 716,136 tokens; compiled, it is the ordinary object but for its file's name).
+- The shadow, with the patch, prints each whole tape's expression's tokens and root (`experiment-span`);
+  `scripts/tok.py` tokenizes the preprocessed file (716,136 tokens, the compiler's count) and `scripts/transform.py`
+  replaces each such full expression of a statement, a condition or a `switch` by `__z`, a volatile global: one leaf
+  under the root the reader makes. A `return`'s value and an initializer are left as they are (7,670 expressions,
+  22,743 records). `transform-counts.txt` has what each variant replaced.
+- Removing calls leaves most static functions unreferenced, and the selection then lowers 179 of 2,399
+  (`bound-first-d541430bf/`, that first, biased run). So every variant ends with `scripts/keeper.c`, a function that
+  names each static function and object: all four then emit the same 2,399 static functions.
+- Seven `--time-stages` runs a variant, in a rotating order, each under the lock (`bound.sh`, `bound-reduce.py`).
+
+Medians, ms; the middle is `check-input` to `lower`:
+
+| | none replaced | plain | nothing listed | all whole tapes |
+| --- | ---: | ---: | ---: | ---: |
+| records replaced | 0 | 119,834 | 215,630 | 256,069 |
+| check-input | 42.441 | 37.792 | 31.753 | 29.485 |
+| check-expressions | 10.747 | 8.980 | 6.485 | 5.052 |
+| check-program | 19.150 | 16.215 | 12.233 | 13.775 |
+| lower | 11.814 | 9.923 | 7.016 | 5.808 |
+| **the middle** | **87.633** | **76.291** | **60.234** | **56.738** |
+| **less than none replaced** | | **-11.342** | **-27.399** | **-30.895** |
+| a record replaced, ns | | 94.6 | 127.1 | 120.7 |
+
+What it says:
+
+- **Step 2's ceiling on `sqlite3.c` is about 31 ms of 112** with every whole tape taken at no cost, 27 with those the
+  tests decide on the window alone, 11 with the plain ones alone. The shadow's own first-run readings put the
+  machine at about 120 TSC ticks a record swept (the front 55, the kernel with its names 22, the tests 27 to 38, C 8,
+  X 9), 10 ms a compile, whatever it takes. So: about 21, 17 and 1 ms net, 1.23, 1.18 and 1.01 times.
+- **The plain slice alone does not pay.** A first compile has to take calls to gain anything.
+- **With no taken expression left, the middle is still 57 ms**: the bodies' statements, declarations and scopes, the
+  file scope, and what the machine refuses. That is the part of the 9.5 ms target no expression machine reaches.
+
+The stand-in is one leaf where a summary node is one node and its rows' splice, and the leaf's own lowering and
+emission are in the variants' later stages, which the middle leaves out: the bound is rough to a millisecond or two
+either way, and it is a ceiling, not a forecast.

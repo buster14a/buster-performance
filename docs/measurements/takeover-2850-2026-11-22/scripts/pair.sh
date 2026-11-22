@@ -9,7 +9,7 @@ candidate=$2
 rounds=${3:-7}
 extra=${4:-}
 sq=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
-out="$dir/results/pair-$parent-$candidate${extra:+-$(echo "$extra" | tr -c 'a-zA-Z0-9' '_')}"
+out="$dir/results/pair-$parent-$candidate${extra:+-$(printf '%s' "$extra" | tr -c 'a-zA-Z0-9' '_')}"
 rm -rf "$out"
 mkdir -p "$out"
 export EXCLUSIVE_OWNER=claude-2850-5a14 EXCLUSIVE_TITLE="#2850: paired -c sqlite3.c, $parent against $candidate $extra" EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/2850
@@ -23,10 +23,7 @@ one()
         cd '$out'
         cat /proc/loadavg > '$key.load'
         taskset -c 2 '$cc' $options $flags -o '$key.o' 2> '$key.warm.stderr'
-        start=\$(date +%s%N)
-        taskset -c 2 /usr/bin/time -f '%R %F' -o '$key.faults' '$cc' $options $flags -o '$key.o' > '$key.stdout' 2> '$key.stderr'
-        end=\$(date +%s%N)
-        echo \$((end - start)) > '$key.wall'
+        taskset -c 2 python3 '$dir/wallrun.py' '$key' -- '$cc' $options $flags -o '$key.o'
         taskset -c 2 perf stat -x, -e cycles:u,cycles:k,instructions:u,page-faults -o '$key.perf' -- '$cc' $options $flags -o '$key.pmu.o' 2> /dev/null
         sha256sum < '$key.o' | cut -d' ' -f1 > '$key.sha'
         sha256sum < '$key.pmu.o' | cut -d' ' -f1 >> '$key.sha'
