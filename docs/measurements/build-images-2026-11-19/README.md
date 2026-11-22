@@ -35,7 +35,7 @@ experiment patch kept in `scripts/patch/` and never meant for a pull request.
   outside [#2850](https://github.com/buster14a/buster/issues/2850)'s budget, which counts cycles a token of one
   compile: its 73 cycles a token on musl's tokens, with today's process and start, would make this build 1.47 times
   faster.
-- **The headers' work repeats.** 93% of musl's preprocessed tokens and 62% of Lua's come from headers. Each distinct
+- **The headers' work repeats.** Section 2 gives the corrected one-walk musl census. The following figures come from the original full-driver census. 93% of musl's preprocessed tokens and 62% of Lua's come from headers. Each distinct
   text of a file processed once would leave 11% of musl's tokens and 44% of Lua's (`files.py`). By exact keys, a
   segment of a header's processing whose key (the file, its start, every macro name it looked up and the definition
   it had) an earlier unit of the build already had: 95.5% of musl's header segments and 91.9% of their tokens, 93.5%
@@ -73,7 +73,54 @@ have 514 distinct texts holding 21.4% of the header tokens, because a header's t
 inclusion already included. That is the granularity [#111](https://github.com/buster14a/buster/issues/111)'s
 transcripts had (`header-replay-2026-10-23`).
 
-## 2. The headers' share, by exact keys (`scripts/patch/image-census.patch`, `images.py`)
+## 2. Header-image census
+
+### Corrected eligibility on the frozen musl inputs (2026-11-22)
+
+Of **4,697,046 header tokens**, **4,413,213 (93.96%)** were in eligible repeat visits. One serial preprocessing walk per unit produced 42,655 header-segment visits over 1,336 units. Of 1,889 distinct input keys, zero gave different output or macro effects on a later visit. Each key's first visit is excluded. [Full counts](results/cloud/image-census-musl-3212.txt) · [Buster issue 3212](https://github.com/buster14a/buster/issues/3212)
+
+| Same input key on two visits | Preprocessed output verified against Clang | Corrected census |
+| --- | --- | --- |
+| One inode included as `left/identity.h` and `right/identity.h` | `__FILE__` produced two distinct string literals | Distinct output, both visits excluded |
+| One header popped a saved `MODE` after an undefinition | The initializer was `7` in one unit and `9` in the other | Distinct output and ordered macro effects, both visits excluded |
+| Plain header, same macro definition | Both initializers were identical | Second visit eligible |
+
+The probe compares the bytes of length-delimited records within one process. Output records carry token kind, flags and spelling, including synthetic integers and embedded data. A macro lookup observes its published definition through the end of its last token. Each macro write records its name and resulting definition in order, after publication of the presence bit. Uses of presumed file or line, changes to line mapping and macro-stack operations flag the segment. The reducer excludes every visit to a key if any visit was flagged or differed. The fixtures also check nested saves and restores, line remapping, write order and exclusion triggered by a later visit.
+
+The original probe counted both failing pairs as equal. On the **same one-walk musl inputs**, it found seven inconsistent keys and counted 4,213,909 eligible tokens (89.71%). The two probes printed byte-identical preprocessed text. The normal `-c --lanes 1` driver also compiled all 1,336 objects with the corrected probe. It made **250 additional history replays**, accounting for the historical denominator of **49,857 header-segment visits**. Across its 1,586 walks, 5,766,767 of 6,050,600 header tokens (95.31%) fell in eligible repeats, with zero inconsistent keys. These counts describe observed reuse opportunities. [Full-driver counts](results/cloud/image-census-musl-driver-3212.txt)
+
+Reproduce from the directory containing this README in Bash. Set `BUSTER` to a Buster checkout and `CORPUS` to the absolute directory populated by Buster's `tools/ci/fetch-corpus.sh`. The archive is `preprocessor-391e729af658`.
+
+```bash
+record=$PWD
+work=$(mktemp -d)
+git -C "$BUSTER" worktree add --detach "$work/buster" 6427879e1143026a12fb0388a20bdea1fe4b2bc5
+git -C "$work/buster" apply "$record/scripts/patch/image-census.patch"
+clang -std=gnu17 -O1 -march=native -fwrapv -funsigned-char -fno-strict-aliasing \
+    -I"$work/buster/src" "$record/scripts/census/walk.c" -o "$work/walk"
+python3 -I scripts/census/test-images.py "$work/walk" "$(command -v clang)"
+export CORPUS LC_ALL=C
+source scripts/census/musl-opts.sh
+scripts/census/musl-units.sh > "$work/units"
+mapfile -t units < "$work/units"
+BUSTER_PP_IMAGE_CENSUS_FILE="$work/rows.tsv" "$work/walk" "${opts[@]}" "${units[@]}" > "$work/musl.i"
+python3 -I scripts/census/images.py "$work/rows.tsv"
+```
+
+The replay used Clang 22.1.8 on an AMD EPYC 9V74 cloud host. The original and corrected probe binaries had SHA-256 `42a9da35c0e2b527967fc20e009c60e932071cb51b11d79f10ee73e1156f9a99` and `2e2b1d3eaa1953e0d4cf16bbe2081646eaecf17bc01012aa9c8fea33e0f98c5a`. The concatenated output had SHA-256 `b4bb7e4c15cee9e0bd5fb492ac713972cb57be7f897c3d4b1bdc3d9c51a9d523` with the corpus at `/workspace/scratch/census-corpus`. Trace IDs are local to one process. Clang 22.1.8 and 23.1.4 agreed with the regression outputs. The fixtures and full one-walk corpus passed with `-fsanitize=address,undefined -fno-sanitize-recover=all`, giving the same preprocessed bytes and summary as the ordinary probe.
+
+To repeat the full-driver census after the preceding commands, run the following in the same shell. The verified Debug build used the repository's pinned Clang 23.1.4 toolchain and had SHA-256 `768026a184ecf29115d7a4a2034a30778533b42d567813afb6d6e8898240bf5c`.
+
+```bash
+(cd "$work/buster" && BUSTER_HOST_ARCH=native BUSTER_DEBUG_INFO=0 ./build.sh --config Debug --jobs 4)
+mkdir -p "$work/objects"
+(cd "$work/objects" && BUSTER_PP_IMAGE_CENSUS_FILE="$work/driver.tsv" "$work/buster/build/compiler" -c --lanes 1 "${opts[@]}" "${units[@]}")
+python3 -I scripts/census/images.py "$work/driver.tsv"
+```
+
+### Historical full-driver census (2026-11-19)
+
+The figures below used the [original instrumentation and reducer](https://github.com/buster14a/buster-performance/tree/8be97cfc1205ea5336ace9a49153c1917853acda/docs/measurements/build-images-2026-11-19/scripts).
 
 The patch (experiment only) adds hooks to `c_preprocessor_impl.c`: every lookup of a macro name
 (`pp_is_macro`) and every macro set (`pp_set_macro`) is attributed to the current **segment**: a file's processing
@@ -203,7 +250,8 @@ export CORPUS=/path/to/preprocessor-391e729af658 COMPILER=/path/to/buster/build/
 scripts/census/musl-units.sh | xargs -P 4 -I{} scripts/census/pp-one.sh {} OUT
 python3 -I scripts/census/files.py OUT/*.i; python3 -I scripts/census/segments.py OUT/*.i
 python3 -I scripts/census/reduce.py RED OUT/*.i      # then name RED's files as the originals (measure.sh does)
-# the census: apply scripts/patch/image-census.patch to the same commit, build Release, then
+# The historical full-driver census used the script revision linked in section 2.
+# Apply its scripts/patch/image-census.patch to the same compiler commit, build Release, then
 BUSTER_PP_IMAGE_CENSUS_FILE=census.tsv $PATCHED -c --lanes 1 "${opts[@]}" $(scripts/census/musl-units.sh)
 python3 -I scripts/census/images.py census.tsv
 # the 9700X jobs: scripts/9700x/measure.sh and measure2.sh, each under exclusive.sh; tables by reduce_perf.py,
