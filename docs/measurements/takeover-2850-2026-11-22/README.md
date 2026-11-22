@@ -415,6 +415,32 @@ What it says:
 Candidates this leaves, none measured as a change: the graph's columns at a tight capacity and packed (about 10 MB),
 the small arenas in base pages (about 17 MB), the never-written columns (about 6 MB). Together under 2 ms.
 
+### What a fill costs: only its first touch (`memory/fresh-*.txt`, `scripts/memory-fresh.py`)
+
+The sources fill 24 token-sized columns of 2.9 MB with zeros or `NONE` (69 MB in all, `memset` by its caller). A fill
+pays the kernel only where it is the memory's first touch, so the experiment now reads, at each push of 512 KB or more,
+how much of its range is not resident yet (`mincore`), and at the end of the push's stage how much of it is resident
+and how much of that holds a byte that is neither 0 nor 0xff. `scripts/memory-fresh.py` reduces it; here, in base
+pages (sizes, not times):
+
+| | MB |
+| --- | ---: |
+| pushed, 345 pushes | 2,335.4 |
+| of it not resident at the push | 1,802.8 |
+| made resident by the end of its stage | 174.6 |
+| of that, 4 KB pages with nothing but zeros or all-ones | 26.7 |
+
+The 26.7 MB by caller: the reader's own columns 12.2 (in pushes that hold 51.4 MB of data), four columns `sqlite3.c`
+never writes 6.8 (the intrinsics' 2.7, the deprecated uses' 2.7 and 0.7, the parser's tree's 0.7), the graph run's
+2.4, the program's about 3.6, the rest under 0.5 each. The stages after `check-declarations` push 1,121 MB and make
+14 MB resident: their fills land on pages an earlier stage touched, and cost their `memset` alone (1.9% of the
+compile's cycles for all the fills, 2 ms).
+
+So sparse columns are worth at most 26.7 MB of first touches, 1.4 ms at 51 µs a MB, if every one of some twenty
+columns were made sparse at no cost to its readers; the four never-written ones alone are 0.35 ms. Under the 1.5 ms
+at which the track was to be dropped: dropped. In huge pages the same count is 98.1 MB of 217.0 (`fresh-huge-pages-
+reduced.txt`), the difference being the slack counted above, which is a layout's, not a fill's.
+
 ## The body boundary with a recorded supplier (`boundary-*/`, `boundary-b1/`)
 
 The scaffold on `claude/2850-boundary-scaffold` (not for merge; [its specification, as
