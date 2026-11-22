@@ -304,3 +304,41 @@ jump, an exit, a result). On `sqlite3.c`'s 2,668 lowered bodies and 262,863 eval
 The placement lines (`experiment-whole`) are an upper bound of what the window decides alone: an expression counts
 where every record of a made kind is the kernel's own, and a record of a kind the kernel never makes is not counted
 against it.
+
+## The body boundary's first increment: the reader's fast paths under a mask
+
+`claude/2850-body-boundary` at `0b150b71b` against its parent, main `3b518936a`. A lazy mask turned three of the
+reader's paths off for the whole unit: the coded walk's class actions, the packed simple declarations (#3268) and the
+statement heads (#3267). The branch keeps them on.
+
+### Every body masked (`mask-mask-main/`, `mask-mask-branch/`)
+
+Both trees with `scripts/experiment-mask-only.patch` (the every-body mask of the section above, and nothing else),
+Release, `scripts/job-boundary1.sh`; seven rounds, medians of `--time-stages`, ms:
+
+| frozen `sqlite3.c`, every body masked | main | branch |
+| --- | ---: | ---: |
+| `check-input` | 22.93 | 21.27 |
+| `check-program` | 2.76 | 2.62 |
+| `check-input` to `lower` | 27.32 | 25.60 |
+| total | 43.91 | 42.06 |
+| peak, MB | 216.2 | 222.3 |
+
+The same unit unmasked reads 111.24 and 111.12 ms in the two trees' interleaved runs. The 6 MB more under the mask
+are the statement heads' columns, which a masked unit didn't allocate.
+
+### Nothing moves without a mask (`pair2-sqlite-3b518936a-0b150b71b/`)
+
+Seven ABBA rounds of the ordinary `-c sqlite3.c`: 112.06 and 111.87 ms (paired -0.24, between -0.77 and +0.26), 1,216.053 M
+and 1,216.049 M user instructions, one set of objects and one of diagnostics.
+
+### Kept bodies beside masked ones (`maskdiff/`, `scripts/maskdiff.sh`)
+
+The every-body mask leaves no kept body for the packed declarations and the statement heads to act on, so the
+difference between the old conditions and the new was read with a partial mask too: `scripts/experiment-mask-modulus.patch`
+masks the bodies whose ordinal modulo N is K. Develop builds of main and of the branch with it, on this session's
+machine (not the 9700X: nothing is timed), over `sqlite3.i`, Lua's 34 units, musl's 1,336 and `main.c`, by default and
+with `-Wall -Wextra`, with no mask and with the masks 2:0, 2:1 and 3:1: 32 configurations, each one's objects and
+diagnostics one set in the two builds (`maskdiff/summary.txt`; a masked musl unit that both reject counts as the same).
+With half of `sqlite3.i`'s bodies masked (2:0) the branch's compile is 649.8 M user instructions and main's 797.2 M
+(Develop builds; unmasked, 1,160.047 M and 1,160.048 M), so the paths do run in the compared compiles.
