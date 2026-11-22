@@ -4,6 +4,8 @@ The ordinary object driver, vector precedence parser, syntax validation, diagnos
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `3ea297ec5655ba40389e3a708bf5260cd2d18557`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.
 
+Each native PMU observation ran one compiler under the hardware lock. Each elapsed observation held the lock for one `time-runs --runs 1 --warmups 1` command, which launched a warm-up compiler followed by the timed compiler. [Elapsed and PMU commands](ordinary-compare-one.sh)
+
 | Input | Total cycles/token, median [min, max] | User instructions, median | True elapsed ms, median [min, max] | Faster elapsed pairs |
 | --- | ---: | ---: | ---: | ---: |
 | [SQLite](sqlite/paired-summary.tsv) | +1.5253 [−0.4099, +97.5502] | +193,850.5 | +0.3200 [−0.4100, +12.6290] | 1/3 |

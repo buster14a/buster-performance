@@ -6,6 +6,8 @@ Each snapshot admits up to 32 candidate tokens. If a boundary needs more candida
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `18eca8d81cd7d4653a1acbdcd5027bf02655bcb3`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.
 
+Each native PMU observation ran one compiler under the hardware lock. Each elapsed observation held the lock for one `time-runs --runs 1 --warmups 1` command, which launched a warm-up compiler followed by the timed compiler. [Elapsed and PMU commands](ordinary-compare-one.sh)
+
 | Input | Total cycles/token, median [min, max] | User instructions, median | True elapsed ms, median [min, max] | Faster elapsed pairs |
 | --- | ---: | ---: | ---: | ---: |
 | [SQLite](sqlite/paired-summary.tsv) | +0.3153 [−1.2894, +0.3452] | +574,445.0 | +0.1800 [−1.0875, +0.1980] | 1/3 |

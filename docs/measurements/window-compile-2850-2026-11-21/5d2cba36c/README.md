@@ -4,6 +4,8 @@ The parser resolves each statement label or ternary colon and immediately correc
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `5d2cba36c5b67be56e83d2258fb75289342dcc3f`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.
 
+Each native PMU observation ran one compiler under the hardware lock. Each elapsed observation held the lock for one `time-runs --runs 1 --warmups 1` command, which launched a warm-up compiler followed by the timed compiler. [Elapsed and PMU commands](ordinary-compare-one.sh)
+
 | Input | Total cycles/token, median [min, max] | User instructions, median | True elapsed ms, median [min, max] | Faster elapsed pairs |
 | --- | ---: | ---: | ---: | ---: |
 | [SQLite](sqlite/paired-summary.tsv) | +0.0196 [−5.0319, +4.4192] | -185,142.5 | −0.1120 [−0.3610, +0.2955] | 6/7 |

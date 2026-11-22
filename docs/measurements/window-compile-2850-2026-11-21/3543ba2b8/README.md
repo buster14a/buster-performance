@@ -6,6 +6,8 @@ Each interval reuses the same K4 block preparations, predecessor indices and pre
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `3543ba2b82d1ebe5e44319bb13551c78a67b37ac`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.
 
+Each native PMU observation ran one compiler under the hardware lock. Each elapsed observation held the lock for one `time-runs --runs 1 --warmups 1` command, which launched a warm-up compiler followed by the timed compiler. [Elapsed and PMU commands](ordinary-compare-one.sh)
+
 | Input | Total cycles/token, median [min, max] | User instructions, median | True elapsed ms, median [min, max] | Faster elapsed pairs |
 | --- | ---: | ---: | ---: | ---: |
 | [SQLite](sqlite/paired-summary.tsv) | +0.7332 [−0.4109, +3.8261] | +408,312.5 | −0.1905 [−0.8635, +1.3255] | 2/3 |

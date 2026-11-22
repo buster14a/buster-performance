@@ -8,6 +8,8 @@ An earlier parser experiment at `70371b499` used the same block-local attribute 
 
 Ryzen 7 9700X CPU 2 compiled each workload in a fresh process on each observation. The earlier compiler used public main `0e1d5b825801135bf50e79da9d546bc95209ab30`. The candidate used `85e09e83822e093f2ed12fd309f3093990b1e904`. The [build receipts](builds.tsv) and [source patch](implementation.patch) identify both native Release executables.
 
+Each native PMU observation ran one compiler under the hardware lock. Each elapsed observation held the lock for one `time-runs --runs 1 --warmups 1` command, which launched a warm-up compiler followed by the timed compiler. [Elapsed and PMU commands](ordinary-compare-one.sh)
+
 | Input | Total cycles/token, median [min, max] | User instructions, median | True elapsed ms, median [min, max] | Faster elapsed pairs |
 | --- | ---: | ---: | ---: | ---: |
 | [SQLite](sqlite/paired-summary.tsv) | −2.8025 [−6.7319, +0.2366] | +377,854.5 | −0.1910 [−0.4855, +11.3360] | 5/7 |
