@@ -953,3 +953,67 @@ not the piece's timed run: they hold the driver's second pass over every root, w
 made there), and what the comparison after the pipeline adds; the timed run is 154 M ticks, about 223 M cycles. What
 they do show is that 25 M cycles of the run with the piece are first touches of its own memory (its graph, its front,
 its tests' state), some of which may fall inside the timed writing: not separated here.
+
+### Is the reference's cost its place's? Every body first, and its memory touched first (`machine-alone/9700x-first/`, `9700x-touch/`)
+
+Two readings of whether the piece's 271 ticks a position are the reference's own or come from where and when it runs.
+
+**Every body read before the walk's first chunk** (`scripts/alone-first.sh`, the branch's `90c42e997`: `--front-alone-first`
+and `--front-alone` in turn, 7 rounds, the 9700X, CPU 2, Release, under the lock; `scripts/first-reduce.py`,
+`machine-alone/9700x-first/reduced.txt`):
+
+| | `sqlite3.c`, each body before the walk acts at it | every body first | Lua | every body first |
+| --- | ---: | ---: | ---: | ---: |
+| its reading, ms | 14.23 | 14.85 | 4.34 | 4.34 |
+| the machine's first run, ms | 26.47 | 26.17 | 7.42 | 7.47 |
+| ticks a position | 271.5 | 273.6 | 219.7 | 220.6 |
+| ticks a token of the bodies a compile would sweep after the scan (every verdict but a root the front lost) | 271.2 | 274.3 | 264.1 | 266.7 |
+
+No: with the bodies read in a row and no walk between them the machine costs the same. (On this session's machine, a
+Develop build, the same pair read a third less for the reading with every body first; the Release build on the 9700X
+does not.)
+
+**Its own memory touched before any timed run** (`scripts/experiment-alone-touch.patch` on the branch's `0dd1dfafa`, not
+for merge: with `BUSTER_EXPERIMENT_ALONE_TOUCH` set, every 4 KB page of what the piece takes from the reader's two
+arenas at its start is read and written before the first body; `scripts/job-touch1.sh`, the same binary with and
+without in turn, 7 rounds; `scripts/touch-reduce.py`, `machine-alone/9700x-touch/reduced.txt`):
+
+| `sqlite3.c`, ms | as it is | its memory touched first |
+| --- | ---: | ---: |
+| the compaction and the entries | 2.66 | 2.68 |
+| the front | 5.63 | 5.64 |
+| its graph's writing | 4.73 | 3.36 |
+| T | 6.15 | 6.17 |
+| the census's tests | 13.43 | 13.13 |
+| C; X | 2.92; 2.40 | 2.95; 2.40 |
+| ticks a position | 272.5 | 261.9 |
+
+The piece reserves 162 MB of the scratch arena and 65 of the reader's at its start (a second front, a graph and a
+store of results sized for the unit's nodes), and their first touches are 1.4 ms of the graph's writing and 0.3 of the
+tests: 10.6 ticks a position of the 272.5. So the reference's own cost on `sqlite3.c` is about 262 ticks a position
+swept, against the 295 a taken token is worth. It is a ceiling for a machine that kept a body's records in one small
+place, not much of one.
+
+## Whether the window's forms take bodies alone (`window-bodies/`)
+
+`scripts/experiment-window-bodies.patch` on the branch's `0dd1dfafa` (not for merge; the earlier `experiment.patch`
+with two lines more): `measure-node-machine --shadow --front-types --front-sweeps --front-tests --window-rows
+--passes 0` on `sqlite3.c` prints each root the lowering popped with its body (`experiment-pop`) and each expression
+whose tape X makes whole on the window with what the tests said of it and whether the kernel made every wanted record
+(`experiment-span`). `scripts/window-bodies.py` groups them by body (`window-bodies/sqlite-reduced.txt`; a Develop build
+on this session's machine: counts, not times). Of 2,668 lowered bodies and 568,438 body tokens:
+
+| every root the lowering popped of the body is | bodies | their tokens |
+| --- | ---: | ---: |
+| taken by the reference at reader time (this run's front is the lean one with the window; the whole front's reads 35.6%) | 1,831 | 32.03% |
+| whole on the window (its tape X's, equal to the reference's) | 1,758 | 29.20% |
+| … with nothing listed for the tests on T's records | 675 | 4.73% |
+| … and every wanted record the kernel's own | 604 | 3.99% |
+| … and no call, label of its own or temporary in a tape | 143 | 0.69% |
+
+Of the bodies the reference takes whole and the window's forms do not take alone, nearly all have a listed
+expression (936 bodies with that alone, 19.2% of the body tokens; 147 with a record left to T too, 5.3%): an
+initialization's root is always listed, and so are an assignment of a constant, a constant subscript and the others
+the tests still read T's records for. So the window's forms as they stand decide 4% of `sqlite3.c`'s body tokens
+without the reference: a body-level machine made of them needs T behind it for the listed expressions (19.5% of the
+records in whole tapes: 8,877 of 49,839 expressions), or those tests moved to the window first.
