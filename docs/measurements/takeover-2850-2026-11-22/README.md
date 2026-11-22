@@ -193,3 +193,64 @@ are no expression's 15.5 ms (`check_input_declaration`, `_declarator_step`, `_sp
 them, `check_input_resolve_range` 3.7), the kernel 12.2 (`clear_page_erms` 7.7; the peak is 185 MB where the unit's is
 237), the program and its controls 7.1, the graph's construction 5.7, the lowering 5.0, the warnings 4.6, Tier 0 and
 the emission 4.2.
+
+## The redesign's two bounds: bodies whole, and the fixed costs' floor
+
+### With no function body
+
+`bound-bodies-d541430bf/`: the preprocessed `sqlite3.c` whole, and with each of its 2,674 function definitions' bodies
+replaced by `;` (`scripts/nobody.py`: 568,641 of the 716,136 tokens), seven `--time-stages` runs each (`bound.sh`). The
+variant without bodies gives 106 warnings (static functions an initializer names, now undefined), which are in its time.
+
+| | whole | no bodies |
+| --- | ---: | ---: |
+| preprocess and parse | 10.475 | 2.613 |
+| check-input | 41.353 | 10.815 |
+| check-expressions | 10.593 | 0.183 |
+| check-program | 18.767 | 2.652 |
+| lower | 11.495 | 0.131 |
+| **the middle** | **85.797** | **14.245** |
+| Tier 0, the emission, the object | 8.756 | 0.150 |
+| total | 105.267 | 17.991 |
+
+The bodies' part of the middle is 71.6 ms, where every whole tape's expression is 30.9: a body taken whole, with no
+token of it read by the stages between the parser and Tier 0, is worth 2.3 times what its expressions are.
+
+### What a fresh process pays whatever it compiles
+
+`floor/` (`scripts/floor.c`, `floor.sh`, `floor-reduce.py`): a static program that maps `sqlite3.c`, reads every byte
+once (a newline count, 64 bytes a step), writes one byte a line of N megabytes of new anonymous memory, and writes
+2,061,192 bytes to a file; eleven fresh processes a variant under `perf stat`, and eleven timed by `wallrun.py`.
+
+| | wall, ms | user, M cycles | kernel, M cycles | faults |
+| --- | ---: | ---: | ---: | ---: |
+| `/bin/true` | 0.196 | 0.19 | 0.23 | 55 |
+| the source mapped and read | 0.297 | 0.48 | 0.30 | 78 |
+| and 8 MB touched, the object written | 1.377 | 0.95 | 3.13 | 82 |
+| 16 MB | 1.786 | 1.60 | 3.87 | 86 |
+| 32 MB | 2.842 | 2.92 | 7.31 | 94 |
+| 64 MB | 4.506 | 4.94 | 13.80 | 110 |
+| 128 MB | 7.844 | 7.56 | 30.00 | 142 |
+| 238 MB, the compile's peak | 13.154 | 12.15 | 54.34 | 198 |
+| 238 MB on base pages | 35.125 | 39.70 | 137.28 | 61,007 |
+| main compiling an empty `main` | 0.525 | 0.73 | 1.35 | 242 |
+
+New memory costs 51 µs a megabyte on 2 MB pages (0.27 M cycles, 0.22 M of them the kernel's): the 238 MB a compile
+of `sqlite3.c` touches today are 12 ms before any work, more than the 9.5 ms asked. Reading every byte of the source
+costs 0.1 ms. (Here the object's file exists and is truncated; `floor-output/` separates that.)
+
+`floor-output/` (`scripts/output.c`, `output.sh`): the object's 2,061,192 bytes alone, the file removed before each run
+or rewritten, on the benchmark directory's btrfs and on tmpfs.
+
+| | wall, ms | kernel, M cycles |
+| --- | ---: | ---: |
+| the buffer filled, nothing written | 0.353 | 0.85 |
+| one `write` to a new file | 0.729 | 2.36 |
+| one `write` over an existing file | 1.090 | 3.42 |
+| a new file mapped and filled in place | 0.757 | 2.61 |
+| tmpfs, one `write` to a new file | 0.663 | 1.87 |
+| tmpfs, mapped | 0.508 | 1.46 |
+
+Writing the object to a new file costs 0.38 ms on this filesystem, 4% of the target, and rewriting an existing one 0.36
+more. So the floor of a compile that keeps 8 MB and writes this object is about 1.0 ms of the wall clock: 0.2 for the
+process, 0.4 for its memory, 0.4 for the write.
