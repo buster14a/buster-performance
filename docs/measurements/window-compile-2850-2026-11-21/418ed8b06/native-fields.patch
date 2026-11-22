@@ -1,0 +1,225 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index a7a8960d1..112a482c6 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1164,6 +1164,10 @@ struct CheckEmitBody
+     // and addend hold the relocation's byte offset and adjusted addend. Their symbolic targets can still be remapped.
+     bool resolved_fields;
+     bool early_source;
++    const CheckSourceBody* source_fields;
++    SymbolId* field_runtime_targets;
++    SymbolId field_table_base;
++    bool relocate_runtime, relocate_tables;
+     CheckProgramStatus status;
+     uint32_t token;
+     const char* reason;
+@@ -2653,9 +2657,21 @@ static void* check_program_emit_window_copy(Arena* kept, const Arena* window, ui
+ 
+ // The C emitter has one reference per marked instruction. Resolve their fields in order while the records
+ // and the encoder's ends are live. A template may instead have both fields of one instruction.
+-static bool check_program_emit_window_fields(const EmittedCode* code, const uint32_t* ends, LinkReference* located)
++// A source fragment owns these complete relocation fields until its atom is assigned. Offsets and
++// addends already have their final instruction-relative values. Targets are still local to the body.
++typedef struct CheckSourceField
++{
++    uint32_t offset;
++    uint32_t target;
++    int32_t addend;
++    uint8_t kind;
++} CheckSourceField;
++
++static inline bool check_program_emit_window_fields(const EmittedCode* code, const uint32_t* ends, LinkReference* located,
++                                                     CheckSourceField* fields, uint64_t length)
+ {
+     uint32_t previous = 0;
++    uint64_t field_end = 0;
+     for (uint32_t i = 0; i < code->reference_count; i += 1)
+     {
+         const LinkReference reference = code->references[i];
+@@ -2663,13 +2679,21 @@ static bool check_program_emit_window_fields(const EmittedCode* code, const uint
+         uint32_t offset = 0;
+         int64_t addend = 0;
+         if (index >= code->count || (i != 0 && previous >= index) ||
+-            !link_code_field(code->records + index, &reference, ends, i, &offset, &addend))
++            !link_code_field(code->records + index, &reference, ends, i, &offset, &addend)) return false;
++        if (fields == NULL)
+         {
+-            return false;
++            located[i] = reference;
++            located[i].instruction = offset;
++            located[i].addend = addend;
++        }
++        else
++        {
++            if (reference.kind == 0 || reference.kind >= BUSTER_LINK_FIXUP_KINDS || addend < INT32_MIN || addend > INT32_MAX ||
++                offset < field_end) return false;
++            field_end = (uint64_t)offset + link_fixup_kinds[reference.kind].width;
++            if (field_end > length) return false;
++            fields[i] = (CheckSourceField){ .offset=offset, .target=reference.target, .addend=(int32_t)addend, .kind=reference.kind };
+         }
+-        located[i] = reference;
+-        located[i].instruction = offset;
+-        located[i].addend = addend;
+         previous = index;
+     }
+     return true;
+@@ -2695,7 +2719,7 @@ static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena*
+     {
+         references = code->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(kept, LinkReference, code->reference_count) : NULL;
+         valid = code->reference_count == 0 || references != NULL;
+-        resolved = valid && check_program_emit_window_fields(code, body->fixup_ends, references);
++        resolved = valid && check_program_emit_window_fields(code, body->fixup_ends, references, NULL, 0);
+     }
+     if (resolved)
+     {
+@@ -3661,6 +3685,7 @@ typedef struct CheckSourceEncoded
+     uint8_t* bytes;
+     uint64_t length;
+     LinkReference* references;
++    CheckSourceField* fields;
+     uint32_t reference_count;
+     uint32_t* label_offsets;
+     uint32_t label_count;
+@@ -3708,14 +3733,22 @@ static CheckSourceEncoded* check_source_encode(CheckSourceControlUnit* unit, Che
+     const uint64_t mark=output->length;
+     if (!check_program_emit_code(&run,&lane,0)) return NULL;
+     CheckSourceEncoded* saved=BUSTER_ARENA_PUSH_ARRAY(output,CheckSourceEncoded,1);
+-    LinkReference* refs=BUSTER_ARENA_PUSH_ARRAY(output,LinkReference,(uint64_t)code.reference_count+1);
++    const bool direct_fields = getenv("BUSTER_CONTROL_OBJECT_FIELDS") != NULL;
++    CheckSourceField* fields = direct_fields ? BUSTER_ARENA_PUSH_ARRAY(output, CheckSourceField, (uint64_t)code.reference_count + 1) : NULL;
++    if (fields != NULL && !check_program_emit_window_fields(&code, body.fixup_ends, NULL, fields, body.length)) fields = NULL;
++    LinkReference* refs = fields == NULL ? BUSTER_ARENA_PUSH_ARRAY(output,LinkReference,(uint64_t)code.reference_count + 1) : NULL;
+     uint8_t* scoped=BUSTER_ARENA_PUSH_ARRAY(output,uint8_t,(uint64_t)symbols+1);
+     uint32_t* tails=frame.tail_count!=0 ? BUSTER_ARENA_PUSH_ARRAY(output,uint32_t,frame.tail_count) : NULL;
+     EmissionFrameRow* rows=frame.row_count!=0 ? BUSTER_ARENA_PUSH_ARRAY(output,EmissionFrameRow,frame.row_count) : NULL;
+     uint32_t* labels=code.label_count!=0? BUSTER_ARENA_PUSH_ARRAY(output,uint32_t,code.label_count):NULL;
+-    bool valid=(code.label_count==0 || labels!=NULL) && saved!=NULL && scoped!=NULL && refs!=NULL && (frame.row_count==0 || rows!=NULL) && (frame.tail_count==0 || tails!=NULL) &&
+-               check_program_emit_window_fields(&code,body.fixup_ends,refs);
+-    for(uint32_t i=0;valid && i<code.reference_count;i+=1) valid=refs[i].target!=0 && refs[i].target<total;
++    bool valid=(code.label_count==0 || labels!=NULL) && saved!=NULL && scoped!=NULL && (fields!=NULL || refs!=NULL) && (frame.row_count==0 || rows!=NULL) && (frame.tail_count==0 || tails!=NULL) &&
++               (fields != NULL || check_program_emit_window_fields(&code,body.fixup_ends,refs,NULL,0));
++    for (uint32_t i=0; valid && i<code.reference_count; i+=1)
++    {
++        const SymbolId target = fields != NULL ? fields[i].target : refs[i].target;
++        valid = target != 0 && target < total;
++        if (fields != NULL) memset(body.bytes + fields[i].offset, 0, link_fixup_kinds[fields[i].kind].width);
++    }
+     if (!valid) {arena_pop_to(output,mark);return NULL;}
+     if (tails!=NULL) memcpy(tails,frame.tails,(size_t)frame.tail_count*sizeof(*tails));
+     if (rows!=NULL) memcpy(rows,frame.rows,(size_t)frame.row_count*sizeof(*rows));
+@@ -3729,7 +3762,7 @@ static CheckSourceEncoded* check_source_encode(CheckSourceControlUnit* unit, Che
+         const uint64_t object=function.values[e];
+         if(tier0_global_kind(function.kinds[e]) && object!=0 && object<=symbols) scoped[object]=access[object];
+     }
+-    *saved=(CheckSourceEncoded){.bytes=body.bytes,.length=body.length,.references=refs,.reference_count=code.reference_count,.label_count=code.label_count,.label_offsets=labels,.access=scoped,.frame=frame};
++    *saved=(CheckSourceEncoded){.bytes=body.bytes,.length=body.length,.references=refs,.fields=fields,.reference_count=code.reference_count,.label_count=code.label_count,.label_offsets=labels,.access=scoped,.frame=frame};
+     return saved;
+ }
+ 
+@@ -3753,9 +3786,9 @@ static bool check_source_emit_saved(CheckEmitRun* run,CheckEmitLane* lane,uint32
+         const SymbolId target=program->object_symbols[source->objects[s]];
+         if (encoded->access[s+1]!=UINT8_MAX && (target==0 || target>=run->access_count || run->access[target]!=encoded->access[s+1])) return false;
+     }
+-    LinkReference* refs=BUSTER_ARENA_PUSH_ARRAY(lane->scratch,LinkReference,(uint64_t)encoded->reference_count+1);
+-    if (refs==NULL) return false;
+-    for(uint32_t i=0;i<encoded->reference_count;i+=1)
++    LinkReference* refs = encoded->fields == NULL ? BUSTER_ARENA_PUSH_ARRAY(lane->scratch, LinkReference, (uint64_t)encoded->reference_count + 1) : NULL;
++    if (encoded->fields == NULL && refs == NULL) return false;
++    for(uint32_t i=0;refs!=NULL && i<encoded->reference_count;i+=1)
+     {
+         refs[i]=encoded->references[i];
+         const SymbolId target=refs[i].target;
+@@ -3765,13 +3798,59 @@ static bool check_source_emit_saved(CheckEmitRun* run,CheckEmitLane* lane,uint32
+         else refs[i].target=program->bodies[b].source_table_base+extra-source->runtime_count;
+         if (refs[i].target==0) return false;
+     }
+-    run->bodies[b]=(CheckEmitBody){.bytes=encoded->bytes,.length=encoded->length,.label_offsets=encoded->label_offsets,.status=CHECK_PROGRAM_OK,.token=BUSTER_CHECK_NONE,.resolved_fields=true,.early_source=true};
++    run->bodies[b]=(CheckEmitBody){.bytes=encoded->bytes,.length=encoded->length,.label_offsets=encoded->label_offsets,.status=CHECK_PROGRAM_OK,.token=BUSTER_CHECK_NONE,.resolved_fields=true,.early_source=true,.source_fields=encoded->fields!=NULL ? source : NULL};
++    if (encoded->fields != NULL)
++    {
++        run->bodies[b].field_table_base = program->bodies[b].source_table_base;
++        if (source->runtime_count != 0)
++        {
++            SymbolId* targets = BUSTER_ARENA_PUSH_ARRAY(lane->scratch, SymbolId, source->runtime_count);
++            if (targets == NULL) return false;
++            memcpy(targets, program->bodies[b].source_runtime_targets, source->runtime_count * sizeof(*targets));
++            run->bodies[b].field_runtime_targets = targets;
++        }
++    }
+     run->codes[b]=(EmittedCode){.references=refs,.reference_count=encoded->reference_count,.label_count=encoded->label_count};
+     if(run->unwind) run->frames[b]=encoded->frame;
+     if(getenv("BUSTER_CONTROL_EARLY_AUDIT")!=NULL) fprintf(stderr,"source-native-fragment\t%u\t%llu\t%u\n",source->closing,(unsigned long long)encoded->length,encoded->reference_count);
+     return true;
+ }
+ 
++// Publish an immutable function's fields directly to its newly defined link atom. Runtime functions
++// and jump tables have their final symbols now. The producer checked the field bounds and cleared
++// their bytes while the encoder owned the fragment.
++static bool check_source_link_fields(Link* link, AtomId atom, const CheckProgram* program, uint32_t b,
++                                     const CheckEmitBody* body, const CheckLowerShared* shared, const CheckProgramLowered* lowered)
++{
++    const CheckSourceBody* source = body->source_fields;
++    const CheckSourceEncoded* encoded = source->encoded;
++    LinkFixups* fixups = &link->fixups;
++    const uint32_t first = fixups->count;
++    const uint32_t count = encoded->reference_count;
++    if (count == 0) return true;
++    if (count > fixups->capacity - first || link->atoms.fixup_count[atom] != 0) return false;
++    for (uint32_t i = 0; i < count; i += 1)
++    {
++        const CheckSourceField field = encoded->fields[i];
++        const uint32_t extra = field.target - source->symbols - 1;
++        SymbolId target = field.target <= source->symbols ? program->object_symbols[source->objects[field.target-1]] :
++                          extra < source->runtime_count ? body->field_runtime_targets[extra] : body->field_table_base + extra - source->runtime_count;
++        const uint32_t runtime = target - shared->provisional_runtimes;
++        if (body->relocate_runtime && runtime < CHECK_LOWER_RUNTIMES) target = lowered->runtime_symbols[runtime];
++        const uint32_t table = target - shared->provisional_tables;
++        if (body->relocate_tables && table < lowered->table_count) target = lowered->case_symbol_base + table;
++        if (target == 0 || target >= link->symbols.count) return false;
++        fixups->offset[first + i] = field.offset;
++        fixups->target[first + i] = target;
++        fixups->kind[first + i] = field.kind;
++        fixups->addend[first + i] = field.addend;
++    }
++    link->atoms.fixup_begin[atom] = first;
++    link->atoms.fixup_count[atom] = count;
++    fixups->count += count;
++    return true;
++}
++
+ // How Tier 0 reaches each symbol of a lowered program, as check_lower_finish numbered them (Tier0Function.symbol_access):
+ // one column, from `output`, for every body that `code`'s emission lowered of `program`, and `*defined_objects`, from
+ // `scratch` (check_program_object_access). It has an entry for every symbol of the emission's link (CheckProgramCode.link):
+@@ -5500,7 +5579,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+             // A naked function's references are its templates' names (mapped below), which no runtime function's are.
+             const EmittedCode* code = run.codes + b;
+             const bool naked = asms->naked != 0 && asms->naked[b].planned;
+-            for (uint32_t i = 0; !naked && i < code->reference_count; i += 1)
++            if (run.bodies[b].source_fields != NULL) run.bodies[b].relocate_runtime = !naked;
++            for (uint32_t i = 0; !naked && run.bodies[b].source_fields == NULL && i < code->reference_count; i += 1)
+             {
+                 const uint64_t provisional = (uint64_t)code->references[i].target - shared.provisional_runtimes;
+                 code->references[i].target = provisional < CHECK_LOWER_RUNTIMES ? result->lowered.runtime_symbols[provisional] : code->references[i].target;
+@@ -5514,7 +5594,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+     {
+         const uint32_t b = result->lowered.tables[t].function;
+         const EmittedCode* code = run.codes + b;
+-        for (uint32_t i = 0; (t == 0 || result->lowered.tables[t - 1].function != b) && i < code->reference_count; i += 1)
++        if (run.bodies[b].source_fields != NULL) run.bodies[b].relocate_tables = true;
++        for (uint32_t i = 0; run.bodies[b].source_fields == NULL && (t == 0 || result->lowered.tables[t - 1].function != b) && i < code->reference_count; i += 1)
+         {
+             const uint64_t table = (uint64_t)code->references[i].target - shared.provisional_tables;
+             code->references[i].target = table < result->lowered.table_count ? result->lowered.case_symbol_base + (SymbolId)table : code->references[i].target;
+@@ -5787,7 +5868,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+             // `prefix` of them, which the atom's alignment comes before, as clang's: its entry's label is the atom's start.
+             const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, body->length, body->bytes, 0);
+             valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix);
+-            if (valid && body->resolved_fields)
++            if (valid && body->source_fields != NULL)
++            {
++                valid = check_source_link_fields(&result->link, atom, program, b, body, &shared, &result->lowered);
++            }
++            else if (valid && body->resolved_fields)
+             {
+                 for (uint32_t i = 0; valid && i < code->reference_count; i += 1)
+                 {

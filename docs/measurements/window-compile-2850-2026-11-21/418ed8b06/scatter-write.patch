@@ -1,0 +1,217 @@
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index e31fcdf29..8e7cdc02c 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -9793,7 +9793,7 @@ static bool check_driver_temporaries(const CheckProgramCode* code, Arena* scratc
+ // labels are, with `debug`'s DWARF (or none), named after `source_path`. Its error is OBJECT_ERROR_FULL where the link
+ // isn't valid or memory ran out before the build. check_driver_object writes it; #1057's parity tests build their
+ // preparation's so, to compare it with -c's file byte for byte.
+-static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
++static Object check_driver_object_build_file(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch, ObjectFileStream* stream)
+ {
+     ObjectUnits units = { 0 };
+     ObjectSymbols symbols = { 0 };
+@@ -9812,11 +9812,16 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
+             .debug = debug,
+             .debug_count = debug != NULL ? 1 : 0,
+         };
+-        result = object_build(&code->link, &units, &symbols, 0, options, source, scratch);
++        result = object_build_file(&code->link, &units, &symbols, 0, options, source, scratch, stream);
+     }
+     return result;
+ }
+ 
++static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSection* sections, const ObjectDebug* debug, const char* source_path, Arena* scratch)
++{
++    return check_driver_object_build_file(code, sections, debug, source_path, scratch, NULL);
++}
++
+ // The first named symbol of `atom` at its start, or 0: what a diagnostic about the atom names.
+ static SymbolId check_driver_atom_symbol(const Link* link, AtomId atom)
+ {
+@@ -10628,14 +10633,19 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+     }
+     else if (valid)
+     {
+-        const Object object = check_driver_object_build(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch);
++        ObjectFileStream spans = { 0 };
++        ObjectFileStream* stream = getenv("BUSTER_OBJECT_TEXT_STREAM") != NULL ? &spans : NULL;
++        const Object object = check_driver_object_build_file(&code, sections, debug ? &dwarf.object : NULL, source_path, scratch, stream);
+         // The optional dump consumes the same resolved Link as the object writer. Validate and render it
+         // before publishing the file, so a later diagnostic cannot leave a newly emitted rejected object.
+         valid = object.error == OBJECT_ERROR_NONE && (!dump_static || check_driver_dump_link(&code.link, &emission));
+         if (object.error == OBJECT_ERROR_NONE)
+         {
+             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
+-            valid = valid && object_write_file(output_path, object.bytes, object.size) == OBJECT_ERROR_NONE;
++            if (stream != NULL && getenv("BUSTER_OBJECT_STREAM_AUDIT") != NULL)
++                fprintf(stderr, "object-text-stream\tbytes=%llu\tspans=%llu\tfile=%llu\n",
++                        (unsigned long long)spans.borrowed, (unsigned long long)spans.count, (unsigned long long)object.size);
++            valid = valid && object_write_stream(output_path, object.bytes, object.size, stream) == OBJECT_ERROR_NONE;
+             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
+         }
+         if (!valid)
+diff --git a/src/buster/compiler/object_writer.c b/src/buster/compiler/object_writer.c
+index fdaf8de38..44dd7f7e8 100644
+--- a/src/buster/compiler/object_writer.c
++++ b/src/buster/compiler/object_writer.c
+@@ -80,6 +80,7 @@
+ #include <fcntl.h>
+ #include <unistd.h>
+ #include <sys/stat.h>
++#include <sys/uio.h>
+ 
+ // CPU architecture dependent includes
+ #include "host_isa.h"
+@@ -1860,7 +1861,22 @@ static uint16_t object_symbol_section_index(uint32_t index)
+ }
+ 
+ // The sections of atoms' contents: each atom's bytes at its offset, int3 in code's gaps and zero in the others'.
+-static void object_fill_sections(const ObjectBuilder* builder, uint8_t* bytes)
++// The borrowed text spans of a directly written ELF. Metadata and all other bytes stay in
++// the ordinary image. The output arena and the link's atom byte arenas outlive the file write.
++typedef struct ObjectFileStream
++{
++    struct iovec* spans;
++    uint64_t count;
++    uint64_t covered;
++    uint64_t borrowed;
++} ObjectFileStream;
++
++static void object_file_span(ObjectFileStream* stream, const void* data, uint64_t size)
++{
++    if (size != 0) stream->spans[stream->count++] = (struct iovec){ .iov_base=(void*)data, .iov_len=size };
++}
++
++static void object_fill_sections(const ObjectBuilder* builder, uint8_t* bytes, ObjectFileStream* stream)
+ {
+     const LinkAtoms* atoms = &builder->link->atoms;
+     const ObjectUnits* units = builder->units;
+@@ -1871,15 +1887,33 @@ static void object_fill_sections(const ObjectBuilder* builder, uint8_t* bytes)
+         {
+             uint8_t* contents = bytes + builder->headers[section->index].sh_offset;
+             const uint8_t gap = section->class == BUSTER_LINK_CLASS_TEXT ? BUSTER_OBJECT_INT3 : 0;
++            const bool borrowed = stream != NULL && section->class == BUSTER_LINK_CLASS_TEXT;
++            if (borrowed)
++            {
++                const uint64_t at = builder->headers[section->index].sh_offset;
++                object_file_span(stream, bytes + stream->covered, at - stream->covered);
++                stream->covered = at + builder->headers[section->index].sh_size;
++            }
+             uint64_t end = 0;
+             for (uint32_t i = section->atom_begin; i < section->atom_end; i += 1)
+             {
+                 const AtomId atom = builder->atoms[i];
+                 const uint64_t offset = units->atom_offset[atom];
+-                memset(contents + end, gap, offset - end);
+-                if (atoms->size[atom] != 0)
++                const uint64_t padding = offset - end;
++                if (borrowed)
+                 {
+-                    memcpy(contents + offset, atoms->bytes[atom], atoms->size[atom]);
++                    // Most x86 functions start at 16-byte alignment. The common padding never
++                    // faults the output image's unused text pages.
++                    static const uint8_t trap[16] = { 204,204,204,204,204,204,204,204,204,204,204,204,204,204,204,204 };
++                    if (padding > sizeof(trap)) memset(contents + end, gap, padding);
++                    object_file_span(stream, padding > sizeof(trap) ? contents + end : trap, padding);
++                    object_file_span(stream, atoms->bytes[atom], atoms->size[atom]);
++                    stream->borrowed += atoms->size[atom];
++                }
++                else
++                {
++                    memset(contents + end, gap, padding);
++                    if (atoms->size[atom] != 0) memcpy(contents + offset, atoms->bytes[atom], atoms->size[atom]);
+                 }
+                 end = offset + atoms->size[atom];
+             }
+@@ -2357,7 +2391,7 @@ static void object_fill_headers(const ObjectBuilder* builder, uint8_t* bytes)
+     memcpy(bytes + builder->headers_offset, builder->headers, builder->header_count * sizeof(Elf64_Shdr));
+ }
+ 
+-static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* symbols, uint32_t unit, ObjectOptions options, String8 source_name, Arena* arena)
++static Object object_build_file(const Link* link, ObjectUnits* units, ObjectSymbols* symbols, uint32_t unit, ObjectOptions options, String8 source_name, Arena* arena, ObjectFileStream* stream)
+ {
+     Object result = { 0 };
+     Scratch scratch = scratch_begin(arena);
+@@ -2410,6 +2444,13 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols*
+     built = built && object_count_debug(&builder);
+     built = built && object_place(&builder, scratch.arena);
+     uint8_t* bytes = built ? arena_push(arena, builder.size, 64) : 0;
++    if (built && stream != NULL)
++    {
++        const uint64_t key = (uint64_t)unit * BUSTER_LINK_CLASS_COUNT;
++        const uint32_t atoms = units->atom_begin[key + BUSTER_LINK_CLASS_COUNT] - units->atom_begin[key];
++        stream->spans = BUSTER_ARENA_PUSH_ARRAY(arena, struct iovec, (uint64_t)atoms*2 + builder.section_count + 1);
++        if (stream->spans == NULL) stream = NULL;
++    }
+     if (built && bytes == 0)
+     {
+         builder.error = OBJECT_ERROR_FULL;
+@@ -2430,7 +2471,8 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols*
+         }
+         memset(bytes + end, 0, builder.headers_offset - end);
+         object_fill_groups(&builder, bytes);
+-        object_fill_sections(&builder, bytes);
++        object_fill_sections(&builder, bytes, stream);
++        if (stream != NULL) object_file_span(stream, bytes + stream->covered, builder.size - stream->covered);
+         object_fill_relocations(&builder, bytes);
+         if (builder.debug != 0)
+         {
+@@ -2473,7 +2515,12 @@ static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols*
+ //   - anything else is written as it is, in order: write rather than pwrite, which a pipe or a terminal refuses.
+ // One write: an object is one buffer, and pwrite or write returns early only for more than 2 GB, on an error, or into a
+ // pipe, which the loop handles.
+-static ObjectError object_write_file(const char* path, const uint8_t* bytes, uint64_t size)
++static Object object_build(const Link* link, ObjectUnits* units, ObjectSymbols* symbols, uint32_t unit, ObjectOptions options, String8 source_name, Arena* arena)
++{
++    return object_build_file(link, units, symbols, unit, options, source_name, arena, NULL);
++}
++
++static ObjectError object_write_stream(const char* path, const uint8_t* bytes, uint64_t size, ObjectFileStream* stream)
+ {
+     ObjectError result = OBJECT_ERROR_NONE;
+     char temporary[PATH_MAX];
+@@ -2505,9 +2552,30 @@ static ObjectError object_write_file(const char* path, const uint8_t* bytes, uin
+         sequential = !S_ISREG(stats.st_mode);
+     }
+     uint64_t written = 0;
++    uint64_t first = 0;
+     while (result == OBJECT_ERROR_NONE && written < size)
+     {
+-        const ssize_t count = sequential ? write(fd, bytes + written, size - written) : pwrite(fd, bytes + written, size - written, (off_t)written);
++        ssize_t count;
++        if (stream != NULL && stream->count != 0)
++        {
++            const uint64_t remaining = stream->count - first;
++            const int vectors = remaining > 256 ? 256 : (int)remaining;
++            count = sequential ? writev(fd, stream->spans + first, vectors) : pwritev(fd, stream->spans + first, vectors, (off_t)written);
++            size_t consumed = count > 0 ? (size_t)count : 0;
++            while (consumed != 0)
++            {
++                struct iovec* span = stream->spans + first;
++                if (consumed < span->iov_len)
++                {
++                    span->iov_base = (uint8_t*)span->iov_base + consumed;
++                    span->iov_len -= consumed;
++                    break;
++                }
++                consumed -= span->iov_len;
++                first += 1;
++            }
++        }
++        else count = sequential ? write(fd, bytes + written, size - written) : pwrite(fd, bytes + written, size - written, (off_t)written);
+         if (count > 0)
+         {
+             written += (uint64_t)count;
+@@ -2539,6 +2607,11 @@ static ObjectError object_write_file(const char* path, const uint8_t* bytes, uin
+     return result;
+ }
+ 
++static ObjectError object_write_file(const char* path, const uint8_t* bytes, uint64_t size)
++{
++    return object_write_stream(path, bytes, size, NULL);
++}
++
+ static bool object_write_units(const Link* link, ObjectUnits* units, ObjectOptions options, const char* const* paths, const String8* source_names, ObjectError* errors)
+ {
+     Scratch scratch = scratch_begin(0);
