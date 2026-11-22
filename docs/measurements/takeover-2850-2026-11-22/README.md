@@ -443,6 +443,12 @@ With `-Wall -Wextra` (`wall-bbe80f1a9.txt`) the objects are the ordinary compile
 are not: a supplied body's uses of its parameters and of the unit's declarations are missing from the reader's unused
 analysis, which then warns of them. B1's second half is open.
 
+By default flags it holds on these corpora and not in general (`boundary-b1/unit-end/`): `w1.c` has a `static`
+function that is used and never defined, of which the ordinary compile warns at the unit's end
+(`-Wundefined-internal`, on by default; `w1-plain.err`). The driver gives a unit with a mask no unit-end warnings, so
+the compile with `w1.c`'s two bodies supplied is silent about it (`w1-sup.err`; the object is the same). None of the
+four corpora has such a function.
+
 Two things the first runs found, both fixed in the scaffold: a command of several units reads each through a view
 without its attested declarations' tokens, and a mask holds the view off, so the recording names tokens by their index
 in the unit's own parse; and an asm statement that leaves no row in its function (an empty template's barrier) still
@@ -522,10 +528,11 @@ source doesn't). So a supplier that makes the function has the references.
 
 With every body masked, a quarter of the compile is the kernel and the largest symbol by far is the page clearing
 (44 M cycles, 7.7 ms): the reader still makes its columns for every token of the unit, masked or not (the peak is 216
-to 222 MB against 238). The bodies' tokens removed from the source left 14.2 ms between `check-input` and `lower`
-("With no function body" above); masked in place they leave 25.5. The 11 ms between the two is what the masked tokens
-cost by being there, and a reader that reads a view without them (as it reads a view without a unit's attested
-declarations) would not pay it.
+to 222 MB against 238). The bodies' tokens removed from a preprocessed source left 14.2 ms between `check-input` and
+`lower` ("With no function body" above, at `d541430bf`); masked in place in the frozen source they leave 25.5 (at
+`0b150b71b`). The two are not one experiment, so the 11 ms between them is an estimate of what the masked tokens cost
+by being there. A reader that reads a view without them (as it reads a view without a unit's attested declarations)
+is not built, and what it saves is not measured.
 
 In the ordinary compile no function is 5%: `check_input_expressions_coded_range` 4.66, `check_input_resolve_range`
 4.24, `check_graph_run` 4.17, `check_lower_drain` 3.55, `tier0_generate` 2.72, `check_program_references` 2.42. A
