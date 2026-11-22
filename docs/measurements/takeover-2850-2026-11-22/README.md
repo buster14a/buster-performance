@@ -1116,3 +1116,29 @@ objects and diagnostics one set):
 
 No compile runs the piece's code. The compiler's own source reads 0.25% slower in all seven rounds with 54 thousand
 instructions more of 8,927 M: the executable's layout with the piece in it, not work of the piece's.
+
+## The machine's roots before the walk against the program's controls (`machine-alone/develop/pairs-a0261712f/`)
+
+A producer has no node to pair a control with its expression's tape: it has the control's token. The branch
+`claude/2850-bodies-before` (`a0261712f`, on the bodies' entries' branch) counts, for each lowered body, each control
+with an expression against the roots the machine with no node of the walk's ran on before the walk: by the
+expression's root's token, how many such roots there are, and whether the one root's control's token, as the reader
+has it before the walk (the root's record's own; an initialization's declaration), is the control's.
+`measure-node-machine --shadow --front-alone --passes 0`, Develop builds on this session's machine (counts);
+`scripts/pairs-reduce.py`, `reduced.txt`:
+
+| controls with an expression | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| an EVALUATE's: with one root; none | 31,054; 780 | 6,257; 281 | 10,778; 1,223 | 11,216; 738 |
+| a branch's | 12,381; 143 | 1,612; 263 | 3,865; 274 | 5,753; 337 |
+| a RETURN's value | 3,861; 21 | 1,210; 5 | 1,014; 159 | 4,246; 205 |
+| an INITIALIZE's value part | 3,863; 169 | 1,722; 39 | 6,895; 4,925 | 1,563; 368 |
+| another's (a `switch`'s, a bound's, a kept result's) | 96; 0 | 95; 78 | 19; 0 | 138; 14 |
+| with several roots | 0 | 0 | 0 | 0 |
+| with one root whose control's token is not the control's | 0 of 51,255 | 0 of 10,896 | 0 of 22,571 | 0 of 22,916 |
+| roots it ran on in those bodies that no control has | 45 of 51,300 | 4 of 10,900 | 26 of 22,597 | 230 of 23,146 |
+
+So a control's token finds its expression's root, and only that one, wherever the front made it; where it made none
+the body is one whose root the front lost, or has a braced initializer, whose parts are roots of the lowering's and
+none of the front's (the listed controls of bodies the machine calls whole: 8 lines on `sqlite3.c`, in its four such
+bodies). What the roots no control has are (45 on `sqlite3.c`) was not read.
