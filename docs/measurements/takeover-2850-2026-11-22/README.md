@@ -358,3 +358,13 @@ with `-Wall -Wextra`, with no mask and with the masks 2:0, 2:1 and 3:1: 32 confi
 diagnostics one set in the two builds (`maskdiff/summary.txt`; a masked musl unit that both reject counts as the same).
 With half of `sqlite3.i`'s bodies masked (2:0) the branch's compile is 649.8 M user instructions and main's 797.2 M
 (Develop builds; unmasked, 1,160.047 M and 1,160.048 M), so the paths do run in the compared compiles.
+
+## Type ids under a mask (`typeids/`)
+
+What the boundary's interface turns on. `ty.h` is a system header whose unused static function makes types (a pointer
+to an array of a struct, a pointer to a pointer, a pointer to a complex); `ty.c` includes it and then has a function
+whose expressions use types made after it. `--dump-typed` of `ty.c`, by the branch's Develop build at `0b150b71b`:
+read whole (`eager.txt`), the comparison `pp != 0` has its operands at type 608; with `-flazy-system-headers`
+(`lazy.txt`: the planner masks the unused body, `deferred=1`), at type 568. So a type made after a masked body has
+another id than in the whole read, and nothing recorded from a whole read that names a type by its id can be given to a
+masked read. A lowered function (`Tier0Function`) names nothing by type id: only symbols.
