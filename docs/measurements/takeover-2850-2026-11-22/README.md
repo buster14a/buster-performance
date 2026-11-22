@@ -931,8 +931,8 @@ musl's 3; `scripts/scan-reduce.py`, `machine-alone/9700x-scan/reduced.txt`; ever
   The compiler's own source, on this session's machine (`machine-alone/develop/scan-90c42e997/`): 748 of 748, and none
   of its 222 whole bodies.
 - The one `sqlite3.c` body it leaves is `sqlite3OpcodeName` (`sqlite3.c:38923`, 404 tokens), a block's static table of
-  strings: the front's report counts a root lost there with no `sizeof`, visit or character constant of the scan's in
-  the body.
+  strings: the front's report counts a root lost there, and the scan finds no token of its three kinds whose value
+  reaches a root's. Why the front loses one there was not read.
 - musl's ticks a token are four times the others': its 18,584 bodies are 77 tokens each on average (the headers'
   inline functions among them), and each scan is timed by two reads of the clock.
 - The specification's gate for a refusal before the sweeps was 20 ticks a body token on the refused bodies.
@@ -945,9 +945,11 @@ musl's 3; `scripts/scan-reduce.py`, `machine-alone/9700x-scan/reduced.txt`; ever
 **Where the shadow's run goes, by symbol** (`machine-alone/9700x-scan/profile-walk-90c42e997/`, `profile-alone-90c42e997/`;
 `scripts/profile-alone.sh`: four `perf record` runs each of `measure-node-machine --shadow` on `sqlite3.c`, with
 `--front --front-types --front-tests --front-sweeps` and with `--front-alone`): 2,068 M and 2,485 M cycles a run, most
-of either the shadow's own passes after the pipeline. The piece adds 417 M: the tests' node function
-(`node_census_node`) 66 M, T (`node_machine_type_in_context` and `node_machine_rule`) 48 M, the records' digest 28 M
-(the shadow's comparison, outside the timed run), the walk's function with the piece's compaction inlined 26 M,
-the front 25 M, the reader-time driver 26 M, C 25 M, `node_alone_bodies` (the graph's writing) 28 M, the kernel's
-page clearing 25 M (the piece's second graph and front), X 11 M. No function of the machine's is small enough to drop
-or large enough to be the lever alone: the reference's sweeps cost what they cost a record.
+of either the shadow's own passes after the pipeline. The run with the piece has 417 M more, by symbol: the tests' node
+function (`node_census_node`) 66 M, T (`node_machine_type_in_context` and `node_machine_rule`) 48 M, the records'
+digest 28 M, the walk's function with the piece's compaction inlined 26 M, the front 25 M, the reader-time driver 26 M,
+C 25 M, `node_alone_bodies` (the graph's writing) 28 M, the kernel's page clearing 25 M, X 11 M. These differences are
+not the piece's timed run: they hold the driver's second pass over every root, which keeps the results (the digest is
+made there), and what the comparison after the pipeline adds; the timed run is 154 M ticks, about 223 M cycles. What
+they do show is that 25 M cycles of the run with the piece are first touches of its own memory (its graph, its front,
+its tests' state), some of which may fall inside the timed writing: not separated here.
