@@ -183,3 +183,13 @@ What it says:
 The stand-in is one leaf where a summary node is one node and its rows' splice, and the leaf's own lowering and
 emission are in the variants' later stages, which the middle leaves out: the bound is rough to a millisecond or two
 either way, and it is a ceiling, not a forecast.
+
+### The residue's profile
+
+`bound-d541430bf/profile-all/` and `profile-none/`: eight cycle profiles each (`profile-file.sh`) of the variant with
+every whole tape replaced and of the one with none, summed by `agg.py` (`by-function.txt`; its cycles a token are over
+the unit's 716,136, not the variant's). With no taken expression left, 407 M cycles a compile: the reader's walks that
+are no expression's 15.5 ms (`check_input_declaration`, `_declarator_step`, `_specifiers` and `_declarator` 5.5 of
+them, `check_input_resolve_range` 3.7), the kernel 12.2 (`clear_page_erms` 7.7; the peak is 185 MB where the unit's is
+237), the program and its controls 7.1, the graph's construction 5.7, the lowering 5.0, the warnings 4.6, Tier 0 and
+the emission 4.2.
