@@ -554,3 +554,31 @@ In the ordinary compile no function is 5%: `check_input_expressions_coded_range`
 lowering made lean for simple bodies could drop the controls' building (about 3 ms), most of the lowering's walk (8 to
 10) and, with the references from the function, their walk (2.6): about 11 ms net of its own cost, with every body
 covered. The rest of `check-program`'s 18.8 ms is the warnings' analyses, which are owed either way.
+
+## The profile-guided build (`pgo-168c45a88/`, `scripts/job-pgo2.sh`)
+
+`BUSTER_PGO=1 ./build.sh` did not build at main: a static build compiles its units with `-ffunction-sections` since
+the start's code order (buster#2885, `1f86f3339`), the training passes the units' flags to the instrumented compiler,
+and the compiler refuses the option at the first training compile. `168c45a88` (branch `claude/2850-pgo-training`, main
+`d5fbf14ee` and that one change to `CMakeLists.txt`) trains without it. With it the build finishes on the 9700X
+(`pgo-168c45a88/build.log`: 129 units, 219.7 s), with the default training: the compiler's own units, each
+preprocessed, checked and compiled.
+
+The profile-guided compiler against the ordinary Release build of the same sources (`scripts/pair2.sh`, seven rounds,
+CPU 2, one lane; paired medians). Every run's objects and diagnostics are one set, the ordinary build's:
+
+| | ordinary | profile-guided | paired | range | |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, wall ms | 111.730 | 108.348 | -3.293 | -4.123 to -3.158 | -2.9% |
+| `sqlite3.c`, user cycles M | 536.672 | 518.096 | -18.372 | -23.284 to -16.550 | -3.4% |
+| `sqlite3.c`, user instructions M | 1,215.957 | 1,150.922 | -65.035 | | -5.3% |
+| `main.c`, wall ms | 600.145 | 563.055 | -36.897 | -38.598 to -34.985 | -6.1% |
+| `main.c`, user cycles M | 3,015.283 | 2,804.012 | -210.265 | -216.334 to -203.831 | -7.0% |
+| Lua (34 units), wall ms | 64.310 | 60.019 | -4.262 | -4.385 to -4.191 | -6.6% |
+| Lua, user cycles M | 292.804 | 270.327 | -22.578 | -22.727 to -22.311 | -7.7% |
+| musl (1,336 units), wall ms | 668.810 | 604.227 | -64.973 | -65.573 to -62.542 | -9.7% |
+| musl, user cycles M | 2,717.894 | 2,387.992 | -328.575 | -331.690 to -323.230 | -12.1% |
+
+The kernel's cycles do not move (within a round's noise on three of the four; musl's fall 2.9%). So the build is worth
+3.3 ms of the frozen compile and 6% to 10% of the other three, and no pull request's CI builds it: nothing would have
+said it broke. Every other pair in this record is of ordinary Release builds, and stays so.
