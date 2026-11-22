@@ -890,3 +890,13 @@ their tokens) and 14.0% (4.26 ms).
   (5.77 if a body stopped at the chunk that refuses it). They are the loss the forecasts lacked.
 - **Stopping at the first refusal saves little:** 11.30 of 17.37 ms for the root-lost bodies, and 5.77 of 6.25 for
   the rest: a refused root is late in its body as often as early.
+
+### Every body read before the walk's first chunk (`machine-alone/develop/first-18fd6b349/`, branch at `18fd6b349`)
+
+The comparison above reads a body before the walk acts at it, with the bodies before it walked already. A compile
+that takes bodies in a row walks none of them. `measure-node-machine --shadow --front-alone-first` reads every body of
+the unit before the walk's first chunk (`scripts/alone-opt.sh` with `ALONE_OPTION=--front-alone-first`; Develop build
+on this session's machine, the default warnings): the same 51,306, 10,900, 53,916 and 43,196 roots on `sqlite3.c`,
+Lua, the compiler's own source and musl, no difference, none run by one of the two alone, none taken before an event
+of the walk's or with a token its actions left. So nothing the machine reads of a body is left there by the walk of
+another.
