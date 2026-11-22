@@ -741,7 +741,7 @@ front left the expression):
 | nothing more | | | 35.6% |
 | `sizeof` or `_Alignof`, which the front leaves | 597 | 379 | 45.6% |
 | a bit-field (the tests) | 495 | 187 | 53.3% |
-| a call or value with no template (a struct by value, long double, 128 bits) | 279 | 192 | 64.7% |
+| an operator with no template of C's (a pointer difference, a conditional, a division or remainder, a comma) | 279 | 192 | 64.7% |
 | a callee T refuses (a library call computed in place, returns_twice, no prototype) | 133 | 90 | 70.0% |
 | no expression of the front's, another reason, a statement's | 152 | 92 | 75.2% |
 | the same, a condition's | 90 | 62 | 80.7% |

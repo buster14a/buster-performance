@@ -21,7 +21,7 @@ for line in open(sys.argv[2]):
     body, token, at, step, detail, op, kind, n = int(f[0]), int(f[1]), int(f[2]), int(f[3]), int(f[4], 16), int(f[5]), int(f[6]), int(f[7])
     if step == 1: k = 'a callee T refuses (a library call computed in place, returns_twice, no prototype)' if detail == 9 else f'T refuses ({detail})'
     elif step == 2: k = {0x20: 'a bit-field (the tests)', 0x40: 'an aggregate\'s value (the tests)', 0x100: 'a declaration\'s flag (the tests)'}.get(detail, f'tests {detail:#x}')
-    elif step == 3: k = 'a call or value with no template (a struct by value, long double, 128 bits)'
+    elif step == 3: k = "an operator with no template of C's (a pointer difference, a conditional, a division or remainder, a comma)"
     else:
         text = statement(at)
         if kind == 5: k = 'a brace initializer\'s element'
