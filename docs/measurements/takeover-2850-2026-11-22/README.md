@@ -254,3 +254,53 @@ or rewritten, on the benchmark directory's btrfs and on tmpfs.
 Writing the object to a new file costs 0.38 ms on this filesystem, 4% of the target, and rewriting an existing one 0.36
 more. So the floor of a compile that keeps 8 MB and writes this object is about 1.0 ms of the wall clock: 0.2 for the
 process, 0.4 for its memory, 0.4 for the write.
+
+### With every body masked in place: the body flip's real ceiling
+
+`mask-exp-mask/` (`scripts/mask.sh`, `mask-reduce.py`; the tree is main `d541430bf` with `scripts/experiment.patch`,
+Release). With `BUSTER_EXPERIMENT_MASK_BODIES` set, the driver masks every function body as `-flazy-system-headers`
+masks a deferred one (2,674 bodies, 568,641 tokens): the reader's walk jumps over it and no later stage sees it, while
+its tokens stay in the unit's columns. The object then has no function; the times are what the unit costs around its
+bodies. Seven runs a variant, in turn, medians, ms:
+
+| | the preprocessed file | masked | `sqlite3.c` | masked |
+| --- | ---: | ---: | ---: | ---: |
+| preprocess and parse | 10.498 | 10.441 | 16.056 | 16.170 |
+| check-input | 41.356 | 22.585 | 41.859 | 22.841 |
+| check-expressions | 10.654 | 0.280 | 10.612 | 0.285 |
+| check-program | 18.737 | 2.821 | 18.829 | 2.749 |
+| lower | 11.631 | 0.351 | 11.464 | 0.368 |
+| **the middle** | **85.840** | **27.010** | **86.489** | **27.142** |
+| Tier 0, the emission, the object | 8.750 | 0.202 | 8.801 | 0.203 |
+| total | 105.413 | 37.974 | 111.684 | 43.799 |
+| peak, MB | 232 | 210 | 238 | 216 |
+
+- **A body flip in today's host is worth 59 ms of the middle, not 72.** The 13 ms between this residue (27.1) and
+  the unit without its bodies' tokens (14.2) are the reader's unit-wide passes, which read every token whether the
+  walk does or not, and the memory, which does not fall (216 MB): 21 ns for each of the bodies' 568,641 tokens.
+- With the mask the reader's coded walk is off for the unit (`check_input_expressions_coded_range`'s condition), so
+  the file scope's few expressions take the older walk here.
+- So `sqlite3.c` with every body taken by something that costs nothing would compile in 43.8 ms and the bodies' code
+  (8.6 ms of Tier 0 and emission today); what takes the bodies adds its own cost.
+
+### What blocks a body, and the order that unlocks the most
+
+`census/` (`scripts/experiment.patch`'s `experiment-body` lines, reduced by `scripts/unlock.py`; `census/*.txt` have the
+four corpora's slice, placement and body lines). A body is free where every expression of it is the census's and the
+reference machine's, and its controls are the plain ones (an evaluation, an initialization, a return, a branch, a
+jump, an exit, a result). On `sqlite3.c`'s 2,668 lowered bodies and 262,863 evaluated nodes:
+
+| unlocked, in the order that frees the most | bodies with it | bodies whole | their nodes |
+| --- | ---: | ---: | ---: |
+| nothing more | | 2,086 (78.2%) | 43.4% |
+| bit-fields | 188 | 83.4% | 52.2% |
+| the machine's refusals (291 expressions) | 201 | 89.1% | 63.6% |
+| the callee's tests (library calls) | 141 | 93.7% | 74.6% |
+| the operator's tests | 54 | 95.4% | 76.5% |
+| aggregate values | 33 | 96.4% | 78.3% |
+| braced initializers | 19 | 96.9% | 80.2% |
+| `switch` and `case` | 82 | 100% | 100% |
+
+The placement lines (`experiment-whole`) are an upper bound of what the window decides alone: an expression counts
+where every record of a made kind is the kernel's own, and a record of a kind the kernel never makes is not counted
+against it.
