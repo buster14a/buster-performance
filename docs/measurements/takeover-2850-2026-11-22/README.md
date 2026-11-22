@@ -1022,11 +1022,28 @@ without the reference: a body-level machine made of them needs T behind it for t
 
 The machine's verdicts are of expressions. A body it takes whole runs none of the stages after the reader, so every
 diagnostic those stages decide of a body and not of one expression has to be proved absent, or the body refused. An
-inventory of them from the sources (this session's reading, by an agent; not a measurement): with the default
-warnings the one that stands is the return flow's ("non-void function does not return a value", from
-`check_program_return_flow` over the controls); a `switch`'s are in bodies the machine does not take yet; the
-uninitialized read's and the unused-but-set parameter's are `-Wall`'s and `-Wextra`'s; the unused objects' and labels'
-come from the resolution's events and the token passes, which a taken body keeps.
+inventory of them from the sources (this session's reading, by an agent, each row with its place in the code; not a
+measurement, and not yet checked row by row). Enabled by default, and lost for a body no stage after the reader sees:
+
+- the return flow's two: "non-void function does not return a value", and a `noreturn` function that falls off its end
+  (`check_program_return_flow`, over the controls);
+- a `switch`'s: an enumeration's values not handled, a case value outside it, an empty case range, and the errors of a
+  duplicate case, a second default, a condition that is no integer and a case that is no constant;
+- the walk's own, at a statement: a `return;` in a function with a result (an error by default), a `_Static_assert` in
+  a body, a case label's constant's warnings, a statement's shape it does not support;
+- a call's, read from the selected program: a callee that needs a target feature the caller lacks (an error), an AVX
+  vector argument's ABI (`-Wpsabi`), a call from an interrupt routine (`-Wexcessive-regsave`);
+- an `asm` statement's operands' and constraints' errors; a `musttail` return's errors; an initializer's (excess
+  elements, a string too long, braces around a scalar, a static local's that is no constant).
+
+Not lost: the unused objects', parameters' and labels' warnings and an empty body's and a dangling else's, which come
+from the resolution's events and the token passes a taken body keeps; and the uninitialized read's and the
+unused-but-set parameter's are `-Wall`'s and `-Wextra`'s, where they need their own proofs.
+
+The count below is of the first row's first half alone, by the most conservative test of it. It refuses no `noreturn`
+function (a void one that falls off passes it), no call of the fourth row and none of the others: each needs its own
+refusal, read at its place in the code and held by a body that stays loud, before a compile takes a body. So the
+figure is an upper bound of what that test leaves, and what the other rows refuse on `sqlite3.c` is not counted.
 
 `scripts/experiment-window-bodies.patch` prints, for each lowered body, the tokens' facts the most conservative proof
 of the return flow's silence reads (`experiment-silence`): the result is void, or the function is `main`, or the
