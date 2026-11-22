@@ -1,0 +1,119 @@
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..1eeb66491 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -3323,6 +3323,78 @@ static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTa
+     }
+ }
+ 
++// For a loaded pointer lvalue, an ordinary -> whose base carries no constant or fault produces
++// the same member lvalue for each use of its pointer type, member name and source flags. Keep
++// successful results in this run alone. A source position earlier than the proof runs the action
++// again because the pointed-to tag may still be incomplete there.
++typedef struct CheckMemberFact CheckMemberFact;
++struct CheckMemberFact
++{
++    TypeId pointer;
++    uint32_t name;
++    uint32_t flags;
++    uint32_t position;
++    TypeId result_type;
++    uint32_t result_flags;
++    uint32_t offset;
++};
++
++#define BUSTER_CHECK_MEMBER_FACTS 256u
++
++static inline CheckMemberFact* check_graph_member_fact(const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckMemberFact* facts)
++{
++    const uint32_t operand = graph->operand0[node];
++    if (operand >= node || stream->value_categories[operand] != CHECK_LVALUE || stream->payload_rows[operand] != 0 ||
++        (stream->value_constants[operand] != CHECK_CONSTANT_ADDRESS && stream->value_constants[operand] != CHECK_CONSTANT_NONE) ||
++        (stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0))
++    {
++        return NULL;
++    }
++    const uint32_t name = graph->members[node];
++    const TypeId pointer = stream->value_types[operand];
++    return facts + ((name ^ (type_index(pointer) * 31u)) & (BUSTER_CHECK_MEMBER_FACTS - 1));
++}
++
++static bool check_graph_member_take(const CheckGraph* graph, CheckStream* stream, uint32_t node, const CheckMemberFact* fact)
++{
++    const uint32_t operand = graph->operand0[node];
++    const TypeId pointer = stream->value_types[operand];
++    const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
++    const bool taken = pointer != 0 && fact->pointer == pointer && fact->name == graph->members[node] &&
++                       fact->flags == stream->value_flags[operand] && position >= fact->position;
++    if (taken)
++    {
++        stream->value_types[node] = fact->result_type;
++        stream->value_flags[node] = fact->result_flags;
++        stream->value_categories[node] = CHECK_LVALUE;
++        stream->conversions[node].operands[0] = (CheckConversion){ .type = type_unqualified(pointer), .flags = BUSTER_CHECK_CONVERT_LVALUE };
++        stream->member_offsets[node] = fact->offset;
++        stream->statistics.scalar_nodes += 1;
++    }
++    return taken;
++}
++
++static void check_graph_member_publish(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t node, CheckMemberFact* fact)
++{
++    const uint32_t operand = graph->operand0[node];
++    const TypeId pointer = stream->value_types[operand];
++    const CheckConversion conversion = stream->conversions[node].operands[0];
++    if (type_is_valid(types, pointer) && type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER &&
++        (type_kind(types, type_element(types, pointer)) == BUSTER_TYPE_KIND_STRUCT ||
++         type_kind(types, type_element(types, pointer)) == BUSTER_TYPE_KIND_UNION) &&
++        conversion.type == type_unqualified(pointer) && conversion.flags == BUSTER_CHECK_CONVERT_LVALUE &&
++        stream->diagnostics[node] == CHECK_DIAG_NONE && stream->warnings[node] == 0 &&
++        stream->value_constants[node] == CHECK_CONSTANT_NONE && stream->value_categories[node] == CHECK_LVALUE &&
++        stream->value_objects[node] == 0 && stream->payload_rows[node] == 0 && stream->member_offsets[node] <= UINT32_MAX)
++    {
++        *fact = (CheckMemberFact){
++            .pointer = pointer, .name = graph->members[node], .flags = stream->value_flags[operand],
++            .position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE,
++            .result_type = stream->value_types[node], .result_flags = stream->value_flags[node], .offset = (uint32_t)stream->member_offsets[node],
++        };
++    }
++}
++
+ // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
+ // default is check_graph_region_postorder's batches, which the benchmark measured faster). Dependencies before begin
+ // are already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them
+@@ -4241,6 +4313,18 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->zero_columns = zero_output;
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
++        // This schedule has no level order. Its unused order scratch holds the field facts until the
++        // pass finishes. Query replay and warnings subsequently use their own original scratch.
++        CheckMemberFact* member_facts = !regions && !transitions && zero_output && graph->members != NULL && graph->fp_environments == NULL &&
++                                        (graph->fp_contract_default & BUSTER_CHECK_FP_ENV_ACCESS) == 0 &&
++                                        graph->overload_candidate_count == 0 && count >= 4096 ?
++                                        (CheckMemberFact*)(void*)order : NULL;
++        _Static_assert(BUSTER_CHECK_MEMBER_FACTS * sizeof(CheckMemberFact) <= 4096 * sizeof(uint32_t) &&
++                       _Alignof(CheckMemberFact) <= _Alignof(uint32_t), "member facts fit the unused order scratch");
++        if (member_facts != NULL)
++        {
++            memset(member_facts, 0, BUSTER_CHECK_MEMBER_FACTS * sizeof(CheckMemberFact));
++        }
+         while (node < count)
+         {
+             if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+@@ -4250,7 +4334,15 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+             }
+             else if (!regions || pure[node] == 0)
+             {
+-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
++                CheckMemberFact* fact = member_facts != NULL && graph->ops[node] == CHECK_OP_ARROW ? check_graph_member_fact(graph, stream, node, member_facts) : NULL;
++                if (fact == NULL || !check_graph_member_take(graph, stream, node, fact))
++                {
++                    check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
++                    if (fact != NULL)
++                    {
++                        check_graph_member_publish(types, graph, stream, node, fact);
++                    }
++                }
+                 node += 1;
+             }
+             else

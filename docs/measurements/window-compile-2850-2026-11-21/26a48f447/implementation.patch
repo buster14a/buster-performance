@@ -1,0 +1,372 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 1772bb019..1b3e4ef86 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1160,11 +1160,9 @@ struct CheckEmitBody
+     uint32_t* row_tokens;
+     uint32_t row_count;
+     uint32_t body_offset;
+-    // A window's body (check_program_emit_windows): its code's records are the ones its references mark, in their order
+-    // (check_program_emit_window_keep), `kept_records` of them, which the merge's fixups read in place of its code's
+-    // count; false for every other body, whose code's records are all there.
+-    bool windowed;
+-    uint32_t kept_records;
++    // A completed window can release its instruction records and fixup ends. In that case its references' instruction
++    // and addend hold the relocation's byte offset and adjusted addend. Their symbolic targets can still be remapped.
++    bool resolved_fields;
+     CheckProgramStatus status;
+     uint32_t token;
+     const char* reason;
+@@ -1720,8 +1718,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+     Arena* bytes = lane->bytes;
+     const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+     *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+-    // What the merge reads stays on the lane's scratch; the offsets don't.
+-    body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
++    // A window resolves fields before releasing the encoder's ends. Other bodies keep them until the merge.
++    Arena* ends = lane->code == &check_program_thread_window ? lane->code : scratch;
++    body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(ends, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
+     body->label_offsets = code->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, code->label_count) : 0;
+     // A naked function's templates' labels, or its asm bodies' (#1839, EmittedCode.asm_label_records): it has no body.
+     const uint32_t asm_label_count = naked != 0 ? naked->label_count : code->asm_label_count;
+@@ -1773,10 +1772,19 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+     {
+         // The branch columns alone, which sizing reads and writes by: the code generators' records are valid by
+         // construction, which x86_validate checks above only with `verify` (#532).
+-        const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+-        const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
++        // A windowed straight-line body has no displacements to size. The encoder produces its record starts while
++        // writing bytes. The count bound guarantees branch sizing's signed-dword limit even for 15-byte instructions.
++        const bool straight = lane->code == &check_program_thread_window && code->branch_count == 0 && code->count <= INT32_MAX / BUSTER_X86_MAX_INSTRUCTION_BYTES;
++        BranchSizing sizing = { .error = BRANCH_SIZING_OK };
++        if (!straight)
++        {
++            const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
++            sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) :
++                                                      (BranchSizing){ .error = shape.error };
++        }
+         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
+-        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
++        const bool need_offsets = run->sources || run->unwind || code->label_count != 0 || asm_label_count != 0;
++        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, straight && need_offsets ? offsets : NULL, body->fixup_ends);
+         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
+         valid = length >= 0;
+         if (valid && run->sources)
+@@ -2033,15 +2041,31 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
+     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
+ }
+ 
++static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena* kept, const Arena* window, uint64_t mark);
++
++static void check_program_emit_window_pop(Arena* window, uint64_t mark, bool poison)
++{
++    const uint64_t written = window->length;
++    arena_pop_to(window, mark);
++    if (poison)
++    {
++        memset(window->base + mark, BUSTER_CHECK_EMIT_WINDOW_POISON, written - mark);
++    }
++}
++
+ // A lowered part's code on lane `lane`: each body's Tier 0 code, the lane's function access column given, and its code
+-// after Tier 0 (check_program_emit_code) until one of them fails.
+-static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
++// after Tier 0 (check_program_emit_code) until one of them fails. In a non-debug window, keep only what the merge reads
++// after each body and reuse its machine-code storage for the next body. window_mark precedes the part's lowering so
++// references to its streams are also preserved. UINT64_MAX lets the caller retain the whole part.
++static bool check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part, uint64_t window_mark)
+ {
++    bool kept = true;
+     const uint32_t end = part->lower.end;
+     part->tier0_failed = end;
+     part->code_failed = end;
+     for (uint32_t b = part->lower.first; part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && b < end; b += 1)
+     {
++        const uint64_t code_mark = window_mark != UINT64_MAX ? lane->code->length : 0;
+         Tier0Function* function = &run->lowered->functions[b];
+         // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's; one that takes
+         // directives is an assembled unit, which the merge publishes (check_program_emit_asm_unit).
+@@ -2130,7 +2154,16 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+                 part->code_failed = b;
+             }
+         }
++        if (window_mark != UINT64_MAX && kept && part->tier0_failed == end && part->code_failed == end)
++        {
++            kept = check_program_emit_window_keep(run, b, lane->scratch, lane->code, window_mark);
++            if (kept)
++            {
++                check_program_emit_window_pop(lane->code, code_mark, run->poison_windows);
++            }
++        }
+     }
++    return kept;
+ }
+ 
+ // A part of the bodies on lane `lane`, its halves that `half` names: its lowering, then its code.
+@@ -2142,7 +2175,7 @@ static void check_program_emit_part(CheckEmitRun* run, CheckEmitLane* lane, Chec
+     }
+     if (half != CHECK_EMIT_HALF_LOWER)
+     {
+-        check_program_emit_code_half(run, lane, part);
++        check_program_emit_code_half(run, lane, part, UINT64_MAX);
+     }
+ }
+ 
+@@ -2614,52 +2647,68 @@ static void* check_program_emit_window_copy(Arena* kept, const Arena* window, ui
+     return result;
+ }
+ 
+-// What the merge reads of body `b`'s code and lowering once its window is popped (check_program_emit_windows), copied out
+-// of the window (its bytes past `mark`) to `kept`: its references and the records they mark, in their order, the
+-// references renumbered to them (CheckEmitBody.kept_records); its asm labels' names; and with -g its locals' homes,
+-// classes and bindings. Its code's other slices, which nothing reads past its code, are nulled where they were the
+-// window's. A body whose references don't ascend over its records keeps every record, so that the merge's fixups refuse
+-// it as they would. Returns false if `kept` has no room.
++// The C emitter has one reference per marked instruction. Resolve their fields in order while the records
++// and the encoder's ends are live. A template may instead have both fields of one instruction.
++static bool check_program_emit_window_fields(const EmittedCode* code, const uint32_t* ends, LinkReference* located)
++{
++    uint32_t previous = 0;
++    for (uint32_t i = 0; i < code->reference_count; i += 1)
++    {
++        const LinkReference reference = code->references[i];
++        const uint32_t index = reference.instruction;
++        uint32_t offset = 0;
++        int64_t addend = 0;
++        if (index >= code->count || (i != 0 && previous >= index) ||
++            !link_code_field(code->records + index, &reference, ends, i, &offset, &addend))
++        {
++            return false;
++        }
++        located[i] = reference;
++        located[i].instruction = offset;
++        located[i].addend = addend;
++        previous = index;
++    }
++    return true;
++}
++
++// Keep the merge's symbolic fields, asm-label names and debug metadata before the window is popped. Ordinary fields
++// carry final offsets and addends, so the instruction records and encoder's fixup ends can be released. Other layouts
++// keep both until the general linker validates their fields. Returns false if the output arena has no room.
+ static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena* kept, const Arena* window, uint64_t mark)
+ {
+     EmittedCode* code = run->codes + b;
+     CheckEmitBody* body = run->bodies + b;
+     Tier0Function* function = run->lowered->functions + b;
+-    // The marked records, as link_add_code_fixups pairs them with the encoder's fixup ends: the references' distinct
+-    // instructions, ascending (a displacement's and an immediate's reference share one).
+-    bool ascending = true;
+-    uint32_t marked = 0;
+-    uint32_t previous = UINT32_MAX;
+-    for (uint32_t i = 0; i < code->reference_count; i += 1)
++    const bool owned = check_program_emit_windowed(window, mark, code->records);
++    bool valid = true;
++    bool resolved = false;
++    uint32_t* fixup_ends = body->fixup_ends;
++    LinkReference* references = NULL;
++    X86Instruction* records = code->records;
++    const bool local_references = code->reference_count == 0 || check_program_emit_windowed(window, mark, code->references);
++    if (owned && local_references)
+     {
+-        const uint32_t instruction = code->references[i].instruction;
+-        ascending = ascending && instruction < code->count && (previous == UINT32_MAX || instruction >= previous);
+-        marked += instruction != previous ? 1 : 0;
+-        previous = instruction;
++        references = code->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(kept, LinkReference, code->reference_count) : NULL;
++        valid = code->reference_count == 0 || references != NULL;
++        resolved = valid && check_program_emit_window_fields(code, body->fixup_ends, references);
+     }
+-    const bool compact = ascending && check_program_emit_windowed(window, mark, code->records) && check_program_emit_windowed(window, mark, code->references);
+-    bool valid = true;
+-    LinkReference* references = check_program_emit_window_copy(kept, window, mark, code->references, code->reference_count, sizeof(LinkReference), &valid);
+-    X86Instruction* records = compact ? (marked != 0 ? BUSTER_ARENA_PUSH_ARRAY(kept, X86Instruction, marked) : NULL) :
+-                                        check_program_emit_window_copy(kept, window, mark, code->records, code->count, sizeof(X86Instruction), &valid);
+-    valid = valid && (!compact || marked == 0 || records != NULL);
+-    if (valid && compact)
+-    {
+-        uint32_t kept_index = UINT32_MAX;
+-        previous = UINT32_MAX;
+-        for (uint32_t i = 0; i < code->reference_count; i += 1)
+-        {
+-            const uint32_t instruction = references[i].instruction;
+-            if (instruction != previous)
+-            {
+-                kept_index += 1;
+-                records[kept_index] = code->records[instruction];
+-                previous = instruction;
+-            }
+-            references[i].instruction = kept_index;
++    if (resolved)
++    {
++        records = NULL;
++        fixup_ends = NULL;
++    }
++    else if (valid)
++    {
++        if (references != NULL)
++        {
++            memcpy(references, code->references, (uint64_t)code->reference_count * sizeof(LinkReference));
+         }
+-        body->windowed = true;
+-        body->kept_records = marked;
++        else
++        {
++            references = check_program_emit_window_copy(kept, window, mark, code->references, code->reference_count, sizeof(LinkReference), &valid);
++        }
++        records = check_program_emit_window_copy(kept, window, mark, code->records, code->count, sizeof(X86Instruction), &valid);
++        fixup_ends = check_program_emit_window_copy(kept, window, mark, body->fixup_ends, code->reference_count, sizeof(uint32_t), &valid);
+     }
+     const uint32_t* asm_label_names = check_program_emit_window_copy(kept, window, mark, code->asm_label_names, code->asm_label_count, sizeof(uint32_t), &valid);
+     const Tier0Home* local_homes = check_program_emit_window_copy(kept, window, mark, code->local_homes, code->local_count, sizeof(Tier0Home), &valid);
+@@ -2669,6 +2718,8 @@ static bool check_program_emit_window_keep(CheckEmitRun* run, uint32_t b, Arena*
+                                                                 code->literals;
+     if (valid)
+     {
++        body->resolved_fields = resolved;
++        body->fixup_ends = fixup_ends;
+         code->references = references;
+         code->literals = literals;
+         code->records = records;
+@@ -2762,21 +2813,16 @@ static bool check_program_emit_windows(CheckEmitRun* run, CheckEmitLane* lane)
+             {
+                 check_program_emit_lower_half(run, lane, part);
+             }
+-            check_program_emit_code_half(run, lane, part);
++            bool kept = check_program_emit_code_half(run, lane, part, run->sources ? UINT64_MAX : mark);
+             const uint32_t end = part->lower.end;
+-            bool kept = part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && part->code_failed == end;
+-            for (uint32_t b = part->lower.first; kept && b < end; b += 1)
++            kept = kept && part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && part->code_failed == end;
++            for (uint32_t b = part->lower.first; run->sources && kept && b < end; b += 1)
+             {
+                 kept = check_program_emit_window_keep(run, b, lane->scratch, window, mark);
+             }
+             if (kept)
+             {
+-                const uint64_t written = window->length;
+-                arena_pop_to(window, mark);
+-                if (run->poison_windows)
+-                {
+-                    memset(window->base + mark, BUSTER_CHECK_EMIT_WINDOW_POISON, written - mark);
+-                }
++                check_program_emit_window_pop(window, mark, run->poison_windows);
+                 // Its streams are gone: only a callee's, which stay, are ready.
+                 for (uint32_t b = part->lower.first; !early[p] && run->inline_table != NULL && b < end; b += 1)
+                 {
+@@ -2878,7 +2924,7 @@ static void check_program_emit_last(CheckEmitRun* run, CheckTier1Inline* inlinin
+                 part.lower.first = b;
+                 part.lower.end = b + 1;
+                 part.lower.stage = CHECK_LOWER_STAGE_NONE;
+-                check_program_emit_code_half(run, lane, &part);
++                check_program_emit_code_half(run, lane, &part, UINT64_MAX);
+                 run->late_tier0_failed = part.tier0_failed != part.lower.end && b < run->late_tier0_failed ? b : run->late_tier0_failed;
+                 run->late_code_failed = part.code_failed != part.lower.end && b < run->late_code_failed ? b : run->late_code_failed;
+             }
+@@ -5612,18 +5658,27 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
+             // A function with patchable_function_entry's NOPs (#1447, CheckEmitBody.sled) has its symbol after the first
+             // `prefix` of them, which the atom's alignment comes before, as clang's: its entry's label is the atom's start.
+             const AtomId atom = link_add_atom(&result->link, BUSTER_LINK_CLASS_TEXT, alignment, body->length, body->bytes, 0);
+-            // A window's body keeps only its marked records (check_program_emit_window_keep).
+-            const uint32_t record_count = body->windowed ? body->kept_records : code->count;
+-            valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix) &&
+-                    link_add_code_fixups(&result->link, atom, code->records, record_count, body->fixup_ends,
+-                                         assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
++            valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix);
++            if (valid && body->resolved_fields)
++            {
++                for (uint32_t i = 0; valid && i < code->reference_count; i += 1)
++                {
++                    const LinkReference* reference = code->references + i;
++                    valid = link_add_code_field(&result->link, atom, reference->instruction, reference->kind, reference->target, reference->addend);
++                }
++            }
++            else if (valid)
++            {
++                valid = link_add_code_fixups(&result->link, atom, code->records, code->count, body->fixup_ends,
++                                             assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
++            }
+             if (valid && source_body && body->sled != 0)
+             {
+                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
+             }
+             // -S's copy of the records the atom's bytes are (#1362): a template's code and a NOP sled's aren't records the
+             // sink prints, which it refuses by name.
+-            if (valid && keep_records && !assembly && body->sled == 0 && !body->windowed && atom < result->assembly_code_count)
++            if (valid && keep_records && !assembly && body->sled == 0 && !body->resolved_fields && atom < result->assembly_code_count)
+             {
+                 valid = check_program_emit_keep_records(&result->assembly_code[atom], code, output);
+                 result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
+diff --git a/src/buster/compiler/link.c b/src/buster/compiler/link.c
+index e78f96d9e..ce0659a6f 100644
+--- a/src/buster/compiler/link.c
++++ b/src/buster/compiler/link.c
+@@ -1279,6 +1279,35 @@ static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86F
+     return result;
+ }
+ 
++// Resolve the field while its encoded instruction and end are in the same body's window.
++// Its target is still symbolic. The link gives it its final symbol and atom later.
++static inline bool link_code_field(const X86Instruction* instruction, const LinkReference* reference, const uint32_t* ends,
++                                   uint64_t ordinal, uint32_t* offset, int64_t* addend)
++{
++    bool valid = ends != NULL && reference->field <= X86_FIXUP_IMMEDIATE && (instruction->form & BUSTER_X86_FORM_FIXUP) != 0 &&
++                 link_kind_fits(reference->kind, instruction, reference->field);
++    if (valid)
++    {
++        const uint32_t end = ends[ordinal];
++        const uint32_t distance = x86_fixup_distance(instruction->form, reference->field);
++        *offset = end - distance;
++        *addend = reference->addend;
++        valid = distance <= end && !(link_fixup_kinds[reference->kind].pc_relative &&
++                                     __builtin_sub_overflow(reference->addend, (int64_t)distance, addend));
++    }
++    return valid;
++}
++
++static inline bool link_add_code_field(Link* link, AtomId atom, uint32_t offset, uint8_t kind, SymbolId target, int64_t addend)
++{
++    const bool valid = link_add_fixup(link, atom, offset, kind, target, addend) != 0;
++    if (valid)
++    {
++        memset(link->atoms.bytes[atom] + offset, 0, link_fixup_kinds[kind].width);
++    }
++    return valid;
++}
++
+ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* instructions, uint64_t instruction_count, const uint32_t* fixup_ends,
+                                  uint64_t marked, const LinkReference* references, uint64_t reference_count)
+ {
+@@ -1299,28 +1328,17 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction*
+         const bool next_instruction = previous == UINT64_MAX || index > previous;
+         const bool next_field = index == previous && previous_field == X86_FIXUP_DISPLACEMENT && reference->field == X86_FIXUP_IMMEDIATE;
+         ordinal += next_instruction ? 1 : 0;
+-        result = index < instruction_count && (next_instruction || next_field) && reference->field <= X86_FIXUP_IMMEDIATE && ordinal < marked &&
+-                 (instructions[index].form & BUSTER_X86_FORM_FIXUP) != 0 && link_kind_fits(reference->kind, &instructions[index], reference->field);
+         uint32_t offset = 0;
+-        int64_t addend = reference->addend;
+-        if (result)
+-        {
+-            const uint32_t end = fixup_ends[ordinal];
+-            const uint32_t distance = x86_fixup_distance(instructions[index].form, reference->field);
+-            offset = end - distance;
+-            result = distance <= end && !(link_fixup_kinds[reference->kind].pc_relative && __builtin_sub_overflow(reference->addend, (int64_t)distance, &addend));
+-        }
++        int64_t addend = 0;
++        result = index < instruction_count && (next_instruction || next_field) && ordinal < marked &&
++                 link_code_field(instructions + index, reference, fixup_ends, ordinal, &offset, &addend);
+         if (!result)
+         {
+             link_fail(link, LINK_ERROR_FIELD);
+         }
+         else
+         {
+-            result = link_add_fixup(link, atom, offset, reference->kind, reference->target, addend) != 0;
+-        }
+-        if (result)
+-        {
+-            memset(link->atoms.bytes[atom] + offset, 0, link_fixup_kinds[reference->kind].width);
++            result = link_add_code_field(link, atom, offset, reference->kind, reference->target, addend);
+         }
+         previous = index;
+         previous_field = reference->field;

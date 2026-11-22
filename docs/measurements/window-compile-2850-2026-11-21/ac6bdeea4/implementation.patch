@@ -1,0 +1,102 @@
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..cff96828c 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -741,6 +741,8 @@ struct CheckOptions
+     // past it are as the kernel mapped them, zero (#628's fresh_output): the C driver's output arena, whose first user the
+     // run is. The run then clears no column and writes no zero in its main loop (CheckStream.zero_columns).
+     bool fresh_output;
++    // A unit-owned, zeroed slice of the source reader's retired scratch pages for the dense result columns.
++    Arena* dense_output;
+     // check_graph_query_runtime replays every node even where no constant_p query's result changes (#1628): the oracle a
+     // test compares the replay's skip with.
+     bool replay_queries;
+@@ -4149,21 +4151,22 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         // Room for a payload row per node, of which the run writes the first few: only those take memory. In a fresh output,
+         // every column pushed here is zero until written (CheckOptions.fresh_output), and none is cleared.
+         zero_output = options->fresh_output && arena_untouched(output);
+-        stream->value_types = BUSTER_ARENA_PUSH_ARRAY(output, TypeId, count);
+-        stream->value_flags = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+-        stream->value_objects = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+-        stream->value_categories = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count);
+-        stream->value_constants = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, count);
+-        stream->payload_rows = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
++        Arena* const dense = options->dense_output != NULL ? options->dense_output : output;
++        stream->value_types = BUSTER_ARENA_PUSH_ARRAY(dense, TypeId, count);
++        stream->value_flags = BUSTER_ARENA_PUSH_ARRAY(dense, uint32_t, count);
++        stream->value_objects = BUSTER_ARENA_PUSH_ARRAY(dense, uint32_t, count);
++        stream->value_categories = BUSTER_ARENA_PUSH_ARRAY(dense, uint8_t, count);
++        stream->value_constants = BUSTER_ARENA_PUSH_ARRAY(dense, uint8_t, count);
++        stream->payload_rows = BUSTER_ARENA_PUSH_ARRAY(dense, uint32_t, count);
+         stream->payloads = BUSTER_ARENA_PUSH_ARRAY(output, CheckValue, count);
+         if (stream->payload_rows != NULL && !zero_output)
+         {
+             memset(stream->payload_rows, 0, (uint64_t)count * sizeof(uint32_t));
+         }
+-        stream->conversions = BUSTER_ARENA_PUSH_ARRAY(output, CheckNodeConversions, count);
++        stream->conversions = BUSTER_ARENA_PUSH_ARRAY(dense, CheckNodeConversions, count);
+         stream->diagnostics = BUSTER_ARENA_PUSH_ARRAY(output, CheckDiagnostic, count);
+         stream->diagnostic_operands = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+-        stream->member_offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count);
++        stream->member_offsets = BUSTER_ARENA_PUSH_ARRAY(dense, uint64_t, count);
+         stream->warnings = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+         stream->warning_ignored = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, count);
+         stream->reports = BUSTER_ARENA_PUSH_ARRAY(output, CheckReport, count);
+@@ -4201,7 +4204,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->count = count;
+         stream->graph = graph;
+         stream->statistics.nodes = count;
+-        stream->statistics.output_bytes = output->length - output_start;
++        stream->statistics.output_bytes = output->length - output_start + (options->dense_output != NULL ? options->dense_output->length : 0);
+         if (stream->statistics.scratch_bytes < scratch->length)
+         {
+             stream->statistics.scratch_bytes = scratch->length;
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index d866ab66f..ac1e6df78 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12892,6 +12892,25 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+             }
+             else if (input_valid || input.diagnostic_graph)
+             {
++                // These stream columns touch nearly every page. Borrow retired reader pages where the lane has
++                // a full-sized scratch arena and the current graph fits in its established working set.
++                const uint64_t dense_row = sizeof(TypeId) + 3 * sizeof(uint32_t) + 2 * sizeof(uint8_t) +
++                                           sizeof(CheckNodeConversions) + sizeof(uint64_t);
++                const uint64_t dense_bytes = dense_row * input.graph.count + 2 * __alignof__(uint64_t);
++                const uint64_t reader_end = scratch->length;
++                Arena dense = { 0 };
++                if (emit_object && !link && kept == NULL && deferred == NULL && input.graph.count != 0 && !arena_compact &&
++                    scratch->capacity >= (1ull << 32) &&
++                    dense_bytes <= scratch->peak - reader_end &&
++                    dense_bytes <= BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count)
++                {
++                    dense.base = arena_push(scratch, dense_bytes, __alignof__(uint64_t));
++                    if (dense.base != NULL)
++                    {
++                        dense.capacity = dense_bytes;
++                        memset(dense.base, 0, dense_bytes);
++                    }
++                }
+                 const CheckOptions check_options = {
+                     .verify = verify,
+                     .transitions = command->check_transitions,
+@@ -12899,6 +12918,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                     // The run is the output arena's first user in the unit, through no copy of it: past its length it is
+                     // as the kernel mapped it unless an earlier unit's pushes reached there (arena_untouched).
+                     .fresh_output = true,
++                    .dense_output = dense.base != NULL ? &dense : NULL,
+                 };
+                 CheckStream stream;
+                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
+@@ -13793,6 +13813,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                     fprintf(errors, "fatal error: %s\n", stream.status == CHECK_STATUS_RESOURCE ? "checker output capacity exhausted" : "invalid checker input graph");
+                     driver_fatal = true;
+                 }
++                if (dense.base != NULL)
++                {
++                    arena_pop_to(scratch, reader_end);
++                }
+             }
+             else
+             {

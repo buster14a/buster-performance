@@ -1,0 +1,183 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..0fc7e7ccc 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -2292,6 +2292,12 @@ struct CheckInputReader
+     uint32_t* scope_marks;
+     uint32_t* scope_ends;
+     uint32_t* scope_openings;
++    bool plain_prototypes;
++    uint32_t plain_prototype_first;
++    uint32_t plain_prototype_declaration_tokens;
++    uint32_t plain_prototype_count;
++    uint32_t plain_prototype_tokens;
++    uint32_t plain_prototype_parameters;
+     uint32_t scope_count;
+     TypeId function_result;
+     uint32_t function_end;
+@@ -8520,6 +8526,119 @@ static bool check_input_attribute_objc(CheckInputReader* reader, CheckInputAttri
+     return valid;
+ }
+ 
++// The parser has already split a file-scope prototype at its parentheses. For short lists of unnamed,
++// unannotated parameters its specifier and pointer tokens give the existing parameter records directly.
++// Give up before publishing typedef uses, interning types or changing the graph when any parameter needs the full reader.
++static bool check_input_plain_prototype(CheckInputReader* reader, uint32_t open, uint32_t close, CheckDeclaratorPart* function,
++                                        CheckDeclaratorParameter* parameters, uint32_t* parameter_count)
++{
++    const Parser* parser = reader->parser;
++    struct PlainParameter
++    {
++        TypeId base;
++        uint32_t word;
++        uint32_t declaration;
++        uint32_t end;
++        uint8_t pointers;
++        bool qualified;
++    } values[8];
++    uint32_t count = 0;
++    uint32_t at = open + 1;
++    bool valid = at < close && close - open <= 48;
++    while (valid && at < close)
++    {
++        const bool qualified = parser->tokens.names[at] == C_NAME_CONST;
++        at += qualified;
++        const uint32_t word = at;
++        uint32_t declaration = BUSTER_CHECK_NONE;
++        TypeId base = 0;
++        if (at < close && parser->tree.roles[at] == PARSE_ROLE_SPECIFIER)
++        {
++            const uint32_t name = parser->tokens.names[at++];
++            switch (name)
++            {
++                case C_NAME_VOID: base = BUSTER_TYPE_VOID; break;
++                case C_NAME_CHAR: base = BUSTER_TYPE_CHAR; break;
++                case C_NAME_INT: case C_NAME_SIGNED: base = BUSTER_TYPE_INT; break;
++                case C_NAME_UNSIGNED: base = BUSTER_TYPE_UINT; break;
++                case C_NAME_SHORT: base = BUSTER_TYPE_SHORT; break;
++                case C_NAME_LONG: base = BUSTER_TYPE_LONG; break;
++                case C_NAME_FLOAT: base = BUSTER_TYPE_FLOAT; break;
++                case C_NAME_DOUBLE: base = BUSTER_TYPE_DOUBLE; break;
++                default:
++                    if (parser->tokens.kinds[word] == PARSE_KIND_IDENTIFIER)
++                    {
++                        const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, name);
++                        if (handle != 0 && reader->bindings.kind[handle - 1] == C_BINDING_TYPEDEF)
++                        {
++                            declaration = reader->bindings.declaration[handle - 1];
++                            base = reader->declared_types[declaration];
++                            valid = base != 0 && reader->output->explicit_abis[declaration] == 0 && check_input_noderef_at(reader->output, declaration) == NULL &&
++                                    type_qualifiers(base) == 0 && type_extended_qualifiers(reader->types, base) == 0 && type_strip_aligned(reader->types, base) == base;
++                        }
++                    }
++                    break;
++            }
++        }
++        uint32_t pointers = 0;
++        while (at < close && parser->tokens.kinds[at] == PARSE_KIND_STAR && pointers < 2)
++        {
++            at += 1;
++            pointers += 1;
++        }
++        const uint8_t kind = base != 0 ? type_kind(reader->types, base) : BUSTER_TYPE_KIND_NONE;
++        const bool simple = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_FLOATING ||
++                            (kind == BUSTER_TYPE_KIND_VOID && (pointers != 0 || (!qualified && count == 0 && at == close))) ||
++                            (pointers != 0 && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION));
++        valid = valid && simple && count < BUSTER_ARRAY_LENGTH(values) && (at == close || (parser->tokens.kinds[at] == PARSE_KIND_COMMA && at + 1 < close));
++        if (valid)
++        {
++            values[count++] = (struct PlainParameter){ .base = base, .word = word, .declaration = declaration, .end = at, .pointers = pointers, .qualified = qualified };
++            at += at < close;
++        }
++    }
++    if (valid)
++    {
++        for (uint32_t i = 0; i < count; i += 1)
++        {
++            const struct PlainParameter value = values[i];
++            if (value.declaration != BUSTER_CHECK_NONE)
++            {
++                reader->output->declarations[value.word] = value.declaration;
++                reader->declared_types[value.word] = value.base;
++                reader->output->explicit_abis[value.word] = 0;
++            }
++            TypeId type = type_qualify(reader->types, value.base, value.qualified ? BUSTER_TYPE_CONST : 0);
++            for (uint32_t level = 0; level < value.pointers; level += 1)
++            {
++                type = check_input_type_result(reader, type_pointer(reader->types, type));
++            }
++            if (type != BUSTER_TYPE_VOID)
++            {
++                const uint32_t index = (*parameter_count)++;
++                parameters[index] = (CheckDeclaratorParameter){ .type = type_adjust_parameter(reader->types, type), .next = BUSTER_CHECK_NONE,
++                    .missing_name = value.end, .place = value.end, .abi_token = BUSTER_CHECK_NONE, .object_size_token = BUSTER_CHECK_NONE };
++                if (function->parameter_count != 0)
++                {
++                    parameters[function->parameter_last].next = index;
++                }
++                else
++                {
++                    function->parameter_first = index;
++                }
++                function->parameter_last = index;
++                function->parameter_count += 1;
++            }
++        }
++        memset(reader->ignored + open + 1, 1, close - open - 1);
++        reader->plain_prototype_declaration_tokens += close + 3 - reader->plain_prototype_first;
++        reader->plain_prototype_count += 1;
++        reader->plain_prototype_tokens += close - open + 1;
++        reader->plain_prototype_parameters += count;
++    }
++    return valid;
++}
++
+ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclaratorRun* run)
+ {
+     const Parser* parser = reader->parser;
+@@ -8892,6 +9011,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
+                 reader->ignored[i] = true;
+                 // The list's scope, which its closing parenthesis ends.
+                 reader->prototype_depth += 1;
++                if (reader->plain_prototype_first != 0 && depth == 1 && reader->scope_count == 0 && reader->prototype_depth == 1 && frame->name < i && frame->name + 1 == i &&
++                    parser->tree.depths[i] == 0 && close + 1 < parser->tokens.count && parser->tokens.kinds[close + 1] == PARSE_KIND_SEMI &&
++                    check_input_plain_prototype(reader, i, close, &parts[frame->function], parameters, &parameter_count))
++                {
++                    frame->cursor = close;
++                }
+             }
+         }
+         else
+@@ -11899,7 +12024,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
+         reader->declarator_names = false;
+         reader->declarator_swift_deferrable = true;
+         uint32_t group_end = BUSTER_CHECK_NONE;
++        reader->plain_prototype_first = reader->plain_prototypes && reader->scope_count == 0 && !continuation && !is_typedef ? first + 1 : 0;
+         TypeId type = check_input_declarator(reader, base, &i, count, &name, &parameters);
++        reader->plain_prototype_first = 0;
+         reader->declarator_swift_deferrable = false;
+         bool invalid = reader->declarator_invalid || invalid_specifiers;
+         bool group_invalid = reader->declarator_group_invalid && !reader->declarator_names;
+@@ -17168,6 +17295,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     const uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
+     CheckInputReader reader =
+     {
++        .plain_prototypes = fresh_output && complete_translation_unit && deferred == NULL && deferred_tokens == NULL && attested == NULL && parser->errors == 0 &&
++                            parser->recovered_types == NULL && !parser->options.scalar && pp->options.published_unused_only && !pp->options.predefines.debug &&
++                            !pp->options.predefines.debug_modules && !pp->options.node_window && !pp->options.node_window_constants,
+         .output = input,
+         .parser = parser,
+         .pp = pp,
+@@ -17991,6 +18121,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     }
+     arena_pop_to(scratch, mark);
+     arena_release(&sparse);
++    if (reader.plain_prototypes && getenv("BUSTER_PROTOTYPE_CENSUS") != NULL)
++    {
++        fprintf(stderr, "plain-prototypes declarations=%u declaration-tokens=%u parameter-tokens=%u parameters=%u\n", reader.plain_prototype_count,
++                reader.plain_prototype_declaration_tokens, reader.plain_prototype_tokens,
++                reader.plain_prototype_parameters);
++    }
+     return valid;
+ }
+ 

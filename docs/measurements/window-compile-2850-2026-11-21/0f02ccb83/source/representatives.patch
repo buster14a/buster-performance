@@ -1,0 +1,79 @@
+diff --git a/src/buster/compiler/c_refine.c b/src/buster/compiler/c_refine.c
+index 77056c495..a91a1b851 100644
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -900,6 +900,63 @@ BUSTER_REFINE_PASS_B_INSTANTIATE(refine_pass_b_32_trigraphs, true, 32)
+ BUSTER_REFINE_PASS_B_INSTANTIATE(refine_pass_b_64_plain, false, 64)
+ BUSTER_REFINE_PASS_B_INSTANTIATE(refine_pass_b_64_trigraphs, true, 64)
+ 
++// Repeated physical spellings of at most four bytes have the same canonical identifier, including
++// in language modes with UCNs or splicing. Choose representatives in source order so that new names
++// are still assigned the same IDs as the scalar interner. A collision merely chooses another
++// representative. The table lives for one pass-A block and its indices address this block alone.
++static bool refine_pass_b_short_representatives(InternTable* table, const uint8_t* source, uint64_t length,
++                                                RefineIdentifiers* identifiers, uint32_t flags, bool trigraphs)
++{
++    enum { SLOTS = 512 };
++    uint32_t keys[SLOTS] = {0};
++    uint32_t positions[SLOTS];
++    RefineIdentifiers representatives;
++    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++    uint32_t count = 0;
++    for (uint32_t i = 0; i < identifiers->count; i += 16)
++    {
++        const __mmask16 valid = identifiers->count - i >= 16 ? 0xffffu : (__mmask16)_bzhi_u32(0xffff, identifiers->count - i);
++        const __m512i starts = _mm512_maskz_loadu_epi32(valid, identifiers->starts + i);
++        const __m512i lengths = _mm512_maskz_loadu_epi32(valid, identifiers->lengths + i);
++        // Keep the final three source bytes and all over-four-byte spellings on the canonical path.
++        // i32gather sign-extends offsets, so this path admits sources of at most INT32_MAX bytes.
++        const __mmask16 within = _mm512_mask_cmple_epu32_mask(valid, starts, _mm512_set1_epi32((int32_t)(length - 4)));
++        const __mmask16 short_names = _mm512_mask_cmple_epu32_mask(within, lengths, _mm512_set1_epi32(4));
++        const __m512i raw = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), short_names, starts, source, 1);
++        // Identifiers cannot contain a NUL byte. Zero padding therefore distinguishes length too.
++        const __m512i mask = _mm512_srlv_epi32(_mm512_set1_epi32(-1), _mm512_slli_epi32(_mm512_sub_epi32(_mm512_set1_epi32(4), lengths), 3));
++        const __m512i spellings = _mm512_and_si512(raw, mask);
++        const __m512i slots = _mm512_srli_epi32(_mm512_mullo_epi32(spellings, _mm512_set1_epi32((int32_t)2654435761u)), 23);
++        const __m512i saved = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), short_names, slots, keys, 4);
++        const __mmask16 hits = _mm512_mask_cmpeq_epi32_mask(short_names, saved, spellings);
++        const __mmask16 fresh = valid & ~hits;
++        const __m512i next = _mm512_mask_expand_epi32(_mm512_setzero_si512(), fresh, _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)count)));
++        const __m512i chosen = _mm512_mask_i32gather_epi32(next, hits, slots, positions, 4);
++        _mm512_mask_compressstoreu_epi32(representatives.starts + count, fresh, starts);
++        _mm512_mask_compressstoreu_epi32(representatives.lengths + count, fresh, lengths);
++        _mm512_mask_storeu_epi32(identifiers->starts + i, valid, chosen);
++        // Same-slot writers in a vector must publish the position and bytes of the same lane.
++        const __mmask16 unique = _mm512_testn_epi32_mask(_mm512_conflict_epi32(slots), _mm512_set1_epi32(-1));
++        const __mmask16 writes = fresh & short_names & unique;
++        _mm512_mask_i32scatter_epi32(keys, writes, slots, spellings, 4);
++        _mm512_mask_i32scatter_epi32(positions, writes, slots, next, 4);
++        count += (uint32_t)__builtin_popcount(fresh);
++    }
++    representatives.count = count;
++    if (!(trigraphs ? refine_pass_b_64_trigraphs : refine_pass_b_64_plain)(table, source, length, &representatives, flags))
++    {
++        return false;
++    }
++    for (uint32_t i = 0; i < identifiers->count; i += 16)
++    {
++        const __mmask16 valid = identifiers->count - i >= 16 ? 0xffffu : (__mmask16)_bzhi_u32(0xffff, identifiers->count - i);
++        const __m512i chosen = _mm512_maskz_loadu_epi32(valid, identifiers->starts + i);
++        const __m512i ids = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), valid, chosen, representatives.ids, 4);
++        _mm512_mask_storeu_epi32(identifiers->ids + i, valid, ids);
++    }
++    return true;
++}
++
+ #define BUSTER_REFINE_FUSED_INSTANTIATE(name, trigraphs) \
+     __attribute__((noinline)) static bool name(InternTable* table, const uint8_t* source, uint64_t length, RefineIdentifiers* identifiers, uint32_t begin, \
+                                                uint32_t count, uint32_t flags) \
+@@ -977,7 +1034,9 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
+         }
+         else
+         {
+-            result = (trigraphs ? refine_pass_b_64_trigraphs : refine_pass_b_64_plain)(table, source, length, &identifiers, flags);
++            result = length >= 65536 && length <= INT32_MAX ?
++                         refine_pass_b_short_representatives(table, source, length, &identifiers, flags, trigraphs) :
++                         (trigraphs ? refine_pass_b_64_trigraphs : refine_pass_b_64_plain)(table, source, length, &identifiers, flags);
+         }
+         if (result)
+         {

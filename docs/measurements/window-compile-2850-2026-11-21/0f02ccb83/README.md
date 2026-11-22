@@ -35,3 +35,24 @@ The full implementation patch applies to Buster `0e1d5b825801135bf50e79da9d546bc
 - One Clang-compiled test driver linked independently against the frozen Clang, baseline Buster and corrected Buster SQLite objects. The executables agreed on all 144 output bytes and exited successfully. The tests cover bound text and blobs, Unicode, an R-tree, a recursive CTE, window functions, UNIQUE constraints, rollback and database integrity. [Runtime driver](reproduce/sqlite-driver.c) and [runtime output](oracles/sqlite-candidate.stdout).
 
 Run either reproducer generator with Python and a destination argument. The header case takes a directory. The conditional case takes a file path. Run the compiler in `-E -P` mode on the generated `case.c`, adding the generated directory to the include path for the header case. The scheduler scripts use the existing Buster benchmark checkout and machine-wide lease.
+
+## Fragment allocation
+
+The signed follow-up `e2c2f1d3308195c9d04d77902f958519deb4a1db` allocates a fragment from the file-cache lane when the translation unit owns that cache. In three machine-locked six-position rounds, its 9700X median whole-compile time was 114.140 ms, compared with 113.875 ms for the eager baseline and 114.212 ms for the corrected cursor. Its per-round wall changes against the eager baseline were +0.59%, +0.24% and −0.41%. The peak resident memory medians were 240,448 KiB for the eager compiler, 251,804 KiB for the corrected cursor, and 239,408 KiB with arena reuse. Every native object matched the corresponding baseline. Ordinary and `-Wall -Wextra` output and diagnostics also matched. [Source patch](source/allocator.patch), [target raw records](measurements/allocator-raw.tar.gz), [target observations](measurements/allocator-observations.tsv) and [local preprocessor screen](measurements/allocator-local.tsv).
+
+## Four-corpus ordinary compilation
+
+The standard 9700X series used three alternating rounds with six measured processes per arm and a separate set of performance-counter runs. Each child compiled the requested translation units into native object files, with one lane for the multiple-file invocations. The corrected cursor matched all 30 ordered native-object manifests on every corpus, including preflight, warning-policy, stage, counter, and wall runs. Ordinary output and diagnostics agreed under the default warning policy and under `-Wall -Wextra`. All grouped performance-counter observations had 100% running coverage.
+
+| Workload | Translation units | Baseline median | Corrected median | Median within-round change |
+| --- | ---: | ---: | ---: | ---: |
+| SQLite | 1 | 113.303 ms | 113.489 ms | +0.45% |
+| Lua | 34 | 63.288 ms | 63.406 ms | +0.35% |
+| musl | 1,336 | 635.504 ms | 634.120 ms | −0.27% |
+| Buster compiler main | 1 | 609.097 ms | 609.416 ms | −0.09% |
+
+The standard and dedicated SQLite series used separate process observations. Both place the ordinary compile near 114 ms. The archive includes the measured SQLite runs for the two earlier heads. Their other three corpora retain the six native preflight, policy and stage runs completed before their correctness defects were identified. [Raw records](measurements/standard-raw.tar.gz), [all observations](measurements/standard-observations.tsv), [paired summaries](measurements/standard-summary.tsv) and [object manifest verification](oracles/standard-objects.tsv).
+
+## Source-local identifier spelling
+
+A separate 7940HS experiment reused a representative for equal one-to-four-byte names within a source block. SQLite performed 282,185 canonical string-table lookups for 454,224 raw identifier occurrences, saving 172,039 lookups. The isolated refinement stage grew from 2.983 to 5.063 ms. Prebinding single-letter names alone took 3.115 ms. Both variants passed the protected-page, randomly generated and frozen source comparisons. Their timing evidence is specific to the 7940HS refinement stage. [Representative source](source/representatives.patch), [single-letter source](source/letters.patch) and [local timing and oracle receipts](measurements/short-spellings-local.tar.gz).
