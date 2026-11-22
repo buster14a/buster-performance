@@ -1,0 +1,1229 @@
+diff --git a/src/buster/compiler/c_check_body_fingerprint.c b/src/buster/compiler/c_check_body_fingerprint.c
+new file mode 100644
+index 000000000..c057e1dc7
+--- /dev/null
++++ b/src/buster/compiler/c_check_body_fingerprint.c
+@@ -0,0 +1,398 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++#ifndef BUSTER_CHECK_BODY_FINGERPRINT
++#define BUSTER_CHECK_BODY_FINGERPRINT
++// Account resident pages in the three verifier mappings after every body has released its logical
++// allocations. The committed extent includes huge-page padding past the final allocation.
++static uint64_t check_body_residency_mapped(const Arena* arena)
++{
++    if (arena->mapping_bytes == 0 || arena->committed == 0) return 0;
++    const uintptr_t start = (uintptr_t)arena->base - arena->mapping_offset;
++    const uintptr_t end = ((uintptr_t)arena->base + arena->peak + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) &
++                          ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++    const uint64_t bytes = end - start < arena->committed ? end - start : arena->committed;
++    const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) / BUSTER_ARENA_PAGE_BYTES;
++    uint8_t* resident = malloc(pages);
++    uint64_t count = 0;
++    if (resident == NULL || mincore(arena->base - arena->mapping_offset, bytes, resident) != 0)
++    {
++        free(resident);
++        return UINT64_MAX;
++    }
++    for (uint64_t i = 0; i < pages; i += 1) count += resident[i] & 1;
++    free(resident);
++    return count * BUSTER_ARENA_PAGE_BYTES;
++}
++
++// A checked function can request a derived pointer type before the whole-unit producer would have.
++// Compare each semantic type by its C key and nominal tag, ignoring its insertion slot.
++static uint64_t check_body_type_fingerprint(const TypeTable* table, TypeId type)
++{
++    const uint32_t i = type_index(type);
++    if (i < BUSTER_TYPE_BUILTIN_COUNT) return type;
++    if (i >= table->types.count) return UINT64_MAX - type;
++    const TypeColumns* c = &table->types;
++    const uint8_t kind = c->kind[i];
++    uint64_t h = UINT64_C(14695981039346656037);
++#define BUSTER_BODY_TYPE(x) h = (h ^ (uint64_t)(x)) * UINT64_C(1099511628211)
++    BUSTER_BODY_TYPE(kind); BUSTER_BODY_TYPE(type_qualifiers(type)); BUSTER_BODY_TYPE(c->flags[i]); BUSTER_BODY_TYPE(c->code[i]);
++    BUSTER_BODY_TYPE(c->size[i]); BUSTER_BODY_TYPE(c->alignment_log2[i]); BUSTER_BODY_TYPE(c->extent[i]);
++    BUSTER_BODY_TYPE(check_body_type_fingerprint(table,c->base[i]));
++    if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION || kind == BUSTER_TYPE_KIND_ENUM)
++    {
++        BUSTER_BODY_TYPE(c->index[i]);
++    }
++    else if (kind == BUSTER_TYPE_KIND_FUNCTION)
++    {
++        BUSTER_BODY_TYPE(type_function_info(table,i));
++        for (uint32_t n = 0; n < c->extent[i]; n += 1)
++        {
++            BUSTER_BODY_TYPE(check_body_type_fingerprint(table,table->parameters.type[c->index[i]+n]));
++            BUSTER_BODY_TYPE(type_parameter_abi(table,type,n));
++        }
++    }
++#undef BUSTER_BODY_TYPE
++    return h;
++}
++
++static uint64_t check_body_value_fingerprint(const TypeTable* types, CheckValue v, uint32_t first)
++{
++    uint64_t h = UINT64_C(14695981039346656037);
++#define BUSTER_BODY_VALUE(x) h = (h ^ (uint64_t)(x)) * UINT64_C(1099511628211)
++        BUSTER_BODY_VALUE(check_body_type_fingerprint(types,v.type)); BUSTER_BODY_VALUE(v.category); BUSTER_BODY_VALUE(v.flags); BUSTER_BODY_VALUE(v.constant_kind);
++        BUSTER_BODY_VALUE(v.integer); BUSTER_BODY_VALUE(v.integer >> 64); BUSTER_BODY_VALUE(v.object); BUSTER_BODY_VALUE(v.overload_head);
++        BUSTER_BODY_VALUE(v.offset); BUSTER_BODY_VALUE(v.bit_width); BUSTER_BODY_VALUE(v.fault); BUSTER_BODY_VALUE(v.object_bit_offset);
++        if (v.fault != CHECK_FAULT_NONE) BUSTER_BODY_VALUE(v.fault_node - first);
++        for (uint32_t k = 0; k < 10; k += 1)
++        {
++            BUSTER_BODY_VALUE(((const uint8_t*)&v.floating)[k]); BUSTER_BODY_VALUE(((const uint8_t*)&v.imaginary)[k]);
++        }
++#undef BUSTER_BODY_VALUE
++    return h;
++}
++
++static uint64_t check_body_fingerprint(const TypeTable* types, const CheckGraph* g, const CheckStream* stream, uint32_t first, uint32_t end, uint32_t close)
++{
++    uint64_t h = UINT64_C(14695981039346656037);
++    const char* const chosen = getenv("BUSTER_BODY_DIFF_TOKEN");
++    const bool dump = chosen != NULL && strtoul(chosen, NULL, 10) == close;
++#define BUSTER_BODY_FIELD(x) do { uint64_t field = (uint64_t)(x); h = (h ^ field) * UINT64_C(1099511628211); \
++    if (dump) fprintf(stderr, "body-field\t%u\t%s\t%016llx\n", j - first, #x, (unsigned long long)field); } while (0)
++    for (uint32_t j = first; j < end; j += 1)
++    {
++        const CheckValue v = check_stream_value(stream, j);
++        const uint32_t edge[3] = { g->operand0[j],g->operand1[j],g->operand2[j] };
++        for (uint32_t k = 0; k < 3; k += 1) BUSTER_BODY_FIELD(edge[k] == BUSTER_CHECK_NONE ? BUSTER_CHECK_NONE : edge[k] - first);
++        BUSTER_BODY_FIELD(g->contexts[j]); BUSTER_BODY_FIELD(g->source_positions != NULL ? g->source_positions[j] : BUSTER_CHECK_NONE);
++        BUSTER_BODY_FIELD(g->warning_suppressed != NULL ? g->warning_suppressed[j] : 0);
++        BUSTER_BODY_FIELD(g->fp_environments != NULL ? g->fp_environments[j] : g->fp_contract_default);
++        BUSTER_BODY_FIELD(g->argument_counts[j]); BUSTER_BODY_FIELD(stream->constant_evaluated != NULL && stream->constant_evaluated[j]);
++        BUSTER_BODY_FIELD(g->ops[j]); BUSTER_BODY_FIELD(g->tokens[j]); BUSTER_BODY_FIELD(check_body_type_fingerprint(types,g->types[j])); BUSTER_BODY_FIELD(g->members[j]);
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,v,first));
++        if (g->ops[j] == CHECK_OP_VALUE)
++            BUSTER_BODY_FIELD(check_body_value_fingerprint(types,check_graph_leaf_value(g,j),first));
++        const CheckNodeConversions* conv = stream->conversions + j;
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            BUSTER_BODY_FIELD(check_body_type_fingerprint(types,conv->operands[k].type)); BUSTER_BODY_FIELD(conv->operands[k].flags);
++        }
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,conv->store.type)); BUSTER_BODY_FIELD(conv->store.flags);
++        if (g->ops[j] != CHECK_OP_VARARGS)
++            for (uint32_t k = 0; k < g->argument_counts[j]; k += 1)
++            {
++                BUSTER_BODY_FIELD(g->argument_nodes[g->argument_offsets[j]+k]-first);
++                BUSTER_BODY_FIELD(g->argument_tokens != NULL ? g->argument_tokens[g->argument_offsets[j]+k] : BUSTER_CHECK_NONE);
++                const CheckConversion c = stream->argument_conversions[g->argument_offsets[j] + k];
++                BUSTER_BODY_FIELD(check_body_type_fingerprint(types,c.type)); BUSTER_BODY_FIELD(c.flags);
++            }
++        BUSTER_BODY_FIELD(stream->diagnostics[j]); BUSTER_BODY_FIELD(stream->diagnostic_operands[j]);
++        BUSTER_BODY_FIELD(stream->warnings[j]); BUSTER_BODY_FIELD(stream->warning_ignored[j]); BUSTER_BODY_FIELD(stream->member_offsets[j]);
++    }
++    for (uint32_t i = 0; i < g->x86_count; i += 1)
++    {
++        const CheckX86Call* e = g->x86_calls + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(1);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(e->info != NULL ? e->info->name_length : 0);
++        if (e->info != NULL) for (uint32_t k = 0; k < e->info->name_length; k += 1) BUSTER_BODY_FIELD(e->info->name[k]);
++        BUSTER_BODY_FIELD(e->required_ice_arguments);
++        BUSTER_BODY_FIELD(e->ice_arguments);
++        BUSTER_BODY_FIELD(e->reachability);
++        BUSTER_BODY_FIELD(e->unselected_context);
++        BUSTER_BODY_FIELD(e->constant_evaluated_context);
++        BUSTER_BODY_FIELD(e->runtime_diagnostic_suppressed);
++    }
++    for (uint32_t i = 0; i < stream->report_count; i += 1)
++    {
++        const CheckReport* e = stream->reports + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(2);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(e->token);
++        BUSTER_BODY_FIELD(e->message);
++        BUSTER_BODY_FIELD(e->diagnostic);
++        BUSTER_BODY_FIELD(e->fault);
++    }
++    for (uint32_t i = 0; i < stream->effect_count; i += 1)
++    {
++        const CheckStoreEffect* e = stream->effects + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(3);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->value,first));
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->destination,first));
++        BUSTER_BODY_FIELD(e->runtime_builtin);
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->warning_operands);
++        BUSTER_BODY_FIELD(e->unsupported);
++    }
++    for (uint32_t i = 0; i < stream->varargs_count; i += 1)
++    {
++        const CheckVarargsEffect* e = stream->varargs + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(4);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->requested_type));
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->mutates_list);
++        BUSTER_BODY_FIELD(e->microsoft);
++    }
++    for (uint32_t i = 0; i < stream->misc_count; i += 1)
++    {
++        const CheckBuiltinMiscEffect* e = stream->misc + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(5);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->constant_value,first));
++        BUSTER_BODY_FIELD(e->constant_evaluated_operands);
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->unsupported);
++        BUSTER_BODY_FIELD(e->frame_level);
++        BUSTER_BODY_FIELD(e->alignment);
++        BUSTER_BODY_FIELD(e->alignment_offset);
++        BUSTER_BODY_FIELD(e->runtime_builtin);
++        BUSTER_BODY_FIELD(e->constraint);
++        BUSTER_BODY_FIELD(e->warning_operands);
++        BUSTER_BODY_FIELD(e->prefetch_rw);
++        BUSTER_BODY_FIELD(e->prefetch_locality);
++        BUSTER_BODY_FIELD(e->terminates);
++        BUSTER_BODY_FIELD(e->reads_memory);
++        BUSTER_BODY_FIELD(e->writes_memory);
++        BUSTER_BODY_FIELD(e->allocates_stack);
++        BUSTER_BODY_FIELD(e->alignment_offset_known);
++        BUSTER_BODY_FIELD(e->cpu_test);
++    }
++    for (uint32_t i = 0; i < stream->floating_count; i += 1)
++    {
++        const CheckBuiltinFloatEffect* e = stream->floating + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(6);
++        BUSTER_BODY_FIELD(e->node - first);
++        for (uint32_t k = 0; k < 2; k += 1)
++        {
++            BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->converted_arguments[k],first));
++        }
++        BUSTER_BODY_FIELD(e->math_kind);
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->errno_pointer_type));
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->floating_type));
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->definite_operands);
++        BUSTER_BODY_FIELD(e->selected_selector);
++        BUSTER_BODY_FIELD(e->class_mask);
++        BUSTER_BODY_FIELD(e->unsupported);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->runtime_builtin);
++        BUSTER_BODY_FIELD(e->evaluation);
++        BUSTER_BODY_FIELD(e->folded);
++        BUSTER_BODY_FIELD(e->reads_memory);
++        BUSTER_BODY_FIELD(e->compiler_barrier);
++        BUSTER_BODY_FIELD(e->reads_fp_environment);
++        BUSTER_BODY_FIELD(e->may_raise_fp_exceptions);
++        BUSTER_BODY_FIELD(e->may_raise_inexact);
++        BUSTER_BODY_FIELD(e->may_set_errno);
++    }
++    for (uint32_t i = 0; i < stream->query_count; i += 1)
++    {
++        const CheckBuiltinQueryEffect* e = stream->queries + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(7);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->runtime_value,first));
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->warning_operands);
++        BUSTER_BODY_FIELD(e->mode);
++        BUSTER_BODY_FIELD(e->known);
++        BUSTER_BODY_FIELD(e->constraint);
++        BUSTER_BODY_FIELD(e->source_proof);
++        BUSTER_BODY_FIELD(e->runtime_plan);
++        BUSTER_BODY_FIELD(e->runtime_effects.flags);
++        BUSTER_BODY_FIELD(e->runtime_effects.fault);
++        BUSTER_BODY_FIELD(e->runtime_effects.fault != CHECK_FAULT_NONE ? e->runtime_effects.fault_node - first : e->runtime_effects.fault_node);
++        BUSTER_BODY_FIELD(e->runtime_effects.reads_fp_environment);
++        BUSTER_BODY_FIELD(e->runtime_effects.may_raise_fp_exceptions);
++        BUSTER_BODY_FIELD(e->unsupported);
++    }
++    for (uint32_t i = 0; i < stream->atomic_count; i += 1)
++    {
++        const CheckBuiltinAtomicEffect* e = stream->atomics + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(8);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->object_address,first));
++        BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->store_value,first));
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->object_type));
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->value_type));
++        BUSTER_BODY_FIELD(e->object_size);
++        BUSTER_BODY_FIELD(e->required_alignment);
++        BUSTER_BODY_FIELD(e->minimum_alignment);
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->success_order);
++        BUSTER_BODY_FIELD(e->failure_order);
++        BUSTER_BODY_FIELD(e->known_orders);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->warning_operands);
++        BUSTER_BODY_FIELD(e->unsupported);
++        BUSTER_BODY_FIELD(e->runtime_builtin);
++        BUSTER_BODY_FIELD(e->fence_scope);
++        BUSTER_BODY_FIELD(e->alignment_known);
++        BUSTER_BODY_FIELD(e->volatile_access);
++        BUSTER_BODY_FIELD(e->reads_memory);
++        BUSTER_BODY_FIELD(e->writes_memory);
++        BUSTER_BODY_FIELD(e->rmw);
++        BUSTER_BODY_FIELD(e->compiler_barrier);
++        BUSTER_BODY_FIELD(e->late_completion);
++        for (uint32_t k = 0; k < 2; k += 1)
++        {
++            BUSTER_BODY_FIELD(e->answers[k]);
++        }
++        BUSTER_BODY_FIELD(e->query_size);
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->query_pointer));
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->space_target));
++    }
++    for (uint32_t i = 0; i < stream->vector_count; i += 1)
++    {
++        const CheckBuiltinVectorEffect* e = stream->vectors + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(9);
++        BUSTER_BODY_FIELD(e->node - first);
++        for (uint32_t k = 0; k < 3; k += 1)
++        {
++            BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->converted_arguments[k],first));
++        }
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->element_type));
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->memory_type));
++        BUSTER_BODY_FIELD(e->lane_count);
++        BUSTER_BODY_FIELD(e->evaluated_argument_count);
++        BUSTER_BODY_FIELD(e->warnings);
++        BUSTER_BODY_FIELD(e->warning_operands);
++        BUSTER_BODY_FIELD(e->unsupported);
++        BUSTER_BODY_FIELD(e->runtime_builtin);
++        BUSTER_BODY_FIELD(e->constraint);
++        BUSTER_BODY_FIELD(e->store_conversion);
++        BUSTER_BODY_FIELD(e->reads_memory);
++        BUSTER_BODY_FIELD(e->writes_memory);
++        BUSTER_BODY_FIELD(e->nondeterministic);
++        BUSTER_BODY_FIELD(e->constant_evaluation_unmodeled);
++        BUSTER_BODY_FIELD(e->reads_fp_environment);
++        BUSTER_BODY_FIELD(e->may_raise_fp_exceptions);
++        BUSTER_BODY_FIELD(e->bool_splat_signed_true);
++    }
++    for (uint32_t i = 0; i < stream->x86_count; i += 1)
++    {
++        const CheckBuiltinX86Effect* e = stream->x86 + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(10);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(e->info != NULL ? e->info->name_length : 0);
++        if (e->info != NULL) for (uint32_t k = 0; k < e->info->name_length; k += 1) BUSTER_BODY_FIELD(e->info->name[k]);
++        BUSTER_BODY_FIELD(e->status);
++        BUSTER_BODY_FIELD(e->constraint);
++        BUSTER_BODY_FIELD(e->checked_ice_arguments);
++        BUSTER_BODY_FIELD(e->matched_rules);
++        BUSTER_BODY_FIELD(e->unsupported);
++        BUSTER_BODY_FIELD(e->range_event_count);
++        for (uint32_t k = 0; k < e->range_event_count; k += 1)
++        {
++            BUSTER_BODY_FIELD(e->range_events[k].node - first);
++            BUSTER_BODY_FIELD(e->range_events[k].argument);
++            BUSTER_BODY_FIELD(e->range_events[k].low);
++            BUSTER_BODY_FIELD(e->range_events[k].high);
++            BUSTER_BODY_FIELD(e->range_events[k].source_line);
++            BUSTER_BODY_FIELD(check_body_value_fingerprint(types,e->range_events[k].value,first));
++            BUSTER_BODY_FIELD(e->range_events[k].disposition);
++            BUSTER_BODY_FIELD(e->range_events[k].default_error);
++        }
++    }
++    for (uint32_t i = 0; i < stream->bit_cast_count; i += 1)
++    {
++        const CheckBuiltinBitCastEffect* e = stream->bit_casts + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(11);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->source_type));
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->representation_type));
++        BUSTER_BODY_FIELD(e->byte_count);
++        BUSTER_BODY_FIELD(e->evaluated_operands);
++        BUSTER_BODY_FIELD(e->unsupported);
++        BUSTER_BODY_FIELD(e->runtime_builtin);
++        for (uint32_t k = 0; k < BUSTER_CHECK_BUILTIN_BIT_CAST_BYTES; k += 1)
++        {
++            BUSTER_BODY_FIELD(e->bytes[k]);
++        }
++        BUSTER_BODY_FIELD(e->payload_count);
++        BUSTER_BODY_FIELD(e->representation_known);
++        BUSTER_BODY_FIELD(e->folded);
++        BUSTER_BODY_FIELD(e->runtime_required);
++        BUSTER_BODY_FIELD(e->volatile_read);
++    }
++    for (uint32_t i = 0; i < stream->overload_count; i += 1)
++    {
++        const CheckOverloadEffect* e = stream->overloads + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(12);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(e->selected.status);
++        BUSTER_BODY_FIELD(e->selected.candidate);
++        BUSTER_BODY_FIELD(e->selected.declaration);
++        BUSTER_BODY_FIELD(e->selected.canonical);
++        BUSTER_BODY_FIELD(e->selected.object);
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->selected.type));
++        BUSTER_BODY_FIELD(e->selected.flags);
++    }
++    for (uint32_t i = 0; i < stream->overload_address_count; i += 1)
++    {
++        const CheckOverloadAddressEffect* e = stream->overload_addresses + i;
++        const uint32_t j = e->node;
++        if (j < first || j >= end) continue;
++        BUSTER_BODY_FIELD(13);
++        BUSTER_BODY_FIELD(e->node - first);
++        BUSTER_BODY_FIELD(e->operand);
++        BUSTER_BODY_FIELD(e->selected.status);
++        BUSTER_BODY_FIELD(e->selected.candidate);
++        BUSTER_BODY_FIELD(e->selected.declaration);
++        BUSTER_BODY_FIELD(e->selected.canonical);
++        BUSTER_BODY_FIELD(e->selected.object);
++        BUSTER_BODY_FIELD(check_body_type_fingerprint(types,e->selected.type));
++        BUSTER_BODY_FIELD(e->selected.flags);
++    }
++#undef BUSTER_BODY_FIELD
++    return h;
++}
++#endif
+diff --git a/src/buster/compiler/c_check_body_residency.c b/src/buster/compiler/c_check_body_residency.c
+new file mode 100644
+index 000000000..f4d490880
+--- /dev/null
++++ b/src/buster/compiler/c_check_body_residency.c
+@@ -0,0 +1,270 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++
++// A verification slice for an ordinary translation unit. A function borrows the reader's immutable
++// source/type columns. Its local graph owns its renumbered edges, and the checker owns its result
++// until all the result fields have been compared with the whole-unit stream.
++typedef struct CheckBodyResidency
++{
++    uint32_t open, close;
++    uint32_t first, end, nodes;
++} CheckBodyResidency;
++
++#include "c_check_body_fingerprint.c"
++static void check_body_whole_fingerprints(const TypeTable* types, const Parser* parser, const CheckGraph* g, const CheckStream* stream)
++{
++    uint32_t node = 0;
++    for (uint32_t t = 0; t < parser->tokens.count; t += 1)
++    {
++        if (parser->tree.parents[t] >= parser->tokens.count)
++        {
++            const uint32_t first = node;
++            while (node < g->count && g->tokens[node] <= t) node += 1;
++            if (parser->tree.roles[t] == PARSE_ROLE_CLOSE_BODY || getenv("BUSTER_CHECK_SOURCE_DECLARATIONS") != NULL)
++                fprintf(stderr, "body-whole-row\t%u\t%u\t%016llx\n", t, node-first,
++                        (unsigned long long)check_body_fingerprint(types,g,stream,first,node,t));
++        }
++    }
++}
++
++static uint32_t check_body_residency_owner(const CheckBodyResidency* bodies, uint32_t count, uint32_t token)
++{
++    uint32_t low = 0, high = count;
++    while (low < high)
++    {
++        const uint32_t mid = low + (high - low) / 2;
++        if (bodies[mid].close < token) low = mid + 1;
++        else high = mid;
++    }
++    return low < count && bodies[low].open <= token ? low : BUSTER_CHECK_NONE;
++}
++
++static bool check_body_residency_graph(const CheckGraph* g, const CheckBodyResidency* body, Arena* arena, CheckGraph* view)
++{
++    const uint32_t first = body->first, end = body->end, size = end - first;
++    for (uint32_t i = 0; i < g->overload_count; i += 1)
++        if (g->overload_calls[i].node >= first && g->overload_calls[i].node < end) return false;
++    uint32_t first_leaf = BUSTER_CHECK_NONE, leaves = 0, first_arg = BUSTER_CHECK_NONE, args = 0;
++    for (uint32_t node = first; node < end; node += 1)
++    {
++        const CheckOp op = g->ops[node];
++        if (op >= CHECK_OP_BUILTIN_UNARY && op != CHECK_OP_BUILTIN_ATOMIC) return false;
++        const uint32_t children[] = {g->operand0[node], g->operand1[node], g->operand2[node]};
++        for (uint32_t i = 0; i < 3; i += 1)
++            if (children[i] != BUSTER_CHECK_NONE && children[i] < first) return false;
++        if (op == CHECK_OP_VALUE)
++        {
++            const uint32_t slot = g->leaf_slots[node];
++            if ((g->leaf_records != NULL ? g->leaf_records[slot].overload_head : g->dense_leaves[slot].overload_head) != 0) return false;
++            if (first_leaf == BUSTER_CHECK_NONE) first_leaf = g->leaf_slots[node];
++            if (g->leaf_slots[node] != first_leaf + leaves++) return false;
++        }
++        if (g->argument_counts[node] != 0)
++        {
++            if (op != CHECK_OP_CALL && op != CHECK_OP_BUILTIN_ATOMIC) return false;
++            if (first_arg == BUSTER_CHECK_NONE) first_arg = g->argument_offsets[node];
++            if (g->argument_offsets[node] != first_arg + args) return false;
++            for (uint32_t i = 0; i < g->argument_counts[node]; i += 1)
++            {
++                const uint32_t child = g->argument_nodes[first_arg + args + i];
++                if (child < first || child >= node) return false;
++            }
++            args += g->argument_counts[node];
++        }
++    }
++    uint32_t* cols = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)size * 5 + args);
++    if (cols == NULL) return false;
++    *view = (CheckGraph){
++        .marked_members = g->marked_members, .marked_member_count = g->marked_member_count,
++        .availability_contexts = g->availability_contexts,
++        .ns_constant_string = g->ns_constant_string, .cfstring_class = g->cfstring_class,
++        .ops = g->ops + first, .tokens = g->tokens + first,
++        .operand0 = cols, .operand1 = cols + size, .operand2 = cols + 2 * size,
++        .leaf_slots = cols + 3 * size, .types = g->types + first, .members = g->members + first,
++        .contexts = g->contexts != NULL ? g->contexts + first : NULL,
++        .const_values = g->const_values, .fp_environments = g->fp_environments != NULL ? g->fp_environments + first : NULL,
++        .fp_contract_default = g->fp_contract_default,
++        .warning_suppressed = g->warning_suppressed != NULL ? g->warning_suppressed + first : NULL,
++        .system_tokens = g->system_tokens, .system_token_count = g->system_token_count,
++        .tag_completions = g->tag_completions, .transparent_unions = g->transparent_unions, .tag_completion_count = g->tag_completion_count,
++        .source_positions = g->source_positions != NULL ? g->source_positions + first : NULL, .extensions = g->extensions,
++        .count = size, .capacity = size, .leaf_count = leaves,
++        .leaf_records = leaves != 0 && g->leaf_records != NULL ? g->leaf_records + first_leaf : NULL,
++        .leaf_payloads = g->leaf_payloads, .leaf_payload_count = g->leaf_payload_count, .leaf_payload_capacity = g->leaf_payload_capacity,
++        .dense_leaves = leaves != 0 && g->dense_leaves != NULL ? g->dense_leaves + first_leaf : NULL,
++        .argument_offsets = cols + 4 * size, .argument_counts = g->argument_counts + first,
++        .argument_nodes = args != 0 ? cols + 5 * size : NULL,
++        .argument_tokens = args != 0 && g->argument_tokens != NULL ? g->argument_tokens + first_arg : NULL,
++        .argument_count = args, .argument_capacity = args,
++    };
++    uint32_t vector = 0;
++    while (vector < g->vector_member_count && g->vector_members[vector].node < first) vector += 1;
++    uint32_t stop = vector;
++    while (stop < g->vector_member_count && g->vector_members[stop].node < end) stop += 1;
++    if (stop > vector)
++    {
++        view->vector_member_count = view->vector_member_capacity = stop - vector;
++        view->vector_members = BUSTER_ARENA_PUSH_ARRAY(arena, CheckVectorCall, view->vector_member_count);
++        if (view->vector_members == NULL) return false;
++        for (uint32_t i = 0; i < view->vector_member_count; i += 1)
++        {
++            view->vector_members[i] = g->vector_members[vector + i];
++            view->vector_members[i].node -= first;
++        }
++    }
++    uint32_t builtin = 0;
++    while (builtin < g->builtin_count && g->builtin_calls[builtin].node < first) builtin += 1;
++    uint32_t past = builtin;
++    while (past < g->builtin_count && g->builtin_calls[past].node < end) past += 1;
++    if (past > builtin)
++    {
++        view->builtin_count = view->builtin_capacity = past - builtin;
++        view->builtin_calls = BUSTER_ARENA_PUSH_ARRAY(arena, CheckBuiltinCall, view->builtin_count);
++        if (view->builtin_calls == NULL) return false;
++        for (uint32_t i = 0; i < view->builtin_count; i += 1)
++        {
++            view->builtin_calls[i] = g->builtin_calls[builtin + i];
++            view->builtin_calls[i].node -= first;
++        }
++    }
++    for (uint32_t j = 0; j < size; j += 1)
++    {
++        const uint32_t i = first + j;
++        view->operand0[j] = g->operand0[i] != BUSTER_CHECK_NONE ? g->operand0[i] - first : BUSTER_CHECK_NONE;
++        view->operand1[j] = g->operand1[i] != BUSTER_CHECK_NONE ? g->operand1[i] - first : BUSTER_CHECK_NONE;
++        view->operand2[j] = g->operand2[i] != BUSTER_CHECK_NONE ? g->operand2[i] - first : BUSTER_CHECK_NONE;
++        view->leaf_slots[j] = g->leaf_slots[i] != BUSTER_CHECK_NONE ? g->leaf_slots[i] - first_leaf : BUSTER_CHECK_NONE;
++        view->argument_offsets[j] = g->argument_counts[i] != 0 ? g->argument_offsets[i] - first_arg : 0;
++    }
++    for (uint32_t i = 0; i < args; i += 1) view->argument_nodes[i] = g->argument_nodes[first_arg + i] - first;
++    return true;
++}
++
++static bool check_body_value_equal(CheckValue a, CheckValue b, uint32_t first)
++{
++    if (b.fault != CHECK_FAULT_NONE) b.fault_node += first;
++    return a.type == b.type && a.category == b.category && a.flags == b.flags && a.constant_kind == b.constant_kind &&
++           a.integer == b.integer && memcmp(&a.floating, &b.floating, 10) == 0 && memcmp(&a.imaginary, &b.imaginary, 10) == 0 &&
++           a.object == b.object && a.overload_head == b.overload_head && a.offset == b.offset && a.bit_width == b.bit_width &&
++           a.fault == b.fault && a.fault_node == b.fault_node && a.object_bit_offset == b.object_bit_offset;
++}
++
++static bool check_body_atomic_equal(const CheckBuiltinAtomicEffect* a, const CheckBuiltinAtomicEffect* b, uint32_t first)
++{
++    return a->node == first + b->node && check_body_value_equal(a->object_address, b->object_address, first) &&
++           check_body_value_equal(a->store_value, b->store_value, first) && memcmp(a->answers, b->answers, sizeof(a->answers)) == 0 &&
++           a->object_type == b->object_type && a->value_type == b->value_type && a->object_size == b->object_size &&
++           a->required_alignment == b->required_alignment && a->minimum_alignment == b->minimum_alignment && a->evaluated_operands == b->evaluated_operands &&
++           a->success_order == b->success_order && a->failure_order == b->failure_order && a->known_orders == b->known_orders &&
++           a->warnings == b->warnings && a->warning_operands == b->warning_operands && a->unsupported == b->unsupported &&
++           a->runtime_builtin == b->runtime_builtin && a->fence_scope == b->fence_scope && a->alignment_known == b->alignment_known &&
++           a->volatile_access == b->volatile_access && a->reads_memory == b->reads_memory && a->writes_memory == b->writes_memory &&
++           a->rmw == b->rmw && a->compiler_barrier == b->compiler_barrier && a->late_completion == b->late_completion &&
++           a->query_size == b->query_size && a->query_pointer == b->query_pointer && a->space_target == b->space_target;
++}
++
++static bool check_body_effects_equal(const CheckStream* all, const CheckStream* part, uint32_t first, uint32_t end)
++{
++    uint32_t j = 0;
++    for (uint32_t k = 0; k < all->atomic_count; k += 1)
++    {
++        const CheckBuiltinAtomicEffect* effect = all->atomics + k;
++        if (effect->node >= first && effect->node < end)
++        {
++            if (j == part->atomic_count || !check_body_atomic_equal(effect, part->atomics + j, first)) return false;
++            j += 1;
++        }
++    }
++    return j == part->atomic_count;
++}
++
++static bool check_body_residency_equal(const CheckStream* all, const CheckStream* part, uint32_t first, uint32_t j)
++{
++    const uint32_t i = first + j;
++    const CheckValue a = check_stream_value(all, i);
++    const CheckValue b = check_stream_value(part, j);
++    for (uint32_t arg = 0; arg < part->graph->argument_counts[j]; arg += 1)
++    {
++        if (memcmp(all->argument_conversions + all->graph->argument_offsets[i] + arg,
++                   part->argument_conversions + part->graph->argument_offsets[j] + arg,
++                   sizeof(*all->argument_conversions)) != 0) return false;
++    }
++    if ((all->constant_evaluated != NULL && all->constant_evaluated[i]) !=
++        (part->constant_evaluated != NULL && part->constant_evaluated[j])) return false;
++    return check_body_value_equal(a, b, first) &&
++           memcmp(all->conversions + i, part->conversions + j, sizeof(*all->conversions)) == 0 &&
++           all->diagnostics[i] == part->diagnostics[j] && all->diagnostic_operands[i] == part->diagnostic_operands[j] &&
++           all->warnings[i] == part->warnings[j] && all->warning_ignored[i] == part->warning_ignored[j] &&
++           all->member_offsets[i] == part->member_offsets[j];
++}
++
++static bool check_body_residency_run(const Parser* parser, TypeTable* types, const CheckGraph* g, const CheckStream* ordinary, FILE* log)
++{
++    const uint32_t tokens = parser->tokens.count;
++    Arena graph = arena_reserve(1ull << 36), checked = arena_reserve(1ull << 36), scratch = arena_reserve(1ull << 36);
++    CheckBodyResidency* bodies = calloc(tokens / 2 + 1, sizeof(*bodies));
++    bool ok = bodies != NULL && graph.base != NULL && checked.base != NULL && scratch.base != NULL;
++    uint32_t n = 0, max_tokens = 0, max_nodes = 0, accepted = 0, acted = 0, largest_accepted = 0, atomics = 0, other = 0, split = 0, fail = 0;
++    for (uint32_t t = 0; ok && t < tokens; t += 1)
++    {
++        uint32_t c = parser->tree.parents[t];
++        if (parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY && c > t && c < tokens && parser->tree.roles[c] == PARSE_ROLE_CLOSE_BODY)
++        {
++            bodies[n++] = (CheckBodyResidency){ .open=t, .close=c, .first=BUSTER_CHECK_NONE };
++            if (c - t + 1 > max_tokens) max_tokens = c - t + 1;
++            t = c;
++        }
++    }
++    for (uint32_t i = 0; ok && i < g->count; i += 1)
++    {
++        const uint32_t b = check_body_residency_owner(bodies, n, g->tokens[i]);
++        if (b == BUSTER_CHECK_NONE) { other += 1; continue; }
++        if (bodies[b].nodes++ == 0) bodies[b].first = i;
++        bodies[b].end = i + 1;
++    }
++    for (uint32_t b = 0; ok && b < n; b += 1)
++    {
++        const CheckBodyResidency* row = bodies + b;
++        if (row->nodes > max_nodes) max_nodes = row->nodes;
++        if (row->nodes == 0) continue;
++        if (row->end - row->first != row->nodes) { split += 1; continue; }
++        CheckGraph view;
++        if (check_body_residency_graph(g, row, &graph, &view))
++        {
++            CheckStream local;
++            if (!check_graph_run(types, &view, &checked, &scratch, &(CheckOptions){ 0 }, &local))
++            {
++                if (fail++ < 5) fprintf(log,"residency-check-failed\tbody=%u\tstatus=%u\tnode=%u\n",b,local.status,local.failed_node);
++            }
++            else
++            {
++                uint32_t j = 0; while (j < view.count && check_body_residency_equal(ordinary,&local,row->first,j)) j += 1;
++                if (j != view.count)
++                {
++                    if (fail++ < 5) fprintf(log,"residency-row-diff\tbody=%u\tfirst=%u\tlocal=%u\top=%u\n",b,row->first,j,view.ops[j]);
++                }
++                else if (!check_body_effects_equal(ordinary, &local, row->first, row->end))
++                {
++                    if (fail++ < 5) fprintf(log, "residency-atomic-diff\tbody=%u\n", b);
++                }
++                else
++                {
++                    accepted += 1;
++                    acted += j;
++                    atomics += local.atomic_count;
++                    if (j > largest_accepted) largest_accepted = j;
++                }
++            }
++        }
++        arena_pop_to(&graph, 0);
++        arena_pop_to(&checked, 0);
++        arena_pop_to(&scratch, 0);
++    }
++    fprintf(log,"residency-summary\ttokens=%u\tbodies=%u\tlargest-body-tokens=%u\tnodes=%u\toutside-body=%u\tlargest-body-nodes=%u\tnoncontiguous-bodies=%u\tchecked-bodies=%u\tchecked-nodes=%u\tlargest-checked=%u\tchecked-atomics=%u\tfailures=%u\tgraph-peak=%llu\tstream-peak=%llu\tscratch-peak=%llu\n",
++           tokens,n,max_tokens,g->count,other,max_nodes,split,accepted,acted,largest_accepted,atomics,fail,(unsigned long long)graph.peak,(unsigned long long)checked.peak,(unsigned long long)scratch.peak);
++    fprintf(log, "residency-pages\tgraph-bytes=%llu\tstream-bytes=%llu\tscratch-bytes=%llu\n",
++            (unsigned long long)check_body_residency_mapped(&graph), (unsigned long long)check_body_residency_mapped(&checked),
++            (unsigned long long)check_body_residency_mapped(&scratch));
++    free(bodies); arena_release(&graph); arena_release(&checked); arena_release(&scratch);
++    return ok && fail == 0;
++}
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+new file mode 100644
+index 000000000..a590e4d6d
+--- /dev/null
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -0,0 +1,188 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++#include "c_check_body_fingerprint.c"
++
++// Indexes keyed by original parser coordinates. These source columns survive graph retirement.
++typedef struct CheckSourceControlUnit
++{
++    uint32_t* first;
++    uint32_t* last;
++    uint32_t* next;
++    uint32_t* previous;
++    uint32_t* token_head;
++    uint32_t* seen;
++    uint8_t* needed;
++    uint64_t* planned;
++    uint32_t* plan_first;
++    uint32_t* parent_cache;
++    uint32_t* case_first;
++    uint32_t* case_map;
++    uint32_t* source_labels;
++} CheckSourceControlUnit;
++
++static void check_source_control_function(CheckSourceControlUnit* unit, CheckInputReader* reader,
++                                          CheckStream* stream, uint32_t close, Arena* output, Arena* scratch);
++
++static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_t stop, uint32_t close,
++                                  Arena* graph, Arena* checked, Arena* scratch, uint32_t* made, CheckSourceControlUnit* controls)
++{
++    CheckInputReader reader = *top;
++    CheckInput input = *top->output;
++    // A single active source root may intern a derived type. The translation-unit type table owns it
++    // across graph retirement, including array decay required by a later static assertion.
++    reader.output = &input;
++    reader.arena = graph;
++    reader.scratch = scratch;
++    reader.warning_query_arena = graph;
++    reader.warning_events = (CheckWarningBuffer){ .arena = graph };
++    reader.source_warning_keys.arena = graph;
++    reader.source_warning_keys.borrowed = true;
++    reader.literal_warnings.arena = graph;
++    reader.literal_warnings.borrowed = true;
++    reader.warning_index_ready = false;
++    reader.warning_index = BUSTER_ARENA_PUSH_ARRAY(graph, uint16_t, (uint64_t)reader.warning_index_base * 2);
++    reader.const_warning_capacity = 0;
++    input.reports = BUSTER_ARENA_PUSH_ARRAY(graph, CheckInputReport, 1);
++    input.report_count = 0;
++    input.report_capacity = 1;
++    input.warning_events = (CheckWarningEvents){ 0 };
++    const uint32_t tokens = stop - begin;
++    uint32_t extra = 0;
++    for (uint32_t i = begin; i < stop; i += 1)
++    {
++        const uint8_t kind = reader.parser->tokens.kinds[reader.postorder[i]];
++        extra += kind == PARSE_KIND_L_SQUARE ? 8 : kind == PARSE_KIND_SIZEOF ? 4 : 0;
++    }
++    if (tokens > UINT32_MAX - extra) return false;
++    const uint32_t room = tokens + extra;
++    CheckGraph shape = top->output->graph;
++    shape.capacity = room;
++    uint32_t* next = BUSTER_ARENA_PUSH_ARRAY(graph, uint32_t, room);
++    if (next == NULL || input.reports == NULL || reader.warning_index == NULL) return false;
++#define BUSTER_BODY_COLUMN(field, n) do { if (shape.field != NULL) { \
++        shape.field = arena_push_array(graph, (n), sizeof(*shape.field), 64); \
++        if (shape.field == NULL) return false; \
++        memset(shape.field, 0, (uint64_t)(n) * sizeof(*shape.field)); } } while (0)
++    BUSTER_BODY_COLUMN(ops, room); BUSTER_BODY_COLUMN(tokens, room); BUSTER_BODY_COLUMN(types, room); BUSTER_BODY_COLUMN(members, room);
++    BUSTER_BODY_COLUMN(operand0, room); BUSTER_BODY_COLUMN(operand1, room); BUSTER_BODY_COLUMN(operand2, room);
++    BUSTER_BODY_COLUMN(leaf_slots, room); BUSTER_BODY_COLUMN(contexts, room); BUSTER_BODY_COLUMN(source_positions, room);
++    BUSTER_BODY_COLUMN(warning_suppressed, room); BUSTER_BODY_COLUMN(fp_environments, room); BUSTER_BODY_COLUMN(recorded_pure, room);
++    BUSTER_BODY_COLUMN(argument_offsets, room); BUSTER_BODY_COLUMN(argument_counts, room); BUSTER_BODY_COLUMN(argument_nodes, tokens);
++    BUSTER_BODY_COLUMN(argument_tokens, tokens); BUSTER_BODY_COLUMN(leaf_records, room);
++    if (shape.leaf_payloads != NULL)
++    {
++        shape.leaf_payloads = BUSTER_ARENA_PUSH_ARRAY(graph, CheckValue, room);
++        if (shape.leaf_payloads == NULL) return false;
++    }
++    BUSTER_BODY_COLUMN(dense_leaves, room);
++#undef BUSTER_BODY_COLUMN
++    CheckDeferredExpressionPart part = { .begin = 0, .end = tokens, .capacity = room, .leaf_capacity = room };
++    if (!check_deferred_expression_graph(&part, &shape, next, graph)) return false;
++    input.graph = part.graph;
++#define BUSTER_BODY_SIDELIST(field, counter, Type, local_limit) do { \
++        const uint32_t limit = (local_limit); \
++        input.graph.counter##_capacity = shape.counter##_capacity < limit ? shape.counter##_capacity : limit; \
++        if (input.graph.counter##_capacity != 0) { \
++            input.graph.field = BUSTER_ARENA_PUSH_ARRAY(graph, Type, input.graph.counter##_capacity); \
++            if (input.graph.field == NULL) return false; } } while (0)
++    BUSTER_BODY_SIDELIST(varargs_calls, varargs, CheckVarargsCall, tokens);
++    BUSTER_BODY_SIDELIST(x86_calls, x86, CheckX86Call, tokens);
++    BUSTER_BODY_SIDELIST(overload_calls, overload, CheckOverloadCall, tokens);
++    BUSTER_BODY_SIDELIST(region_proofs, region_proof, CheckRegionProof, tokens);
++    BUSTER_BODY_SIDELIST(region_steps, region_step, CheckRegionProofStep, tokens <= UINT32_MAX / 9 ? 9 * tokens : UINT32_MAX);
++#undef BUSTER_BODY_SIDELIST
++
++    input.graph.const_values = &input.const_values;
++    reader.value_next = next;
++    check_input_expressions_coded_range(&reader, begin, stop);
++    if (input.resource || input.report_count != 0)
++    {
++        fprintf(stderr,"body-source-decline\tclose=%u\tresource=%u\treports=%u\ttype-error=%u\tnodes=%u\n",
++                close,input.resource,input.report_count,reader.types->last_error,input.graph.count);
++        return false;
++    }
++    check_graph_record_finish(&input.graph);
++    CheckStream stream;
++    if (!check_graph_run(top->types, &input.graph, checked, scratch, &(CheckOptions){ 0 }, &stream))
++    {
++        fprintf(stderr,"body-source-decline\tclose=%u\tstatus=%u\tnode=%u\n",close,stream.status,stream.failed_node);
++        return false;
++    }
++    if (getenv("BUSTER_BODY_DISCARD_RESULT") == NULL) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
++            (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, close));
++    if (controls != NULL && reader.parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
++        check_source_control_function(controls, &reader, &stream, close, checked, scratch);
++    *made = input.graph.count;
++    return true;
++}
++
++// This verification entry stops before the ordinary expression graph is filled. File-scope binding and
++// token/type columns are retained, and only audited complete function trees enter the local expression producer.
++static void check_body_source_run(CheckInputReader* reader)
++{
++    Arena graph = arena_reserve(1ull << 36), checked = arena_reserve(1ull << 36), scratch = arena_reserve(1ull << 36);
++    const uint32_t count = reader->parser->tokens.count;
++    const Parser* parser = reader->parser;
++    Arena indexes = arena_reserve(UINT64_C(1) << 34);
++    CheckSourceControlUnit unit = { 0 };
++    CheckSourceControlUnit* controls = NULL;
++    if (getenv("BUSTER_SOURCE_CONTROLS") != NULL)
++    {
++        const uint64_t slots = (uint64_t)count + 1;
++#define BUSTER_CONTROL_INDEX(field, Type, length) unit.field = BUSTER_ARENA_PUSH_ARRAY(&indexes, Type, length); if (unit.field == NULL) exit(2)
++        BUSTER_CONTROL_INDEX(first, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(last, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(next, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(previous, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(token_head, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(seen, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(needed, uint8_t, slots);
++        BUSTER_CONTROL_INDEX(planned, uint64_t, (slots + 63) / 64);
++        BUSTER_CONTROL_INDEX(plan_first, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(parent_cache, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(case_first, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(case_map, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(source_labels, uint32_t, slots);
++#undef BUSTER_CONTROL_INDEX
++        memset(unit.seen, 0, slots * sizeof(uint32_t));
++        memset(unit.planned, 0, ((slots + 63) / 64) * sizeof(uint64_t));
++        controls = &unit;
++    }
++    uint32_t begin = 0, admitted = 0, bodies = 0, produced = 0, skipped = 0, nodes = 0, biggest = 0;
++    bool safe = true;
++    const bool include_declarations = getenv("BUSTER_CHECK_SOURCE_DECLARATIONS") != NULL;
++    const bool explore = getenv("BUSTER_CHECK_BODY_ADMIT_ALL") != NULL;
++    for (uint32_t i = 0; i < count; i += 1)
++    {
++        const uint32_t t = reader->postorder[i];
++        safe = safe && check_deferred_expression_parallel(reader, t);
++        if (parser->tree.parents[t] >= count)
++        {
++            if (include_declarations || parser->tree.roles[t] == PARSE_ROLE_CLOSE_BODY)
++            {
++                bodies += 1;
++                if (safe || explore)
++                {
++                    uint32_t made = 0;
++                    admitted += 1;
++                    if (check_body_source_one(reader, begin, i + 1, t, &graph, &checked, &scratch, &made, controls))
++                    {
++                        produced += 1; nodes += made; biggest = biggest > made ? biggest : made;
++                    }
++                    else skipped += 1;
++                    arena_pop_to(&graph, 0); arena_pop_to(&checked, 0); arena_pop_to(&scratch, 0);
++                }
++            }
++            begin = i + 1;
++            safe = true;
++        }
++    }
++    fprintf(stderr,"body-source-summary\tunit-graph-capacity=%u\tbodies=%u\tadmitted=%u\tproduced=%u\tdeclined=%u\tnodes=%u\tlargest-checked=%u\tunit-graph-nodes=%u\tgraph-peak=%llu\tstream-peak=%llu\tscratch-peak=%llu\n",
++            reader->output->graph.capacity,bodies,admitted,produced,skipped,nodes,biggest,reader->output->graph.count,(unsigned long long)graph.peak,(unsigned long long)checked.peak,(unsigned long long)scratch.peak);
++    fprintf(stderr,"body-source-pages\tgraph=%llu\tstream=%llu\tscratch=%llu\n",
++            (unsigned long long)check_body_residency_mapped(&graph),(unsigned long long)check_body_residency_mapped(&checked),
++            (unsigned long long)check_body_residency_mapped(&scratch));
++    arena_release(&indexes);
++    arena_release(&graph);arena_release(&checked);arena_release(&scratch);
++    exit(produced > 0 && begin == count && (!include_declarations || skipped == 0) ? 0 : 1);
++}
+diff --git a/src/buster/compiler/c_check_deferred_expressions.c b/src/buster/compiler/c_check_deferred_expressions.c
+index ae09f2ad3..0825132f3 100644
+--- a/src/buster/compiler/c_check_deferred_expressions.c
++++ b/src/buster/compiler/c_check_deferred_expressions.c
+@@ -486,6 +486,8 @@ static bool check_deferred_expression_graph(CheckDeferredExpressionPart* part, c
+     return valid;
+ }
+ 
++#include "c_check_body_source.c"
++
+ // Each lane owns one arena and takes complete forest parts. The type descriptor is private; capacities at the current
+ // counts prohibit writes through its borrowed columns, including an index growth on a missing derived type.
+ static void check_deferred_expression_lane(void* argument)
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..d173f3c20 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -16258,6 +16258,7 @@ static void check_input_expression_visit(CheckInputReader* reader, uint32_t toke
+ // The walk over the tokens in postorder that builds the expression graph, the coded walk (check_input_expressions_coded):
+ // it visits only the tokens it acts at, whose first values their classes wrote (check_input_expression_classes), and
+ // acts at most of them by their classes, testing the sparse columns only of tokens their classes say have an entry.
++static void check_body_source_run(CheckInputReader* reader);
+ static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader* reader);
+ static void check_deferred_give_back(CheckDeferred* deferred);
+ 
+@@ -16269,6 +16270,10 @@ static void check_input_expressions(CheckInputReader* reader)
+     const uint64_t classed = __rdtsc();
+     reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_CLASSES] = classed - start;
+     reader->output->expression_visits = acts;
++    if (getenv("BUSTER_CHECK_BODY_SOURCE_ONLY") != NULL)
++    {
++        check_body_source_run(reader);
++    }
+     if (reader->deferred == NULL || !check_deferred_expressions(reader->deferred, reader))
+     {
+         if (reader->deferred != NULL)
+@@ -17165,7 +17170,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     input->asm_capacity = counts.asms;
+     const uint32_t vector_members = counts.vector_members;
+     const bool transparent_unions = counts.groups[CHECK_INPUT_COUNT_TRANSPARENT_UNIONS] != 0;
+-    const uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
++    const bool body_source = getenv("BUSTER_CHECK_BODY_SOURCE_ONLY") != NULL;
++    const uint64_t graph_capacity = body_source ? 1 : (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
+     CheckInputReader reader =
+     {
+         .output = input,
+@@ -17300,7 +17306,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     uint8_t* recorded_pure = valid ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+     uint8_t* warning_suppressed = recorded_pure != NULL ? arena_push_array(arena, graph_capacity, sizeof(uint8_t), 1) : NULL;
+     valid &= warning_suppressed != NULL;
+-    valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, count + 1);
++    valid &= check_graph_initialize(&input->graph, arena, (uint32_t)graph_capacity, body_source ? 1 : count + 1);
+     const uint8_t fp_contract = predefines_fp_contract(&pp->options.predefines);
+     input->graph.fp_contract_default = fp_contract == BUSTER_PREDEFINES_CONTRACT_ON ? BUSTER_CHECK_FP_CONTRACT_ON :
+                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
+@@ -17315,7 +17321,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     input->const_values = check_const_view(&reader.const_values);
+     input->graph.const_values = &input->const_values;
+     input->graph.warning_suppressed = valid ? warning_suppressed : NULL;
+-    input->graph.argument_tokens = valid ? arena_push_array(arena, (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
++    input->graph.argument_tokens = valid ? arena_push_array(arena, body_source ? 1 : (uint64_t)count + 1, sizeof(uint32_t), 64) : 0;
+     valid &= input->graph.argument_tokens != 0;
+     if (valid && vector_members != 0)
+     {
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 4aa93ef49..725d1c213 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -6577,6 +6577,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+ 
+ // check_program's loop (#2536's step 2.2c.1): the bodies from the run's next to `end`, each's controls, return flow,
+ // chains and references, in token order, as the loop over them all would make them.
++#if BUSTER_SOURCE_CONSUMER
++#include "c_check_source_control_program.c"
++#endif
++
+ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
+ {
+     CheckProgram* program = run->program;
+@@ -6894,6 +6898,10 @@ static bool check_program_finish(CheckProgramRun* run)
+     else
+     {
+         program->output_bytes = output->length - mark;
++#if BUSTER_SOURCE_CONSUMER
++        if (getenv("BUSTER_WHOLE_CONTROLS") != NULL) check_source_control_oracle(program, parser);
++#endif
++
+     }
+     if (!run->keep_scratch)
+     {
+diff --git a/src/buster/compiler/c_check_source_control_program.c b/src/buster/compiler/c_check_source_control_program.c
+new file mode 100644
+index 000000000..f9e8b5880
+--- /dev/null
++++ b/src/buster/compiler/c_check_source_control_program.c
+@@ -0,0 +1,226 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++// Emit the ordinary control tape and per-body object dependencies before the source checker retires its graph.
++// The ordinary record uses the same function-local node numbering. Its references are independently sorted.
++static void check_source_control_record(const char* arm, uint32_t close, const CheckControl* entries, uint32_t count,
++                                        uint32_t first_node, const uint32_t* refs, uint32_t ref_count, const CheckProgram* program)
++{
++    fprintf(stderr, "source-control-%s\t%u\t%u\t%u", arm, close, count, ref_count);
++    for (uint32_t i = 0; i < count; i += 1)
++    {
++        const CheckControl entry = entries[i];
++        const uint32_t node = entry.node == BUSTER_CHECK_NONE || entry.kind == CHECK_CONTROL_LIFETIME ? entry.node : entry.node - first_node;
++        fprintf(stderr, "\t%u,%u,%u,%u", (uint32_t)entry.kind, entry.token, node,
++                entry.kind == CHECK_CONTROL_INITIALIZE ? program->initializers->declaration_tokens[entry.target] :
++                entry.kind == CHECK_CONTROL_CASE ? program->cases[entry.target].token : entry.target);
++    }
++    fprintf(stderr, "\trefs");
++    for (uint32_t i = 0; i < ref_count; i += 1) fprintf(stderr, ",%u", refs[i]);
++    fputc('\n', stderr);
++}
++
++// Fingerprint initializer parts and switch cases that a body's ordered control accesses after its graph is retired.
++static void check_source_control_details(const char* arm, const CheckProgram* p, uint32_t opening, uint32_t close,
++                                         uint32_t first_node, uint32_t case_first, uint32_t case_end)
++{
++    const CheckInitializers* inits = p->initializers;
++    const uint32_t n = inits == NULL ? 0 : inits->count;
++    uint32_t lo = 0, hi = n;
++    while (lo < hi)
++    {
++        const uint32_t mid = lo + (hi - lo) / 2;
++        if (inits->declaration_tokens[mid] < opening) lo = mid + 1;
++        else hi = mid;
++    }
++    for (uint32_t i = lo; i < n && inits->declaration_tokens[i] < close; i += 1)
++    {
++        const CheckInitializer* plan = inits->plans + i;
++        uint64_t h = UINT64_C(14695981039346656037);
++#define BUSTER_DETAIL(x) h = (h ^ (uint64_t)(x)) * UINT64_C(1099511628211)
++        BUSTER_DETAIL(check_body_type_fingerprint(p->types, plan->type)); BUSTER_DETAIL(plan->object_size);
++        BUSTER_DETAIL(plan->status); BUSTER_DETAIL(plan->warning_count); BUSTER_DETAIL(plan->warning_token);
++        BUSTER_DETAIL(plan->floating_values); BUSTER_DETAIL(plan->changed_integers); BUSTER_DETAIL(plan->enum_values); BUSTER_DETAIL(plan->label_differences);
++        for (uint32_t j = 0; j < plan->count; j += 1)
++        {
++            const CheckInitPart* part = plan->parts + j;
++            BUSTER_DETAIL(part->kind); BUSTER_DETAIL(check_body_type_fingerprint(p->types, part->type));
++            BUSTER_DETAIL(part->node == BUSTER_CHECK_NONE ? part->node : part->node - first_node);
++            BUSTER_DETAIL(part->token); BUSTER_DETAIL(part->overload_candidate); BUSTER_DETAIL(part->bit_offset);
++            BUSTER_DETAIL(part->bit_width); BUSTER_DETAIL(part->byte_count);
++            BUSTER_DETAIL(check_body_value_fingerprint(p->types, part->value, first_node));
++            BUSTER_DETAIL(check_body_type_fingerprint(p->types, part->conversion.type)); BUSTER_DETAIL(part->conversion.flags);
++            if (part->kind == CHECK_INIT_BYTES)
++                for (uint64_t k = 0; k < part->byte_count; k += 1) { BUSTER_DETAIL(part->bytes[k]); }
++        }
++        fprintf(stderr, "source-plan-%s\t%u\t%u\t%u\t%016llx\n", arm, close, inits->declaration_tokens[i], plan->count, (unsigned long long)h);
++    }
++    for (uint32_t i = case_first; i < case_end; i += 1)
++    {
++        const CheckProgramCase* item = p->cases + i;
++        uint64_t h = UINT64_C(14695981039346656037);
++        BUSTER_DETAIL(check_body_type_fingerprint(p->types, item->type)); BUSTER_DETAIL(item->owner); BUSTER_DETAIL(item->target);
++        BUSTER_DETAIL(item->fallback); BUSTER_DETAIL(item->range);
++        BUSTER_DETAIL(item->lower); BUSTER_DETAIL(item->lower >> 64); BUSTER_DETAIL(item->upper); BUSTER_DETAIL(item->upper >> 64);
++        if (item->wide_lower != NULL || item->wide_upper != NULL)
++        {
++            uint32_t width = 0; bool sign = false;
++            if (!check_wide_type(p->types, item->type, &width, &sign)) exit(2);
++            for (uint32_t limb = 0; limb < check_wide_count(width); limb += 1)
++            {
++                BUSTER_DETAIL(item->wide_lower == NULL ? 0 : item->wide_lower[limb]);
++                BUSTER_DETAIL(item->wide_upper == NULL ? 0 : item->wide_upper[limb]);
++            }
++        }
++        fprintf(stderr, "source-case-%s\t%u\t%u\t%016llx\n", arm, close, item->token, (unsigned long long)h);
++    }
++#undef BUSTER_DETAIL
++}
++
++static void check_source_control_oracle(const CheckProgram* p, const Parser* parser)
++{
++    uint32_t body = 0, node = 0, case_at = 0;
++    for (uint32_t t = 0; t < parser->tokens.count; t += 1)
++    {
++        if (parser->tree.parents[t] < parser->tokens.count) continue;
++        const uint32_t first = node;
++        while (node < p->input->graph.count && p->input->graph.tokens[node] <= t) node += 1;
++        if (body < p->body_count && parser->tree.parents[p->bodies[body].opening] == t)
++        {
++            const CheckProgramBody* b = p->bodies + body++;
++            const uint32_t first_case = case_at;
++            while (case_at < p->case_count && p->cases[case_at].token <= t) case_at += 1;
++            check_source_control_details("whole", p, b->opening, t, first, first_case, case_at);
++            check_source_control_record("whole", t, p->controls + b->first, b->count, first,
++                                        b->reference_count == 0 ? NULL : p->references + b->reference_first, b->reference_count, p);
++        }
++    }
++}
++
++static void check_source_control_function(CheckSourceControlUnit* unit, CheckInputReader* reader,
++                                          CheckStream* stream, uint32_t close, Arena* output, Arena* scratch)
++{
++    const Parser* parser = reader->parser;
++    const CheckInput* input = reader->output;
++    uint32_t opening = BUSTER_CHECK_NONE;
++    for (uint32_t t = reader->first_child[close]; t != BUSTER_CHECK_NONE; t = reader->next_child[t])
++        if (parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY) opening = t;
++    if (opening >= close) return;
++    uint32_t case_count = 0;
++    for (uint32_t t = opening + 1; t < close; t += 1)
++    {
++        const uint8_t role = parser->tree.roles[t], kind = parser->tokens.kinds[t];
++        case_count += role == PARSE_ROLE_CLOSE_CASE;
++        if ((kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX) ||
++            role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE) return;
++    }
++    for (uint32_t i = 0; i < input->asm_count; i += 1)
++        if (input->asm_statements[i].statement - opening < close - opening) return;
++    for (uint32_t i = 0; i < input->region_count; i += 1)
++        if (input->regions[i].opening - opening < close - opening) return;
++    for (uint32_t i = 0; i < input->vla_count; i += 1)
++        if (input->vlas[i].declaration - opening < close - opening) return;
++    for (uint32_t i = 0; i < input->cleanup_count; i += 1)
++        if (input->cleanups[i].declaration - opening < close - opening) return;
++    const CheckGraph* graph = &input->graph;
++    if (graph->overload_count != 0 || stream->overload_address_count != 0) return;
++    for (uint32_t i = 0; i < graph->count; i += 1)
++        if (graph->ops[i] >= CHECK_OP_BUILTIN_UNARY ||
++            (graph->ops[i] == CHECK_OP_CALL && (graph->members[i] & BUSTER_CHECK_LIBRARY_CALL) != 0)) return;
++    CheckInitializers plans = { .token_count = input->token_count };
++    for (uint32_t token = check_sparse_next(input->initializer_begins, opening, close); token < close;
++         token = check_sparse_next(input->initializer_begins, token + 1, close)) plans.count += 1;
++    uint32_t* plan_next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, plans.count + 1);
++    plans.plans = BUSTER_ARENA_PUSH_ARRAY(output, CheckInitializer, plans.count + 1);
++    plans.declaration_tokens = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, plans.count + 1);
++    if (!plan_next || !plans.plans || !plans.declaration_tokens) exit(2);
++    uint32_t at = 0;
++    for (uint32_t token = check_sparse_next(input->initializer_begins, opening, close); token < close;
++         token = check_sparse_next(input->initializer_begins, token + 1, close))
++    {
++        const uint32_t begin = check_sparse_get(input->initializer_begins, token);
++        const uint32_t end = check_sparse_get(input->initializer_ends, token);
++        if (end > close || begin >= end || check_init_object_candidate(input, reader->types, token)) return;
++        if (!check_initializer_plan_warnings(reader->types, parser, input->token_nodes, stream, input->strings,
++                input->string_count, input->string_ids, input->declared_types[token], begin, end,
++                check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC), false, true,
++                output, scratch, plans.plans + at, graph, NULL, NULL, NULL, NULL)) return;
++        plans.declaration_tokens[at++] = token;
++    }
++    const uint32_t names = input->token_count + 1;
++    const uint32_t slots = graph->count + 1;
++    const uint32_t capacity = (close - opening + 1) * 8 + 16;
++    CheckProgram p = { .input = input, .stream = stream, .parser = parser, .types = reader->types,
++                       .object_count = names, .initializers = &plans, .identifiers = reader->pp->table };
++    check_program_plans(&p, parser, &plans, unit->plan_first, unit->planned, plan_next, unit->parent_cache);
++    if (p.status != CHECK_PROGRAM_OK) return;
++    CheckControlWriter writer = { .program = &p, .parser = parser, .first = unit->first, .last = unit->last,
++                                   .next = unit->next, .previous = unit->previous, .token_first = unit->token_head,
++                                   .planned = unit->planned, .plan_first = unit->plan_first, .plan_next = plan_next, .capacity = capacity, .fold_capacity = slots,
++                                   .switch_scratch = scratch, .region_final = BUSTER_CHECK_NONE };
++    writer.case_first = unit->case_first;
++    writer.case_map = unit->case_map;
++    writer.source_labels = unit->source_labels;
++    writer.label_positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
++    uint32_t* case_next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, case_count + 1);
++    p.cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramCase, case_count + 1);
++    writer.case_next = case_next;
++    writer.switch_capacity = case_count / 4;
++    writer.switches = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, writer.switch_capacity + 1);
++    if (!writer.label_positions || !case_next || !p.cases || !writer.switches) exit(2);
++    if (case_count != 0) memset(unit->case_map + opening, 0xff, (close - opening + 1) * sizeof(uint32_t));
++    memset(unit->case_first + opening, 0xff, (close - opening + 1) * sizeof(uint32_t));
++    for (uint32_t t = opening + 1; t < close && p.status == CHECK_PROGRAM_OK; t += 1)
++    {
++        if ((parser->tokens.kinds[t] == PARSE_KIND_SWITCH || parser->tree.roles[t] == PARSE_ROLE_CLOSE_CASE) &&
++            (input->deferred_tokens == NULL || input->deferred_tokens[t] == 0))
++            check_program_case(&p, parser, t, unit->case_first, case_next, unit->case_map);
++    }
++    if (p.case_count != case_count || p.status != CHECK_PROGRAM_OK) return;
++    if (case_count != 0) check_program_case_conflicts(&p, parser, NULL, scratch);
++    if (p.status != CHECK_PROGRAM_OK) return;
++    uint32_t* links = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
++    uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
++    uint64_t* refs = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, slots);
++    uint64_t* sorted = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, slots);
++    uint32_t* canonical = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
++    writer.fold_stack = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
++    writer.labels = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
++    writer.entries = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControl, capacity);
++    writer.tasks = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckControlTask, capacity);
++    writer.dropped_ranges = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, capacity);
++    writer.static_initializers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)slots + 63) / 64);
++    if (!links || !marks || !refs || !sorted || !canonical || !writer.fold_stack || !writer.labels ||
++        !writer.entries || !writer.tasks || !writer.dropped_ranges || !writer.static_initializers) exit(2);
++    memset(unit->token_head + opening, 0xff, ((uint64_t)close - opening + 1) * sizeof(uint32_t));
++    for (uint32_t j = graph->count; j != 0; )
++    {
++        const uint32_t i = --j, token = graph->tokens[i];
++        if (token >= opening && token <= close) { links[i] = unit->token_head[token]; unit->token_head[token] = i; }
++    }
++    memset(writer.static_initializers, 0, (((uint64_t)slots + 63) / 64) * sizeof(uint64_t));
++    for (uint32_t token = check_sparse_next(input->initializer_nodes, opening, close); token < close;
++         token = check_sparse_next(input->initializer_nodes, token + 1, close))
++    {
++        const uint32_t node = check_sparse_get(input->initializer_nodes, token);
++        if (node < graph->count)
++        {
++            const uint64_t bit = UINT64_C(1) << (node % 64);
++            writer.static_initializers[node / 64] = (writer.static_initializers[node / 64] & ~bit) |
++                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) ? bit : 0);
++        }
++    }
++    writer.static_initializers_ready = true;
++    writer.node_next = links;
++    check_control_build(&writer, opening);
++    if (p.status != CHECK_PROGRAM_OK) return;
++    memset(marks, 0, slots * sizeof(uint32_t));
++    const uint32_t count = check_program_references(&p, writer.entries, writer.entry_count, close + 1,
++                                                     unit->seen, marks, writer.fold_stack, refs, unit->needed);
++    if (p.status != CHECK_PROGRAM_OK) return;
++    uint32_t varying = 0;
++    for (uint32_t i = 1; i < count; i += 1) varying |= (uint32_t)((refs[i] ^ refs[0]) >> 32);
++    const uint64_t* order = c_bindings_sort(refs, sorted, count, true, varying);
++    for (uint32_t i = 0; i < count; i += 1) canonical[i] = (uint32_t)(order[i] >> 32);
++    check_source_control_details("local", &p, opening, close, 0, 0, p.case_count);
++    check_source_control_record("local", close, writer.entries, writer.count, 0, canonical, count, &p);
++}
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index d866ab66f..1433e7355 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12457,6 +12457,8 @@ static void check_attested_summary(const CheckAttested* attested, uint64_t* coun
+ // kept across processes gives too, for the tests.
+ static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
+ 
++#include "c_check_body_residency.c"
++
+ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
+                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
+                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+@@ -12909,6 +12911,19 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                     stage_clock->transition_folds += stream.statistics.transition_folds;
+                     stage_clock->transition_entries += stream.statistics.transition_entries;
+                 }
++                if (ready && getenv("BUSTER_BODY_WHOLE_CHECK_ONLY") != NULL)
++                {
++                    fprintf(stderr,"whole-check-summary\tnodes=%u\n",stream.count);
++                    exit(0);
++                }
++                if (ready && getenv("BUSTER_CHECK_BODY_WHOLE_FINGERPRINT") != NULL)
++                {
++                    check_body_whole_fingerprints(&types, checking, &input.graph, &stream);
++                }
++                if (ready && getenv("BUSTER_CHECK_BODY_RESIDENCY") != NULL)
++                {
++                    ready = check_body_residency_run(checking, &types, &input.graph, &stream, errors);
++                }
+                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
+                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
+                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);

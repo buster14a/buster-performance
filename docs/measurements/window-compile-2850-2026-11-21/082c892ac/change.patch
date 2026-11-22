@@ -1,0 +1,155 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index a6c45a314..31eccaa82 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -3,8 +3,27 @@
+ #include "c_check_body_fingerprint.c"
+ #include "c_check_body_memory.c"
+ 
++// A forest interval ends after a complete external declaration. Ordinary graph nodes for distinct
++// declarations occupy consecutive intervals even when operator tokens within a declaration are in postorder.
++static void check_source_batch_receipts(CheckInputReader* reader, const CheckGraph* graph, const CheckStream* checked,
++                                        uint32_t begin, uint32_t end)
++{
++    uint32_t first_source = begin, node = 0;
++    for (uint32_t pos = begin; pos < end; pos += 1)
++    {
++        const uint32_t close = reader->postorder[pos];
++        if (reader->parser->tree.parents[close] < reader->parser->tokens.count) continue;
++        const uint32_t first = node;
++        while (graph != NULL && node < graph->count && graph->tokens[node] <= close) node += 1;
++        const uint64_t digest = graph == NULL ? UINT64_C(14695981039346656037) :
++            check_body_fingerprint(reader->types, graph, checked, first, node, first_source, close);
++        fprintf(stderr, "body-source-row\t%u\t%u\t%016llx\n", close, node - first, (unsigned long long)digest);
++        first_source = pos + 1;
++    }
++}
++
+ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_t stop, uint32_t close,
+-                                  uint32_t extra, bool discard, Arena* graph, Arena* checked, Arena* scratch, uint32_t* made)
++                                  uint32_t extra, bool discard, bool grouped, Arena* graph, Arena* checked, Arena* scratch, uint32_t* made)
+ {
+     CheckInputReader reader = *top;
+     CheckInput input = *top->output;
+@@ -81,12 +100,94 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+         fprintf(stderr,"body-source-decline\tclose=%u\tstatus=%u\tnode=%u\n",close,stream.status,stream.failed_node);
+         return false;
+     }
+-    if (!discard) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
++    if (grouped && !discard) check_source_batch_receipts(top, &input.graph, &stream, begin, stop);
++    else if (!discard) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
+             (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, begin, close));
+     *made = input.graph.count;
+     return true;
+ }
+ 
++typedef struct CheckSourceBatch
++{
++    uint32_t first;
++    uint32_t end;
++    uint32_t extra;
++    bool active;
++} CheckSourceBatch;
++
++typedef struct CheckSourceBatches
++{
++    uint32_t roots;
++    uint32_t batches;
++    uint32_t checked;
++    uint32_t max_nodes;
++    uint32_t max_tokens;
++} CheckSourceBatches;
++
++static bool check_source_batch_flush(CheckInputReader* reader, CheckSourceBatch batch, bool discard,
++                                     Arena* graph, Arena* checked, Arena* scratch, CheckSourceBatches* totals)
++{
++    if (batch.first == batch.end) return true;
++    uint32_t made = 0;
++    if (batch.active)
++    {
++        const uint32_t close = reader->postorder[batch.end - 1];
++        if (!check_body_source_one(reader, batch.first, batch.end, close, batch.extra, discard, true, graph, checked, scratch, &made)) return false;
++    }
++    else if (!discard)
++    {
++        check_source_batch_receipts(reader, NULL, NULL, batch.first, batch.end);
++    }
++    totals->checked += made;
++    totals->batches += 1;
++    if (made > totals->max_nodes) totals->max_nodes = made;
++    const uint32_t tokens = batch.end - batch.first;
++    if (tokens > totals->max_tokens) totals->max_tokens = tokens;
++    arena_pop_to(graph, 0);
++    arena_pop_to(checked, 0);
++    arena_pop_to(scratch, 0);
++    return true;
++}
++
++static bool check_source_batch_forest(CheckInputReader* reader, uint32_t limit, bool discard,
++                                      Arena* graph, Arena* checked, Arena* scratch)
++{
++    const Parser* parser = reader->parser;
++    const uint32_t tokens = parser->tokens.count;
++    uint32_t root_first = 0, extra = 0;
++    bool active = false;
++    CheckSourceBatch batch = { 0 };
++    CheckSourceBatches result = { 0 };
++    const uint8_t drop = BUSTER_CHECK_EXPRESSION_ACTS | (CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT);
++    for (uint32_t i = 0; i < tokens; i += 1)
++    {
++        const uint32_t t = reader->postorder[i];
++        const uint8_t visit = reader->visits[t];
++        active |= (visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && visit != drop;
++        const uint8_t kind = parser->tokens.kinds[t];
++        extra += kind == PARSE_KIND_L_SQUARE ? 8 : kind == PARSE_KIND_SIZEOF ? 4 : 0;
++        if (parser->tree.parents[t] < tokens) continue;
++        const uint32_t end = i + 1;
++        if (batch.end > batch.first && end - batch.first > limit)
++        {
++            if (!check_source_batch_flush(reader, batch, discard, graph, checked, scratch, &result)) return false;
++            batch = (CheckSourceBatch){ .first = root_first, .end = root_first };
++        }
++        if (batch.extra > UINT32_MAX - extra) return false;
++        batch.extra += extra;
++        batch.active |= active;
++        batch.end = end;
++        result.roots += 1;
++        root_first = end;
++        extra = 0;
++        active = false;
++    }
++    const bool valid = root_first == tokens && check_source_batch_flush(reader, batch, discard, graph, checked, scratch, &result);
++    fprintf(stderr, "source-batch-summary\tlimit=%u\troots=%u\tbatches=%u\tnodes=%u\tlargest-nodes=%u\tlargest-tokens=%u\twhole-graph=%u\n",
++            limit, result.roots, result.batches, result.checked, result.max_nodes, result.max_tokens, reader->output->graph.count);
++    return valid;
++}
++
+ // This verification entry stops before the ordinary expression graph is filled. File-scope binding and
+ // token/type columns are retained, and only audited complete function trees enter the local expression producer.
+ static void check_body_source_run(CheckInputReader* reader)
+@@ -101,6 +202,16 @@ static void check_body_source_run(CheckInputReader* reader)
+     const bool discard = getenv("BUSTER_BODY_DISCARD_RESULT") != NULL;
+     const bool include_declarations = getenv("BUSTER_CHECK_SOURCE_DECLARATIONS") != NULL;
+     const bool explore = getenv("BUSTER_CHECK_BODY_ADMIT_ALL") != NULL;
++    const char* batching = getenv("BUSTER_SOURCE_ROOT_BATCH");
++    if (batching != NULL && include_declarations && explore)
++    {
++        const unsigned long limit = strtoul(batching, NULL, 10);
++        if (limit == 0 || limit > UINT32_MAX) exit(2);
++        const bool valid = check_source_batch_forest(reader, (uint32_t)limit, discard, &graph, &checked, &scratch);
++        check_body_memory_audit(reader, &graph, &checked, &scratch, "source-batch-exit");
++        arena_release(&graph); arena_release(&checked); arena_release(&scratch);
++        exit(valid ? 0 : 1);
++    }
+     for (uint32_t i = 0; i < count; i += 1)
+     {
+         const uint32_t t = reader->postorder[i];
+@@ -119,7 +230,7 @@ static void check_body_source_run(CheckInputReader* reader)
+                     admitted += 1;
+                     if (!active && !discard)
+                         fprintf(stderr,"body-source-row\t%u\t0\t%016llx\n",t,(unsigned long long)UINT64_C(14695981039346656037));
+-                    if (!active || check_body_source_one(reader, begin, i + 1, t, extra, discard, &graph, &checked, &scratch, &made))
++                    if (!active || check_body_source_one(reader, begin, i + 1, t, extra, discard, false, &graph, &checked, &scratch, &made))
+                     {
+                         produced += 1; nodes += made; biggest = biggest > made ? biggest : made;
+                     }

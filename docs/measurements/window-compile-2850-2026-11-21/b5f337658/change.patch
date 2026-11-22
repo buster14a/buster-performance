@@ -1,0 +1,258 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index 653905f20..a590e4d6d 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -13,10 +13,15 @@ typedef struct CheckSourceControlUnit
+     uint32_t* seen;
+     uint8_t* needed;
+     uint64_t* planned;
++    uint32_t* plan_first;
++    uint32_t* parent_cache;
++    uint32_t* case_first;
++    uint32_t* case_map;
++    uint32_t* source_labels;
+ } CheckSourceControlUnit;
+ 
+ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInputReader* reader,
+-                                          CheckStream* stream, uint32_t close, Arena* scratch);
++                                          CheckStream* stream, uint32_t close, Arena* output, Arena* scratch);
+ 
+ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_t stop, uint32_t close,
+                                   Arena* graph, Arena* checked, Arena* scratch, uint32_t* made, CheckSourceControlUnit* controls)
+@@ -106,7 +111,7 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     if (getenv("BUSTER_BODY_DISCARD_RESULT") == NULL) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
+             (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, close));
+     if (controls != NULL && reader.parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
+-        check_source_control_function(controls, &reader, &stream, close, scratch);
++        check_source_control_function(controls, &reader, &stream, close, checked, scratch);
+     *made = input.graph.count;
+     return true;
+ }
+@@ -133,6 +138,11 @@ static void check_body_source_run(CheckInputReader* reader)
+         BUSTER_CONTROL_INDEX(seen, uint32_t, slots);
+         BUSTER_CONTROL_INDEX(needed, uint8_t, slots);
+         BUSTER_CONTROL_INDEX(planned, uint64_t, (slots + 63) / 64);
++        BUSTER_CONTROL_INDEX(plan_first, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(parent_cache, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(case_first, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(case_map, uint32_t, slots);
++        BUSTER_CONTROL_INDEX(source_labels, uint32_t, slots);
+ #undef BUSTER_CONTROL_INDEX
+         memset(unit.seen, 0, slots * sizeof(uint32_t));
+         memset(unit.planned, 0, ((slots + 63) / 64) * sizeof(uint64_t));
+diff --git a/src/buster/compiler/c_check_source_control_program.c b/src/buster/compiler/c_check_source_control_program.c
+index 5b431b630..f9e8b5880 100644
+--- a/src/buster/compiler/c_check_source_control_program.c
++++ b/src/buster/compiler/c_check_source_control_program.c
+@@ -3,23 +3,82 @@
+ // Emit the ordinary control tape and per-body object dependencies before the source checker retires its graph.
+ // The ordinary record uses the same function-local node numbering. Its references are independently sorted.
+ static void check_source_control_record(const char* arm, uint32_t close, const CheckControl* entries, uint32_t count,
+-                                        uint32_t first_node, const uint32_t* refs, uint32_t ref_count)
++                                        uint32_t first_node, const uint32_t* refs, uint32_t ref_count, const CheckProgram* program)
+ {
+     fprintf(stderr, "source-control-%s\t%u\t%u\t%u", arm, close, count, ref_count);
+     for (uint32_t i = 0; i < count; i += 1)
+     {
+         const CheckControl entry = entries[i];
+         const uint32_t node = entry.node == BUSTER_CHECK_NONE || entry.kind == CHECK_CONTROL_LIFETIME ? entry.node : entry.node - first_node;
+-        fprintf(stderr, "\t%u,%u,%u,%u", (uint32_t)entry.kind, entry.token, node, entry.target);
++        fprintf(stderr, "\t%u,%u,%u,%u", (uint32_t)entry.kind, entry.token, node,
++                entry.kind == CHECK_CONTROL_INITIALIZE ? program->initializers->declaration_tokens[entry.target] :
++                entry.kind == CHECK_CONTROL_CASE ? program->cases[entry.target].token : entry.target);
+     }
+     fprintf(stderr, "\trefs");
+     for (uint32_t i = 0; i < ref_count; i += 1) fprintf(stderr, ",%u", refs[i]);
+     fputc('\n', stderr);
+ }
+ 
++// Fingerprint initializer parts and switch cases that a body's ordered control accesses after its graph is retired.
++static void check_source_control_details(const char* arm, const CheckProgram* p, uint32_t opening, uint32_t close,
++                                         uint32_t first_node, uint32_t case_first, uint32_t case_end)
++{
++    const CheckInitializers* inits = p->initializers;
++    const uint32_t n = inits == NULL ? 0 : inits->count;
++    uint32_t lo = 0, hi = n;
++    while (lo < hi)
++    {
++        const uint32_t mid = lo + (hi - lo) / 2;
++        if (inits->declaration_tokens[mid] < opening) lo = mid + 1;
++        else hi = mid;
++    }
++    for (uint32_t i = lo; i < n && inits->declaration_tokens[i] < close; i += 1)
++    {
++        const CheckInitializer* plan = inits->plans + i;
++        uint64_t h = UINT64_C(14695981039346656037);
++#define BUSTER_DETAIL(x) h = (h ^ (uint64_t)(x)) * UINT64_C(1099511628211)
++        BUSTER_DETAIL(check_body_type_fingerprint(p->types, plan->type)); BUSTER_DETAIL(plan->object_size);
++        BUSTER_DETAIL(plan->status); BUSTER_DETAIL(plan->warning_count); BUSTER_DETAIL(plan->warning_token);
++        BUSTER_DETAIL(plan->floating_values); BUSTER_DETAIL(plan->changed_integers); BUSTER_DETAIL(plan->enum_values); BUSTER_DETAIL(plan->label_differences);
++        for (uint32_t j = 0; j < plan->count; j += 1)
++        {
++            const CheckInitPart* part = plan->parts + j;
++            BUSTER_DETAIL(part->kind); BUSTER_DETAIL(check_body_type_fingerprint(p->types, part->type));
++            BUSTER_DETAIL(part->node == BUSTER_CHECK_NONE ? part->node : part->node - first_node);
++            BUSTER_DETAIL(part->token); BUSTER_DETAIL(part->overload_candidate); BUSTER_DETAIL(part->bit_offset);
++            BUSTER_DETAIL(part->bit_width); BUSTER_DETAIL(part->byte_count);
++            BUSTER_DETAIL(check_body_value_fingerprint(p->types, part->value, first_node));
++            BUSTER_DETAIL(check_body_type_fingerprint(p->types, part->conversion.type)); BUSTER_DETAIL(part->conversion.flags);
++            if (part->kind == CHECK_INIT_BYTES)
++                for (uint64_t k = 0; k < part->byte_count; k += 1) { BUSTER_DETAIL(part->bytes[k]); }
++        }
++        fprintf(stderr, "source-plan-%s\t%u\t%u\t%u\t%016llx\n", arm, close, inits->declaration_tokens[i], plan->count, (unsigned long long)h);
++    }
++    for (uint32_t i = case_first; i < case_end; i += 1)
++    {
++        const CheckProgramCase* item = p->cases + i;
++        uint64_t h = UINT64_C(14695981039346656037);
++        BUSTER_DETAIL(check_body_type_fingerprint(p->types, item->type)); BUSTER_DETAIL(item->owner); BUSTER_DETAIL(item->target);
++        BUSTER_DETAIL(item->fallback); BUSTER_DETAIL(item->range);
++        BUSTER_DETAIL(item->lower); BUSTER_DETAIL(item->lower >> 64); BUSTER_DETAIL(item->upper); BUSTER_DETAIL(item->upper >> 64);
++        if (item->wide_lower != NULL || item->wide_upper != NULL)
++        {
++            uint32_t width = 0; bool sign = false;
++            if (!check_wide_type(p->types, item->type, &width, &sign)) exit(2);
++            for (uint32_t limb = 0; limb < check_wide_count(width); limb += 1)
++            {
++                BUSTER_DETAIL(item->wide_lower == NULL ? 0 : item->wide_lower[limb]);
++                BUSTER_DETAIL(item->wide_upper == NULL ? 0 : item->wide_upper[limb]);
++            }
++        }
++        fprintf(stderr, "source-case-%s\t%u\t%u\t%016llx\n", arm, close, item->token, (unsigned long long)h);
++    }
++#undef BUSTER_DETAIL
++}
++
+ static void check_source_control_oracle(const CheckProgram* p, const Parser* parser)
+ {
+-    uint32_t body = 0, node = 0;
++    uint32_t body = 0, node = 0, case_at = 0;
+     for (uint32_t t = 0; t < parser->tokens.count; t += 1)
+     {
+         if (parser->tree.parents[t] < parser->tokens.count) continue;
+@@ -28,14 +87,17 @@ static void check_source_control_oracle(const CheckProgram* p, const Parser* par
+         if (body < p->body_count && parser->tree.parents[p->bodies[body].opening] == t)
+         {
+             const CheckProgramBody* b = p->bodies + body++;
++            const uint32_t first_case = case_at;
++            while (case_at < p->case_count && p->cases[case_at].token <= t) case_at += 1;
++            check_source_control_details("whole", p, b->opening, t, first, first_case, case_at);
+             check_source_control_record("whole", t, p->controls + b->first, b->count, first,
+-                                        b->reference_count == 0 ? NULL : p->references + b->reference_first, b->reference_count);
++                                        b->reference_count == 0 ? NULL : p->references + b->reference_first, b->reference_count, p);
+         }
+     }
+ }
+ 
+ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInputReader* reader,
+-                                          CheckStream* stream, uint32_t close, Arena* scratch)
++                                          CheckStream* stream, uint32_t close, Arena* output, Arena* scratch)
+ {
+     const Parser* parser = reader->parser;
+     const CheckInput* input = reader->output;
+@@ -43,12 +105,13 @@ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInp
+     for (uint32_t t = reader->first_child[close]; t != BUSTER_CHECK_NONE; t = reader->next_child[t])
+         if (parser->tree.roles[t] == PARSE_ROLE_OPEN_BODY) opening = t;
+     if (opening >= close) return;
++    uint32_t case_count = 0;
+     for (uint32_t t = opening + 1; t < close; t += 1)
+     {
+         const uint8_t role = parser->tree.roles[t], kind = parser->tokens.kinds[t];
+-        if (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE || kind == PARSE_KIND_SWITCH ||
+-            role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE ||
+-            check_sparse_get(input->initializer_begins, t) != BUSTER_CHECK_NONE) return;
++        case_count += role == PARSE_ROLE_CLOSE_CASE;
++        if ((kind == PARSE_KIND_AMPAMP && role == PARSE_ROLE_PREFIX) ||
++            role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE) return;
+     }
+     for (uint32_t i = 0; i < input->asm_count; i += 1)
+         if (input->asm_statements[i].statement - opening < close - opening) return;
+@@ -63,15 +126,58 @@ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInp
+     for (uint32_t i = 0; i < graph->count; i += 1)
+         if (graph->ops[i] >= CHECK_OP_BUILTIN_UNARY ||
+             (graph->ops[i] == CHECK_OP_CALL && (graph->members[i] & BUSTER_CHECK_LIBRARY_CALL) != 0)) return;
++    CheckInitializers plans = { .token_count = input->token_count };
++    for (uint32_t token = check_sparse_next(input->initializer_begins, opening, close); token < close;
++         token = check_sparse_next(input->initializer_begins, token + 1, close)) plans.count += 1;
++    uint32_t* plan_next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, plans.count + 1);
++    plans.plans = BUSTER_ARENA_PUSH_ARRAY(output, CheckInitializer, plans.count + 1);
++    plans.declaration_tokens = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, plans.count + 1);
++    if (!plan_next || !plans.plans || !plans.declaration_tokens) exit(2);
++    uint32_t at = 0;
++    for (uint32_t token = check_sparse_next(input->initializer_begins, opening, close); token < close;
++         token = check_sparse_next(input->initializer_begins, token + 1, close))
++    {
++        const uint32_t begin = check_sparse_get(input->initializer_begins, token);
++        const uint32_t end = check_sparse_get(input->initializer_ends, token);
++        if (end > close || begin >= end || check_init_object_candidate(input, reader->types, token)) return;
++        if (!check_initializer_plan_warnings(reader->types, parser, input->token_nodes, stream, input->strings,
++                input->string_count, input->string_ids, input->declared_types[token], begin, end,
++                check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC), false, true,
++                output, scratch, plans.plans + at, graph, NULL, NULL, NULL, NULL)) return;
++        plans.declaration_tokens[at++] = token;
++    }
+     const uint32_t names = input->token_count + 1;
+     const uint32_t slots = graph->count + 1;
+     const uint32_t capacity = (close - opening + 1) * 8 + 16;
+     CheckProgram p = { .input = input, .stream = stream, .parser = parser, .types = reader->types,
+-                       .object_count = names, .identifiers = reader->pp->table };
++                       .object_count = names, .initializers = &plans, .identifiers = reader->pp->table };
++    check_program_plans(&p, parser, &plans, unit->plan_first, unit->planned, plan_next, unit->parent_cache);
++    if (p.status != CHECK_PROGRAM_OK) return;
+     CheckControlWriter writer = { .program = &p, .parser = parser, .first = unit->first, .last = unit->last,
+                                    .next = unit->next, .previous = unit->previous, .token_first = unit->token_head,
+-                                   .planned = unit->planned, .capacity = capacity, .fold_capacity = slots,
++                                   .planned = unit->planned, .plan_first = unit->plan_first, .plan_next = plan_next, .capacity = capacity, .fold_capacity = slots,
+                                    .switch_scratch = scratch, .region_final = BUSTER_CHECK_NONE };
++    writer.case_first = unit->case_first;
++    writer.case_map = unit->case_map;
++    writer.source_labels = unit->source_labels;
++    writer.label_positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, capacity);
++    uint32_t* case_next = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, case_count + 1);
++    p.cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckProgramCase, case_count + 1);
++    writer.case_next = case_next;
++    writer.switch_capacity = case_count / 4;
++    writer.switches = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, writer.switch_capacity + 1);
++    if (!writer.label_positions || !case_next || !p.cases || !writer.switches) exit(2);
++    if (case_count != 0) memset(unit->case_map + opening, 0xff, (close - opening + 1) * sizeof(uint32_t));
++    memset(unit->case_first + opening, 0xff, (close - opening + 1) * sizeof(uint32_t));
++    for (uint32_t t = opening + 1; t < close && p.status == CHECK_PROGRAM_OK; t += 1)
++    {
++        if ((parser->tokens.kinds[t] == PARSE_KIND_SWITCH || parser->tree.roles[t] == PARSE_ROLE_CLOSE_CASE) &&
++            (input->deferred_tokens == NULL || input->deferred_tokens[t] == 0))
++            check_program_case(&p, parser, t, unit->case_first, case_next, unit->case_map);
++    }
++    if (p.case_count != case_count || p.status != CHECK_PROGRAM_OK) return;
++    if (case_count != 0) check_program_case_conflicts(&p, parser, NULL, scratch);
++    if (p.status != CHECK_PROGRAM_OK) return;
+     uint32_t* links = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+     uint32_t* marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots);
+     uint64_t* refs = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, slots);
+@@ -91,6 +197,19 @@ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInp
+         const uint32_t i = --j, token = graph->tokens[i];
+         if (token >= opening && token <= close) { links[i] = unit->token_head[token]; unit->token_head[token] = i; }
+     }
++    memset(writer.static_initializers, 0, (((uint64_t)slots + 63) / 64) * sizeof(uint64_t));
++    for (uint32_t token = check_sparse_next(input->initializer_nodes, opening, close); token < close;
++         token = check_sparse_next(input->initializer_nodes, token + 1, close))
++    {
++        const uint32_t node = check_sparse_get(input->initializer_nodes, token);
++        if (node < graph->count)
++        {
++            const uint64_t bit = UINT64_C(1) << (node % 64);
++            writer.static_initializers[node / 64] = (writer.static_initializers[node / 64] & ~bit) |
++                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) ? bit : 0);
++        }
++    }
++    writer.static_initializers_ready = true;
+     writer.node_next = links;
+     check_control_build(&writer, opening);
+     if (p.status != CHECK_PROGRAM_OK) return;
+@@ -102,5 +221,6 @@ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInp
+     for (uint32_t i = 1; i < count; i += 1) varying |= (uint32_t)((refs[i] ^ refs[0]) >> 32);
+     const uint64_t* order = c_bindings_sort(refs, sorted, count, true, varying);
+     for (uint32_t i = 0; i < count; i += 1) canonical[i] = (uint32_t)(order[i] >> 32);
+-    check_source_control_record("local", close, writer.entries, writer.count, 0, canonical, count);
++    check_source_control_details("local", &p, opening, close, 0, 0, p.case_count);
++    check_source_control_record("local", close, writer.entries, writer.count, 0, canonical, count, &p);
+ }

@@ -1,0 +1,217 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index 54bfa3097..5fe84f8bc 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -2,6 +2,7 @@
+ // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+ #include "c_check_body_fingerprint.c"
+ #include "c_check_body_static_rows.c"
++#include "c_check_body_static_data.c"
+ 
+ // A parsed declaration may carry the braced initializer to its semicolon through a specifier
+ // chain, or discard its values at an intervening declarator. Follow the same coded actions
+@@ -29,7 +30,7 @@ static bool check_body_static_discards(const CheckInputReader* reader, uint32_t
+ }
+ 
+ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_t stop, uint32_t close,
+-                                  Arena* graph, Arena* checked, Arena* scratch, uint32_t* made, uint32_t frontier, bool emit_discards, uint32_t last_row)
++                                  Arena* graph, Arena* checked, Arena* scratch, uint32_t* made, uint32_t frontier, bool emit_discards, uint32_t last_row, uint32_t first_row, uint32_t declaration)
+ {
+     CheckInputReader reader = *top;
+     CheckInput input = *top->output;
+@@ -144,6 +145,13 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     }
+     if (frontier != BUSTER_CHECK_NONE)
+     {
++        if (getenv("BUSTER_SOURCE_STATIC_DATA") != NULL &&
++            !check_body_static_data(&reader, &stream, first_row, last_row, declaration, checked, scratch))
++        {
++            fprintf(stderr, "static-data-declined\t");
++            check_body_data_name(&reader, declaration);
++            fprintf(stderr, "\t%u\t%u\n", first_row, last_row);
++        }
+         fprintf(stderr, "static-source-row\t%u\t%u\t%u\t%u\t%016llx\t%016llx\n", close, last_row, expression_nodes,
+                 input.graph.count - expression_nodes,
+                 (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, expression_nodes, close),
+@@ -186,14 +194,16 @@ static void check_body_source_run(CheckInputReader* reader)
+                         reader->initializers[rows.first_row - 2] == 2 && BUSTER_CHECK_RARE(reader, static_initializers, rows.first_row - 2) &&
+                         check_body_static_discards(reader, rows.first_row - 2, t, &emit_discards))
+                     {
+-                        uint32_t start = begin, frontier, last_row;
++                        uint32_t start = begin, frontier, last_row, first_row = rows.first_row;
++                        const uint32_t declaration = reader->initializer_declarations[rows.first_row - 2];
+                         bool valid = true;
+                         while (valid && check_static_rows_next(parser, &rows, &frontier, &last_row))
+                         {
+                             const uint32_t stop = reader->postorder_positions[frontier] + 1;
+                             uint32_t part = 0;
+                             valid = start < stop && stop <= i + 1 &&
+-                                    check_body_source_one(reader, start, stop, t, &graph, &checked, &scratch, &part, frontier, emit_discards, last_row);
++                                    check_body_source_one(reader, start, stop, t, &graph, &checked, &scratch, &part, frontier, emit_discards, last_row, first_row, declaration);
++                            first_row = rows.next_row;
+                             if (valid)
+                             {
+                                 made += part;
+@@ -208,7 +218,7 @@ static void check_body_source_run(CheckInputReader* reader)
+                         nodes += made;
+                         fprintf(stderr, "static-completed\t%u\t%u\n", t, made);
+                     }
+-                    else if (check_body_source_one(reader, begin, i + 1, t, &graph, &checked, &scratch, &made, BUSTER_CHECK_NONE, false, 0))
++                    else if (check_body_source_one(reader, begin, i + 1, t, &graph, &checked, &scratch, &made, BUSTER_CHECK_NONE, false, 0, 0, BUSTER_CHECK_NONE))
+                     {
+                         produced += 1; nodes += made; biggest = biggest > made ? biggest : made;
+                     }
+diff --git a/src/buster/compiler/c_check_body_static_data.c b/src/buster/compiler/c_check_body_static_data.c
+new file mode 100644
+index 000000000..6e86c675e
+--- /dev/null
++++ b/src/buster/compiler/c_check_body_static_data.c
+@@ -0,0 +1,102 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++
++static void check_body_data_hex(FILE* file, const uint8_t* data, uint64_t count)
++{
++    const char digits[] = "0123456789abcdef";
++    for (uint64_t i = 0; i < count; i += 1)
++    {
++        const uint8_t value = data == NULL ? 0 : data[i];
++        fputc(digits[value >> 4], file);
++        fputc(digits[value & 15], file);
++    }
++}
++
++static void check_body_data_name(const CheckInputReader* reader, uint32_t token)
++{
++    const uint32_t name = reader->parser->tokens.names[token];
++    if (name != 0)
++    {
++        fwrite(intern_bytes(reader->pp->table, name), 1, intern_length(reader->pp->table, name), stderr);
++    }
++}
++
++// Each independent array element owns its complete set of overlapping writes. Emit the final
++// bytes and unresolved source identities while the row's conversions and string literals are live.
++static bool check_body_static_data(CheckInputReader* reader, const CheckStream* stream, uint32_t row,
++                                   uint32_t last, uint32_t decl, Arena* output, Arena* scratch)
++{
++    const Parser* parser = reader->parser;
++    if (decl >= parser->tokens.count) return false;
++    CheckInput* input = reader->output;
++    const TypeId array = type_strip_aligned(reader->types, reader->declared_types[decl]);
++    if (type_kind(reader->types, array) != BUSTER_TYPE_KIND_ARRAY) return false;
++    const TypeId element = type_element(reader->types, array);
++    // The ordinary front end can already have materialized a literal table before graph construction.
++    // Those rows carry no graph node. Keep their provenance separate from a window that plans its live expressions.
++    for (const CheckInputLiteralTable* table = input->literal_tables; table != NULL; table = table->next)
++    {
++        if (table->declaration > decl) break;
++        if (table->declaration == decl)
++        {
++            fprintf(stderr, "static-preplanned\t");
++            check_body_data_name(reader, decl);
++            fprintf(stderr, "\t%u\t%u\n", row, last);
++            return true;
++        }
++    }
++    while (row < last)
++    {
++        const uint32_t close = parser->tree.parents[row];
++        if (close > last || close <= row) return false;
++        const uint64_t output_start = output->length;
++        const uint64_t scratch_start = scratch->length;
++        CheckInitializer init;
++        if (!check_initializer_plan_warnings(reader->types, parser, input->token_nodes, stream, input->strings,
++                input->string_count, input->string_ids, element, row, close + 1, true, false, true,
++                output, scratch, &init, &input->graph, NULL, NULL, NULL, NULL))
++        {
++            fprintf(stderr, "static-init-failed\t%u\t%u\t%u\t%u\n", decl, row, init.status, init.failed_token);
++            return false;
++        }
++        const CheckDataObject object = { .object = reader->objects[decl], .type = element, .initializer_plan = &init,
++                                         .initializer = BUSTER_CHECK_NONE, .token = decl };
++        CheckDataPlan data = { 0 };
++        const CheckDataStatus status = check_data_plan_object(reader->types, stream, &object, NULL, parser->tokens.count + 1,
++                                                              NULL, output, scratch, NULL, &data);
++        if (status != CHECK_DATA_OK || data.size != type_size(reader->types, element))
++        {
++            fprintf(stderr, "static-data-failed\t%u\t%u\t%u\n", decl, row, status);
++            return false;
++        }
++        fprintf(stderr, "static-data-row\t");
++        check_body_data_name(reader, decl);
++        fprintf(stderr, "\t%u\t", row);
++        check_body_data_hex(stderr, data.bytes, data.size);
++        fputc('\n', stderr);
++        for (uint32_t i = 0; i < data.fixup_count; i += 1)
++        {
++            const CheckDataFixup* f = &data.fixups[i];
++            if (f->object == 0 || f->object > parser->tokens.count) return false;
++            const uint32_t token = f->object - 1;
++            const uint32_t id = check_sparse_present(input->string_ids) ? check_sparse_get(input->string_ids, token) : BUSTER_CHECK_NONE;
++            fprintf(stderr, "static-data-fixup\t%u\t%u\t%lld\t", row, f->offset, (long long)f->addend);
++            if (id < input->string_count && input->strings[id].object == f->object && !input->strings[id].predefined)
++            {
++                fprintf(stderr, "string\t");
++                check_body_data_hex(stderr, input->strings[id].bytes, input->strings[id].byte_count);
++            }
++            else
++            {
++                fprintf(stderr, "symbol\t");
++                check_body_data_name(reader, token);
++            }
++            fputc('\n', stderr);
++        }
++        arena_pop_to(scratch, scratch_start);
++        arena_pop_to(output, output_start);
++        if (close == last) break;
++        row = close + 2;
++    }
++    return true;
++}
+diff --git a/src/buster/compiler/c_check_data.c b/src/buster/compiler/c_check_data.c
+index a91fd515a..81c7cf002 100644
+--- a/src/buster/compiler/c_check_data.c
++++ b/src/buster/compiler/c_check_data.c
+@@ -170,7 +170,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
+             plan->alignment_log2 = (uint8_t)alignment;
+         }
+     }
+-    if (status == CHECK_DATA_OK)
++    if (status == CHECK_DATA_OK && link != NULL)
+     {
+         if (object->object == 0 || object->object >= object_count || object_symbols[object->object] == 0 || object_symbols[object->object] >= link->symbols.count)
+         {
+@@ -245,8 +245,8 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
+                 // emission placed before the static data is planned, as an assembler resolves clang's `.long .La-.Lb`.
+                 const uint32_t minuend = value->object;
+                 const uint32_t subtrahend = (uint32_t)value->integer;
+-                const SymbolId a = minuend < object_count ? object_symbols[minuend] : 0;
+-                const SymbolId b = subtrahend < object_count ? object_symbols[subtrahend] : 0;
++                const SymbolId a = link != NULL && minuend < object_count ? object_symbols[minuend] : 0;
++                const SymbolId b = link != NULL && subtrahend < object_count ? object_symbols[subtrahend] : 0;
+                 const bool placed = a != 0 && b != 0 && a < link->symbols.count && b < link->symbols.count && link->symbols.atom[a] != 0 &&
+                                     link->symbols.atom[a] == link->symbols.atom[b];
+                 if (!placed)
+@@ -762,7 +762,7 @@ static CheckDataStatus check_data_plan_header(const TypeTable* types, const Chec
+             plan->alignment_log2 = (uint8_t)alignment;
+         }
+     }
+-    if (status == CHECK_DATA_OK)
++    if (status == CHECK_DATA_OK && link != NULL)
+     {
+         if (object->object == 0 || object->object >= object_count || object_symbols[object->object] == 0 || object_symbols[object->object] >= link->symbols.count)
+         {
+@@ -1143,6 +1143,12 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
+     {
+         status = CHECK_DATA_RESOURCE;
+     }
++    // A source window has checked values and object identities before translation-unit symbol selection.
++    // Its caller consumes the bytes and ordered source fixups before recycling the checked row.
++    if (link == NULL)
++    {
++        return status;
++    }
+     for (uint32_t i = 0; status == CHECK_DATA_OK && i < plan->fixup_count; i += 1)
+     {
+         CheckDataFixup* reference = &plan->fixups[i];
