@@ -1092,3 +1092,27 @@ between a difference and this table, since there was none. The lowered bodies he
 headers' unreferenced inline functions are not lowered), and the machine is the one after the pipeline, on the walk's
 nodes: before the walk the machine with no node of the walk's takes every root of 35.6% of `sqlite3.c`'s body tokens,
 where this one takes 48.58%.
+
+**Its fixture's faults** (`bodies-entries/faults-eec7ca784.txt`, `faults-cbdcbc070.txt`, `scripts/bodies-faults.py`):
+sixteen single changes to the piece, each built and run against the fixture. At `eec7ca784` thirteen failed it, one did
+not build, and two were not caught: a branch of the other sense (the fixture's only do statement's condition was
+branches, so its control wrote none of its own), and a tape's label moved by one (no tape had a label of its own). At
+`cbdcbc070` the fixture has a body for each, and all sixteen fail it.
+
+**What it leaves out, by kind** (`bodies-entries/develop-cbdcbc070/`, the default warnings again at `cbdcbc070`, which
+counts the first control of another kind): a `switch`'s in each of `sqlite3.c`'s 48 and Lua's 57, in 7 of the
+compiler's own 8 and 34 of musl's 51; an `asm` statement in the others.
+
+**Nothing else moves** (`bodies-entries/pair2-*-0dd1dfafa-eec7ca784/`: the ordinary compile at the piece's `eec7ca784`
+against the branch it stands on, seven paired rounds a workload on the 9700X, CPU 2, Release, under the lock; the
+objects and diagnostics one set):
+
+| | the branch it stands on | the piece | paired | range | user instructions M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, wall ms | 111.435 | 111.341 | +0.247 | -0.189 to +18.056 | 1,215.364 and 1,215.364 |
+| the compiler's own source | 598.519 | 600.362 | +1.472 | +0.209 to +4.140 | 8,927.314 and 8,927.370 |
+| Lua | 64.054 | 64.085 | +0.035 | -0.235 to +0.071 | 724.335 and 724.334 |
+| musl | 663.097 | 661.096 | -1.976 | -3.547 to +1.988 | 6,634.680 and 6,634.105 |
+
+No compile runs the piece's code. The compiler's own source reads 0.25% slower in all seven rounds with 54 thousand
+instructions more of 8,927 M: the executable's layout with the piece in it, not work of the piece's.
