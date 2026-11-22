@@ -1,0 +1,252 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index a6c45a314..c74c58817 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -3,9 +3,26 @@
+ #include "c_check_body_fingerprint.c"
+ #include "c_check_body_memory.c"
+ 
++typedef struct CheckBodyDiagnosticIndex
++{
++    uint32_t* first;
++    uint32_t* last;
++    uint32_t* next;
++    uint32_t* previous;
++    uint32_t* token_first;
++    uint64_t* planned;
++    uint32_t controls;
++    uint32_t other_bodies;
++} CheckBodyDiagnosticIndex;
++
++static bool check_body_publish_local(CheckInputReader* reader, CheckInput* input, const CheckStream* stream,
++                                     uint32_t begin, uint32_t closing, CheckBodyDiagnosticIndex* index, Arena* output, Arena* scratch);
++static bool check_body_publish_unit(CheckInputReader* reader, Arena* scratch);
++
+ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_t stop, uint32_t close,
+-                                  uint32_t extra, bool discard, Arena* graph, Arena* checked, Arena* scratch, uint32_t* made)
++                                  uint32_t extra, bool discard, CheckBodyDiagnosticIndex* diagnostic, Arena* graph, Arena* checked, Arena* scratch, uint32_t* made)
+ {
++    const bool diagnose = diagnostic != NULL;
+     CheckInputReader reader = *top;
+     CheckInput input = *top->output;
+     // A single active source root may intern a derived type. The translation-unit type table owns it
+@@ -68,7 +85,7 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     input.graph.const_values = &input.const_values;
+     reader.value_next = next;
+     check_input_expressions_coded_range(&reader, begin, stop);
+-    if (input.resource || input.report_count != 0)
++    if (input.resource || (!diagnose && input.report_count != 0))
+     {
+         fprintf(stderr,"body-source-decline\tclose=%u\tresource=%u\treports=%u\ttype-error=%u\tnodes=%u\n",
+                 close,input.resource,input.report_count,reader.types->last_error,input.graph.count);
+@@ -83,6 +100,7 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     }
+     if (!discard) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
+             (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, begin, close));
++    if (diagnose && !check_body_publish_local(&reader,&input,&stream,begin,close,diagnostic,checked,scratch)) return false;
+     *made = input.graph.count;
+     return true;
+ }
+@@ -98,9 +116,23 @@ static void check_body_source_run(CheckInputReader* reader)
+     uint32_t begin = 0, admitted = 0, bodies = 0, produced = 0, skipped = 0, nodes = 0, biggest = 0;
+     bool safe = true, active = false;
+     uint32_t extra = 0;
+-    const bool discard = getenv("BUSTER_BODY_DISCARD_RESULT") != NULL;
++    const bool diagnose = getenv("BUSTER_BODY_LIVE_DIAGNOSTICS") != NULL;
++    const bool discard = diagnose || getenv("BUSTER_BODY_DISCARD_RESULT") != NULL;
+     const bool include_declarations = getenv("BUSTER_CHECK_SOURCE_DECLARATIONS") != NULL;
+     const bool explore = getenv("BUSTER_CHECK_BODY_ADMIT_ALL") != NULL;
++    CheckBodyDiagnosticIndex index = {0};
++    if (diagnose && !reader->pp->options.suppress_warnings)
++    {
++        const uint64_t n = (uint64_t)count + 1;
++        index.first = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, n);
++        index.last = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, n);
++        index.next = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, n);
++        index.previous = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, n);
++        index.token_first = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, n);
++        index.planned = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, (n + 63) / 64);
++        if (!index.first || !index.last || !index.next || !index.previous || !index.token_first || !index.planned) exit(1);
++        memset(index.planned,0,((n + 63) / 64) * sizeof(uint64_t));
++    }
+     for (uint32_t i = 0; i < count; i += 1)
+     {
+         const uint32_t t = reader->postorder[i];
+@@ -119,7 +151,7 @@ static void check_body_source_run(CheckInputReader* reader)
+                     admitted += 1;
+                     if (!active && !discard)
+                         fprintf(stderr,"body-source-row\t%u\t0\t%016llx\n",t,(unsigned long long)UINT64_C(14695981039346656037));
+-                    if (!active || check_body_source_one(reader, begin, i + 1, t, extra, discard, &graph, &checked, &scratch, &made))
++                    if ((!active && (!diagnose || parser->tree.roles[t] != PARSE_ROLE_CLOSE_BODY)) || check_body_source_one(reader, begin, i + 1, t, extra, discard, diagnose ? &index : NULL, &graph, &checked, &scratch, &made))
+                     {
+                         produced += 1; nodes += made; biggest = biggest > made ? biggest : made;
+                     }
+@@ -131,6 +163,19 @@ static void check_body_source_run(CheckInputReader* reader)
+             safe = true; active = false; extra = 0;
+         }
+     }
++    if (diagnose)
++    {
++        const bool ready=skipped==0 && check_body_publish_unit(reader,&scratch);
++        const char* receipt=getenv("BUSTER_BODY_DIAGNOSTIC_RECEIPT");
++        if(receipt!=NULL)
++        {
++            FILE* f=fopen(receipt,"a");
++            if(f!=NULL){fprintf(f,"roots=%u nodes=%u declined=%u ready=%u control-bodies=%u other-bodies=%u\n",produced,nodes,skipped,ready,index.controls,index.other_bodies);fclose(f);}
++        }
++        pp_diagnostic_publish(reader->pp);
++        pp_diagnostic_summary(reader->pp);
++        exit(ready && reader->pp->errors == 0 ? 0 : 1);
++    }
+     fprintf(stderr,"body-source-summary\tunit-graph-capacity=%u\tbodies=%u\tadmitted=%u\tproduced=%u\tdeclined=%u\tnodes=%u\tlargest-checked=%u\tunit-graph-nodes=%u\tgraph-peak=%llu\tstream-peak=%llu\tscratch-peak=%llu\n",
+             reader->output->graph.capacity,bodies,admitted,produced,skipped,nodes,biggest,reader->output->graph.count,(unsigned long long)graph.peak,(unsigned long long)checked.peak,(unsigned long long)scratch.peak);
+     fprintf(stderr,"body-source-pages\tgraph=%llu\tstream=%llu\tscratch=%llu\n",
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 1433e7355..b8d7a7689 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12459,6 +12459,135 @@ static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
+ 
+ #include "c_check_body_residency.c"
+ 
++static _Thread_local CheckWarningSeverity check_body_return_baseline;
++
++static bool check_body_diagnostic_control(CheckInputReader* reader, CheckInput* input, const CheckStream* stream, uint32_t closing,
++                                          CheckBodyDiagnosticIndex* index, CheckProgram* program, CheckProgramBody* body, Arena* scratch)
++{
++    const Parser* p = reader->parser;
++    uint32_t opening = reader->first_child[closing];
++    while (opening < closing && p->tree.roles[opening] != PARSE_ROLE_OPEN_BODY) opening = reader->next_child[opening];
++    if (opening >= closing || input->region_count != 0) return false;
++    const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
++    if (declaration >= input->token_count) return false;
++    for (uint32_t i = opening; i <= closing; ++i)
++    {
++        if (p->tokens.kinds[i] == PARSE_KIND_SWITCH || p->tree.roles[i] == PARSE_ROLE_CLOSE_CASE ||
++            p->tree.roles[i] == PARSE_ROLE_LABEL || p->tree.roles[i] == PARSE_ROLE_CLOSE_ASM) return false;
++    }
++    for (uint32_t i = 0; i < input->cleanup_count; ++i)
++        if (input->cleanups[i].declaration >= opening && input->cleanups[i].declaration <= closing) return false;
++    for (uint32_t i = 0; i < input->vla_count; ++i)
++        if (input->vlas[i].body == opening) return false;
++    const uint32_t graph_count=input->graph.count;
++    const uint64_t capacity=(uint64_t)(closing-opening+1)*8+16;
++    if (capacity > UINT32_MAX) return false;
++    CheckControlWriter writer = {
++        .parser=p, .program=program, .first=index->first, .last=index->last, .next=index->next, .previous=index->previous,
++        .token_first=index->token_first, .planned=index->planned, .region_final=BUSTER_CHECK_NONE, .switch_scratch=scratch,
++        .capacity=(uint32_t)capacity, .fold_capacity=graph_count+1,
++    };
++    writer.entries=BUSTER_ARENA_PUSH_ARRAY(scratch,CheckControl,capacity);
++    writer.tasks=BUSTER_ARENA_PUSH_ARRAY(scratch,CheckControlTask,capacity);
++    writer.labels=BUSTER_ARENA_PUSH_ARRAY(scratch,uint32_t,capacity);
++    writer.dropped_ranges=BUSTER_ARENA_PUSH_ARRAY(scratch,uint64_t,(uint64_t)closing-opening+2);
++    writer.fold_stack=BUSTER_ARENA_PUSH_ARRAY(scratch,uint32_t,(uint64_t)graph_count+1);
++    writer.static_initializers=BUSTER_ARENA_PUSH_ARRAY(scratch,uint64_t,((uint64_t)graph_count+64)/64);
++    uint32_t* node_next=BUSTER_ARENA_PUSH_ARRAY(scratch,uint32_t,(uint64_t)graph_count+1);
++    if (!writer.entries || !writer.tasks || !writer.labels || !writer.dropped_ranges || !writer.fold_stack ||
++        !writer.static_initializers || !node_next) return false;
++    writer.node_next=node_next;
++    memset(index->token_first+opening,0xff,((uint64_t)closing-opening+1)*sizeof(uint32_t));
++    for (uint32_t n=graph_count; n-- > 0;)
++    {
++        uint32_t token=input->graph.tokens[n];
++        if (token>=opening && token<=closing) {node_next[n]=index->token_first[token];index->token_first[token]=n;}
++    }
++    *program=(CheckProgram){.input=input,.stream=stream,.types=reader->types,.parser=p,.identifiers=reader->pp->table,
++                            .status=CHECK_PROGRAM_OK,.token=BUSTER_CHECK_NONE,.diagnostic_position=BUSTER_CHECK_NONE,.bodies=body,.body_count=1};
++    const uint32_t name=p->tokens.names[declaration];
++    *body=(CheckProgramBody){.declaration=declaration,.opening=opening,.object=input->objects[declaration],
++        .is_main=intern_length(program->identifiers,name)==4 && memcmp(intern_bytes(program->identifiers,name),"main",4)==0};
++    check_control_build(&writer,opening);
++    body->count=writer.count;body->entry_count=writer.entry_count;
++    program->controls=writer.entries;program->control_count=writer.count;
++    program->dropped_ranges=writer.dropped_ranges;program->dropped_range_count=writer.dropped_range_count;
++    CheckReturnFacts facts={0};
++    check_program_return_flow(&writer,body,&facts,check_body_return_baseline!=CHECK_WARNING_IGNORE,true);
++    arena_release(&facts.storage);
++    return program->status==CHECK_PROGRAM_OK;
++}
++
++static bool check_body_publish_local(CheckInputReader* reader, CheckInput* input, const CheckStream* stream,
++                                     uint32_t begin, uint32_t closing, CheckBodyDiagnosticIndex* index, Arena* output, Arena* scratch)
++{
++    const Parser* p = reader->parser;
++    Preprocessor* pp = reader->pp;
++    const bool quiet = pp->options.suppress_warnings;
++    input->implicit_function_count = 0; input->kr_diagnostic_count = 0;
++    input->packed_member_count = 0; input->fp_pragma_count = 0;
++    input->visibility_pragmas = NULL; input->pack_pragmas = NULL;
++    input->pragma_warnings = (CheckWarningEvents){0};
++    input->constant_warning_count = 0; input->constant_warnings_prepared = true;
++    if (!check_input_warning_graph(input,p,reader->types,stream,output,scratch)) return false;
++    if (!check_driver_reports_from(p,p,pp,pp->output.count,input,stream,reader->types,NULL,NULL,NULL,0,NULL,0,
++                                   quiet,NULL,begin,scratch)) return false;
++    if (!check_driver_warning_events_from(p,pp,input,reader->types,stream,&input->warning_events,NULL,pp->output.count,scratch) ||
++        !check_driver_warning_events_from(p,pp,input,reader->types,stream,&stream->warning_events,NULL,pp->output.count,scratch)) return false;
++    check_driver_x86_reports(p,p,pp,input,stream,reader->types,quiet);
++    CheckProgram local;
++    CheckProgram* program=NULL;
++    CheckProgramBody body;
++    if (!quiet && p->tree.roles[closing] == PARSE_ROLE_CLOSE_BODY)
++    {
++        if (check_body_diagnostic_control(reader,input,stream,closing,index,&local,&body,scratch))
++        {
++            program=&local; ++index->controls;
++            check_driver_return_reports(p,p,pp,program,UINT64_MAX,check_body_return_baseline,false);
++        }
++        else ++index->other_bodies;
++    }
++    if (!quiet && input->graph.count != 0)
++    {
++        check_common_resources.fail_at=UINT32_MAX;
++        check_common_contexts=(CheckCommonContexts){0};
++        CheckWarningSpelling spell={0};
++        const CheckCommonEnabled enabled={
++            .sign_compare=check_common_enabled(pp,input,CHECK_WARNING_ID_SIGN_COMPARE,true),
++            .out_of_range=check_common_enabled(pp,input,CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE,false),
++            .self_assign=check_common_enabled(pp,input,CHECK_WARNING_ID_SELF_ASSIGN,true),
++            .enum_cast=input->enum_names, .const_values=&input->const_values,
++            .atomic_access=reader->types->atomic_records && check_common_enabled(pp,input,CHECK_WARNING_ID_ATOMIC_ACCESS,false),
++        };
++        CheckCommonCandidates candidates={.count=input->graph.count};
++        CheckCommonFacts facts={0};
++        if (!check_common_candidates_build(&input->graph,scratch,&candidates) ||
++            !check_common_facts(input,stream,reader->types,p,program,&enabled,NULL,&candidates,scratch,&facts)) return false;
++        check_common_self_assigns(p,pp,input,stream,reader->types,&spell,&facts,scratch);
++        check_common_graph_warnings(p,pp,input,stream,reader->types,&spell,&facts,program,NULL,scratch);
++        check_common_format(p,pp,input,stream,reader->types,&spell,program,&candidates,scratch);
++        check_common_return_stack(p,pp,input,stream,reader->types,&candidates,scratch);
++        check_common_contexts=(CheckCommonContexts){0};
++    }
++    return true;
++}
++
++static bool check_body_publish_unit(CheckInputReader* r, Arena* scratch)
++{
++    CheckInput* input=r->output;Preprocessor* pp=r->pp; const Parser* p=r->parser;
++    const bool quiet=pp->options.suppress_warnings;
++    if (!check_driver_reports(p,p,pp,pp->output.count,input,NULL,r->types,NULL,NULL,NULL,0,NULL,0,quiet,NULL,scratch))return false;
++    if (!check_driver_warning_events_from(p,pp,input,r->types,NULL,&input->warning_events,NULL,pp->output.count,scratch))return false;
++    if (!quiet)
++    {
++        check_common_empty_bodies(p,pp,input,scratch);
++        check_common_dangling_else(p,pp,input,scratch);
++        check_common_shift_op_parentheses(p,pp,input,scratch);
++    }
++    check_common_chained_comparisons(p,pp,input,scratch);
++    return true;
++}
++
+ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
+                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
+                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
+@@ -12483,6 +12612,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+     const bool return_warning = command->return_warning;
+     const bool warning_errors = command->warning_errors;
+     const int32_t return_error = command->return_error;
++    check_body_return_baseline = !return_warning ? CHECK_WARNING_IGNORE :
++        return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
+     const bool id_ordered = command->id_ordered;
+     const uint64_t id_order = command->id_order;
+     const bool emit_object = command->emit_object;
