@@ -1,0 +1,256 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index e026aafcc..2c5e2a6e7 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -109,6 +109,19 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+ 
+     input.graph.const_values = &input.const_values;
+     reader.value_next = next;
++    CheckSourceArithmetic arithmetic = {0};
++    if (getenv("BUSTER_SOURCE_ARITHMETIC") != NULL)
++    {
++        arithmetic.limit = room / 4 + 1;
++        arithmetic.words = BUSTER_ARENA_PUSH_ARRAY(graph,uint8_t,room);
++        arithmetic.proofs = BUSTER_ARENA_PUSH_ARRAY(graph,CheckSourceIntegerProof,arithmetic.limit);
++        if (arithmetic.words != NULL && arithmetic.proofs != NULL)
++        {
++            memset(arithmetic.words,0,room);
++            arithmetic.audit = getenv("BUSTER_SOURCE_ARITHMETIC_AUDIT") != NULL;
++            input.graph.source_arithmetic = &arithmetic;
++        }
++    }
+     check_input_expressions_coded_range(&reader, begin, stop);
+     if (input.resource || input.report_count != 0)
+     {
+@@ -123,6 +136,7 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+         fprintf(stderr,"body-source-decline\tclose=%u\tstatus=%u\tnode=%u\n",close,stream.status,stream.failed_node);
+         return false;
+     }
++    if (arithmetic.audit) fprintf(stderr,"source-arithmetic\tclose=%u\tnodes=%u\tleaves=%u\tcandidates=%u\tproofs=%u\tchains=%u\ttaken=%u\n",close,input.graph.count,arithmetic.source_leaves,arithmetic.candidates,arithmetic.count,arithmetic.chains,arithmetic.taken);
+     if (input.source_bodies == NULL && getenv("BUSTER_BODY_DISCARD_RESULT") == NULL) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
+             (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, close));
+     if (controls != NULL && reader.parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 60bd42a86..e001b5010 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -189,6 +189,7 @@ static inline __attribute__((always_inline)) uint32_t check_input_batch_add(Chec
+         (c == BUSTER_CHECK_NONE || c < node))
+     {
+         const bool leaf = op == CHECK_OP_VALUE;
++        if (reader->output->graph.source_arithmetic != NULL) check_source_integer_append(reader->output->graph.source_arithmetic,node,op,a,b);
+         batch->ops[place] = op;
+         batch->tokens[place] = token;
+         batch->operand0[place] = a;
+@@ -216,6 +217,12 @@ static inline __attribute__((always_inline)) uint32_t check_input_batch_add(Chec
+ static inline __attribute__((always_inline)) void check_input_batch_set_leaf(CheckInputReader* reader, const CheckInputBatch* batch, uint32_t node, const CheckValue* value)
+ {
+     check_graph_set_leaf_at(&reader->output->graph, batch->leaf_slots[node - batch->base], value);
++    CheckSourceArithmetic* source = reader->output->graph.source_arithmetic;
++    if (source != NULL)
++    {
++        source->words[node] = check_source_integer_word(value->type,value->flags,value->category,value->constant_kind,value->fault != CHECK_FAULT_NONE || value->overload_head != 0);
++        source->source_leaves += source->words[node] != 0;
++    }
+ }
+ 
+ static inline __m512i check_input_gather_bytes(__mmask16 lanes, __m512i indices, const uint8_t* column);
+diff --git a/src/buster/compiler/c_check_source_arithmetic.c b/src/buster/compiler/c_check_source_arithmetic.c
+new file mode 100644
+index 000000000..416561168
+--- /dev/null
++++ b/src/buster/compiler/c_check_source_arithmetic.c
+@@ -0,0 +1,139 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++
++// A source leaf or unknown result that carries no inherited flag or fault. Four low bits identify a builtin
++// integer. The operand's value category and constant status distinguish a read and a possible integer fold.
++#define BUSTER_SOURCE_INT_CODE 15u
++#define BUSTER_SOURCE_INT_LVALUE 16u
++#define BUSTER_SOURCE_INT_LITERAL 32u
++#define BUSTER_SOURCE_INT_NEEDED 64u
++#define BUSTER_SOURCE_INT_CHECKED 128u
++
++typedef struct CheckSourceIntegerProof
++{
++    uint32_t node;
++    uint32_t a;
++    uint32_t b;
++    uint8_t op;
++    uint8_t left;
++    uint8_t right;
++    uint8_t result;
++    uint8_t lt;
++    uint8_t rt;
++    uint8_t lf;
++    uint8_t rf;
++} CheckSourceIntegerProof;
++
++struct CheckSourceArithmetic
++{
++    uint8_t* words;
++    CheckSourceIntegerProof* proofs;
++    uint32_t limit;
++    uint32_t count;
++    uint32_t next;
++    uint32_t taken;
++    uint32_t chains;
++    uint32_t candidates;
++    uint32_t source_leaves;
++    bool audit;
++};
++
++static uint8_t check_source_integer_word(TypeId type, uint32_t flags, uint32_t category, uint32_t constant, bool fault)
++{
++    uint8_t result = 0;
++    if (type >= BUSTER_TYPE_BOOL && type <= BUSTER_TYPE_UINT128 && type_qualifiers(type) == 0 && !fault)
++    {
++        if (category == CHECK_RVALUE && constant == CHECK_CONSTANT_INTEGER && (flags & ~(BUSTER_CHECK_ICE | BUSTER_CHECK_LITERAL_ZERO)) == 0)
++            result = (uint8_t)type_index(type) | BUSTER_SOURCE_INT_LITERAL;
++        else if (category == CHECK_RVALUE && constant == CHECK_CONSTANT_NONE && flags == 0)
++            result = (uint8_t)type_index(type);
++        else if (category == CHECK_LVALUE && (constant == CHECK_CONSTANT_ADDRESS || constant == CHECK_CONSTANT_NONE) &&
++                 (flags & ~(BUSTER_CHECK_NONNULL_ADDRESS | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_STATIC_OBJECT)) == 0)
++            result = (uint8_t)type_index(type) | BUSTER_SOURCE_INT_LVALUE;
++    }
++    return result;
++}
++
++// Run before the pending expression is stored in its wide graph columns. It consumes source leaf words and
++// earlier results from this very producer, publishing the output type and final conversions for both operands.
++static __attribute__((noinline)) void check_source_integer_append(CheckSourceArithmetic* source, uint32_t node, CheckOp op, uint32_t a, uint32_t b)
++{
++    source->words[node] = 0;
++    while (source->count != 0 && source->proofs[source->count-1].node >= node) source->count -= 1;
++    if (!((op >= CHECK_OP_POSITIVE && op <= CHECK_OP_LOGICAL_OR) || op == CHECK_OP_CONDITION)) return;
++    const bool unary = op <= CHECK_OP_BIT_NOT || op == CHECK_OP_CONDITION;
++    b = unary ? a : b;
++    if (a >= node || b >= node || source->count == source->limit) return;
++    source->candidates += 1;
++    const uint8_t left = source->words[a] & 63u;
++    const uint8_t right = source->words[b] & 63u;
++    const bool ak = (left & BUSTER_SOURCE_INT_LITERAL) != 0;
++    const bool bk = (right & BUSTER_SOURCE_INT_LITERAL) != 0;
++    const bool logical = op == CHECK_OP_NOT || op == CHECK_OP_CONDITION || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
++    if (left == 0 || right == 0 || (ak && bk) || (logical && (ak || bk)) || (bk && op >= CHECK_OP_DIVIDE && op <= CHECK_OP_SHIFT_RIGHT)) return;
++
++    uint8_t lt = left & BUSTER_SOURCE_INT_CODE, rt = right & BUSTER_SOURCE_INT_CODE;
++    uint8_t lf = (left & BUSTER_SOURCE_INT_LVALUE) != 0 ? BUSTER_CHECK_CONVERT_LVALUE : 0;
++    uint8_t rf = (right & BUSTER_SOURCE_INT_LVALUE) != 0 ? BUSTER_CHECK_CONVERT_LVALUE : 0;
++    if (!logical)
++    {
++        const uint8_t lp = type_promotion_codes[lt], rp = type_promotion_codes[rt];
++        lf |= lp != lt ? BUSTER_CHECK_CONVERT_PROMOTION : 0;
++        rf |= rp != rt ? BUSTER_CHECK_CONVERT_PROMOTION : 0;
++        lt = lp;
++        rt = rp;
++        if (!unary && op != CHECK_OP_SHIFT_LEFT && op != CHECK_OP_SHIFT_RIGHT)
++        {
++            const uint8_t common = type_integer_codes[((lt & 7u) << 3) | (rt & 7u)];
++            lf |= lt != common ? BUSTER_CHECK_CONVERT_ARITHMETIC : 0;
++            rf |= rt != common ? BUSTER_CHECK_CONVERT_ARITHMETIC : 0;
++            lt = common;
++            rt = common;
++        }
++    }
++    const uint8_t result = logical || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ? BUSTER_TYPE_CODE_INT : lt;
++    source->proofs[source->count++] = (CheckSourceIntegerProof){ .node=node,.a=a,.b=b,.op=(uint8_t)op,.left=left,.right=right,.result=result,
++        .lt=lt,.rt=unary ? 0 : rt,.lf=lf,.rf=unary ? 0 : rf };
++    if (source->audit && ((source->words[a] | source->words[b]) & BUSTER_SOURCE_INT_CHECKED)) source->chains += 1;
++    source->words[a] |= BUSTER_SOURCE_INT_NEEDED;
++    source->words[b] |= BUSTER_SOURCE_INT_NEEDED;
++    // The high bit distinguishes the producer's own derived value until the checker begins consuming the source tape.
++    source->words[node] = result | BUSTER_SOURCE_INT_CHECKED;
++}
++
++static void check_source_integer_leaf(CheckSourceArithmetic* source, const CheckStream* stream, uint32_t node)
++{
++    const uint32_t row = stream->payload_rows[node];
++    source->words[node] = BUSTER_SOURCE_INT_CHECKED | check_source_integer_word(stream->value_types[node],stream->value_flags[node],
++        stream->value_categories[node],stream->value_constants[node],row != 0 && stream->payloads[row-1].fault != CHECK_FAULT_NONE);
++}
++
++// A selected source row is consumed after its actual dependencies. Changes to an edge, operator, constant
++// context, FP access or either operand's checked shape leave the node to its normal scalar action.
++static __attribute__((noinline)) bool check_source_integer_take(CheckSourceArithmetic* source, const CheckGraph* graph, CheckStream* stream, uint32_t node)
++{
++    const CheckSourceIntegerProof* p = source->proofs + source->next++;
++    const uint32_t a = p->a, b = p->b;
++    const bool unary = p->op <= CHECK_OP_BIT_NOT || p->op == CHECK_OP_CONDITION;
++    bool taken = graph->ops[node] == p->op && graph->operand0[node] == a && (unary || graph->operand1[node] == b) &&
++                 source->words[a] == (BUSTER_SOURCE_INT_CHECKED | p->left) && source->words[b] == (BUSTER_SOURCE_INT_CHECKED | p->right) &&
++                 (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
++                 ((graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default) & BUSTER_CHECK_FP_ENV_ACCESS) == 0;
++    if (taken)
++    {
++        stream->value_types[node] = BUSTER_TYPE_BUILTIN(p->result);
++        stream->value_flags[node] = 0;
++        stream->value_objects[node] = 0;
++        stream->value_categories[node] = CHECK_RVALUE;
++        stream->value_constants[node] = CHECK_CONSTANT_NONE;
++        stream->diagnostics[node] = CHECK_DIAG_NONE;
++        stream->warnings[node] = 0;
++        stream->member_offsets[node] = 0;
++        stream->conversions[node] = (CheckNodeConversions){.operands={{.type=BUSTER_TYPE_BUILTIN(p->lt),.flags=p->lf},{.type=BUSTER_TYPE_BUILTIN(p->rt),.flags=p->rf}}};
++        stream->statistics.scalar_nodes += 1;
++        source->words[node] = BUSTER_SOURCE_INT_CHECKED | p->result;
++        source->taken += 1;
++    }
++    else source->words[node] = 0;
++    return taken;
++}
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..8e48cdf16 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -259,8 +259,10 @@ static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedM
+     return result;
+ }
+ 
++typedef struct CheckSourceArithmetic CheckSourceArithmetic;
+ struct CheckGraph
+ {
++    CheckSourceArithmetic* source_arithmetic;
+     // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+     // and 0 for none.
+     const CheckInputMarkedMember* marked_members;
+@@ -3323,6 +3325,8 @@ static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTa
+     }
+ }
+ 
++#include "c_check_source_arithmetic.c"
++
+ // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
+ // default is check_graph_region_postorder's batches, which the benchmark measured faster). Dependencies before begin
+ // are already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them
+@@ -4241,16 +4245,28 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->zero_columns = zero_output;
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
++        CheckSourceArithmetic* source = !regions && !transitions && graph->overload_candidate_count == 0 ? graph->source_arithmetic : NULL;
++        if (source != NULL)
++        {
++            source->next = 0;
++            source->taken = 0;
++            // Reset derived source outputs before replay. Only a leaf or proof checked in this pass can provide a word.
++            for (uint32_t i=0; i<source->count; i+=1) source->words[source->proofs[i].node] &= ~BUSTER_SOURCE_INT_CHECKED;
++        }
+         while (node < count)
+         {
+             if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+             {
+                 check_graph_leaf(types, graph, stream, node);
++                if (source != NULL && (source->words[node] & BUSTER_SOURCE_INT_NEEDED))
++                    check_source_integer_leaf(source,stream,node);
++                if (source != NULL && source->next < source->count && source->proofs[source->next].node == node) source->next += 1;
+                 node += 1;
+             }
+             else if (!regions || pure[node] == 0)
+             {
+-                check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
++                if (!(source != NULL && source->next < source->count && source->proofs[source->next].node == node && check_source_integer_take(source,graph,stream,node)))
++                    check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
+                 node += 1;
+             }
+             else

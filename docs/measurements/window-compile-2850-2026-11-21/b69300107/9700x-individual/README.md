@@ -1,0 +1,5 @@
+# Individual-invocation Ryzen 7 9700X results
+
+In the earlier source-owned native compiler, SQLite took 237.578 ms against 114.428 ms ordinary. The paired elapsed difference was +123.342 ms in five rounds, with 3.407 billion more user instructions in the three PMU rounds. The Buster self-source comparison took 894.079 ms against 611.799 ms, with all five paired elapsed differences positive.
+
+The harness used CPU 2 and acquired the hardware lock separately for every compiler process and every perf invocation. Five rounds alternated ABBA and BAAB. Wall and RSS came from fresh processes in each of the twenty observations per workload. Separate runs in the first three rounds captured cycles, user cycles, user instructions and minor faults with 100% counter running time. The paired column subtracts the ordinary or dense observation mean from the candidate mean within each round, then takes the median. Paired differences can differ from differences between the reported arm medians. [Per-round results](paired.tsv), [individual observations](samples.tsv), [build identity](revision.txt), [compiler hash](compiler.sha256) and [raw records and commands](raw.tar.gz).

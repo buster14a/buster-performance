@@ -1,0 +1,92 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index ed7ee1e5b..4c71883da 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -19,6 +19,9 @@ typedef struct CheckSourceControlUnit
+     uint32_t file_first;
+     uint32_t file_decl;
+     bool file_accepted;
++    bool direct_columns;
++    bool poison_columns;
++    uint64_t direct_bytes;
+     Arena native_types;
+     Arena native_abi;
+     struct CheckSourceTypeCache* type_cache;
+@@ -71,6 +74,8 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     input.report_count = 0;
+     input.report_capacity = 1;
+     input.warning_events = (CheckWarningEvents){ 0 };
++    const bool direct_columns = controls != NULL && controls->direct_columns;
++    const bool poison_columns = direct_columns && controls->poison_columns;
+     const uint32_t tokens = stop - begin;
+     uint32_t extra = 0;
+     for (uint32_t i = begin; i < stop; i += 1)
+@@ -87,7 +92,9 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+ #define BUSTER_BODY_COLUMN(field, n) do { if (shape.field != NULL) { \
+         shape.field = arena_push_array(graph, (n), sizeof(*shape.field), 64); \
+         if (shape.field == NULL) return false; \
+-        memset(shape.field, 0, (uint64_t)(n) * sizeof(*shape.field)); } } while (0)
++        const uint64_t bytes = (uint64_t)(n) * sizeof(*shape.field); \
++        if (direct_columns) controls->direct_bytes += bytes; \
++        if (!direct_columns || poison_columns) memset(shape.field, poison_columns ? 0xa5 : 0, bytes); } } while (0)
+     BUSTER_BODY_COLUMN(ops, room); BUSTER_BODY_COLUMN(tokens, room); BUSTER_BODY_COLUMN(types, room); BUSTER_BODY_COLUMN(members, room);
+     BUSTER_BODY_COLUMN(operand0, room); BUSTER_BODY_COLUMN(operand1, room); BUSTER_BODY_COLUMN(operand2, room);
+     BUSTER_BODY_COLUMN(leaf_slots, room); BUSTER_BODY_COLUMN(contexts, room); BUSTER_BODY_COLUMN(source_positions, room);
+@@ -128,7 +135,7 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     }
+     check_graph_record_finish(&input.graph);
+     CheckStream stream;
+-    if (!check_graph_run(top->types, &input.graph, checked, scratch, &(CheckOptions){ 0 }, &stream))
++    if (!check_graph_run(top->types, &input.graph, checked, scratch, &(CheckOptions){ .fresh_output = direct_columns }, &stream))
+     {
+         if (input.source_bodies == NULL || getenv("BUSTER_CONTROL_SOURCE_DECLINES") != NULL) fprintf(stderr,"body-source-decline\tclose=%u\tstatus=%u\tnode=%u\n",close,stream.status,stream.failed_node);
+         return false;
+@@ -316,6 +323,8 @@ static void check_control_source_native(CheckInputReader* reader)
+     const bool file_audit = getenv("BUSTER_SOURCE_FILE_AUDIT") != NULL;
+     uint32_t file_units = 0, file_nodes = 0;
+     unit.file_decl = BUSTER_CHECK_NONE;
++    unit.direct_columns = getenv("BUSTER_SOURCE_WRITE_COLUMNS") != NULL;
++    unit.poison_columns = getenv("BUSTER_SOURCE_POISON_COLUMNS") != NULL;
+     const bool local_lists = reader->first_value == NULL;
+     Arena lists = local_lists ? arena_reserve(UINT64_C(1) << 36) : (Arena){0};
+     const CheckWarningEvents* prefix = &in->warning_events;
+@@ -470,6 +479,12 @@ static void check_control_source_native(CheckInputReader* reader)
+         if (local_lists) arena_pop_to(&lists, 0);
+         begin=i+1;
+     }
++    if (getenv("BUSTER_SOURCE_RESIDENCY_AUDIT") != NULL)
++        fprintf(stderr, "source-storage\tcolumn-bytes=%llu\tgraph-peak=%llu\tchecked-peak=%llu\tscratch-peak=%llu\tgraph-resident=%llu\tchecked-resident=%llu\tscratch-resident=%llu\n",
++                (unsigned long long)unit.direct_bytes, (unsigned long long)graph.peak,
++                (unsigned long long)checked.peak, (unsigned long long)scratch.peak,
++                (unsigned long long)check_body_residency_mapped(&graph), (unsigned long long)check_body_residency_mapped(&checked),
++                (unsigned long long)check_body_residency_mapped(&scratch));
+     if (file_audit) fprintf(stderr, "file-published\t%u\t%u\n", file_units, file_nodes);
+     if (getenv("BUSTER_CONTROL_SOURCE_AUDIT") != NULL) fprintf(stderr,"control-source-summary\tbodies=%u\tselected=%u\tlocal-graph-nodes=%u\tunit-graph-capacity=%u\tunit-graph-nodes=%u\n",bodies,selected,local,in->graph.capacity,in->graph.count);
+     if (local_lists)
+diff --git a/src/buster/compiler/c_check_live_control_native.c b/src/buster/compiler/c_check_live_control_native.c
+index 6eadfd558..ee2c0a74b 100644
+--- a/src/buster/compiler/c_check_live_control_native.c
++++ b/src/buster/compiler/c_check_live_control_native.c
+@@ -149,7 +149,21 @@ static bool check_source_file_data(CheckSourceControlUnit* unit, CheckInputReade
+             in->string_count, in->string_ids, in->declared_types[decl], begin, end, true, false, true,
+             output, scratch, &plan, &in->graph, &collector, NULL, NULL, NULL) ||
+         plan.warning_count != 0 || warnings.count != 0 || plan.label_differences ||
+-        plan.floating_values || plan.changed_integers || plan.enum_values) return false;
++        plan.changed_integers || plan.enum_values) return false;
++    if (plan.floating_values)
++    {
++        // Ordinary brace diagnostics inspect a floating part converted to an integer.
++        // Admit direct literals stored into floating fields; leave all other conversions with the unit.
++        for (uint32_t i = 0; i < plan.count; i += 1)
++        {
++            const CheckInitPart* part = plan.parts + i;
++            if (part->kind != CHECK_INIT_VALUE || part->node >= stream->count) continue;
++            const TypeId source_type = check_stream_type(stream, part->node);
++            if (check_action_kind(reader->types, source_type) == BUSTER_TYPE_KIND_FLOATING &&
++                (check_action_kind(reader->types, part->conversion.type) != BUSTER_TYPE_KIND_FLOATING ||
++                 in->graph.ops[part->node] != CHECK_OP_VALUE)) return false;
++        }
++    }
+     CheckInitializers plans = { .count = 1, .plans = &plan, .declaration_tokens = &unit->file_decl };
+     CheckProgram p = { .types = reader->types, .stream = stream, .input = in, .initializers = &plans,
+                        .object_count = in->token_count+1 };

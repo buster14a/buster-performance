@@ -7,3 +7,5 @@ For all 2,668 selected SQLite functions, independent local selection and branch 
 The scoped type preparation uses checked type count, completed tag count, member count and vector ABI width as its validity key, with body-local variable slot maps and declaration ranges. On the earlier 1,218-body SQLite boundary, four balanced fresh-process samples per arm give local medians of 9.087 s versus 5.433 s after sharing declarations, and 5.253 s versus 1.610 s after reusing checked types and ABI rows. The checker translation unit was built with -O0 and the other driver units optimized. These are engineering comparisons of the local prototypes. [Local declaration timing](declarations-local-o0.tsv) [Local preparation timing](type-and-abi-local-o0.tsv)
 
 [Source delta above the oracle](source.patch) [Source library binding](builtin-and-library.patch) [Raw comparisons and commands](raw-and-commands.tar.gz)
+
+[Controlled per-invocation Ryzen 7 9700X results](9700x-individual/README.md)
