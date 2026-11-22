@@ -1,0 +1,163 @@
+From a074693634bf6ceced80d72749182fe383d65034 Mon Sep 17 00:00:00 2001
+From: David Gonzalez Martin <davidgmbb@gmail.com>
+Date: Sun, 22 Nov 2026 03:46:53 +0100
+Subject: [PATCH] Reuse successful runtime record member actions across retired
+ bodies
+
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/c_check_body_source.c | 12 +++-
+ src/buster/compiler/c_checker.c           | 72 +++++++++++++++++++++++
+ 2 files changed, 83 insertions(+), 1 deletion(-)
+
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index 4ddf0f36b..bb69144e9 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -123,12 +123,13 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     }
+     check_graph_record_finish(&input.graph);
+     CheckStream stream;
++    input.graph.member_rules = top->output->graph.member_rules;
+     if (!check_graph_run(top->types, &input.graph, checked, scratch, &(CheckOptions){ 0 }, &stream))
+     {
+         fprintf(stderr,"body-source-decline\tclose=%u\tstatus=%u\tnode=%u\n",close,stream.status,stream.failed_node);
+         return false;
+     }
+-    if (input.source_bodies == NULL && getenv("BUSTER_BODY_DISCARD_RESULT") == NULL) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
++    if ((input.source_bodies == NULL && getenv("BUSTER_BODY_DISCARD_RESULT") == NULL) || getenv("BUSTER_CONTROL_RULE_ROWS") != NULL) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
+             (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, close));
+     if (controls != NULL && reader.parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY)
+         check_source_control_function(controls, &reader, &stream, close, checked, scratch);
+@@ -219,6 +220,12 @@ static void check_control_source_native(CheckInputReader* reader)
+     *in->source_bodies = (CheckSourceBodies){0};
+     in->source_body_output = reader->arena;
+     Arena indexes = arena_reserve(UINT64_C(1) << 34);
++    if (getenv("BUSTER_CONTROL_MEMBER_RULES") != NULL)
++    {
++        in->graph.member_rules = BUSTER_ARENA_PUSH_ARRAY(&indexes, CheckMemberRules, 1);
++        if (in->graph.member_rules == NULL) abort();
++        memset(in->graph.member_rules, 0, sizeof(*in->graph.member_rules));
++    }
+     CheckSourceControlUnit unit = { .native_metadata=&indexes, .native_types=arena_reserve(UINT64_C(1)<<31), .native_abi=arena_reserve(UINT64_C(1)<<31), .native_typed=check_source_retire_typed?arena_reserve(UINT64_C(1)<<35):(Arena){0} };
+     unit.persistent = in;
+     CheckSourceControlUnit* controls = NULL;
+@@ -297,5 +304,8 @@ static void check_control_source_native(CheckInputReader* reader)
+         begin=i+1;
+     }
+     if (getenv("BUSTER_CONTROL_SOURCE_AUDIT") != NULL) fprintf(stderr,"control-source-summary\tbodies=%u\tselected=%u\tlocal-graph-nodes=%u\tunit-graph-capacity=%u\tunit-graph-nodes=%u\n",bodies,selected,local,in->graph.capacity,in->graph.count);
++    if (in->graph.member_rules != NULL && getenv("BUSTER_CONTROL_SOURCE_AUDIT") != NULL)
++        fprintf(stderr, "source-member-rules\thits=%u\tsaved=%u\n", in->graph.member_rules->hits, in->graph.member_rules->saved);
++    in->graph.member_rules = NULL;
+     arena_release(&unit.native_typed);arena_release(&unit.native_abi);arena_release(&unit.native_types);arena_release(&indexes);arena_release(&graph);arena_release(&checked);arena_release(&scratch);
+ }
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..348430800 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -259,6 +259,22 @@ static __attribute__((unused)) bool check_marked_dropped(const CheckInputMarkedM
+     return result;
+ }
+ 
++typedef struct CheckMemberRule
++{
++    TypeId base;
++    uint32_t name;
++    CheckOp op;
++    uint32_t position;
++    CheckActionResult result;
++} CheckMemberRule;
++
++typedef struct CheckMemberRules
++{
++    CheckMemberRule slots[1024];
++    uint32_t hits;
++    uint32_t saved;
++} CheckMemberRules;
++
+ struct CheckGraph
+ {
+     // The marked members and the tokens' availability contexts (CheckInput's, #147), for the initializers' walk; null
+@@ -371,6 +387,7 @@ struct CheckGraph
+     CheckGraphValidation recorded;
+     uint32_t recorded_nodes;
+     bool recorded_ready;
++    CheckMemberRules* member_rules;
+ };
+ 
+ typedef enum CheckStatus
+@@ -3095,9 +3112,48 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
+ 
+ // A node's action, its result stored, with `guards` receiving what it read of its source position (CheckAction.guards),
+ // or null. Always inlined (#880), as profile-guided builds do; hot caller: check_graph_scalar_node, once per impure node.
++// A plain member of an unknown record lvalue, or a member reached by loading a pointer lvalue.
++// At runtime the pointer load discards the source object's address. The resulting member lvalue
++// depends only on its type, its member and the fixed flags below. Reuse a successful ordinary
++// action once its complete record is visible at this source position.
++static CheckMemberRule* check_graph_member_rule(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
++{
++    const CheckOp op = graph->ops[node];
++    const uint32_t a = graph->operand0[node];
++    if (graph->overload_candidate_count != 0 || graph->source_positions == NULL ||
++        graph->members == NULL || a >= node || stream->dense_values != NULL || stream->payload_rows[a] != 0 ||
++        stream->value_categories[a] != CHECK_LVALUE || stream->value_flags[a] != BUSTER_CHECK_NONNULL_ADDRESS ||
++        (stream->constant_evaluated != NULL && stream->constant_evaluated[node] != 0) ||
++        ((graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default) & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
++    {
++        return NULL;
++    }
++    const CheckConstantKind constant = stream->value_constants[a];
++    if (constant != CHECK_CONSTANT_NONE && !(op == CHECK_OP_ARROW && constant == CHECK_CONSTANT_ADDRESS))
++    {
++        return NULL;
++    }
++    const uint32_t hash = graph->members[node] * UINT32_C(0x85ebca6b) + stream->value_types[a] * UINT32_C(0x9e3779b9);
++    return &graph->member_rules->slots[hash >> 22];
++}
++
+ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node, CheckValue* arguments,
+                                                                           Arena* scratch, CheckActionGuards* guards)
+ {
++    CheckMemberRule* rule = NULL;
++    const CheckOp op = graph->ops[node];
++    if (graph->member_rules != NULL && (op == CHECK_OP_ARROW || op == CHECK_OP_MEMBER) && guards == NULL)
++    {
++        rule = check_graph_member_rule(graph, stream, node);
++        if (rule != NULL && rule->op == op && rule->base == stream->value_types[graph->operand0[node]] &&
++            rule->name == graph->members[node] && rule->position <= graph->source_positions[node])
++        {
++            check_graph_store(stream, node, &rule->result);
++            stream->statistics.scalar_nodes += 1;
++            graph->member_rules->hits += 1;
++            return;
++        }
++    }
+     CheckAction action;
+     CheckActionResult result;
+     check_graph_action(graph, stream, node, arguments, &action);
+@@ -3226,6 +3282,22 @@ static inline __attribute__((always_inline)) void check_graph_node_action(TypeTa
+     {
+         check_graph_region_effects(types, graph, stream, node, scratch, &result);
+     }
++    if (rule != NULL && result.diagnostic == CHECK_DIAG_NONE && result.warnings == 0 &&
++        result.value.constant_kind == CHECK_CONSTANT_NONE && result.value.object == 0)
++    {
++        const TypeId base = action.operands[0].type;
++        const TypeId plain = type_strip_aligned(types, base);
++        const uint8_t kind = type_kind(types, plain);
++        const uint8_t record = op == CHECK_OP_ARROW && kind == BUSTER_TYPE_KIND_POINTER ?
++                               type_kind(types, type_strip_aligned(types, type_element(types, plain))) :
++                               op == CHECK_OP_MEMBER ? kind : BUSTER_TYPE_KIND_NONE;
++        if (record == BUSTER_TYPE_KIND_STRUCT || record == BUSTER_TYPE_KIND_UNION)
++        {
++            *rule = (CheckMemberRule){ .base = base, .name = action.member, .op = op,
++                                       .position = action.context.source_position, .result = result };
++            graph->member_rules->saved += 1;
++        }
++    }
+     check_graph_store(stream, node, &result);
+     stream->statistics.scalar_nodes += 1;
+ }
+-- 
+2.56.1
+

@@ -1,0 +1,3 @@
+# Source-name handoff into parsing and member lookup
+
+The retained native PP, parser and declaration experiments include the original frozen source, perfect-identity controls, source data lifetimes and the original Release warning replay failure. A complete frozen dictionary and an exact precomputed raw identifier tape reduced preprocessing from 9.131 to 8.182 ms. Combining that oracle with free elimination of inactive and trivia bytes still took 6.224 ms. SQLite’s parser retained the physical spellings of 24,323 member selectors. The archive includes the cross-build declaration matches and explicitly identifies subsequent same-process validations. [Download the research packet](structural-source-handoff-v2.tar.gz).

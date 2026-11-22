@@ -1,0 +1,5 @@
+# Native compilation consumes the forest built before preprocessing ends
+
+The real native driver accepts the source reader’s grammar forest and skips its ordinary whole-unit grammar pass when the projected token tuple agrees with the normalized full output. The whole-unit token conversion is still present in this revision. Source membership is checked independently in the separate [parser and traversal witness](../1333be695/README.md).
+
+Both default and maximum-warning pairs produced the complete 2,061,200-byte SQLite object and 11,276,208-byte Buster object in this local Develop build. All four source-mode objects equal the independently frozen ordinary ELF. Status, stdout and diagnostics also matched, including all 7,425 SQLite and 11,818 Buster maximum-warning bytes. Each audited compile consumed the live tree. SQLite had 709,161 of 716,136 rows ready before end of preprocessing, and Buster had 2,421,290 of 2,433,563. [Four native comparisons](native.tsv), [raw source diagnostics and build commands](preflight.tar.gz), [source patch against 40ae34f9d](source.patch).
