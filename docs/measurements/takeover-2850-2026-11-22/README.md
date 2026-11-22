@@ -29,9 +29,10 @@ in the files):
 | the data's publication, the object's build and write | 1.31 |
 | **total** | **111.94** |
 
-The process: 98.7 ms user, 16.3 ms system, 5,643 minor faults, 238.6 MB peak. One of the seven ran on base pages
-(56,408 faults, 179 MB peak, 143.0 ms): the arenas' page policy read the host as busy when it started
-(`huge-pages busy`). The medians leave it out of sight; a comparison of two builds has to look for it.
+The process: 98.7 ms user, 16.3 ms system, 5,643 minor faults, 238.6 MB peak. One of the seven, the second, ran on
+base pages (56,408 faults, 179 MB peak, 143.0 ms): its report says `huge-pages busy`, the arenas' page policy having
+found 9 tasks runnable when it started (`before-2.txt`), where the other six found 1 and say `system`. The medians
+leave it out of sight; a comparison of two builds has to look for it.
 
 ## The profile at main `d541430bf`
 
@@ -76,8 +77,9 @@ the mean of its two runs of an arm, the columns are the medians of the rounds an
 | page faults | 5,469 | 5,469.5 | 0 | -1.5 | +1.5 | 3 of 7 |
 
 All 56 objects are one object and the diagnostics one stream. The +25.2 ms round holds one wall run of 165.7 ms (the
-candidate's, round 1, position 1), a run on base pages as in the stage table's seventh; the other 27 wall runs are
-111.8 to 115.7 ms. On this host, with its 2 MB pages, the faults don't move (the 902 fewer of the pull request's
+candidate's, round 1, position 1); the other 27 wall runs are 111.8 to 115.7 ms. That run's faults were not recorded
+(`pair.sh` counted them in the counters run alone, and has recorded the wall run's since), so that it ran on base
+pages, as the stage table's second run did, is likely and not shown. On this host, with its 2 MB pages, the faults don't move (the 902 fewer of the pull request's
 description are the 7940HS's); what the change saves here is the column's clearing, 1.3 user cycles a token in every
 round, and the wall clock doesn't resolve it.
 

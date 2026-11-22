@@ -8,6 +8,10 @@ for wall in sorted(glob.glob(os.path.join(out, 'r*.wall'))):
     m = re.match(r'r(\d+)\.p(\d+)\.(\w+)', os.path.basename(key))
     r, arm = int(m.group(1)), m.group(3)
     w = int(open(wall).read())
+    if os.path.exists(key + '.faults'):
+        faults = int(open(key + '.faults').read().split()[0])
+        if faults > 20000:
+            print(f'note: {os.path.basename(key)} wall run took {faults} minor faults (base pages), {w / 1e6:.3f} ms')
     c = {}
     for line in open(key + '.perf'):
         f = line.strip().split(',')

@@ -24,7 +24,7 @@ one()
         cat /proc/loadavg > '$key.load'
         taskset -c 2 '$cc' $options $flags -o '$key.o' 2> '$key.warm.stderr'
         start=\$(date +%s%N)
-        taskset -c 2 '$cc' $options $flags -o '$key.o' > '$key.stdout' 2> '$key.stderr'
+        taskset -c 2 /usr/bin/time -f '%R %F' -o '$key.faults' '$cc' $options $flags -o '$key.o' > '$key.stdout' 2> '$key.stderr'
         end=\$(date +%s%N)
         echo \$((end - start)) > '$key.wall'
         taskset -c 2 perf stat -x, -e cycles:u,cycles:k,instructions:u,page-faults -o '$key.perf' -- '$cc' $options $flags -o '$key.pmu.o' 2> /dev/null
