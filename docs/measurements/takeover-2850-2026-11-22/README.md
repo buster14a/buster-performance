@@ -414,3 +414,71 @@ What it says:
 
 Candidates this leaves, none measured as a change: the graph's columns at a tight capacity and packed (about 10 MB),
 the small arenas in base pages (about 17 MB), the never-written columns (about 6 MB). Together under 2 ms.
+
+## The body boundary with a recorded supplier (`boundary-*/`, `boundary-b1/`)
+
+The scaffold on `claude/2850-boundary-scaffold` (not for merge; [its specification, as
+amended](https://github.com/buster14a/buster/issues/2524#issuecomment-7079102369)): a function body's lowered function
+supplied from outside the reader. `BUSTER_BOUNDARY_RECORD=DIRECTORY` makes an ordinary compile write each unit's
+bodies' functions, references, string tokens, runtime calls and jump tables; `BUSTER_BOUNDARY_SUPPLY=DIRECTORY` makes a
+compile of the same unit mask those bodies from the reader and take them at the lowering (`BUSTER_BOUNDARY_SELECT=N:K`
+takes the eligible bodies whose ordinal modulo N is K). A body the recording can't carry is read as ever.
+
+### B1, exactness (`boundary-b1/`, `scripts/b1.sh`; Develop builds on this session's machine)
+
+For `sqlite3.c`, Lua's 34 units, `main.c` and musl's 1,336 units: the ordinary compile, the recording, and the compile
+with every eligible body supplied and with each half of them.
+
+| by default flags, at `bbe80f1a9` | bodies | supplied | their tokens | refused |
+| --- | ---: | ---: | ---: | --- |
+| `sqlite3.c` | 2,668 | 2,589 | 480,204 | 79 with a block-scope `static` or `extern` |
+| Lua | 1,096 | 1,081 | 156,805 | 14 with `static` or `extern`, 1 with labels as values |
+| `main.c` | 1,498 | 1,358 | 285,353 | 114 `static` or `extern`, 11 asm, 10 objects, 4 helpers, 1 initializer pool |
+| musl | 2,756 | 2,161 | 249,484 | 510 asm, 68 `static` or `extern`, 17 with a diagnostic |
+
+Every variant's objects and diagnostics are the ordinary compile's (`default-bbe80f1a9.txt`: 0 differences in 16
+comparisons; `default-e38e1bfb0.txt` is the same before jump tables were supplied).
+
+With `-Wall -Wextra` (`wall-bbe80f1a9.txt`) the objects are the ordinary compile's in every variant and the diagnostics
+are not: a supplied body's uses of its parameters and of the unit's declarations are missing from the reader's unused
+analysis, which then warns of them. B1's second half is open.
+
+Two things the first runs found, both fixed in the scaffold: a command of several units reads each through a view
+without its attested declarations' tokens, and a mask holds the view off, so the recording names tokens by their index
+in the unit's own parse; and an asm statement that leaves no row in its function (an empty template's barrier) still
+numbers the unit's asm helpers, so any asm statement refuses its body.
+
+### B2, what the unit costs with its bodies supplied (`boundary-6bc8d41a5/`, `boundary-bbe80f1a9/`)
+
+The 9700X, Release, CPU 2, one lane, under the lock, `scripts/boundary.sh`: seven rounds, each the ordinary compile
+twice, the compile with every eligible body supplied twice, and with each half once; `--time-stages` medians, ms. All 43
+objects of a run are one.
+
+| frozen `sqlite3.c` | ordinary | supplied, without jump tables (`6bc8d41a5`) | supplied, with them (`bbe80f1a9`) |
+| --- | ---: | ---: | ---: |
+| bodies supplied (their tokens) | | 2,550 (431,126) | 2,589 (480,204) |
+| share of the bodies' 568,438 tokens | | 76% | 84% |
+| `check-input` | 41.49 | 28.11 | 26.54 |
+| `check-expressions` | 10.50 | 2.95 | 2.06 |
+| `check-program` | 18.83 | 6.58 | 5.24 |
+| `lower` | 11.48 | 3.35 | 2.70 |
+| `check-input` to `lower` | 85.76 | 43.07 | 38.58 |
+| Tier 0 and emission | 8.77 | 8.91 | 8.92 |
+| total | 110.93 | 69.50 | 64.92 |
+| with half of them (2:0, 2:1) | | 93.41, 94.07 | 92.61, 91.22 |
+| peak, MB | 238.4 | 230.7 | 230.8 |
+
+(The ordinary column is `bbe80f1a9`'s; `6bc8d41a5`'s read 110.71.) Reading the recording, 6.4 MB, is 1.7 ms of the
+supplied compile (its `setup` stage; `load-ticks` in the report beside the recording).
+
+The gate was 56 ms, refuted at 62: **refuted, at 64.9 ms with 84% of the bodies' tokens supplied.** The three points
+(0%, 76%, 84%) are a line of 0.544 ms a percent, which reaches 56.5 ms with every body supplied: what the host costs
+when bodies cost nothing is about what the gate allowed in all. What is left is the reader's passes over every token
+(21 ms with every body masked), the front (16), Tier 0 and emission (9), and the memory: the peak moves from 238 MB to
+231.
+
+### B3, nothing else moves (`pair2-sqlite-f1fcdf2a0-6bc8d41a5/`)
+
+Main `f1fcdf2a0` against the scaffold with nothing recorded or supplied, seven ABBA rounds of the ordinary `-c
+sqlite3.c`: 111.73 and 111.32 ms (paired -0.47, between -0.84 and +0.67), 1,215.957 M and 1,215.946 M user instructions,
+one set of objects and diagnostics.
