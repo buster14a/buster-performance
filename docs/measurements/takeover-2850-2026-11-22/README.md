@@ -900,3 +900,49 @@ on this session's machine, the default warnings): the same 51,306, 10,900, 53,91
 Lua, the compiler's own source and musl, no difference, none run by one of the two alone, none taken before an event
 of the walk's or with a token its actions left. So nothing the machine reads of a body is left there by the walk of
 another.
+
+### A scan of a body's tokens for a root the front would lose (`machine-alone/9700x-scan/`, branch at `90c42e997`)
+
+The count above was of a blunt scan: any `sizeof` or visit of the walk's own in the body. The branch's scan
+(`node_alone_scan`) follows the token's value: a token the front leaves (a `sizeof` or `_Alignof` by its kind, a token
+of the walk's own visit by its class's byte, a character constant with an escape or of several characters by its
+spelling) loses a root where its value reaches a root's token (a statement's terminator, a condition, a return, an
+initialization) through the parents that take values; under a declarator or a label it reaches none. It reads the
+parser's kinds and parents and the reader's visit bytes, before any of the body is compacted. In the shadow it refuses
+nothing: every body is read as before, and the report has, by a body's verdict, the bodies the scan finds a lost root
+in, with the scan's own ticks and the tokens it read.
+
+`scripts/job-scan1.sh` (`alone-split.sh` at the branch's `90c42e997`; the 9700X, CPU 2, Release, under the lock; 7 runs,
+musl's 3; `scripts/scan-reduce.py`, `machine-alone/9700x-scan/reduced.txt`; every run's status 0 and no root differs):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| bodies whose root the front lost (lowered) | 514 | 279 | 584 |
+| … of them the scan finds one in | 513 | 279 | 584 |
+| … their tokens found | 278,079 of 278,483 | 100,404 of 100,404 | 163,234 of 163,234 |
+| whole bodies the scan finds one in | 0 of 1,856 | 0 of 630 | 0 of 1,871 |
+| bodies refused after their sweeps the scan finds one in | 0 of 298 | 0 of 187 | 1 of 301 |
+| tokens the scan read (it stops at the first it finds) | 374,620 | 121,860 | 619,925 |
+| its ticks, M (ms) | 1.45 (0.383) | 0.55 (0.146) | 8.70 (2.294) |
+| ticks a token read; a body's postorder position | 3.88; 2.56 | 4.54; 2.73 | 14.03; 6.11 |
+
+- **The scan decides the root-lost bodies before any work, and costs no whole body:** on `sqlite3.c` the 17.4 ms the
+  piece spends reading and sweeping those bodies (5.35 and 12.05 here) against 0.38 ms for the scan over every body.
+  The compiler's own source, on this session's machine (`machine-alone/develop/scan-90c42e997/`): 748 of 748, and none
+  of its 222 whole bodies.
+- The one `sqlite3.c` body it leaves is `sqlite3OpcodeName` (`sqlite3.c:38923`, 404 tokens), a block's static table of
+  strings: the front's report counts a root lost there with no `sizeof`, visit or character constant of the scan's in
+  the body.
+- musl's ticks a token are four times the others': its 18,584 bodies are 77 tokens each on average (the headers'
+  inline functions among them), and each scan is timed by two reads of the clock.
+- The specification's gate for a refusal before the sweeps was 20 ticks a body token on the refused bodies.
+
+**Where the shadow's run goes, by symbol** (`machine-alone/9700x-scan/profile-walk-90c42e997/`, `profile-alone-90c42e997/`;
+`scripts/profile-alone.sh`: four `perf record` runs each of `measure-node-machine --shadow` on `sqlite3.c`, with
+`--front --front-types --front-tests --front-sweeps` and with `--front-alone`): 2,068 M and 2,485 M cycles a run, most
+of either the shadow's own passes after the pipeline. The piece adds 417 M: the tests' node function
+(`node_census_node`) 66 M, T (`node_machine_type_in_context` and `node_machine_rule`) 48 M, the records' digest 28 M
+(the shadow's comparison, outside the timed run), the walk's function with the piece's compaction inlined 26 M,
+the front 25 M, the reader-time driver 26 M, C 25 M, `node_alone_bodies` (the graph's writing) 28 M, the kernel's
+page clearing 25 M (the piece's second graph and front), X 11 M. No function of the machine's is small enough to drop
+or large enough to be the lever alone: the reference's sweeps cost what they cost a record.
