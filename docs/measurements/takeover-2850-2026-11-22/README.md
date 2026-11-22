@@ -1142,3 +1142,43 @@ So a control's token finds its expression's root, and only that one, wherever th
 the body is one whose root the front lost, or has a braced initializer, whose parts are roots of the lowering's and
 none of the front's (the listed controls of bodies the machine calls whole: 8 lines on `sqlite3.c`, in its four such
 bodies). What the roots no control has are (45 on `sqlite3.c`) was not read.
+
+## The same comparison made before the walk (`bodies-before/`, buster branch `claude/2850-bodies-before`)
+
+The statements' second piece as [specified](https://github.com/buster14a/buster/issues/2850#issuecomment-7083525675),
+at the branch's `bfe3be4cf` (the fixture's commit after it is `f9f39dbd9`): `measure-node-machine --shadow --front-alone
+--bodies --passes 0`. Two comparisons, reported apart.
+
+- **The tapes kept before the walk.** The machine with no node of the walk's keeps, for each root it takes, each
+  label's place on its tape, each call's row (what stands for its callee's symbol, its arguments' count and classes,
+  whether it is variadic), its temporaries, and whether its root is branches or a constant; and, by each control's
+  token, the root that is its expression's. After the pipeline the bodies' entries are made again for each body that
+  machine took whole before the walk: the program's controls, each finding its root by its own token, with the kept
+  tape where the machine's after the pipeline stood, a global's object made its symbol by the program's numbering. A
+  body with an `if` whose condition's root is a constant is refused, by the tokens alone.
+- **The controls from the tokens.** A twin of the program's builder makes a body's controls from the parser's tree and
+  tokens, the reader's columns the resolution fills, and, for whether a control has an expression, the root kept
+  under its token; they are compared with the program's: count, kind, token, target, and whether each has an
+  expression.
+
+Develop builds on this session's machine (counts), `scripts/bodies-before.sh`; `scripts/before-reduce.py`,
+`bodies-before/develop-bfe3be4cf/reduced.txt`; every run's status 0:
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| whole before the walk: bodies; of the body tokens | 1,856; 35.62% | 630; 29.71% | 222; 3.62% | 1,871; 31.76% |
+| **the kept tapes:** attempted; of the body tokens | 1,814; 32.79% | 580; 23.12% | 205; 2.84% | 1,287; 20.94% |
+| … their entries; the lowered function's; that differ | 122,351; 1,814; 0 | 22,356; 580; 0 | 8,345; 205; 0 | 38,607; 1,287; 0 |
+| … left out: a control of another kind; an initialization of another form; a constant `if` | 33; 4; 5 | 50; 0; 0 | 12; 5; 0 | 532; 51; 1 |
+| … bodies the program dropped a range of; attempted there | 9; 0 | 1; 0 | 2; 0 | 71; 0 |
+| **the controls' twin:** attempted; of the body tokens | 1,791; 32.18% | 572; 22.29% | 205; 2.79% | 1,308; 21.88% |
+| … its controls; bodies the program's; that differ | 21,661; 1,791; 0 | 4,218; 572; 0 | 1,209; 205; 0 | 7,314; 1,308; 0 |
+| … left out: a `switch`; an `asm` statement; a block's static or extern declaration; a dropped range | 32; 0; 28; 5 | 48; 0; 10; 0 | 6; 6; 5; 0 | 27; 509; 26; 1 |
+
+With `-g` every row is the same. With `-Wall -Wextra` the kept tapes' bodies are 1,505, 525, 176 and 1,167 and the
+twin's 1,485, 519, 176 and 1,188, and none differs. In the three flag sets: 11,145 bodies from the kept tapes and
+11,120 from the twin, none differing, on each one's first run on each corpus but for one change after the first
+`sqlite3.c` run of the kept tapes: the constant that refuses a body was first any condition's whose root or operand
+had a constant kind, which took an lvalue's address's kind for its value's and refused 415 bodies; it is the
+condition's own record's now, and an `if`'s alone, looked for by the tokens (the program's controls have no condition
+where it folded one: three such bodies had been attempted, and compared equal, since the controls were the program's).
