@@ -1182,3 +1182,24 @@ twin's 1,485, 519, 176 and 1,188, and none differs. In the three flag sets: 11,1
 had a constant kind, which took an lvalue's address's kind for its value's and refused 415 bodies; it is the
 condition's own record's now, and an `if`'s alone, looked for by the tokens (the program's controls have no condition
 where it folded one: three such bodies had been attempted, and compared equal, since the controls were the program's).
+
+**Its fixture's faults** (`bodies-before/faults-f9f39dbd9.txt`, `scripts/before-faults.py`): twenty single changes,
+each built and run against the fixture: seven to what the machine keeps beside a tape, one to the token an
+initialization's root is kept under, two to the kept tapes' splice (a global's object left an object, the constant `if`
+not looked for) and ten to the twin. Each fails it.
+
+**Nothing else moves** (`bodies-before/9700x/pair2-*-cbdcbc070-f9f39dbd9/`, `scripts/job-before1.sh`: the ordinary
+compile at the piece's `f9f39dbd9` against the branch it stands on, seven paired rounds a workload on the 9700X, CPU
+2, Release, under the lock; the objects and diagnostics one set):
+
+| | the branch it stands on | the piece | paired | range | user instructions M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, wall ms | 111.205 | 111.633 | -0.051 | -0.147 to +17.929 | 1,215.364 and 1,215.364 |
+| the compiler's own source | 598.505 | 599.007 | +1.646 | -1.395 to +2.626 | 8,927.367 and 8,927.311 |
+| Lua | 64.113 | 63.999 | -0.102 | -0.393 to -0.052 | 724.336 and 724.334 |
+| musl | 662.286 | 660.046 | -2.425 | -3.320 to -0.765 | 6,634.208 and 6,634.104 |
+
+**What the kept columns cost the machine's timed run** (`bodies-before/9700x/alone-split-f9f39dbd9/`, the same
+`alone-split.sh` as the scan's): 274.6 ticks a position on `sqlite3.c` (its reading 14.73 ms, the machine's first run
+26.44) where `90c42e997` read 272.9 (14.24 and 26.68), and 220.3 on Lua where it read 219.2. The keeping is in the
+driver's second pass, which keeps the results and is not timed.
