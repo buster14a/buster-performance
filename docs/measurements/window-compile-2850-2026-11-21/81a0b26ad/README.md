@@ -1,0 +1,14 @@
+# Mixed integer transfer rows in the function-local checker
+
+Buster `81a0b26ada174cba5dd6dbda546ae125976207fb` extends the existing source-local checker `4bd73ecaf27519017ab6d710a3d7c0d4d49071aa`. Each block classifies up to sixteen source operators. Within that block, expressions run in their original postorder and can read an immediately preceding result. Unknown arithmetic uses the type system’s existing integer-promotion and pair-conversion tables. Eligible predicates use the checked operand type and category, including unqualified pointers. The producer writes the result type, flags and each operand conversion. The ordinary checker handles folds, exceptional contexts and unrecognized forms. [Source patch](implementation.patch)
+
+The source/checked-output oracle has 0 recorded differences. Each source scope compares the candidate, checked on the function-local graph, against both the ordinary whole graph and the preceding source-local implementation, including earlier independent archived fingerprints for both frozen inputs. The directed fixtures cover type conversions, integer faults, sequencing, volatile and atomic accesses, floating environments and ineligible operands. A 196-function matrix covers every pair of fourteen standard and 128-bit integer types with eighteen binary operators and three unary or conditional forms. [Per-input cases](oracle/comparisons.tsv), [differences](oracle/failures.json) and [raw source and output](oracle/raw.tar.gz).
+
+| Input | Scope | Nodes | Checked actions taken | Paired stage wall change | Paired user instructions |
+| --- | --- | ---: | ---: | ---: | ---: |
+| sqlite | functions | 319,280 | 31,183 | -4.622 ms (5/5 faster) | -21,729,276 |
+| sqlite | declarations | 323,623 | 31,183 | -9.803 ms (4/5 faster) | -21,490,132 |
+| buster | functions | 586,965 | 46,084 | +2.557 ms (0/5 faster) | -32,474,992 |
+| buster | declarations | 1,407,416 | 46,084 | +13.811 ms (1/5 faster) | -36,210,406 |
+
+The matched local 7940HS Develop stage starts a fresh process, preprocesses, parses and checks the selected source range. Both modes stop at the same reader boundary before normal source finalizers and native output. The wall series uses five alternating ABBA/BAAB rounds per workload and scope. Three separate rounds per workload and scope record user-mode instructions and cycles. The instrumented stage breakdown uses a fenced x86 timestamp counter around the existing checker boundaries. It includes workspace and validation, discovery of constant contexts, allocation and initialization of the result stream, action dispatch and the completion passes. Output and scratch byte counts report arena charges. [Per-mode coverage](stage/coverage.tsv), [individual operator counts](stage/operators.tsv), [stage breakdown](stage/check-cost.tsv), [paired measurements](stage/paired.tsv), [samples](stage/samples.tsv) and [raw reports](stage/raw.tar.gz).

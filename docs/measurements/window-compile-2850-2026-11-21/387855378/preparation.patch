@@ -1,0 +1,187 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index 9928bd60d..9487d47b6 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -13,6 +13,12 @@ typedef struct CheckSourceControlUnit
+     uint32_t* seen;
+     uint8_t* needed;
+     uint64_t* planned;
++    Arena* native_metadata;
++    uint32_t* declaring;
++    uint32_t declaring_count;
++    uint32_t* object_declarations;
++    uint32_t* object_symbols;
++    uint8_t* defined_functions;
+ } CheckSourceControlUnit;
+ 
+ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInputReader* reader,
+@@ -119,7 +125,7 @@ static void check_body_source_run(CheckInputReader* reader)
+     const uint32_t count = reader->parser->tokens.count;
+     const Parser* parser = reader->parser;
+     Arena indexes = arena_reserve(UINT64_C(1) << 34);
+-    CheckSourceControlUnit unit = { 0 };
++    CheckSourceControlUnit unit = { .native_metadata=&indexes };
+     CheckSourceControlUnit* controls = NULL;
+     if (getenv("BUSTER_SOURCE_CONTROLS") != NULL)
+     {
+@@ -188,7 +194,7 @@ static void check_control_source_native(CheckInputReader* reader)
+     *in->source_bodies = (CheckSourceBodies){0};
+     in->source_body_output = reader->arena;
+     Arena indexes = arena_reserve(UINT64_C(1) << 34);
+-    CheckSourceControlUnit unit = { 0 };
++    CheckSourceControlUnit unit = { .native_metadata=&indexes };
+     CheckSourceControlUnit* controls = NULL;
+     if (true)
+     {
+@@ -218,7 +224,11 @@ static void check_control_source_native(CheckInputReader* reader)
+             bodies+=1;
+             uint32_t open=t;
+             while(open!=0 && !(parser->tokens.kinds[open]==PARSE_KIND_L_BRACE && parser->tree.parents[open]==t)) open-=1;
+-            const bool shape = open != 0;
++            bool shape = open != 0 && getenv("BUSTER_CONTROL_SKIP_TRIAL") == NULL;
++            // A statement-expression closing group can store the new graph's synthetic void result
++            // in its region. Keep the regular reader as its sole owner until local controls support regions.
++            for (uint32_t r=0;shape && r<in->region_count;r+=1)
++                shape=in->regions[r].opening-open>=t-open;
+             if (shape)
+             {
+                 uint32_t low=t, high=t;
+@@ -240,7 +250,10 @@ static void check_control_source_native(CheckInputReader* reader)
+                 arena_pop_to(&graph,0);arena_pop_to(&checked,0);arena_pop_to(&scratch,0);
+             }
+         }
++        const uint32_t initial_nodes=in->graph.count;
+         if (!done) check_input_expressions_coded_range(reader,begin,i+1);
++        if (getenv("BUSTER_CONTROL_NODE_CENSUS")!=NULL)
++            fprintf(stderr,"control-node-census\t%u\t%u\t%u\n",t,done,in->graph.count-initial_nodes);
+         begin=i+1;
+     }
+     if (getenv("BUSTER_CONTROL_SOURCE_AUDIT") != NULL) fprintf(stderr,"control-source-summary\tbodies=%u\tselected=%u\tlocal-graph-nodes=%u\tunit-graph-capacity=%u\tunit-graph-nodes=%u\n",bodies,selected,local,in->graph.capacity,in->graph.count);
+diff --git a/src/buster/compiler/c_check_live_control_native.c b/src/buster/compiler/c_check_live_control_native.c
+index 036e409e3..c414161de 100644
+--- a/src/buster/compiler/c_check_live_control_native.c
++++ b/src/buster/compiler/c_check_live_control_native.c
+@@ -49,7 +49,7 @@ static void check_live_control_rows(const char* arm,const CheckProgram* p,uint32
+     fprintf(stderr,"\n");
+     free(records); free(offsets); free(ends); free(bytes);
+ }
+-static void check_live_control_native(CheckProgram* p,CheckInputReader* reader,uint32_t opening,uint32_t close,CheckControl* entries,
++static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram* p,CheckInputReader* reader,uint32_t opening,uint32_t close,CheckControl* entries,
+                                       uint32_t entry_count,uint32_t count,uint32_t* refs,uint32_t ref_count,Arena* scratch)
+ {
+     static uint32_t seen;
+@@ -64,18 +64,40 @@ static void check_live_control_native(CheckProgram* p,CheckInputReader* reader,u
+     const uint32_t own=in->objects[declaration];
+     if(own==0 || own>=p->object_count) return;
+     CheckProgramBody body={.opening=opening,.declaration=declaration,.object=own,.first=0,.count=count,.entry_count=entry_count,.reference_count=ref_count};
++    const IdentId name=reader->parser->tokens.names[declaration];
++    body.is_main=intern_length(p->identifiers,name)==4 && memcmp(intern_bytes(p->identifiers,name),"main",4)==0;
+     p->bodies=&body;
+     p->body_count=1;
+     p->controls=entries;
+     p->control_count=count;
+     p->references=refs;
+     p->reference_count=ref_count;
+-    p->object_symbols=BUSTER_ARENA_PUSH_ARRAY(scratch,SymbolId,p->object_count);
+-    p->object_declarations=BUSTER_ARENA_PUSH_ARRAY(scratch,uint32_t,p->object_count);
++    if (unit->object_symbols == NULL)
++    {
++        Arena* arena=unit->native_metadata;
++        unit->object_symbols=BUSTER_ARENA_PUSH_ARRAY(arena,uint32_t,p->object_count);
++        unit->object_declarations=BUSTER_ARENA_PUSH_ARRAY(arena,uint32_t,p->object_count);
++        unit->defined_functions=BUSTER_ARENA_PUSH_ARRAY(arena,uint8_t,p->object_count);
++        unit->declaring=BUSTER_ARENA_PUSH_ARRAY(arena,uint32_t,(uint64_t)in->token_count+16);
++        if (!unit->object_symbols || !unit->object_declarations || !unit->defined_functions || !unit->declaring) abort();
++        memset(unit->object_symbols,0,(size_t)p->object_count*sizeof(*unit->object_symbols));
++        memset(unit->defined_functions,0,p->object_count);
++        for (uint32_t object=0;object<p->object_count;object+=1) unit->object_declarations[object]=object-1;
++        unit->declaring_count=check_program_declaring(in->declarations,&in->initializer_nodes,0,in->token_count,unit->declaring,false);
++        arena_pop_to(arena,(uint64_t)((uint8_t*)(unit->declaring+unit->declaring_count)-arena->base));
++        for(uint32_t t=0;t<in->token_count;t+=1)
++        {
++            if(reader->parser->tree.roles[t]!=PARSE_ROLE_OPEN_BODY) continue;
++            const uint32_t decl=check_sparse_get(in->body_declarations,t);
++            if(decl<in->token_count && in->objects[decl]<p->object_count) unit->defined_functions[in->objects[decl]]=1;
++        }
++    }
++    p->object_symbols=unit->object_symbols;
++    p->object_declarations=unit->object_declarations;
++    p->source_declarations=unit->declaring;
++    p->source_declaration_count=unit->declaring_count;
+     p->symbol_objects=BUSTER_ARENA_PUSH_ARRAY(scratch,uint32_t,(uint64_t)ref_count+1);
+-    if (!p->object_symbols || !p->object_declarations || !p->symbol_objects) abort();
+-    memset(p->object_symbols,0,(size_t)p->object_count*sizeof(*p->object_symbols));
+-    for(uint32_t obj=0;obj<p->object_count;obj+=1) p->object_declarations[obj]=obj-1;
++    if (p->symbol_objects==NULL) abort();
+     for(uint32_t r=0;r<ref_count;r+=1)
+     {
+         if(refs[r]==0 || refs[r]>=p->object_count) return;
+@@ -112,6 +134,8 @@ static void check_live_control_native(CheckProgram* p,CheckInputReader* reader,u
+         uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch,uint8_t,p->object_count);
+         if (access==NULL||defined==NULL) abort();
+         check_program_object_access(p,access,defined,false);
++        for (uint32_t sym=0;sym<p->symbol_count;sym+=1)
++            if (unit->defined_functions[p->symbol_objects[sym]] && access[sym+1]==BUSTER_TIER0_ACCESS_GOT) access[sym+1]=BUSTER_TIER0_ACCESS_DIRECT;
+         f->symbol_access=access;
+         f->symbol_count=p->symbol_count+1;
+         const Tier0Code code=tier0_compile(f,scratch);
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index f111ec82f..5a0ae054d 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -485,6 +485,8 @@ struct CheckProgramCensus
+ typedef struct CheckProgram CheckProgram;
+ struct CheckProgram
+ {
++    uint32_t* source_declarations;
++    uint32_t source_declaration_count;
+     const CheckInput* input;
+     const CheckStream* stream;
+     const TypeTable* types;
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index e7686ded2..4a94fb443 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -19898,9 +19898,11 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+     shared->incoming = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->body_count + 1) : 0;
+     shared->local_start = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 2) : 0;
+     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
+-    uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
+-    const uint32_t declaring_count = declaring != NULL ? check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar)) : 0;
+-    if (declaring != NULL)
++    const bool shared_declarations = program->source_declarations != NULL;
++    uint32_t* declaring = shared_declarations ? program->source_declarations : valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
++    const uint32_t declaring_count = shared_declarations ? program->source_declaration_count :
++        declaring != NULL ? check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar)) : 0;
++    if (declaring != NULL && !shared_declarations)
+     {
+         // The vector writer may store a full last block. Its live prefix is now complete.
+         arena_pop_to(scratch, (uint64_t)((uint8_t*)(declaring + declaring_count) - scratch->base));
+diff --git a/src/buster/compiler/c_check_source_control_program.c b/src/buster/compiler/c_check_source_control_program.c
+index 61a47a3cb..22efaf385 100644
+--- a/src/buster/compiler/c_check_source_control_program.c
++++ b/src/buster/compiler/c_check_source_control_program.c
+@@ -34,7 +34,7 @@ static void check_source_control_oracle(const CheckProgram* p, const Parser* par
+     }
+ }
+ 
+-static void check_live_control_native(CheckProgram* program, CheckInputReader* reader, uint32_t opening, uint32_t close,
++static void check_live_control_native(CheckSourceControlUnit* unit, CheckProgram* program, CheckInputReader* reader, uint32_t opening, uint32_t close,
+                                       CheckControl* entries,uint32_t entry_count,uint32_t count,uint32_t* references,uint32_t reference_count,Arena* scratch);
+ 
+ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInputReader* reader,
+@@ -107,5 +107,13 @@ static void check_source_control_function(CheckSourceControlUnit* unit, CheckInp
+     for (uint32_t i = 0; i < count; i += 1) canonical[i] = (uint32_t)(order[i] >> 32);
+     if (input->source_bodies == NULL) check_source_control_record("local", close, writer.entries, writer.count, 0, canonical, count);
+     if (input->source_bodies != NULL || getenv("BUSTER_LOCAL_CONTROL_NATIVE") != NULL)
+-        check_live_control_native(&p,reader,opening,close,writer.entries,writer.entry_count,writer.count,canonical,count,scratch);
++    {
++        check_live_control_native(unit,&p,reader,opening,close,writer.entries,writer.entry_count,writer.count,canonical,count,scratch);
++        if (unit->object_symbols != NULL)
++        {
++            const uint32_t declaration=check_sparse_get(input->body_declarations,opening);
++            if (declaration < input->token_count) unit->object_symbols[input->objects[declaration]]=0;
++            for (uint32_t i=0; i<count; i+=1) unit->object_symbols[canonical[i]]=0;
++        }
++    }
+ }
