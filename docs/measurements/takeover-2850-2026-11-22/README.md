@@ -836,8 +836,10 @@ piece's head, the ordinary compile, seven paired rounds a workload, the objects 
 | musl | 663.786 | 663.166 | -0.138 | -1.909 to +17.103 | 6,635.856 and 6,634.508 |
 
 **Its fixture's faults** (`machine-alone/faults/`, `scripts/alone-faults.py`): fifteen single changes to the piece
-and to the two functions it leans on, each built and run against the fixture at `eda9d7b51` (its fixture then had 17
-of the head's 18 bodies): each fails it.
+and to the two functions it leans on, each built and run against the fixture, at `eda9d7b51` (whose fixture had 17 of
+the head's 18 bodies) and again at the pull request's head, `61cd6d100`: each fails it. At the head fourteen fail it
+by its counts or by a root that differs, and one makes the run fault: with the tests reading the reader's graph, its
+node columns are null while the machine runs.
 
 ### The machine's run by sweep (`machine-alone/9700x-split/`, branch `claude/2850-alone-split` at `2aeb81306`)
 

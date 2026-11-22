@@ -39,14 +39,14 @@ for i, (name, file, old, new) in enumerate(faults):
         print(f'{i:2} NOT APPLIED ({text.count(old)} places): {name}', flush=True); continue
     open(path, 'w').write(text.replace(old, new))
     env = dict(os.environ, CORES_TITLE='#2850: the machine alone, a fault a build', CORES_LINK='https://github.com/buster14a/buster/issues/2850')
-    b = subprocess.run(['cores', '-n', '8', '--', './build.sh', '--config', 'Develop', '--target', 'compiler'], cwd=tree, env=env, capture_output=True, text=True)
+    b = subprocess.run(['cores', '-n', '4', '--', './build.sh', '--config', 'Develop', '--target', 'compiler'], cwd=tree, env=env, capture_output=True, text=True)
     if b.returncode != 0:
         print(f'{i:2} DID NOT BUILD: {name}', flush=True)
     else:
         t = subprocess.run(['./build/cmake/native/Develop/compiler', 'test-checker', '--part', '45/64'], cwd=tree, capture_output=True, text=True, timeout=1500)
         lines = [l for l in (t.stdout + t.stderr).split('\n') if 'node-alone' in l]
-        seen = t.returncode != 0 and len(lines) != 0
+        seen = t.returncode != 0
         caught += seen
-        print(f"{i:2} {'caught' if seen else 'NOT CAUGHT (status ' + str(t.returncode) + ')'}: {name}" + (': ' + lines[0][:330] if lines else ''), flush=True)
+        print(f"{i:2} {('caught' if lines else 'caught (the run faults, status ' + str(t.returncode) + ')') if seen else 'NOT CAUGHT (status ' + str(t.returncode) + ')'}: {name}" + (': ' + lines[0][:330] if lines else ''), flush=True)
     open(path, 'w').write(text)
 print(f'caught {caught}', flush=True)
