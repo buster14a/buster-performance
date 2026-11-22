@@ -1313,3 +1313,40 @@ roots compared and none differing:
 the body tokens) that is 2.2 ms. **Where the 354 ticks a root go was not read.** The columns it writes are indexed by
 node (313 thousand of them for 51 thousand roots) and are first written in this run, so the first touch of their pages
 may be much of it, and a compile's columns indexed by root would touch fewer; neither is measured here.
+
+### Main's #2987, and a statement no control reaches (`bodies-beside/develop-342578890/`, branch at `342578890`, main merged in)
+
+With main merged into the branch, `sqlite3.c`'s runs failed their own gate: 15 of its bodies had a range the program
+dropped where 9 had, and the kept tapes' comparison attempted two of them. Main's #2987 (`c_check_program_reach.c`)
+makes the program leave out a statement no control reaches: one that follows, in its block, a `return`, a `break`, a
+`continue` or a `goto`, an `if` whose arms both end so, a constantly true `while` or a `for` without a condition, and
+that holds no label. It reads a condition's truth and a loop's own breaks from its nodes, which a producer does not
+have. So the controls' twin asks more, by the tokens and the kept roots' facts (`node_twin_unreached`): after a
+statement control may not leave for the next, the next statement of the block is a labelled one. Where that holds in
+every block the program has nothing to leave out; where it does not the body is refused. The same twenty runs
+(`scripts/beside-run.sh`), Develop build on this session's machine, each status 0:
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| bodies the program dropped a range of; attempted from the kept tapes | 15; 0 | 2; 0 | 2; 0 | 73; 0 |
+| bodies the kept tapes' comparison refuses for it; their tokens | 20; 4,976 | 1; 218 | 0 | 8; 1,653 |
+| bodies compared from the kept tapes; that differ | 1,794; 0 | 579; 0 | 205; 0 | 1,279; 0 |
+| bodies whose controls from the tokens are the program's; that differ | 1,771; 0 | 571; 0 | 205; 0 | 1,300; 0 |
+| a producer takes: bodies; body tokens; of the lowered bodies' | 1,766; 177,129; 31.16% | 556; 44,471; 21.90% | 200; 10,621; 2.64% | 1,248; 59,467; 19.76% |
+
+- **None of the bodies the program dropped a range of is attempted again,** and what a producer takes of
+  `sqlite3.c` goes from 182,105 body tokens to 177,129.
+- **What the refusal costs beyond the program's own rule** is not counted apart: among the 20 are bodies the program
+  keeps whole (a `while (1)` a `break` leaves, with a statement after it).
+- The compiler's own source has 12 bodies more than before the merge (1,510 lowered): main's.
+
+**Its faults** (`bodies-beside/faults-65a97f416/`; the branch at `65a97f416`, whose fixture has an `if` whose arms
+both return and an endless `for`, each with a statement after it): 55 single faults, each built and run against the
+fixtures, each failing them. Eight of the walk for a statement no control reaches (`scripts/reach-faults.py`: a
+statement after a jump walked as any other, a labelled one refused too, a jump, an `if` whose arms both end, a
+constantly true `while` and a `for` without a condition each taken to go on, the twin's builder and the kept tapes'
+comparison not asking); the twin's and the kept tapes' twenty (`before-faults.py`), the entries' builder's sixteen
+(`bodies-faults.py`) and the eleven beside the entries (`beside-faults.py`), aimed again where the twin moved to its
+own file. Two of the eight did not build as first written (a tautology the compiler refuses) and are in
+`reach-faults-two.txt` reworded. The first two suites ran on this session's machine and the rest on the 9700X
+(`scripts/job-faults1.sh`), Develop builds.

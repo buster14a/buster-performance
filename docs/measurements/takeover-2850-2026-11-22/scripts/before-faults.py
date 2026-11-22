@@ -7,6 +7,7 @@ tree = sys.argv[1]
 R = 'src/buster/compiler/c_check_node_machine_reader.c'
 A = 'src/buster/compiler/c_check_node_machine_alone.c'
 C = 'src/buster/compiler/c_check_node_census.c'
+N = 'src/buster/compiler/c_check_node_bodies.c'
 faults = [
     ("a kept label's place one entry later", R,
      "        types->side_label_count += machine->label_count;",
@@ -38,38 +39,38 @@ faults = [
     ("an if's constant condition not looked for", C,
      "            constant = slot != 0 && slot != UINT32_MAX && slot - 1 < kept->node_capacity && kept->side_label_firsts[slot - 1] != UINT32_MAX &&",
      "            constant = slot == 0 && slot != UINT32_MAX && slot - 1 < kept->node_capacity && kept->side_label_firsts[slot - 1] != UINT32_MAX &&"),
-    ("the twin: an else's jump to the else", C,
+    ("the twin: an else's jump to the else", N,
      "                node_twin_entry(twin, CHECK_CONTROL_JUMP, token, false, end);\n            }\n            node_twin_statement(twin, body, task.stop, task.repeat);",
      "                node_twin_entry(twin, CHECK_CONTROL_JUMP, token, false, otherwise);\n            }\n            node_twin_statement(twin, body, task.stop, task.repeat);"),
-    ("the twin: a while's branch to its start", C,
+    ("the twin: a while's branch to its start", N,
      "            node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, token, true, end);\n            node_twin_mark(twin, start);",
      "            node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, token, true, start);\n            node_twin_mark(twin, start);"),
-    ("the twin: a do statement's branch of the other sense", C,
+    ("the twin: a do statement's branch of the other sense", N,
      "            node_twin_entry(twin, CHECK_CONTROL_BRANCH_TRUE, condition, true, start);",
      "            node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, condition, true, start);"),
-    ("the twin: a for's condition left out", C,
+    ("the twin: a for's condition left out", N,
      "            if (node_twin_valued(twin, condition))\n            {\n                node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, condition, true, end);",
      "            if (node_twin_valued(twin, condition) && body == BUSTER_CHECK_NONE)\n            {\n                node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, condition, true, end);"),
-    ("the twin: a break to its loop's repeat", C,
+    ("the twin: a break to its loop's repeat", N,
      "                node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, kind == PARSE_KIND_BREAK ? task.stop : task.repeat);",
      "                node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, task.repeat != BUSTER_CHECK_NONE ? task.repeat : task.stop);"),
-    ("the twin: a goto to the body's first label", C,
-     "                    node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, twin->source_labels[target]);",
-     "                    node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, 0 * twin->source_labels[target] + twin->label_count - 1);"),
-    ("the twin: every return with a value", C,
+    ("the twin: a goto to the body's first label", N,
+     "                    node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, twin->source_labels[target - twin->opening]);",
+     "                    node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, 0 * twin->source_labels[target - twin->opening] + twin->label_count - 1);"),
+    ("the twin: every return with a value", N,
      "                node_twin_entry(twin, CHECK_CONTROL_RETURN, jump, node_twin_valued(twin, jump), BUSTER_CHECK_NONE);",
      "                node_twin_entry(twin, CHECK_CONTROL_RETURN, jump, node_twin_valued(twin, jump) || true, BUSTER_CHECK_NONE);"),
-    ("the twin: an initialization at its terminator", C,
+    ("the twin: an initialization at its terminator", N,
      "twin->entries[twin->count++] = (NodeTwinControl){ .kind = CHECK_CONTROL_INITIALIZE, .token = declaration, .target = BUSTER_CHECK_NONE, .valued = false };",
      "twin->entries[twin->count++] = (NodeTwinControl){ .kind = CHECK_CONTROL_INITIALIZE, .token = declaration != BUSTER_CHECK_NONE ? task.token : declaration, .target = BUSTER_CHECK_NONE, .valued = false };"),
-    ("the twin: a block's static declaration not left out", C,
+    ("the twin: a block's static declaration not left out", N,
      "            node_twin_fail(twin, NODE_TWIN_STATIC);",
      "            node_twin_fail(twin, NODE_TWIN_ATTEMPTED);"),
-    ("the twin: a label's statement without its label", C,
-     "        node_twin_mark(twin, twin->source_labels[token]);\n    }\n    else if (role == PARSE_ROLE_CLOSE_CASE)",
+    ("the twin: a label's statement without its label", N,
+     "        node_twin_mark(twin, twin->source_labels[token - twin->opening]);\n    }\n    else if (role == PARSE_ROLE_CLOSE_CASE)",
      "    }\n    else if (role == PARSE_ROLE_CLOSE_CASE)"),
 ]
-originals = {f: open(os.path.join(tree, f)).read() for f in (R, A, C)}
+originals = {f: open(os.path.join(tree, f)).read() for f in (R, A, C, N)}
 caught = 0
 for name, file, old, new in faults:
     original = originals[file]
