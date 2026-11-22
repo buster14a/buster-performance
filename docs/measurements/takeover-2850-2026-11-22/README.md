@@ -863,3 +863,30 @@ machine's own form they read half the census's in their own piece, and on the wi
 The same branch (`f5073d2dd`) counts what the walk's marks are read against: `sqlite3.c`'s bodies hold 3,642 tokens the
 walk's class actions left to its visit, and none of the 50,323 roots the machine took has one among its expression's
 tokens (the fixture's bodies hold 7, which it asserts).
+
+### The piece's ticks by a body's verdict, and what a scan of the tokens would refuse (`machine-alone/9700x-verdicts/`, branch at `b3bb0de89`)
+
+The same command, with each lowered body's ticks kept beside its verdict: its reading's, its machine's first run's,
+and those spent by the end of the chunk in which it is first stopped; and whether a scan of its tokens alone finds a
+`sizeof` or `_Alignof` (by the token's kind) or a token of the walk's own visit (by its class's byte): what could
+refuse the body before its compaction. The 9700X, CPU 2, Release, under the lock; medians of 7 runs, musl's of 3; ms.
+
+| `sqlite3.c`, 568,438 body tokens | bodies | their tokens | reading | the machine's first run | by the chunk that stops them | the scan refuses: bodies | tokens |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| every root taken | 1,856 | 35.6% | 4.65 | 9.89 | | 33 | 14,422 |
+| a root the front lost | 514 | 49.0% | 5.39 | 11.98 | 11.30 | 499 | 273,311 |
+| T refuses a root | 52 | 2.7% | 0.33 | 0.83 | 1.10 | 3 | 1,483 |
+| the tests refuse one | 130 | 6.9% | 0.87 | 1.93 | 2.54 | 5 | 2,105 |
+| C or X refuses one | 116 | 5.9% | 0.69 | 1.60 | 2.13 | 4 | 1,023 |
+
+Lua: 29.7% whole (50 of its 630 bodies scanned out), 49.5% with a root lost (260 of 279 bodies by the scan, 96.9% of
+their tokens), 20.8% refused after their sweeps (2.47 ms of the piece's 11.3). musl: 31.8%, 54.2% (548 of 584, 97.3% of
+their tokens) and 14.0% (4.26 ms).
+
+- **A scan of the tokens decides nearly every root-lost body before any work on it:** 98.1% of their tokens on
+  `sqlite3.c`. It costs the whole bodies it also finds one in: 33 of 1,856, 7.1% of their tokens (a `sizeof` under a
+  declarator or a label loses no root).
+- **The bodies refused after their sweeps are 15.4% of `sqlite3.c`'s body tokens and 6.25 ms of the piece's 40.6**
+  (5.77 if a body stopped at the chunk that refuses it). They are the loss the forecasts lacked.
+- **Stopping at the first refusal saves little:** 11.30 of 17.37 ms for the root-lost bodies, and 5.77 of 6.25 for
+  the rest: a refused root is late in its body as often as early.
