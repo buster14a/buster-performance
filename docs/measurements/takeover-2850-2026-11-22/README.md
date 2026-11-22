@@ -1015,5 +1015,5 @@ Of the bodies the reference takes whole and the window's forms do not take alone
 expression (936 bodies with that alone, 19.2% of the body tokens; 147 with a record left to T too, 5.3%): an
 initialization's root is always listed, and so are an assignment of a constant, a constant subscript and the others
 the tests still read T's records for. So the window's forms as they stand decide 4% of `sqlite3.c`'s body tokens
-without the reference: a body-level machine made of them needs T behind it for the listed expressions (19.5% of the
-records in whole tapes: 8,877 of 49,839 expressions), or those tests moved to the window first.
+without the reference: a body-level machine made of them needs T behind it for the listed expressions (8,877 of the
+49,839 expressions with a whole tape, 19.6% of their records), or those tests moved to the window first.
