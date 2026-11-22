@@ -1,0 +1,3 @@
+# Source windows prepare declaration and expression-comma columns
+
+While the physical source was still being preprocessed, the grammar producer filled the expression-comma bytes and declaration-start masks. It carried the open aggregate stack across windows. The final reader borrowed these results and avoided the corresponding complete-input sweeps. SQLite filled 716,136 comma bytes and 716,096 declaration rows, with the last nonfinal cut at token 709,161. Buster filled 2,433,563 comma bytes and 2,433,536 declaration rows. Both ordinary native files under default and maximum warnings and 57 directed source/policy observations matched. [SQLite trace](sqlite.stderr), [Buster trace](main.stderr), [commands and tests](native-tests.tar.gz), [source diff](source.patch).

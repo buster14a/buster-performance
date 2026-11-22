@@ -1,3 +1,11 @@
 # Pre-EOF typed and native handoff
 
 A complete speculative checker runs at original-source window 24. The final source-owned body path compares the typed function, ABI and auxiliary input columns before it calls instruction selection. A match returns the earlier bytes and unwind metadata. The extended version compares calls, symbol-access modes, labels, relocation and runtime ordering, and the other selector inputs. On SQLite it skipped selection for 1,643 functions (174,912 typed entries, 469,183 final text bytes, 6,953 relocations). On Buster it skipped 294 functions (48,192 entries, 146,026 bytes, 2,004 relocations). Four linked SQLite shell workloads matched a Clang build. Both full native objects matched independent ordinary reference bytes. The final reader still checks and lowers the prefix. [Acceptance](acceptance.tsv), [SQLite functions](sqlite-bodies.tsv), [Buster functions](main-bodies.tsv), [source](source.patch), [logs and commands](records.tar.gz).
+
+## State at a real prefix boundary
+
+A separate debugger compared token-indexed reader and checker results at three events. The first was the end of the speculative prefix resolver while preprocessing still had an active context. The second was the same token boundary in the final resolver before its next declaration. The third followed all final declarations. On SQLite all 34 available columns over 401,852 tokens agreed exactly at both comparisons. On Buster all 35 available columns over 955,032 tokens agreed. The experiment flattened the sparse directories into logical values and retained hashes for both sides of every comparison. It sampled selected token columns, including declared types and declaration and control targets. Transferring other storage, including pointer-owned scopes and type tables, requires its own proof. [SQLite comparison](sqlite-semantic.tsv), [Buster comparison](main-semantic.tsv), [debugger harness](compare-semantic.py).
+
+## Fresh local timing at window 24
+
+Five ABBA groups compared an unreachable prefix window with the actual window in the same Develop compiler. The median paired difference was +162.443 ms on SQLite and +488.839 ms on Buster. All ten pairs lost. Each arm produced the exact local object. [Paired differences](local-pairs.tsv), [individual processes](local-wall.tsv), [timing harness](measure-local.py).
