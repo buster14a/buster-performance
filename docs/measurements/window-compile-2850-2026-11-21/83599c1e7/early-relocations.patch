@@ -1,0 +1,166 @@
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 1a1ae57f6..10d4689ef 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -10646,6 +10646,8 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
+             if (stream != NULL && getenv("BUSTER_OBJECT_STREAM_AUDIT") != NULL)
+                 fprintf(stderr, "object-text-stream\tbytes=%llu\tspans=%llu\tfile=%llu\n",
+                         (unsigned long long)spans.borrowed, (unsigned long long)spans.count, (unsigned long long)object.size);
++            if (spans.relocation_bytes != 0 && getenv("BUSTER_OBJECT_STREAM_AUDIT") != NULL)
++                fprintf(stderr, "object-rela-stream\tbytes=%llu\n", (unsigned long long)spans.relocation_bytes);
+             valid = valid && object_write_stream(output_path, object.bytes, object.size, stream) == OBJECT_ERROR_NONE;
+             check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
+         }
+diff --git a/src/buster/compiler/object_writer.c b/src/buster/compiler/object_writer.c
+index 62500bf2e..c6476942c 100644
+--- a/src/buster/compiler/object_writer.c
++++ b/src/buster/compiler/object_writer.c
+@@ -757,6 +757,7 @@ struct ObjectSection
+     uint64_t fixup_count;
+     uint32_t index;
+     uint32_t relocation_index;
++    Elf64_Rela* relocations;
+     uint32_t symbol;
+     uint32_t name;
+     const ObjectAtomSection* explicit_section;
+@@ -1196,6 +1197,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
+     uint64_t undefined_count = 0;
+     for (uint32_t s = 0; result && s < builder->section_count; s += 1)
+     {
++        Elf64_Rela* relocation = sections[s].relocations;
+         const uint32_t atom_end = sections[s].atom_end;
+         for (uint32_t i = sections[s].atom_begin; result && i < atom_end; i += 1)
+         {
+@@ -1235,23 +1237,35 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
+                 // A relocation that refers to a local target's section symbol needs that symbol, and the target's offset
+                 // in the addend, which has to stay within 64 bits.
+                 const uint32_t code = (uint32_t)entry;
++                uint32_t place_code = code;
++                const uint8_t kind = kinds[fixup];
++                int64_t addend = (kind & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
+                 if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL)
+                 {
+-                    const uint8_t kind = kinds[fixup];
+-                    const int64_t addend = (kind & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
+                     if (object_uses_section_symbol(kind & BUSTER_LINK_FIXUP_KIND, code, addend))
+                     {
+                         const AtomId target_atom = symbols->atom[target];
+                         const uint64_t place = units->atom_offset[target_atom] + symbols->value[target];
+                         int64_t adjusted = 0;
+                         result = place <= INT64_MAX && !__builtin_add_overflow(addend, (int64_t)place, &adjusted);
+-                        sections[units->atom_section[target_atom]].symbol = 1;
++                        const uint32_t section = units->atom_section[target_atom];
++                        sections[section].symbol = 1;
++                        place_code = BUSTER_OBJECT_SYMBOL_KIND | section;
++                        addend = adjusted;
+                     }
+                     else if (builder->local_places != 0)
+                     {
+                         builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE] = 1;
+                     }
+                 }
++                if (relocation != NULL)
++                {
++                    *relocation++ = (Elf64_Rela){
++                        .r_offset = units->atom_offset[atom] + fixups->offset[fixup],
++                        .r_info = ELF64_R_INFO(place_code, object_relocation_types[kind & BUSTER_LINK_FIXUP_KIND]),
++                        .r_addend = addend,
++                    };
++                }
+             }
+         }
+     }
+@@ -1870,6 +1884,7 @@ typedef struct ObjectFileStream
+     uint64_t count;
+     uint64_t covered;
+     uint64_t borrowed;
++    uint64_t relocation_bytes;
+ } ObjectFileStream;
+ 
+ static void object_file_span(ObjectFileStream* stream, const void* data, uint64_t size)
+@@ -1931,12 +1946,20 @@ static void object_fill_sections(const ObjectBuilder* builder, uint8_t* bytes, O
+                 end = offset + atoms->size[atom];
+             }
+         }
++        if (stream != NULL && section->relocations != NULL)
++        {
++            const Elf64_Shdr* header = &builder->headers[section->relocation_index];
++            object_file_span(stream, bytes + stream->covered, header->sh_offset - stream->covered);
++            object_file_span(stream, section->relocations, header->sh_size);
++            stream->covered = header->sh_offset + header->sh_size;
++            stream->relocation_bytes += header->sh_size;
++        }
+     }
+ }
+ 
+ // The relocations of each section of atoms, in order: its atoms', each atom's fixups in offset order. The columns the
+ // loops read are in locals: with -fno-strict-aliasing, each store would otherwise make the compiler load them again.
+-static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes)
++static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes, bool borrowed)
+ {
+     const Link* link = builder->link;
+     const ObjectUnits* units = builder->units;
+@@ -1967,6 +1990,24 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
+         if (section->relocation_index != 0)
+         {
+             Elf64_Rela* relocation = (Elf64_Rela*)(bytes + builder->headers[section->relocation_index].sh_offset);
++            if (section->relocations != NULL)
++            {
++                // The classification pass already supplied the addend, field, relocation type and
++                // symbol class. Layout has now assigned the three symbol bases and compact local places.
++                for (uint64_t j = 0; j < section->fixup_count; j += 1)
++                {
++                    Elf64_Rela* row = section->relocations + j;
++                    const uint32_t code = (uint32_t)ELF64_R_SYM(row->r_info);
++                    const uint32_t kind = code >> BUSTER_OBJECT_SYMBOL_KIND_SHIFT;
++                    const uint32_t place = code & BUSTER_OBJECT_SYMBOL_PLACE;
++                    const uint64_t index = kind == 3 ? sections[place].symbol :
++                                           kind == 0 && builder->local_places != NULL ? builder->local_base + builder->local_places[place] :
++                                           bases[kind] + place;
++                    row->r_info = ELF64_R_INFO(index, ELF64_R_TYPE(row->r_info));
++                }
++                if (!borrowed) memcpy(relocation, section->relocations, section->fixup_count * sizeof(*relocation));
++                continue;
++            }
+             for (uint32_t i = section->atom_begin; i < section->atom_end; i += 1)
+             {
+                 const AtomId atom = unit_atoms[i];
+@@ -2453,6 +2494,20 @@ static Object object_build_file(const Link* link, ObjectUnits* units, ObjectSymb
+     }
+     built = built && object_count_sections(&builder, scratch.arena);
+     built = built && object_count_groups(&builder, scratch.arena);
++    if (built && stream != NULL && builder.fixup_count != 0 && builder.section_count <= BUSTER_OBJECT_SYMBOL_PLACE &&
++        getenv("BUSTER_OBJECT_EARLY_RELOCATIONS") != NULL)
++    {
++        Elf64_Rela* rows = BUSTER_ARENA_PUSH_ARRAY(arena, Elf64_Rela, builder.fixup_count);
++        for (uint32_t s = 0; rows != NULL && s < builder.section_count; s += 1)
++        {
++            ObjectSection* section = &builder.sections[s];
++            if (section->fixup_count != 0)
++            {
++                section->relocations = rows;
++                rows += section->fixup_count;
++            }
++        }
++    }
+     built = built && object_count_symbols(&builder, scratch.arena);
+     built = built && object_count_debug(&builder);
+     built = built && object_place(&builder, scratch.arena);
+@@ -2461,7 +2516,7 @@ static Object object_build_file(const Link* link, ObjectUnits* units, ObjectSymb
+     {
+         const uint64_t key = (uint64_t)unit * BUSTER_LINK_CLASS_COUNT;
+         const uint32_t atoms = units->atom_begin[key + BUSTER_LINK_CLASS_COUNT] - units->atom_begin[key];
+-        stream->spans = BUSTER_ARENA_PUSH_ARRAY(arena, struct iovec, (uint64_t)atoms*2 + builder.section_count + 1);
++        stream->spans = BUSTER_ARENA_PUSH_ARRAY(arena, struct iovec, (uint64_t)atoms * 2 + (uint64_t)builder.section_count * 3 + 1);
+         if (stream->spans == NULL) stream = NULL;
+     }
+     if (built && bytes == 0)
+@@ -2486,7 +2541,7 @@ static Object object_build_file(const Link* link, ObjectUnits* units, ObjectSymb
+         object_fill_groups(&builder, bytes);
+         object_fill_sections(&builder, bytes, stream);
+         if (stream != NULL) object_file_span(stream, bytes + stream->covered, builder.size - stream->covered);
+-        object_fill_relocations(&builder, bytes);
++        object_fill_relocations(&builder, bytes, stream != NULL);
+         if (builder.debug != 0)
+         {
+             object_fill_debug(&builder, bytes);

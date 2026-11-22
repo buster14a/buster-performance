@@ -1,0 +1,1 @@
+asm(".pushsection .text.shared,\"axG\",@progbits,shared,comdat\n.weak shared\n.type shared,@function\nshared: call external\nret\n.size shared,.-shared\n.popsection"); extern int shared(void);int use(void){return shared();}
