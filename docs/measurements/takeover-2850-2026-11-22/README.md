@@ -936,6 +936,11 @@ musl's 3; `scripts/scan-reduce.py`, `machine-alone/9700x-scan/reduced.txt`; ever
 - musl's ticks a token are four times the others': its 18,584 bodies are 77 tokens each on average (the headers'
   inline functions among them), and each scan is timed by two reads of the clock.
 - The specification's gate for a refusal before the sweeps was 20 ticks a body token on the refused bodies.
+- **Its fixture's faults** (`machine-alone/faults/scan-faults-0dd1dfafa.txt`, `scripts/scan-faults.sh`): three single
+  changes to the scan, each built and run against the fixture, which asserts the three bodies it finds a lost root in
+  (a `sizeof`, an `_Alignof`, a character constant of several characters) and none in another verdict's. With the
+  kinds and classes unread it finds 1 of 3; with every token left taken for a lost root it finds one in a whole body
+  (the escape under a label); with several characters unread, 2 of 3. Each fails it.
 
 **Where the shadow's run goes, by symbol** (`machine-alone/9700x-scan/profile-walk-90c42e997/`, `profile-alone-90c42e997/`;
 `scripts/profile-alone.sh`: four `perf record` runs each of `measure-node-machine --shadow` on `sqlite3.c`, with
