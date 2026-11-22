@@ -117,6 +117,22 @@ a token where they were a byte) merged with it on the 9700X (`fbb4c1739`, a loca
 It retires a few more instructions everywhere and takes less time on the two workloads of small units. One of
 `sqlite3.c`'s wall runs took 25,430 faults more than its pair's (base pages): the +20.9 ms in that summary's range.
 
+### Again after #3270 (`pair2-WORKLOAD-610b32c3e-5647be701/`, `scripts/job-comma2.sh`)
+
+The branch merged with main `610b32c3e` (`5647be701`: main no longer allocates the selected tokens' column for every
+unit, #3270, and the merge keeps that), against that main, seven rounds each:
+
+| | wall, ms | paired | rounds lower | user instructions, M, paired | page faults, paired |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 111.630 | +0.105 | 2 of 7 | +0.241 | +0.5 |
+| the compiler's own source | 600.911 | +0.185 | 3 of 7 | +2.548 | -15.0 |
+| Lua | 64.456 | -0.063 | 6 of 7 | +0.091 | -4.5 |
+| musl | 670.444 | -0.187 | 4 of 7 | +1.140 | -4.0 |
+
+Nothing is left of the first reading's time on Lua and musl: each wall difference is inside its rounds' spread, and
+the branch retires more instructions on every workload. It was not proposed. (musl's `*.stderr` files are left out of
+the record as before; their hashes are the `.diag` files.)
+
 ## The window's options at main
 
 `pair-d541430bf-d541430bf-__node_window_assignments_/` (seven rounds; its wall runs failed, for want of
