@@ -1,0 +1,258 @@
+diff --git a/src/buster/compiler/c_check_attested_test.c b/src/buster/compiler/c_check_attested_test.c
+index f10474086..92397d839 100644
+--- a/src/buster/compiler/c_check_attested_test.c
++++ b/src/buster/compiler/c_check_attested_test.c
+@@ -1123,6 +1123,9 @@ static const CheckAttestedField check_attested_reader_fields[] =
+     { "scope_marks", CHECK_ATTESTED_FIELD_OWN },
+     { "scope_ends", CHECK_ATTESTED_FIELD_OWN },
+     { "scope_openings", CHECK_ATTESTED_FIELD_OWN },
++    { "source_use_runs", CHECK_ATTESTED_FIELD_AMBIENT },
++    { "source_use_run_count", CHECK_ATTESTED_FIELD_MEASURE },
++    { "source_use_tokens", CHECK_ATTESTED_FIELD_MEASURE },
+     { "scope_count", CHECK_ATTESTED_FIELD_TRANSIENT },
+     { "function_result", CHECK_ATTESTED_FIELD_TRANSIENT },
+     { "function_end", CHECK_ATTESTED_FIELD_TRANSIENT },
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index a9a340382..0e3ac65b6 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -1506,6 +1506,8 @@ _Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_
+ // A specifier's type query finishes at the token, or a designator's, a selection's type, a va_arg's or a builtin's type
+ // name starts there (specifier_finishes, designator_valid, selection_type_ends, vararg_types, builtin_type_ends).
+ #define BUSTER_CHECK_RESOLVE_QUERY 0x20u
++// An ordinary source operand, classified with its role, kind and syntax bits while those lanes are live.
++#define BUSTER_CHECK_RESOLVE_OPERAND 0x40u
+ // Before the expressions' walk (check_input_expressions), the token's classes (check_input_expression_classes):
+ // The expressions' walk may act at the token: it has children, a sparse column has an entry for it, or its role or
+ // kind is one the walk acts at.
+@@ -2296,6 +2298,9 @@ struct CheckInputReader
+     uint32_t* scope_marks;
+     uint32_t* scope_ends;
+     uint32_t* scope_openings;
++    bool source_use_runs;
++    uint32_t source_use_run_count;
++    uint32_t source_use_tokens;
+     uint32_t scope_count;
+     TypeId function_result;
+     uint32_t function_end;
+@@ -14238,6 +14243,82 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
+     }
+ }
+ 
++// A run of visits whose only action is an already-bound ordinary name. The source reader checks the
++// whole prefix against its live bindings before publishing exactly the normal events in source order.
++// Any visit with scope, declaration, initializer or type-query work ends the prefix.
++static uint32_t check_input_source_use_run(CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t* visits)
++{
++    const Parser* parser = reader->parser;
++    CBindings* bindings = &reader->bindings;
++    const uint32_t scope_end = reader->function_end < end ? reader->function_end + 1 : end;
++    const uint32_t stop = reader->resolve_limit < scope_end ? reader->resolve_limit : scope_end;
++    if (first + 2 >= stop || reader->function_body == BUSTER_CHECK_NONE || reader->specifier_query_depth != 0 || first < reader->inference_end ||
++        reader->output->overload_heads != NULL || reader->types->changes != NULL || !bindings->valid)
++    {
++        return first;
++    }
++    const __mmask64 lanes = check_input_scan_all(first, stop);
++    const __m512i zero = _mm512_setzero_si512();
++    const __m512i marks = _mm512_maskz_loadu_epi8(lanes, reader->visits + first);
++    const uint64_t marked = _mm512_mask_cmpneq_epi8_mask(lanes, marks, zero);
++    uint64_t names = _mm512_mask_cmpeq_epi8_mask(lanes, marks, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX | BUSTER_CHECK_RESOLVE_OPERAND));
++    names &= _mm512_cmpeq_epi8_mask(_mm512_maskz_loadu_epi8(lanes, reader->ignored + first), zero);
++    const uint64_t barrier = marked & ~names;
++    names &= barrier != 0 ? (barrier & (0u - barrier)) - 1 : UINT64_MAX;
++    if ((names & 1) == 0 || (names & (names - 1)) == 0)
++    {
++        return first;
++    }
++    uint32_t count = 0;
++    uint32_t positions[16], identifiers[16], handles[16];
++    for (; names != 0 && count < BUSTER_ARRAY_LENGTH(positions); names &= names - 1)
++    {
++        const uint32_t at = first + (uint32_t)__builtin_ctzll(names);
++        const uint32_t identifier = parser->tokens.names[at];
++        const uint32_t parent = parser->tree.parents[at];
++        const uint8_t parent_role = parent < parser->tokens.count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
++        const uint8_t parent_kind = parent < parser->tokens.count ? parser->tokens.kinds[parent] : PARSE_KIND_END;
++        const bool label = parent_role == PARSE_ROLE_LABEL || parent_kind == PARSE_KIND_GOTO ||
++                           (parent_role == PARSE_ROLE_PREFIX && parent_kind == PARSE_KIND_AMPAMP) ||
++                           (at + 1 < parser->tokens.count && parser->tree.roles[at + 1] == PARSE_ROLE_LABEL);
++        if (label || identifier == 0 || identifier >= bindings->name_capacity || reader->builtin_names[identifier] != CBUILTIN_NONE ||
++            (reader->intrinsic_names != NULL && reader->intrinsic_names[identifier] != 0) || reader->output->declarations[at] != BUSTER_CHECK_NONE)
++        {
++            break;
++        }
++        const uint32_t handle = bindings->heads[identifier];
++        if (handle == 0 || bindings->kind[handle - 1] == C_BINDING_TYPEDEF)
++        {
++            break;
++        }
++        positions[count] = at;
++        identifiers[count] = identifier;
++        handles[count] = handle;
++        count += 1;
++    }
++    const uint32_t event = bindings->count;
++    if (count < 2 || count > bindings->capacity - event || (event > bindings->base && first < bindings->point[event - 1]))
++    {
++        return first;
++    }
++    const __mmask16 used = (__mmask16)((1u << count) - 1u);
++    const __m512i points = _mm512_maskz_loadu_epi32(used, positions);
++    _mm512_mask_storeu_epi32(bindings->declaration + event, used, points);
++    _mm512_mask_storeu_epi32(bindings->point + event, used, points);
++    _mm512_mask_storeu_epi32(bindings->key + event, used, _mm512_maskz_loadu_epi32(used, identifiers));
++    _mm512_mask_storeu_epi32(bindings->previous + event, used, _mm512_maskz_loadu_epi32(used, handles));
++    _mm512_mask_storeu_epi32(bindings->depth + event, used, _mm512_setzero_si512());
++    _mm512_mask_storeu_epi32(bindings->end + event, used, _mm512_set1_epi32(-1));
++    memset(bindings->operation + event, C_BINDING_USE, count);
++    memset(bindings->kind + event, C_BINDING_OBJECT, count);
++    bindings->count += count;
++    reader->source_use_run_count += 1;
++    reader->source_use_tokens += count;
++    *visits += count - 1;
++    reader->position = positions[count - 1];
++    return reader->position;
++}
++
+ // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
+ // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
+ // after its closing brace, where its scopes end and nothing else of the token is its. It visits only the
+@@ -14322,6 +14403,21 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin,
+             i = parser->tree.parents[i];
+             continue;
+         }
++        if (mark == (BUSTER_CHECK_RESOLVE_SYNTAX | BUSTER_CHECK_RESOLVE_OPERAND))
++        {
++            const uint32_t last = check_input_source_use_run(reader, i, end, &visits);
++            if (last != i)
++            {
++                i = last;
++                continue;
++            }
++            check_input_resolve_ignored(reader, i, PARSE_ROLE_OPERAND, PARSE_KIND_IDENTIFIER, parser->tree.parents[i]);
++            if (!reader->ignored[i])
++            {
++                check_input_resolve_name(reader, i, PARSE_ROLE_OPERAND);
++            }
++            continue;
++        }
+         const uint8_t role = parser->tree.roles[i];
+         const uint8_t kind = parser->tokens.kinds[i];
+         const uint32_t parent = parser->tree.parents[i];
+@@ -16727,7 +16823,7 @@ struct CheckInputTokenCounts
+ // (check_input_role_tests). A name of 0 counts no token: tokens without a name have 0. Without roles, every token is
+ // marked.
+ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
+-                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits)
++                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits, bool classify_operands)
+ {
+     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
+     // The last name also gates the declaration-specifier column. Keep it in the filter of possible names.
+@@ -16872,7 +16968,14 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
+                                  _mm512_test_epi8_mask(kind_tests, _mm512_set1_epi8(BUSTER_CHECK_KIND_RESOLVE)) | extension | group | name |
+                                  named | attributes | strings);
+             }
+-            _mm512_mask_storeu_epi8(visits + token, lanes, _mm512_maskz_mov_epi8(visit, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX)));
++            __m512i marks = _mm512_maskz_mov_epi8(visit, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX));
++            if (classify_operands && roles != NULL)
++            {
++                const __mmask64 ordinary = visit & ~(named | attributes | strings) & _mm512_cmpeq_epi8_mask(role, _mm512_set1_epi8(PARSE_ROLE_OPERAND)) &
++                                           _mm512_cmpeq_epi8_mask(kind, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER));
++                marks = _mm512_mask_set1_epi8(marks, ordinary, BUSTER_CHECK_RESOLVE_SYNTAX | BUSTER_CHECK_RESOLVE_OPERAND);
++            }
++            _mm512_mask_storeu_epi8(visits + token, lanes, marks);
+         }
+         attribute_depth += __builtin_popcountll(list_opens) - __builtin_popcountll(list_closes);
+     }
+@@ -17168,7 +17271,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
+     // With BUSTER_CHECK_VISITS_PADDING bytes past its count + 1, which the coded walk's gathers of four bytes may read.
+     uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
+-    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits);
++    const bool source_use_runs = fresh_output && complete_translation_unit && deferred == NULL && deferred_tokens == NULL && attested == NULL && parser->errors == 0 &&
++                                 parser->recovered_types == NULL && !parser->options.scalar && pp->options.published_unused_only && !pp->options.predefines.debug &&
++                                 !pp->options.predefines.debug_modules && !pp->options.node_window && !pp->options.node_window_constants && getenv("BUSTER_SOURCE_USE_REFERENCE") == NULL && parser->language.standard >= 1999;
++    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, source_use_runs);
+     input->vla_capacity = counts.subscripts;
+     input->asm_capacity = counts.asms;
+     const uint32_t vector_members = counts.vector_members;
+@@ -17176,6 +17282,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     const uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
+     CheckInputReader reader =
+     {
++        .source_use_runs = source_use_runs,
+         .output = input,
+         .parser = parser,
+         .pp = pp,
+@@ -17809,6 +17916,32 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+             {
+                 check_input_tentative_arrays(&reader, reader.position < count ? reader.position : count);
+             }
++            const char* event_file = getenv("BUSTER_SOURCE_USE_EVENTS");
++            if (event_file != NULL)
++            {
++                FILE* file = fopen(event_file, "ab");
++                if (file == NULL)
++                {
++                    abort();
++                }
++                const CBindings* bindings = &reader.bindings;
++                const uint32_t header[] = { reader.output->resolve_visits, bindings->count, bindings->name_capacity, bindings->active_count };
++                fwrite(header, sizeof(header), 1, file);
++                fwrite(bindings->heads, sizeof(uint32_t), bindings->name_capacity * C_BINDING_NAMESPACES, file);
++                fwrite(bindings->active, sizeof(uint32_t), bindings->active_count, file);
++                fwrite(bindings->key, sizeof(uint32_t), bindings->count, file);
++                fwrite(bindings->declaration, sizeof(uint32_t), bindings->count, file);
++                fwrite(bindings->point, sizeof(uint32_t), bindings->count, file);
++                fwrite(bindings->end, sizeof(uint32_t), bindings->count, file);
++                fwrite(bindings->previous, sizeof(uint32_t), bindings->count, file);
++                fwrite(bindings->depth, sizeof(uint32_t), bindings->count, file);
++                fwrite(bindings->operation, sizeof(uint8_t), bindings->count, file);
++                fwrite(bindings->kind, sizeof(uint8_t), bindings->count, file);
++                if (ferror(file) || fclose(file) != 0)
++                {
++                    abort();
++                }
++            }
+             check_input_bindings(&reader, binding_mode);
+             check_input_builtin_uses_publish(&reader);
+             check_typo_finish(&reader);
+@@ -18011,6 +18144,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     {
+         input->visit_misses += check_input_rare_verify(&reader);
+     }
++    if (reader.source_use_runs && getenv("BUSTER_SOURCE_USE_CENSUS") != NULL)
++    {
++        fprintf(stderr, "source-use-runs runs=%u uses=%u events=%u visits=%u\n", reader.source_use_run_count, reader.source_use_tokens,
++                reader.bindings.count, reader.output->resolve_visits);
++    }
+     arena_pop_to(scratch, mark);
+     arena_release(&sparse);
+     return valid;
+diff --git a/src/buster/compiler/c_check_input_scan_test.c b/src/buster/compiler/c_check_input_scan_test.c
+index c9a9f8373..dba140ac1 100644
+--- a/src/buster/compiler/c_check_input_scan_test.c
++++ b/src/buster/compiler/c_check_input_scan_test.c
+@@ -984,7 +984,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+         uint32_t syntax_differences = 0;
+         memset(syntax, 0xa5, (uint64_t)count + 1);
+         memset(visits, 0xa5, (uint64_t)count + 1);
+-        const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits);
++        const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits, false);
+         char description[200];
+         snprintf(description, sizeof(description), "token counts of %u tokens: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
+                  count, counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
+diff --git a/src/buster/compiler/c_check_overload_test.c b/src/buster/compiler/c_check_overload_test.c
+index f40c85603..33a1dfcad 100644
+--- a/src/buster/compiler/c_check_overload_test.c
++++ b/src/buster/compiler/c_check_overload_test.c
+@@ -633,7 +633,7 @@ static __attribute__((noinline)) void check_test_overloadable_counts(CheckTest*
+                 spelled += named;
+                 expected += named && listed;
+             }
+-            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL);
++            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL, false);
+             char description[200];
+             snprintf(description, sizeof(description), "source %u's names of overloadable: %u of %u counted, the tree's %u, expected %u", s,
+                      counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE], spelled, expected, sources[s].counted);
