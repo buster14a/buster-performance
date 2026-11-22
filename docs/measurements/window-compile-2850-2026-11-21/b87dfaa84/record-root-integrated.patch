@@ -1,0 +1,114 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index df97a4a98..4d65aea3d 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -898,6 +898,7 @@ struct CheckInputMusttail
+ #define BUSTER_CHECK_WINDOW_WRITE 0x04u
+ #define BUSTER_CHECK_WINDOW_FIELD_LOAD 0x08u
+ #define BUSTER_CHECK_WINDOW_LAST_LOAD 0x10u
++#define BUSTER_CHECK_WINDOW_RECORD_ADDRESS 0x20u
+ 
+ typedef struct CheckInputWindowRow CheckInputWindowRow;
+ struct CheckInputWindowRow
+@@ -918,6 +919,7 @@ struct CheckInputWindowSummary
+     uint32_t count;
+     // The declaration's field index for a source-resolved member operand, or zero for other windows.
+     uint32_t member;
++    int64_t record_offset;
+ };
+ 
+ typedef struct CheckSourceBody
+diff --git a/src/buster/compiler/c_check_member_chain_input.c b/src/buster/compiler/c_check_member_chain_input.c
+index 2689a9ecc..264d73e81 100644
+--- a/src/buster/compiler/c_check_member_chain_input.c
++++ b/src/buster/compiler/c_check_member_chain_input.c
+@@ -39,14 +39,15 @@ static uint32_t check_input_member_chain(CheckInputReader* reader, CheckInputBat
+     const uint32_t base = tokens[first], op = tokens[first + 1];
+     const uint32_t declaration = ids->declarations[identifier];
+     const TypeId base_type = (TypeId)ids->types[identifier];
+-    if (op != base + 1 || p->tokens.kinds[op] != PARSE_KIND_ARROW || p->tree.parents[base] != op ||
++    const bool record_root = p->tokens.kinds[op] == PARSE_KIND_PERIOD;
++    if (op != base + 1 || (!record_root && p->tokens.kinds[op] != PARSE_KIND_ARROW) || p->tree.parents[base] != op ||
+         ids->status[identifier] != (BUSTER_CHECK_IDENTIFIER_ACTED | BUSTER_CHECK_IDENTIFIER_NODE) || (ids->types[identifier] >> 32) != CHECK_LVALUE ||
+         ids->flags[identifier] != (((uint64_t)CHECK_CONSTANT_ADDRESS << 32) | BUSTER_CHECK_NONNULL_ADDRESS) || declaration >= input->token_count ||
+         ids->objects[identifier] != (uint64_t)declaration + 1 || input->declaration_kinds[declaration] != C_BINDING_OBJECT ||
+         check_sparse_get(input->declaration_bodies, declaration) >= input->token_count ||
+         check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC | BUSTER_CHECK_BITS_THREAD_LOCAL) ||
+         check_input_attributes_at(input, declaration) != NULL || !type_is_valid(types, base_type) || type_qualifiers(base_type) != 0 ||
+-        type_kind(types, base_type) != BUSTER_TYPE_KIND_POINTER || reader->tag_completions == NULL)
++        (!record_root && type_kind(types, base_type) != BUSTER_TYPE_KIND_POINTER) || reader->tag_completions == NULL)
+         return 0;
+     uint32_t stop = first + 1, root = base;
+     while (stop < end && check_input_window_code(classes, stop) == CHECK_INPUT_CODE_MEMBER && tokens[stop] == (stop == first + 1 ? base + 1 : root + 2) &&
+@@ -61,12 +62,16 @@ static uint32_t check_input_member_chain(CheckInputReader* reader, CheckInputBat
+         return 0;
+     CheckInputWindowRow rows[1 + 3 * 16];
+     check_node_window_member_pointer(rows, (uint32_t)ids->objects[identifier], base);
++    if (record_root) rows[0].flags |= BUSTER_CHECK_WINDOW_RECORD_ADDRESS;
++    bool through_pointer = !record_root;
++    int64_t record_offset = 0;
+     uint32_t count = 1, member = 0;
+     TypeId type = base_type;
+     for (uint32_t a = first + 1; a < stop; a += 1)
+     {
+         const uint32_t t = tokens[a];
+         const bool arrow = p->tokens.kinds[t] == PARSE_KIND_ARROW;
++        through_pointer |= arrow;
+         if (arrow && type_kind(types, type) != BUSTER_TYPE_KIND_POINTER)
+             return 0;
+         const TypeId record = arrow ? type_element(types, type) : type;
+@@ -93,13 +98,23 @@ static uint32_t check_input_member_chain(CheckInputReader* reader, CheckInputBat
+             return 0;
+         if (options->mutate_token == t)
+             bits += 8;
+-        count += check_node_window_member_step(rows + count, t, type, bits / 8, load, last);
++        // The ordinary aggregate address is a symbolic object plus one accumulated byte displacement
++        // until a pointer field is read. The field being loaded keeps its own memory operand.
++        if (!through_pointer && !load)
++        {
++            if (bits / 8 > (uint64_t)(INT64_MAX - record_offset)) return 0;
++            record_offset += (int64_t)(bits / 8);
++        }
++        else
++            count += check_node_window_member_step(rows + count, t, type, bits / 8, load, last);
+     }
++    if (!through_pointer) return 0;
+     const CheckValue value = {.type = type, .category = CHECK_LVALUE, .flags = BUSTER_CHECK_NONNULL_ADDRESS};
+     const uint32_t node = check_input_window_publish(reader, batch, root, value, rows, count, stop - first);
+     if (node == BUSTER_CHECK_NONE)
+         return 0;
+     input->window_summaries[input->window_count - 1].member = member;
++    input->window_summaries[input->window_count - 1].record_offset = record_offset;
+     check_input_expression_value(reader, root, node);
+     if (options->audit)
+         fprintf(stderr, "source-chain\t%u\t%u\t%u\t%u\t%u\t%u\n", base, root, stop - first - 1, count, node, type);
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index 1520a8b59..a52eb44b4 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -15696,6 +15696,13 @@ static __attribute__((noinline)) void check_lower_window(CheckLowerWriter* write
+     for (uint32_t i = 0; i < summary->count && writer->output->status == CHECK_PROGRAM_OK; i += 1)
+     {
+         const CheckInputWindowRow* row = program->input->window_rows + summary->first + i;
++        if ((row->flags & BUSTER_CHECK_WINDOW_RECORD_ADDRESS) != 0)
++        {
++            writer->token = row->token;
++            check_lower_source(writer, row->token);
++            check_lower_address(writer, (uint32_t)row->value, summary->record_offset);
++            continue;
++        }
+         if ((row->flags & BUSTER_CHECK_WINDOW_FIELD_LOAD) != 0)
+         {
+             if (load || (row->flags & BUSTER_CHECK_WINDOW_LAST_LOAD) == 0)
+@@ -19827,7 +19834,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
+     const uint64_t x86_lanes = check_x86_lanes_room(program);
+     // A control's entries, up to four: a deferred lowering's bound is the controls' room the checker's setup reserves.
+     const uint64_t controls = deferred ? program->control_capacity : program->control_count;
+-    const uint64_t capacity64 = (uint64_t)nodes * 32 + controls * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
++    // A projected member lvalue may stand in for up to sixteen field actions. Each can emit an offset,
++    // pointer add and load. The ordinary per-node bound covers the root and all enclosing expressions.
++    const uint64_t window_entries = input != NULL ? (uint64_t)input->window_nodes * 3 : 0;
++    const uint64_t capacity64 = (uint64_t)nodes * 32 + window_entries + controls * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
+                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 6 + asm_labels * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
+                                 limb_room.entries + lane_calls * 17 + node_counts.transport_entries + 32 + x86_lanes;
+     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
