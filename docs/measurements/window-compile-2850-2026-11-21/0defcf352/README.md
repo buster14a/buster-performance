@@ -1,0 +1,3 @@
+# Complete SQLite source-local controls
+
+The local checker uses checked builtin operands, source attributes and the unit inventory of declarations with assembly labels to place direct and computed library calls. Every one of SQLite’s 2,674 source bodies matches the ordinary program: 63,547 ordered controls, 11,162 body references, 1,506 switch cases and 6,942 converted initializer parts. The Buster control comparison matches on 8,451 of 8,667 source bodies. Its 216 remaining bodies use local assembler, statement expressions or a constant-vector initializer that needs an earlier data dependency. [Totals](summary.txt), [all source and ordinary records](raw.tar.gz) and [compiler source](source.patch)

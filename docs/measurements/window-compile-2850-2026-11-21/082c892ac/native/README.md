@@ -1,0 +1,5 @@
+# Release reader boundary on Ryzen 7 9700X
+
+The same Release binary on CPU 2 processed all 7,298 frozen SQLite declarations and all 12,518 Buster declarations through the post-checker boundary. Ordinary output qualification first compared the patched executable with its unchanged parent. Each workload then held the exclusive host lock through five alternating four-child rounds, plus separate user PMU samples in three rounds. The timed boundary stops before lowering and ELF publication. This grouped lease was exploratory. The current shared-host protocol releases the exclusive lock after each process.
+
+SQLite median wall time was 67.949 ms on the dense path and 66.409 ms in batches. The median paired change was −1.417 ms (5/5) and −61,436 KiB peak RSS. User instructions increased by 44.506 million, while total cycles decreased by 6.975 million (3/3). Buster wall time changed by −10.581 ms (5/5) and RSS by −184,318 KiB. User instructions increased by 20.266 million. [Pairing and ranges](paired.tsv), [observations](samples.tsv) and [raw PMU, clock, stdout and stderr files](native-raw.tar.gz)

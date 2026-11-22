@@ -43,6 +43,7 @@ def sources(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--compiler", type=Path, required=True)
+    p.add_argument("--reference-compiler", type=Path, help="Independent clean ordinary compiler, defaults to --compiler")
     p.add_argument("--sqlite", type=Path)
     p.add_argument("--self-source", type=Path)
     p.add_argument("--lua-source", type=Path)
@@ -71,7 +72,7 @@ def main():
                 receipt = directory/"source.receipt"
                 receipt.unlink(missing_ok=True)
                 command = ["--lanes","1","-c",*flags,*POLICIES[policy],"-o",directory/"unit.o"]
-                ordinary = observe(args.compiler.resolve(), command, env)
+                ordinary = observe((args.reference_compiler or args.compiler).resolve(), command, env)
                 source = observe(args.compiler.resolve(), command, {**env,**local,"BUSTER_BODY_DIAGNOSTIC_RECEIPT":str(receipt.resolve())})
                 for label, result in (("ordinary",ordinary),("source",source)):
                     (directory/(label+".stderr.xz")).write_bytes(lzma.compress(result[2]))

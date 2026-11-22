@@ -1,0 +1,9 @@
+# Native object publication from source-local C graphs
+
+All 2,674 SQLite definitions were checked on source-local graphs. Ordinary symbol selection emitted 2,668 of them. They supplied all 381,191 final typed entries and all 11,162 body symbol references. The unit retired 319,280 expression nodes before the ordinary backend emitted the complete 2,061,200-byte x86-64 object. Its remaining 4,343 nodes belonged to file scope.
+
+The frozen inputs are SQLite 3.53.2 and the Buster compiler amalgamation. Each ordinary object was checked byte for byte. The coverage runs use one lane and a diagnostic build with the checker unit at -O0. The opt-in path uses BUSTER_CONTROL_SOURCE_NATIVE=1. [Per-unit coverage and complete ELF hashes](native-units.tsv), [raw output and commands](raw.tar.gz) and [complete experimental source above the frozen base](source.patch)
+
+The four SQLite shell comparisons linked the complete candidate, ordinary and Clang objects to the same Clang shell. Core SQL, dot commands, file handling and a query suite matched every stdout/stderr byte and the expected process exits (1, 0, 1, 0). The additional static-variable suite ran 20 C sources under four warning policies. Eighteen default cases linked and ran identically with Clang. The candidate matched 76 of the 80 compile comparisons. An overridden initializer lost its warning in three policies and emitted an object when warnings were errors. [Source and policy results](static-cases.tsv)
+
+In five alternating four-process rounds on the local Ryzen 7940HS, ordinary Develop SQLite compilation took a median 312.264 ms and the complete source-local path took 651.690 ms. The median paired change was +347.647 ms, slower in every round. The x86 initialization routine alone accounted for 26.14% of user cycle samples in the source-local build. The runtime target uses fresh native Release compilation on the 9700X. [Paired local times](paired.tsv) and [CPU profile](sqlite.batch.profile)

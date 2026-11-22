@@ -115,3 +115,24 @@ The live publisher now builds the ordinary enum definition index once and runs t
 Every one of 6,860 comparisons matched ordinary status, stdout and raw stderr. All 6,860 source-local executions reached the live publisher. Each of 1,372 fresh source units ran under five policies, including `-Weverything`, `-w` and warnings promoted to errors. Buster’s everything run produced 11,818 diagnostic bytes and SQLite’s 7,425. The per-file table includes hashes and source-local control coverage. [Results by source and policy](diagnostics/enum-events/totals.tsv), [SQLite](diagnostics/enum-events/sqlite-policies.tsv.xz), [Buster](diagnostics/enum-events/buster-policies.tsv.xz), [Lua](diagnostics/enum-events/lua-policies.tsv.xz) and [musl](diagnostics/enum-events/musl-policies.tsv.xz)
 
 Apply `diagnostic-enum-events.patch` after `diagnostic-case-controls.patch` and supply `--policy default --policy wall --policy strict --policy quiet --policy everything` to the real-source reproducer with all four source paths. [Reproducer](diagnostic-corpora.py)
+
+## Scoped initializer marks on the diagnostic path
+
+Each function now constructs its static-initializer bitset from the initializer records inside its own source interval. Marking the bitset ready avoids scanning all TU initializers in the control writer for each function. It also prevents a retired graph’s node index from marking a reused slot in the active function. The independently loaded patches reconstruct every recorded diagnostic revision's tracked tree. [Source change](diagnostic-local-initializers.patch) and [patch verification](diagnostics/patch-checks.tsv)
+
+The normal Develop build at `c8f75a9f7` repeated the five alternating ABBA/BAAB rounds on the local 7940HS. The reference command and source-local driver ran `-fsyntax-only` in fresh processes. All process outputs matched within each round. Buster's local diagnostic path was faster in all ten paired rounds, across both warning policies. SQLite's default result had two faster rounds out of five. These are local syntax/diagnostic timings. [Paired comparisons](diagnostics/stage-c8f75a9f7/paired.tsv), [raw process samples](diagnostics/stage-c8f75a9f7/samples.tsv), [absolute medians](diagnostics/stage-c8f75a9f7/per-mode.tsv) and [native build](diagnostics/stage-c8f75a9f7/provenance.tsv)
+
+| Source | Policy | Paired wall change | Faster rounds | Peak RSS change | Minor fault change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| SQLite | Default | +3.087 ms | 2/5 | −1,560 KiB | −10,391.5 |
+| SQLite | Wall | −7.155 ms | 4/5 | −5,692 KiB | −11,826.5 |
+| Buster | Default | −98.371 ms | 5/5 | −139,402 KiB | −62,458.5 |
+| Buster | Wall | −68.788 ms | 5/5 | −180,320 KiB | −73,030 |
+
+Rebuild after the final supplemental patch and use the same `diagnostic-stages.py` command and frozen sources to reproduce the comparison.
+
+The final native build repeated the five-policy corpus with its ordinary mode and again with a separately built, unmodified compiler. Both controls matched all 6,860 source-local processes in status and every stdout/stderr byte. The compiled source files compare equal between the independent reference at `fbef2d68d` and the original experiment base `0e1d5b825`. Add `--reference-compiler /path/to/clean/compiler` to `diagnostic-corpora.py` to use a separate binary. The case tables include the diagnostic digest and the live publisher's raw receipt. These diagnostic comparisons include expected errors. [Per-reference totals](diagnostics/native-final/summary.tsv), [SQLite rows](diagnostics/native-final/sqlite-clean-final.tsv.xz), [Buster rows](diagnostics/native-final/main-clean-final.tsv.xz), [Lua rows](diagnostics/native-final/lua-clean-final.tsv.xz), [musl rows](diagnostics/native-final/musl-clean-final.tsv.xz) and [all unique stderr files by digest](diagnostics/enum-events/stderr-by-sha256.tar.xz)
+
+The final local Buster profile attributed 9.54% of sampled user cycles to `check_graph_run`, 4.63% to `check_const_append` and 4.53% to the expression reader. The packed raw profiles retain the event samples used for both source-unit rankings. [Buster ranking](diagnostics/stage-c8f75a9f7/buster-local.txt.xz), [Buster perf.data](diagnostics/stage-c8f75a9f7/buster-local.data.xz), [SQLite ranking](diagnostics/stage-c8f75a9f7/sqlite-local.txt.xz) and [SQLite perf.data](diagnostics/stage-c8f75a9f7/sqlite-local.data.xz)
+
+The final native compiler also passed all 850,925 ordinary checker assertions, run with seed 2850 in eight parts. [Assertion totals and raw log names](diagnostics/native-final/checker.tsv) and [binary digests](diagnostics/native-final/builds.tsv)

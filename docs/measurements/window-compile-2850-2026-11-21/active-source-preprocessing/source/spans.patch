@@ -1,0 +1,143 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 16d77c83e..7b785a9a6 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -3419,6 +3419,7 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
+             uint64_t* chunks = arena_push_array(scratch.arena, refine_progress_words(data->length), sizeof(uint64_t), 64);
+             RefineProgress progress;
+             refine_progress_begin(&progress, chunks);
++            refine_source_cache_begin(&progress,scratch.arena,data->length);
+             refined = chunks != 0 && refine_tokens_chunks(table, data->bytes, data->length, data->kinds, data->starts, data->values, data->token_count, data->values,
+                                                           data->space, prepare->refine_flags, &progress);
+             if (refined)
+@@ -3598,6 +3599,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     uint64_t* directive_words = arena_push_array(scratch.arena, 2 * word_room, sizeof(uint64_t), 64);
+     RefineProgress progress;
+     refine_progress_begin(&progress, backslash_chunks);
++    refine_source_cache_begin(&progress,scratch.arena,length);
+     // The line ends before each page; those before `lined` are counted (`lines`).
+     uint32_t* pages = arena_push_array(arena, length / BUSTER_PP_LINE_PAGE_BYTES + 1, sizeof(uint32_t), 64);
+     uint64_t lined = 0;
+diff --git a/src/buster/compiler/c_refine.c b/src/buster/compiler/c_refine.c
+index 77056c495..833709fa7 100644
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -914,12 +914,80 @@ BUSTER_REFINE_FUSED_INSTANTIATE(refine_intern_batch_fused_trigraphs, true)
+ // refined a window at a time (refine_tokens_blocks): the ends of the 16 tokens before the next block (lane 15 is the last
+ // one's), read before pass C wrote ids over the identifiers' ends in place, and the source's backslash chunks
+ // (refine_scan_chunks), scanned up to word `scanned`. refine_progress_begin starts a file's.
++// A source-local table is empty at the start of a large file. A slot for a short
++// name proves its whole identical spelling. A longer name also compares its
++// remaining bytes with the immutable spelling of the cached canonical ID.
++typedef struct RefineSourceName
++{
++    uint64_t first;
++    uint32_t length;
++    IdentId id;
++} RefineSourceName;
++#define BUSTER_REFINE_SOURCE_NAMES 2048u
++
++static bool refine_source_names(InternTable* table, const uint8_t* source, uint64_t length, RefineIdentifiers* names, RefineSourceName* cache, const uint64_t* marked, uint32_t flags)
++{
++    for (uint32_t i=0; i<names->count; i+=1)
++    {
++        const uint32_t n=names->lengths[i];
++        const uint32_t start=names->starts[i];
++        if (marked != NULL)
++        {
++            const uint32_t first_chunk=start/64;
++            const uint32_t last_chunk=(start+n-1)/64;
++            const bool possible = last_chunk-first_chunk>1 ? refine_chunks_have_backslash(marked,start,start+n) :
++                                  (((marked[first_chunk/64]>>(first_chunk%64)) | (marked[last_chunk/64]>>(last_chunk%64))) & 1) != 0;
++            if (possible)
++            {
++                names->ids[i]=refine_intern_identifier(table,source,length,start,n,flags);
++                if (names->ids[i]==0) { return false; }
++                continue;
++            }
++        }
++        const uint8_t* text=source+start;
++        uint64_t first;
++        if (n>=8) { memcpy(&first,text,8); }
++        else { first=(uint64_t)_mm_cvtsi128_si64(_mm_maskz_loadu_epi8((__mmask16)_bzhi_u32(0xffff,n),text)); }
++        uint32_t hash=(uint32_t)_mm_crc32_u64(n,first);
++        if (n>8)
++        {
++            uint32_t tail;
++            memcpy(&tail,text+n-4,sizeof(tail));
++            hash=_mm_crc32_u32(hash,tail);
++        }
++        RefineSourceName* entry=&cache[hash & (BUSTER_REFINE_SOURCE_NAMES-1)];
++        IdentId id=entry->id;
++        bool found=entry->length==n && entry->first==first;
++        if (found && n>8)
++        {
++            const uint8_t* record=table->records+table->spans[id].offset;
++            if (n<=64)
++            {
++                const __mmask64 after=_bzhi_u64(~UINT64_C(0),n-8);
++                const __m512i current=_mm512_maskz_loadu_epi8(after,text+8);
++                const __m512i cached=_mm512_maskz_loadu_epi8(after,record+8);
++                found=_mm512_mask_cmpneq_epi8_mask(after,current,cached)==0;
++            }
++            else { found=memcmp(text+8,record+8,n-8)==0; }
++        }
++        if (!found)
++        {
++            id=intern_find_or_add(table,text,n);
++            if (id==0) { return false; }
++            *entry=(RefineSourceName){ .first=first,.length=n,.id=id };
++        }
++        names->ids[i]=id;
++    }
++    return true;
++}
++
+ typedef struct RefineProgress RefineProgress;
+ struct RefineProgress
+ {
+     __m512i previous_ends;
+     uint64_t* backslash_chunks;
+     uint64_t scanned;
++    RefineSourceName* source_names;
+ };
+ 
+ // The words refine_progress_begin needs for the backslash chunks of a source of `length` bytes.
+@@ -934,6 +1002,15 @@ static void refine_progress_begin(RefineProgress* progress, uint64_t* backslash_
+     *progress = (RefineProgress){ .previous_ends = _mm512_setzero_si512(), .backslash_chunks = backslash_chunks };
+ }
+ 
++static void refine_source_cache_begin(RefineProgress* progress,Arena* arena,uint64_t length)
++{
++    if (length >= (1u<<20))
++    {
++        progress->source_names=arena_push_array(arena,BUSTER_REFINE_SOURCE_NAMES,sizeof(*progress->source_names),64);
++        if (progress->source_names!=NULL) { memset(progress->source_names,0,BUSTER_REFINE_SOURCE_NAMES*sizeof(*progress->source_names)); }
++    }
++}
++
+ // The vectorized path over the blocks of tokens [begin, end) (`begin` a multiple of BUSTER_REFINE_BLOCK_TOKENS, from
+ // `progress` as the blocks before left it): an instantiation per trigraph setting, batch size and form of pass B.
+ // Each block's source bytes are scanned for backslashes just before its passes.
+@@ -959,7 +1036,12 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
+         {
+             previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, false);
+         }
+-        if (fused)
++        if (progress->source_names != NULL)
++        {
++            const uint64_t* marked=refine_chunks_have_backslash(backslash_chunks,starts[block],ends[block_end-1]) ? backslash_chunks : NULL;
++            result=refine_source_names(table,source,length,&identifiers,progress->source_names,marked,flags);
++        }
++        else if (fused)
+         {
+             for (uint32_t first = 0; result && first < identifiers.count; first += batch)
+             {
+@@ -997,6 +1079,7 @@ BUSTER_INLINE bool refine_tokens_whole(InternTable* table, const uint8_t* source
+     RefineProgress progress;
+     uint64_t* backslash_chunks = arena_push_array(scratch.arena, refine_progress_words(length), sizeof(uint64_t), 64);
+     refine_progress_begin(&progress, backslash_chunks);
++    refine_source_cache_begin(&progress,scratch.arena,length);
+     const bool result = backslash_chunks != 0 &&
+                         refine_tokens_with(table, source, length, kinds, starts, ends, values, space, flags, trigraphs, batch, fused, 0, count, &progress);
+     scratch_end(scratch);

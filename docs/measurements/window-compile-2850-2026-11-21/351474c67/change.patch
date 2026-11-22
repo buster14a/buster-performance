@@ -1,0 +1,165 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 1a194a8df..3e84a17b2 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -919,6 +919,11 @@ struct CheckInputWindowSummary
+ typedef struct CheckSourceBody
+ {
+     struct Tier0Function* function;
++    struct CheckLowerTable* tables;
++    uint32_t table_count;
++    uint32_t case_count;
++    uint32_t table_symbol;
++    uint32_t* case_ordinals;
+     struct CheckControl* controls;
+     uint32_t control_count;
+     uint32_t entry_count;
+diff --git a/src/buster/compiler/c_check_live_control_native.c b/src/buster/compiler/c_check_live_control_native.c
+index 4463afb9e..9104bb34d 100644
+--- a/src/buster/compiler/c_check_live_control_native.c
++++ b/src/buster/compiler/c_check_live_control_native.c
+@@ -225,7 +225,7 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+     if (ok && in->source_bodies != NULL)
+     {
+         Tier0Function* f=lowered.functions;
+-        if (lowered.helpers.count!=0 || lowered.initializers.count!=0 || lowered.runtime_symbol_count!=0 || lowered.table_count!=0 || lowered.label_symbol_count!=0 || f->x87 || f->int128 ||
++        if (lowered.helpers.count!=0 || lowered.initializers.count!=0 || lowered.runtime_symbol_count!=0 || lowered.label_symbol_count!=lowered.case_symbol_count || f->x87 || f->int128 ||
+             f->asm_body_count!=0 || f->hidden_copy!=0)
+         {
+             uint32_t detail=(lowered.helpers.count!=0) | (lowered.initializers.count!=0)<<1 | (lowered.runtime_symbol_count!=0)<<2 |
+@@ -240,6 +240,13 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+             arena_pop_to(output, mark);
+             return;
+         }
++        const uint32_t label_base=lowered.case_symbol_base+lowered.table_count;
++        for (uint32_t i=0;i<lowered.label_symbol_count;i+=1)
++        {
++            const uint32_t ordinal=lowered.label_symbols[i]-label_base;
++            if(ordinal>=lowered.case_symbol_count) {arena_pop_to(output,mark);return;}
++            lowered.label_symbols[i]=ordinal;
++        }
+         uint32_t* objects=BUSTER_ARENA_PUSH_ARRAY(output,uint32_t,p->symbol_count);
+         if (objects==NULL) abort();
+         memcpy(objects,p->symbol_objects,p->symbol_count*sizeof(*objects));
+@@ -247,6 +254,8 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+         if (controls==NULL) abort();
+         memcpy(controls,entries,(size_t)count*sizeof(*controls));
+         if (!check_input_source_add(in->source_bodies,(CheckSourceBody){ .function=f,.objects=objects,.symbols=p->symbol_count,
++                                        .tables=lowered.tables,.table_count=lowered.table_count,.case_count=lowered.case_symbol_count,
++                                        .table_symbol=lowered.case_symbol_base,.case_ordinals=lowered.label_symbols,
+                                         .controls=controls,.control_count=count,.entry_count=entry_count,.references=ref_count,.opening=opening,.closing=close },output)) abort();
+         check_live_control_warnings(unit,p,reader,opening,close,scratch);
+         check_live_static_publish(unit->persistent, pending);
+@@ -284,20 +293,35 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+ }
+ 
+ 
+-static bool check_live_control_bind(const CheckSourceBody* saved,const CheckProgram* program,Tier0Function* function,Arena* output)
++static bool check_live_control_bind(const CheckSourceBody* saved,const CheckProgram* program,Tier0Function* function,uint32_t body,CheckLowerWriter* writer,Arena* output)
+ {
+     *function=*saved->function;
+     uint64_t* values=BUSTER_ARENA_PUSH_ARRAY(output,uint64_t,(uint64_t)function->count+1);
+     SymbolId* targets=BUSTER_ARENA_PUSH_ARRAY(output,SymbolId,(uint64_t)function->call_count+1);
+     if(values==NULL || targets==NULL) return false;
++    uint32_t first_table=0;
++    if (saved->table_count!=0)
++    {
++        first_table=check_lower_table_of(writer->tables,writer->table_count,body,program->bodies[body].first+saved->tables[0].control);
++        if (first_table>=writer->table_count || saved->table_count>writer->table_count-first_table ||
++            saved->case_count>writer->label_symbol_capacity-writer->output->label_symbol_count) return false;
++        const uint32_t first_label=writer->tables[first_table].first_label;
++        for (uint32_t k=0;k<saved->case_count;k+=1)
++            writer->output->label_symbols[writer->output->label_symbol_count++]=BUSTER_CHECK_LOWER_CASE_SYMBOL | (first_label+saved->case_ordinals[k]);
++    }
+     for(uint32_t i=0;i<function->count;i+=1)
+     {
+         uint64_t value=function->values[i];
+         if(tier0_global_kind(function->kinds[i]))
+         {
+-            if(value==0 || value>saved->symbols) return false;
+-            value=program->object_symbols[saved->objects[value-1]];
+-            if(value==0) return false;
++            const uint64_t table=value-saved->table_symbol;
++            if(table<saved->table_count) value=(uint64_t)writer->provisional_tables+first_table+table;
++            else
++            {
++                if(value==0 || value>saved->symbols) return false;
++                value=program->object_symbols[saved->objects[value-1]];
++                if(value==0) return false;
++            }
+         }
+         values[i]=value;
+     }
+diff --git a/src/buster/compiler/c_check_program_lower.c b/src/buster/compiler/c_check_program_lower.c
+index a87852d56..0db82f1d9 100644
+--- a/src/buster/compiler/c_check_program_lower.c
++++ b/src/buster/compiler/c_check_program_lower.c
+@@ -17727,7 +17727,14 @@ static uint32_t check_lower_switch_room(const CheckProgram* program, bool deferr
+     }
+     const uint64_t total = deferred ? (uint64_t)tables * (copies + 1) : (uint64_t)tables + copied / 5;
+     *labels = ((uint64_t)program->case_count + tables) * (copies + 1);
+-    return total < UINT32_MAX ? (uint32_t)total : UINT32_MAX;
++    uint64_t source_tables=0;
++    if (program->source_token_count==0 && program->input!=NULL && program->input->source_bodies!=NULL)
++        for(uint32_t b=0;b<program->body_count;b+=1)
++        {
++            const CheckSourceBody* owned=check_input_source_body(program->input->source_bodies,program->bodies[b].opening);
++            if(owned!=NULL) {source_tables+=owned->table_count;*labels+=owned->case_count;}
++        }
++    return total+source_tables < UINT32_MAX ? (uint32_t)(total+source_tables) : UINT32_MAX;
+ }
+ 
+ // The jump tables of bodies `first` to `end` (check_lower_switch_table), after those of the bodies before them, which
+@@ -17742,6 +17749,25 @@ static bool check_lower_switch_range(CheckProgramLowered* lowered, uint32_t capa
+     for (uint32_t b = first; valid && b < end; b += 1)
+     {
+         const CheckProgramBody* body = program->bodies + b;
++        const CheckSourceBody* source=program->input->source_bodies!=NULL && program->source_token_count==0 ?
++                                      check_input_source_body(program->input->source_bodies,body->opening) : NULL;
++        if(source!=NULL)
++        {
++            if(source->table_count>capacity-lowered->table_count || source->case_count>UINT32_MAX-lowered->case_symbol_count) return false;
++            for(uint32_t k=0;k<source->table_count;k+=1)
++            {
++                CheckLowerTable item=source->tables[k];
++                item.control+=body->first;
++                item.function=b;
++                item.first_label+=lowered->case_symbol_count;
++                item.entries=BUSTER_ARENA_PUSH_ARRAY(output,uint32_t,item.count);
++                if(item.entries==NULL) return false;
++                for(uint32_t e=0;e<item.count;e+=1) item.entries[e]=source->tables[k].entries[e]+lowered->case_symbol_count;
++                lowered->tables[lowered->table_count++]=item;
++            }
++            lowered->case_symbol_count+=source->case_count;
++            continue;
++        }
+         // (A target_clones copy is its body again, right after it, #2247: its switches' tables are its own.)
+         while (s != 0 && program->switches[s - 1] >= body->first)
+         {
+@@ -17772,7 +17798,7 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, CheckLowerSw
+     uint64_t labels = 0;
+     const uint32_t capacity = check_lower_switch_room(program, false, &labels);
+     bool valid = true;
+-    if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
++    if (capacity != 0 && program->stream != 0 && (program->switch_count != 0 || program->input->source_bodies != NULL))
+     {
+         lowered->tables = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, capacity);
+         CheckLowerCaseRange* cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
+@@ -20397,7 +20423,7 @@ static void check_lower_deferred_reset(const CheckLowerShared* shared)
+     }
+ }
+ 
+-static bool check_live_control_bind(const CheckSourceBody* saved,const CheckProgram* program,Tier0Function* function,Arena* output);
++static bool check_live_control_bind(const CheckSourceBody* saved,const CheckProgram* program,Tier0Function* function,uint32_t body,CheckLowerWriter* writer,Arena* output);
+ 
+ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLowerWriter* writer, const CheckLowerShared* shared, CheckLowerPart* part,
+                                                                        bool sources, Arena* output, Arena* scratch)
+@@ -20443,7 +20469,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
+         const CheckSourceBody* source=check_input_source_body(input->source_bodies,body.opening);
+         if (source!=NULL)
+         {
+-            if (!check_live_control_bind(source,program,&lowered->functions[b],output)) { check_lower_fail(writer,CHECK_PROGRAM_INVALID); break; }
++            if (!check_live_control_bind(source,program,&lowered->functions[b],b,writer,output)) { check_lower_fail(writer,CHECK_PROGRAM_INVALID); break; }
+             shared->signatures[b]=UINT32_MAX;
+             part->entries+=lowered->functions[b].count;
+             if (getenv("BUSTER_CONTROL_SOURCE_AUDIT")!=NULL)

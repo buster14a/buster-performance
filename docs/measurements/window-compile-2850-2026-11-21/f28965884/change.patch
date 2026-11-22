@@ -1,0 +1,310 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index b6258855b..378c26bb2 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -14,6 +14,7 @@ typedef struct CheckSourceControlUnit
+     uint8_t* needed;
+     uint64_t* planned;
+     Arena* native_metadata;
++    CheckInput* persistent;
+     Arena native_types;
+     struct CheckSourceTypeCache* type_cache;
+     uint32_t* local_map;
+@@ -213,6 +214,7 @@ static void check_control_source_native(CheckInputReader* reader)
+     in->source_body_output = reader->arena;
+     Arena indexes = arena_reserve(UINT64_C(1) << 34);
+     CheckSourceControlUnit unit = { .native_metadata=&indexes, .native_types=arena_reserve(UINT64_C(1)<<31) };
++    unit.persistent = in;
+     CheckSourceControlUnit* controls = NULL;
+     if (true)
+     {
+diff --git a/src/buster/compiler/c_check_data.c b/src/buster/compiler/c_check_data.c
+index a91fd515a..e9979cda3 100644
+--- a/src/buster/compiler/c_check_data.c
++++ b/src/buster/compiler/c_check_data.c
+@@ -170,7 +170,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
+             plan->alignment_log2 = (uint8_t)alignment;
+         }
+     }
+-    if (status == CHECK_DATA_OK)
++    if (status == CHECK_DATA_OK && link != NULL)
+     {
+         if (object->object == 0 || object->object >= object_count || object_symbols[object->object] == 0 || object_symbols[object->object] >= link->symbols.count)
+         {
+@@ -245,8 +245,8 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
+                 // emission placed before the static data is planned, as an assembler resolves clang's `.long .La-.Lb`.
+                 const uint32_t minuend = value->object;
+                 const uint32_t subtrahend = (uint32_t)value->integer;
+-                const SymbolId a = minuend < object_count ? object_symbols[minuend] : 0;
+-                const SymbolId b = subtrahend < object_count ? object_symbols[subtrahend] : 0;
++                const SymbolId a = link != NULL && minuend < object_count ? object_symbols[minuend] : 0;
++                const SymbolId b = link != NULL && subtrahend < object_count ? object_symbols[subtrahend] : 0;
+                 const bool placed = a != 0 && b != 0 && a < link->symbols.count && b < link->symbols.count && link->symbols.atom[a] != 0 &&
+                                     link->symbols.atom[a] == link->symbols.atom[b];
+                 if (!placed)
+@@ -762,7 +762,7 @@ static CheckDataStatus check_data_plan_header(const TypeTable* types, const Chec
+             plan->alignment_log2 = (uint8_t)alignment;
+         }
+     }
+-    if (status == CHECK_DATA_OK)
++    if (status == CHECK_DATA_OK && link != NULL)
+     {
+         if (object->object == 0 || object->object >= object_count || object_symbols[object->object] == 0 || object_symbols[object->object] >= link->symbols.count)
+         {
+@@ -822,6 +822,31 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
+         {
+             status = compatible == TYPE_ANSWER_FULL ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
+         }
++        else if (initializer->prepared != NULL)
++        {
++            const CheckPreparedInitializer* image = initializer->prepared;
++            direct = true;
++            if (initializer->object_size != plan->size || initializer->count != 0 || image->bytes == NULL) return CHECK_DATA_INVALID;
++            plan->fixups = image->address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, image->address_count) : NULL;
++            if (image->address_count != 0 && plan->fixups == NULL) return CHECK_DATA_RESOURCE;
++            uint64_t end = 0;
++            for (uint32_t i = 0; i < image->address_count; i += 1)
++            {
++                const CheckPreparedAddress* field = image->addresses + i;
++                if (field->object == 0 || field->object >= object_count || field->offset < end ||
++                    field->offset > plan->size || plan->size - field->offset < sizeof(uint64_t)) return CHECK_DATA_INVALID;
++                end = (uint64_t)field->offset + sizeof(uint64_t);
++                plan->fixups[i] = (CheckDataFixup){ .offset = field->offset, .object = field->object, .addend = field->addend };
++            }
++            plan->fixup_count = image->address_count;
++            nonzero = image->address_count != 0 || check_data_nonzero(image->bytes, plan->size);
++            if (nonzero)
++            {
++                plan->bytes = check_data_payload(bytes, scratch, plan->size);
++                if (plan->bytes == NULL) return CHECK_DATA_RESOURCE;
++                memcpy(plan->bytes, image->bytes, plan->size);
++            }
++        }
+         else if (initializer->count != 0)
+         {
+             const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
+@@ -1139,10 +1164,16 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
+             arena_pop_to(scratch, (uint64_t)(values - scratch->base) + (temporary ? plan->size : 0));
+         }
+     }
+-    if (status == CHECK_DATA_OK && !check_data_sort_fixups(plan, scratch))
++    if (status == CHECK_DATA_OK && (initializer == NULL || initializer->prepared == NULL) && !check_data_sort_fixups(plan, scratch))
+     {
+         status = CHECK_DATA_RESOURCE;
+     }
++    // A source window has checked values and object identities before translation-unit symbol selection.
++    // Its caller consumes the bytes and ordered source fixups before recycling the checked row.
++    if (link == NULL)
++    {
++        return status;
++    }
+     for (uint32_t i = 0; status == CHECK_DATA_OK && i < plan->fixup_count; i += 1)
+     {
+         CheckDataFixup* reference = &plan->fixups[i];
+diff --git a/src/buster/compiler/c_check_data_input.c b/src/buster/compiler/c_check_data_input.c
+index 3d1d910f0..33a3c907d 100644
+--- a/src/buster/compiler/c_check_data_input.c
++++ b/src/buster/compiler/c_check_data_input.c
+@@ -576,7 +576,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
+                     (plan_index == 0 || (initializers->declaration_tokens != 0 && initializers->declaration_tokens[plan_index - 1] == token));
+             // A part references an object, or a label difference two (#1447).
+             const CheckInitializer* counted = valid && plan_index != 0 ? initializers->plans + plan_index - 1 : NULL;
+-            reference_capacity += counted != NULL ? (uint64_t)counted->count << (counted->label_differences ? 1 : 0) : 0;
++            reference_capacity += counted != NULL && counted->prepared != NULL ? counted->prepared->address_count : counted != NULL ? (uint64_t)counted->count << (counted->label_differences ? 1 : 0) : 0;
+             if (!valid)
+             {
+                 result->status = CHECK_DATA_INPUT_INVALID;
+diff --git a/src/buster/compiler/c_check_initializer.c b/src/buster/compiler/c_check_initializer.c
+index 3b9cf4ad0..3ceb91f37 100644
+--- a/src/buster/compiler/c_check_initializer.c
++++ b/src/buster/compiler/c_check_initializer.c
+@@ -103,6 +103,22 @@ struct CheckInitPart
+     CheckConversion conversion;
+ };
+ 
++// A complete checked static image stores addresses by source object until the translation
++// unit selects symbols. Offsets are byte offsets in the final, nonoverlapping image.
++typedef struct CheckPreparedAddress
++{
++    uint32_t offset;
++    uint32_t object;
++    int64_t addend;
++} CheckPreparedAddress;
++
++typedef struct CheckPreparedInitializer
++{
++    const uint8_t* bytes;
++    CheckPreparedAddress* addresses;
++    uint32_t address_count;
++} CheckPreparedInitializer;
++
+ typedef struct CheckInitializer CheckInitializer;
+ struct CheckInitializer
+ {
+@@ -110,6 +126,7 @@ struct CheckInitializer
+     // Instance storage can extend a GNU flexible-array member without changing the declared type's sizeof.
+     uint64_t object_size;
+     CheckInitPart* parts;
++    const CheckPreparedInitializer* prepared;
+     uint32_t count;
+     CheckInitStatus status;
+     uint32_t failed_token;
+@@ -4018,6 +4035,17 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
+     *count = 0;
+     const uint64_t output_mark = output != 0 ? output->length : 0;
+     const uint64_t scratch_mark = scratch != 0 ? scratch->length : 0;
++    if (initializer != NULL && initializer->prepared != NULL)
++    {
++        const CheckPreparedInitializer* prepared = initializer->prepared;
++        if (output == NULL || scratch == NULL || output == scratch || initializer->status != CHECK_INIT_OK) return CHECK_INIT_INVALID;
++        uint32_t* result = prepared->address_count == 0 ? NULL : BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, prepared->address_count);
++        if (prepared->address_count != 0 && result == NULL) return CHECK_INIT_RESOURCE;
++        for (uint32_t i = 0; i < prepared->address_count; i += 1) result[i] = prepared->addresses[i].object;
++        *objects = result;
++        *count = prepared->address_count;
++        return CHECK_INIT_OK;
++    }
+     uint8_t* selected = 0;
+     uint32_t used = 0;
+     CheckInitStatus status = output != 0 && scratch != 0 && output != scratch ?
+diff --git a/src/buster/compiler/c_check_initializer_input.c b/src/buster/compiler/c_check_initializer_input.c
+index ba34b4b86..90db926ba 100644
+--- a/src/buster/compiler/c_check_initializer_input.c
++++ b/src/buster/compiler/c_check_initializer_input.c
+@@ -112,6 +112,12 @@ static bool check_init_objects_open(CheckInitObjects* objects, const CheckInput*
+ static bool check_init_object_bytes(const TypeTable* types, const CheckInitializer* plan, uint8_t* bytes, uint64_t size)
+ {
+     bool valid = size <= UINT64_MAX / 8 && size == plan->object_size && plan->status == CHECK_INIT_OK;
++    if (valid && plan->prepared != NULL)
++    {
++        if (plan->prepared->address_count != 0) return false;
++        memcpy(bytes, plan->prepared->bytes, size);
++        return true;
++    }
+     if (valid)
+     {
+         memset(bytes, 0, size);
+diff --git a/src/buster/compiler/c_check_live_control_native.c b/src/buster/compiler/c_check_live_control_native.c
+index 53a953dc7..4463afb9e 100644
+--- a/src/buster/compiler/c_check_live_control_native.c
++++ b/src/buster/compiler/c_check_live_control_native.c
+@@ -52,6 +52,76 @@ static void check_live_control_rows(const char* arm,const CheckProgram* p,uint32
+     fprintf(stderr,"\n");
+     free(records); free(offsets); free(ends); free(bytes);
+ }
++// Freeze function-scope static objects before their checked nodes retire. The ordinary
++// unit data writer later resolves each source object to its final symbol and section.
++static bool check_live_static_objects(CheckSourceControlUnit* unit, const CheckProgram* p,
++                                      Arena* output, Arena* scratch, CheckInputLiteralTable** first)
++{
++    CheckInputLiteralTable** tail = first;
++    const CheckInitializers* plans = p->initializers;
++    const CheckInput* in = p->input;
++    for (uint32_t i = 0; plans != NULL && i < plans->count; i += 1)
++    {
++        const uint32_t token = plans->declaration_tokens[i];
++        if (!check_input_bit(in->declaration_bits, token, BUSTER_CHECK_BITS_STATIC)) continue;
++        const CheckInputLiteralTable* existing = unit->persistent->literal_tables;
++        while (existing != NULL && existing->declaration < token) existing = existing->next;
++        if (existing != NULL && existing->declaration == token) continue;
++        const CheckInitializer* init = &plans->plans[i];
++        if (init->status != CHECK_INIT_OK || init->label_differences) return false;
++        const uint64_t temporary = scratch->length;
++        CheckDataObject object = { .object = in->objects[token], .type = in->declared_types[token], .token = token,
++                                   .initializer = BUSTER_CHECK_NONE, .initializer_plan = init };
++        CheckDataPlan data;
++        // The canonical planner owns payload bytes in output. Its ordered address records
++        // live in scratch until copied into the retained, symbol-independent image.
++        if (check_data_plan_object(p->types, p->stream, &object, NULL, p->object_count, NULL,
++                                   output, scratch, NULL, &data) != CHECK_DATA_OK) return false;
++        CheckInputLiteralTable* row = BUSTER_ARENA_PUSH_ARRAY(output, CheckInputLiteralTable, 1);
++        CheckPreparedInitializer* image = BUSTER_ARENA_PUSH_ARRAY(output, CheckPreparedInitializer, 1);
++        CheckPreparedAddress* fields = data.fixup_count == 0 ? NULL : BUSTER_ARENA_PUSH_ARRAY(output, CheckPreparedAddress, data.fixup_count);
++        if (row == NULL || image == NULL || (data.fixup_count != 0 && fields == NULL)) return false;
++        // check_data_payload can place a temporary image in scratch when the object arena is too small.
++        uint8_t* payload = data.bytes;
++        if (payload == NULL || (uintptr_t)payload - (uintptr_t)output->base >= output->length)
++        {
++            payload = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, data.size != 0 ? data.size : 1);
++            if (payload == NULL) return false;
++            if (data.bytes != NULL) memcpy(payload, data.bytes, data.size);
++            else memset(payload, 0, data.size);
++        }
++        for (uint32_t j = 0; j < data.fixup_count; j += 1)
++        {
++            const CheckDataFixup* fix = data.fixups + j;
++            fields[j] = (CheckPreparedAddress){ .offset = fix->offset, .object = fix->object, .addend = fix->addend };
++        }
++        *image = (CheckPreparedInitializer){ .bytes = payload, .addresses = fields, .address_count = data.fixup_count };
++        *row = (CheckInputLiteralTable){ .declaration = token, .plan = { .type = init->type,
++                                         .object_size = data.size, .prepared = image, .failed_token = BUSTER_CHECK_NONE,
++                                         .warning_token = BUSTER_CHECK_NONE } };
++        *tail = row;
++        tail = &row->next;
++        arena_pop_to(scratch, temporary);
++    }
++    return true;
++}
++
++static void check_live_static_publish(CheckInput* destination, CheckInputLiteralTable* pending)
++{
++    CheckInputLiteralTable** link = &destination->literal_tables;
++    while (pending != NULL)
++    {
++        CheckInputLiteralTable* next = pending->next;
++        while (*link != NULL && (*link)->declaration < pending->declaration) link = &(*link)->next;
++        pending->next = *link;
++        *link = pending;
++        if (pending->next == NULL) destination->literal_tables_last = pending;
++        destination->literal_table_count += 1;
++        link = &pending->next;
++        pending = next;
++    }
++}
++
+ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram* p,CheckInputReader* reader,uint32_t opening,uint32_t close,CheckControl* entries,
+                                       uint32_t entry_count,uint32_t count,uint32_t* refs,uint32_t ref_count,Arena* scratch)
+ {
+@@ -62,9 +132,6 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+     if ((step && (seen-1) % (uint32_t)strtoul(step,NULL,10)!=0) || (maximum && seen>(uint32_t)strtoul(maximum,NULL,10))) return;
+     const CheckInput* in=p->input;
+     p->target=reader->pp->options.target;
+-    if (in->source_bodies!=NULL && p->initializers!=NULL)
+-        for (uint32_t i=0;i<p->initializers->count;i+=1)
+-            if (check_input_bit(in->declaration_bits,p->initializers->declaration_tokens[i],BUSTER_CHECK_BITS_STATIC)) {check_source_control_decline(in,close,"static-initializer",i);return;}
+     const uint32_t declaration=check_sparse_get(in->body_declarations,opening);
+     if(declaration>=in->token_count) return;
+     const CheckInputAttributes* attributes=check_input_attributes_at(in,declaration);
+@@ -166,6 +233,13 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+                             (f->asm_body_count!=0)<<7 | (f->hidden_copy!=0)<<8;
+             check_source_control_decline(in,close,"auxiliary-records",detail);arena_pop_to(output,mark); return;
+         }
++        CheckInputLiteralTable* pending = NULL;
++        if (!check_live_static_objects(unit, p, output, scratch, &pending))
++        {
++            check_source_control_decline(in, close, "static-data-image", 0);
++            arena_pop_to(output, mark);
++            return;
++        }
+         uint32_t* objects=BUSTER_ARENA_PUSH_ARRAY(output,uint32_t,p->symbol_count);
+         if (objects==NULL) abort();
+         memcpy(objects,p->symbol_objects,p->symbol_count*sizeof(*objects));
+@@ -175,12 +249,16 @@ static void check_live_control_native(CheckSourceControlUnit* unit,CheckProgram*
+         if (!check_input_source_add(in->source_bodies,(CheckSourceBody){ .function=f,.objects=objects,.symbols=p->symbol_count,
+                                         .controls=controls,.control_count=count,.entry_count=entry_count,.references=ref_count,.opening=opening,.closing=close },output)) abort();
+         check_live_control_warnings(unit,p,reader,opening,close,scratch);
++        check_live_static_publish(unit->persistent, pending);
+         if (p->initializers!=NULL)
+             for (uint32_t i=0;i<p->initializers->count;i+=1)
+             {
+                 const uint32_t t=p->initializers->declaration_tokens[i];
+-                check_sparse_set(in->sparse_pool,in->initializer_begins,t,BUSTER_CHECK_NONE);
+-                check_sparse_set(in->sparse_pool,in->initializer_ends,t,BUSTER_CHECK_NONE);
++                if (!check_input_bit(in->declaration_bits, t, BUSTER_CHECK_BITS_STATIC))
++                {
++                    check_sparse_set(in->sparse_pool,in->initializer_begins,t,BUSTER_CHECK_NONE);
++                    check_sparse_set(in->sparse_pool,in->initializer_ends,t,BUSTER_CHECK_NONE);
++                }
+                 check_sparse_set(in->sparse_pool,in->initializer_nodes,t,BUSTER_CHECK_NONE);
+             }
+         return;

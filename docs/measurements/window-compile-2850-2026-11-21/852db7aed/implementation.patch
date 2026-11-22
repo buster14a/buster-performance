@@ -1,0 +1,366 @@
+diff --git a/src/buster/compiler/c_check_body_source.c b/src/buster/compiler/c_check_body_source.c
+index a6c45a314..97ca4820e 100644
+--- a/src/buster/compiler/c_check_body_source.c
++++ b/src/buster/compiler/c_check_body_source.c
+@@ -4,7 +4,7 @@
+ #include "c_check_body_memory.c"
+ 
+ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_t stop, uint32_t close,
+-                                  uint32_t extra, bool discard, Arena* graph, Arena* checked, Arena* scratch, uint32_t* made)
++                                  uint32_t extra, bool discard, Arena* graph, Arena* checked, Arena* scratch, uint32_t* made, CheckBodyActionRows* rows)
+ {
+     CheckInputReader reader = *top;
+     CheckInput input = *top->output;
+@@ -76,11 +76,19 @@ static bool check_body_source_one(CheckInputReader* top, uint32_t begin, uint32_
+     }
+     check_graph_record_finish(&input.graph);
+     CheckStream stream;
+-    if (!check_graph_run(top->types, &input.graph, checked, scratch, &(CheckOptions){ 0 }, &stream))
++    if (!check_graph_run(top->types, &input.graph, checked, scratch, &(CheckOptions){ .body_rows = rows }, &stream))
+     {
+         fprintf(stderr,"body-source-decline\tclose=%u\tstatus=%u\tnode=%u\n",close,stream.status,stream.failed_node);
+         return false;
+     }
++    if (rows != NULL)
++    {
++        rows->bodies += 1;
++        rows->recorded += input.graph.recorded_ready && input.graph.recorded_nodes == input.graph.count;
++        rows->nodes += input.graph.count;
++        rows->output_bytes += stream.statistics.output_bytes;
++        rows->scratch_bytes += stream.statistics.scratch_bytes;
++    }
+     if (!discard) fprintf(stderr,"body-source-row\t%u\t%u\t%016llx\n", close, input.graph.count,
+             (unsigned long long)check_body_fingerprint(top->types, &input.graph, &stream, 0, input.graph.count, begin, close));
+     *made = input.graph.count;
+@@ -99,6 +107,11 @@ static void check_body_source_run(CheckInputReader* reader)
+     bool safe = true, active = false;
+     uint32_t extra = 0;
+     const bool discard = getenv("BUSTER_BODY_DISCARD_RESULT") != NULL;
++    CheckBodyActionRows counts = {
++        .dispatch = getenv("BUSTER_CHECK_BODY_ACTION_ROWS") != NULL,
++        .audit = getenv("BUSTER_CHECK_BODY_ACTION_AUDIT") != NULL,
++    };
++    CheckBodyActionRows* rows = counts.dispatch || counts.audit ? &counts : NULL;
+     const bool include_declarations = getenv("BUSTER_CHECK_SOURCE_DECLARATIONS") != NULL;
+     const bool explore = getenv("BUSTER_CHECK_BODY_ADMIT_ALL") != NULL;
+     for (uint32_t i = 0; i < count; i += 1)
+@@ -119,7 +132,7 @@ static void check_body_source_run(CheckInputReader* reader)
+                     admitted += 1;
+                     if (!active && !discard)
+                         fprintf(stderr,"body-source-row\t%u\t0\t%016llx\n",t,(unsigned long long)UINT64_C(14695981039346656037));
+-                    if (!active || check_body_source_one(reader, begin, i + 1, t, extra, discard, &graph, &checked, &scratch, &made))
++                    if (!active || check_body_source_one(reader, begin, i + 1, t, extra, discard, &graph, &checked, &scratch, &made, rows))
+                     {
+                         produced += 1; nodes += made; biggest = biggest > made ? biggest : made;
+                     }
+@@ -131,6 +144,19 @@ static void check_body_source_run(CheckInputReader* reader)
+             safe = true; active = false; extra = 0;
+         }
+     }
++    if (rows != NULL)
++        fprintf(stderr,"body-action-rows\tbodies=%llu\trecorded=%llu\tnodes=%llu\tinteger-ops=%llu\tready=%llu\ttaken=%llu\tearly-leaves=%llu\tfallback=%llu\tblocks=%llu\toutput-bytes=%llu\tscratch-bytes=%llu\n",
++                (unsigned long long)rows->bodies, (unsigned long long)rows->recorded, (unsigned long long)rows->nodes,
++                (unsigned long long)rows->integer_ops,(unsigned long long)rows->ready,(unsigned long long)rows->taken,
++                (unsigned long long)rows->leaves,(unsigned long long)rows->fallback,(unsigned long long)rows->blocks,
++                (unsigned long long)rows->output_bytes,(unsigned long long)rows->scratch_bytes);
++    if (counts.audit)
++        fprintf(stderr, "body-check-cost\tvalidation-and-workspace=%llu\tcontext-scan=%llu\tstream-setup=%llu\taction-dispatch=%llu\tcompletion=%llu\tfresh=%llu\tconstant-contexts=%llu\tregion-runs=%llu\ttransition-runs=%llu\n",
++                (unsigned long long)counts.validate_ticks,(unsigned long long)counts.context_ticks,(unsigned long long)counts.stream_ticks,
++                (unsigned long long)counts.action_ticks,(unsigned long long)counts.tail_ticks,(unsigned long long)counts.fresh,(unsigned long long)counts.contexts,
++                (unsigned long long)counts.region_runs,(unsigned long long)counts.transition_runs);
++    for (uint32_t op = 0; counts.audit && op < CHECK_OP_COUNT; op += 1)
++        if (counts.ops[op] != 0) fprintf(stderr, "body-action-op\t%u\t%llu\n", op,(unsigned long long)counts.ops[op]);
+     fprintf(stderr,"body-source-summary\tunit-graph-capacity=%u\tbodies=%u\tadmitted=%u\tproduced=%u\tdeclined=%u\tnodes=%u\tlargest-checked=%u\tunit-graph-nodes=%u\tgraph-peak=%llu\tstream-peak=%llu\tscratch-peak=%llu\n",
+             reader->output->graph.capacity,bodies,admitted,produced,skipped,nodes,biggest,reader->output->graph.count,(unsigned long long)graph.peak,(unsigned long long)checked.peak,(unsigned long long)scratch.peak);
+     fprintf(stderr,"body-source-pages\tgraph=%llu\tstream=%llu\tscratch=%llu\n",
+diff --git a/src/buster/compiler/c_checker.c b/src/buster/compiler/c_checker.c
+index e542c5b22..106bd0852 100644
+--- a/src/buster/compiler/c_checker.c
++++ b/src/buster/compiler/c_checker.c
+@@ -714,6 +714,36 @@ struct CheckStream
+     CheckStatistics statistics;
+ };
+ 
++// Serialize the optional stage observer on its leased core. Unobserved checker runs take no timestamps.
++static inline uint64_t check_body_action_stamp(void)
++{
++    _mm_lfence();
++    const uint64_t ticks = __rdtsc();
++    _mm_lfence();
++    return ticks;
++}
++
++typedef struct CheckBodyActionRows CheckBodyActionRows;
++struct CheckBodyActionRows
++{
++    bool dispatch;
++    bool audit;
++    uint64_t validate_ticks, context_ticks, stream_ticks, action_ticks, tail_ticks;
++    uint64_t fresh, contexts, region_runs, transition_runs;
++    uint64_t bodies;
++    uint64_t recorded;
++    uint64_t nodes;
++    uint64_t integer_ops;
++    uint64_t ops[CHECK_OP_COUNT];
++    uint64_t ready;
++    uint64_t taken;
++    uint64_t leaves;
++    uint64_t fallback;
++    uint64_t blocks;
++    uint64_t output_bytes;
++    uint64_t scratch_bytes;
++};
++
+ typedef struct CheckOptions CheckOptions;
+ struct CheckOptions
+ {
+@@ -744,6 +774,8 @@ struct CheckOptions
+     // check_graph_query_runtime replays every node even where no constant_p query's result changes (#1628): the oracle a
+     // test compares the replay's skip with.
+     bool replay_queries;
++    // An optional source-local producer for ordinary integer operations in validated graph blocks.
++    CheckBodyActionRows* body_rows;
+ };
+ 
+ _Static_assert(sizeof(CheckValue) == 96 && __builtin_offsetof(CheckValue, category) == 4 && __builtin_offsetof(CheckValue, flags) == 8 && __builtin_offsetof(CheckValue, constant_kind) == 12 &&
+@@ -3323,6 +3355,120 @@ static inline __attribute__((always_inline)) void check_graph_scalar_node(TypeTa
+     }
+ }
+ 
++// An ordinary nonconstant integer operand, or a checked integer constant. The presence of an unknown operand
++// prevents a fold. Every other flag, source-time load, fault, qualifier or arithmetic type takes its ordinary action.
++static bool check_body_integer_operand(const CheckStream* stream, uint32_t node, bool* known, uint32_t* conversion)
++{
++    const uint32_t flags = stream->value_flags[node];
++    const uint32_t row = stream->payload_rows[node];
++    const uint32_t category = stream->value_categories[node];
++    const uint32_t constant = stream->value_constants[node];
++    *known = category == CHECK_RVALUE && constant == CHECK_CONSTANT_INTEGER;
++    *conversion = category == CHECK_LVALUE ? BUSTER_CHECK_CONVERT_LVALUE : 0;
++    const uint32_t ordinary = BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_MODIFICATION;
++    if (*known)
++    {
++        return (flags & ~(BUSTER_CHECK_ICE | BUSTER_CHECK_LITERAL_ZERO)) == 0 &&
++               (row == 0 || stream->payloads[row - 1].fault == CHECK_FAULT_NONE);
++    }
++    return (row == 0 || stream->payloads[row - 1].fault == CHECK_FAULT_NONE) &&
++                        ((category == CHECK_RVALUE && row == 0 && constant == CHECK_CONSTANT_NONE && (flags & ~ordinary) == 0) ||
++                        (category == CHECK_LVALUE && (constant == CHECK_CONSTANT_ADDRESS || constant == CHECK_CONSTANT_NONE) &&
++                         (flags & ~(ordinary | BUSTER_CHECK_NONNULL_ADDRESS | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME | BUSTER_CHECK_STATIC_OBJECT)) == 0));
++}
++
++// Classify sixteen source operators together and execute each proof in graph order.
++// Dependent expressions can consume the result from the immediately preceding lane.
++// The builtin type tables are the same integer promotion and pair tables used by the
++// type kernels. The ordinary check retains constant folding, faults and other types.
++static bool check_body_transfer(TypeTable* types, const CheckGraph* graph, CheckStream* stream,
++                                uint32_t node, CheckBodyActionRows* stats)
++{
++    const CheckOp op = graph->ops[node];
++    const uint32_t a = graph->operand0[node];
++    const bool unary = op <= CHECK_OP_BIT_NOT || op == CHECK_OP_CONDITION;
++    const uint32_t b = unary ? a : graph->operand1[node];
++    if (a >= node || b >= node || (stream->constant_evaluated != NULL && stream->constant_evaluated[node]) ||
++        ((graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default) & BUSTER_CHECK_FP_ENV_ACCESS) != 0)
++        return false;
++
++    const bool logical = op == CHECK_OP_NOT || op == CHECK_OP_CONDITION || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
++    const TypeId left = stream->value_types[a];
++    const TypeId right = stream->value_types[b];
++    if (type_qualifiers(left | right) != 0) return false;
++    const bool integral = left >= BUSTER_TYPE_BOOL && left <= BUSTER_TYPE_UINT128 &&
++                          right >= BUSTER_TYPE_BOOL && right <= BUSTER_TYPE_UINT128;
++    if (!integral && !(unary && logical && type_is_valid(types, left) && type_kind(types, left) == BUSTER_TYPE_KIND_POINTER))
++        return false;
++    bool ak = false, bk = false;
++    uint32_t af = 0, bf = 0;
++    if (!check_body_integer_operand(stream, a, &ak, &af) || (!unary && !check_body_integer_operand(stream, b, &bk, &bf))) return false;
++    stats->ready += 1;
++    if ((ak && (unary || bk)) || (logical && (ak || bk)) ||
++        (bk && op >= CHECK_OP_DIVIDE && op <= CHECK_OP_SHIFT_RIGHT)) return false;
++
++    TypeId lt = left, rt = right;
++    if (!logical)
++    {
++        lt = BUSTER_TYPE_BUILTIN(type_promotion_codes[type_index(left)]);
++        rt = BUSTER_TYPE_BUILTIN(type_promotion_codes[type_index(right)]);
++        if (lt != left) af |= BUSTER_CHECK_CONVERT_PROMOTION;
++        if (!unary && rt != right) bf |= BUSTER_CHECK_CONVERT_PROMOTION;
++        if (!unary && op != CHECK_OP_SHIFT_LEFT && op != CHECK_OP_SHIFT_RIGHT)
++        {
++            const uint32_t index = ((type_index(lt) & 7u) << 3) | (type_index(rt) & 7u);
++            const TypeId common = BUSTER_TYPE_BUILTIN(type_integer_codes[index]);
++            if (lt != common) af |= BUSTER_CHECK_CONVERT_ARITHMETIC;
++            if (rt != common) bf |= BUSTER_CHECK_CONVERT_ARITHMETIC;
++            lt = common;
++            rt = common;
++        }
++    }
++    stream->conversions[node] = (CheckNodeConversions){ .operands = {
++        { .type = lt, .flags = af }, { .type = unary ? 0 : rt, .flags = bf } } };
++    stream->value_types[node] = logical || (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) ? BUSTER_TYPE_INT : lt;
++    stream->value_flags[node] = (stream->value_flags[a] | stream->value_flags[b]) & BUSTER_CHECK_INHERITED;
++    stream->value_objects[node] = 0;
++    stream->value_constants[node] = CHECK_CONSTANT_NONE;
++    stream->value_categories[node] = CHECK_RVALUE;
++    stream->diagnostics[node] = CHECK_DIAG_NONE;
++    stream->warnings[node] = 0;
++    stream->member_offsets[node] = 0;
++    stream->statistics.scalar_nodes += 1;
++    return true;
++}
++
++static void check_body_action_blocks(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckValue* arguments,
++                                     Arena* scratch, CheckBodyActionRows* stats)
++{
++    for (uint32_t first = 0; first < graph->count; first += 16)
++    {
++        const uint32_t count = graph->count - first < 16 ? graph->count - first : 16;
++        const __mmask16 live = (__mmask16)((1u << count) - 1);
++        const __m512i op = _mm512_maskz_loadu_epi32(live, graph->ops + first);
++        const __mmask16 operators = _mm512_mask_cmpge_epi32_mask(live, op, _mm512_set1_epi32(CHECK_OP_POSITIVE)) &
++                                    _mm512_cmple_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR));
++        const __mmask16 candidates = operators | _mm512_mask_cmpeq_epi32_mask(live, op, _mm512_set1_epi32(CHECK_OP_CONDITION));
++        stats->integer_ops += (uint32_t)__builtin_popcount(candidates);
++        stats->blocks += 1;
++        for (uint32_t lane = 0; lane < count; lane += 1)
++        {
++            const uint32_t node = first + lane;
++            if ((candidates & (1u << lane)) != 0 && check_body_transfer(types, graph, stream, node, stats))
++            {
++                stats->taken += 1;
++                if (stats->audit) stats->ops[graph->ops[node]] += 1;
++            }
++            else
++            {
++                if (check_graph_is_leaf(graph, node)) check_graph_leaf(types, graph, stream, node);
++                else check_graph_scalar_node(types, graph, stream, node, arguments, scratch);
++                stats->fallback += 1;
++            }
++        }
++    }
++}
++
+ // Count/place/fill a stable level order inside one mutation-free postorder region (CheckOptions.level_order: the
+ // default is check_graph_region_postorder's batches, which the benchmark measured faster). Dependencies before begin
+ // are already complete. The region's leaves complete first, in node order (check_graph_leaf), and `marks` keeps them
+@@ -4092,6 +4238,8 @@ static void check_graph_constant_contexts(const CheckGraph* graph, uint8_t* mark
+ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* output, Arena* scratch, const CheckOptions* options, CheckStream* stream)
+ {
+     const uint64_t output_start = output->length;
++    const bool body_audit = options->body_rows != NULL && options->body_rows->audit;
++    uint64_t audit_clock = body_audit ? check_body_action_stamp() : 0;
+     const uint64_t scratch_start = scratch->length;
+     *stream = (CheckStream){
+         .failed_node = BUSTER_CHECK_NONE,
+@@ -4134,6 +4282,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         }
+         stream->status = result ? CHECK_STATUS_OK : CHECK_STATUS_INVALID_GRAPH;
+     }
++    if (body_audit)
++    {
++        const uint64_t now = check_body_action_stamp();
++        options->body_rows->validate_ticks += now - audit_clock;
++        audit_clock = now;
++    }
+     const uint32_t maximum_arguments = validation.maximum_arguments;
+     const uint32_t maximum_effects = validation.maximum_effects;
+     const uint32_t* maximum_builtins = validation.builtins;
+@@ -4144,6 +4298,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+     {
+         constant_contexts = (graph->contexts[node] & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT | BUSTER_CHECK_CONTEXT_STATIC | BUSTER_CHECK_CONTEXT_VALUE)) != 0;
+     }
++    if (body_audit)
++    {
++        const uint64_t now = check_body_action_stamp();
++        options->body_rows->context_ticks += now - audit_clock;
++        audit_clock = now;
++    }
+     if (result && count != 0)
+     {
+         // Room for a payload row per node, of which the run writes the first few: only those take memory. In a fresh output,
+@@ -4222,6 +4382,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         {
+             memset(stream->argument_conversions, 0, (size_t)graph->argument_count * sizeof(*stream->argument_conversions));
+         }
++    if (body_audit)
++    {
++        const uint64_t now = check_body_action_stamp();
++        options->body_rows->stream_ticks += now - audit_clock;
++        audit_clock = now;
++    }
+         // The memoized transitions (#1050, c_check_transitions.c) where the options ask for them, unless overload sets make
+         // operands contextual, a column its keys read is absent (as check_graph_validate's blocks need theirs), or the
+         // scratch arena has no room for the table. Otherwise, in node order: the leaves without their actions and the other
+@@ -4241,6 +4407,23 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         stream->zero_columns = zero_output;
+         uint32_t node = transitions ? count : 0;
+         const bool regions = options->regions || options->level_order;
++        if (options->body_rows != NULL && options->body_rows->dispatch && !regions && !transitions && graph->overload_candidate_count == 0 &&
++            graph->dense_leaves == NULL && graph->leaf_records != NULL && graph->operand0 != NULL && graph->operand1 != NULL)
++        {
++            check_body_action_blocks(types, graph, stream, arguments, scratch, options->body_rows);
++            node = count;
++        }
++        else if (options->body_rows != NULL)
++        {
++            options->body_rows->fallback += count;
++        }
++        if (body_audit)
++        {
++            options->body_rows->fresh += zero_output;
++            options->body_rows->contexts += constant_contexts;
++            options->body_rows->region_runs += regions;
++            options->body_rows->transition_runs += transitions;
++        }
+         while (node < count)
+         {
+             if ((!regions || pure[node] == 0) && check_graph_is_leaf(graph, node))
+@@ -4267,6 +4450,12 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+                 }
+             }
+         }
++    if (body_audit)
++    {
++        const uint64_t now = check_body_action_stamp();
++        options->body_rows->action_ticks += now - audit_clock;
++        audit_clock = now;
++    }
+         stream->zero_columns = false;
+         for (uint32_t pass = 0; result && pass < 2; pass += 1)
+         {
+@@ -4313,6 +4502,7 @@ static bool check_graph_run(TypeTable* types, const CheckGraph* graph, Arena* ou
+         };
+     }
+     arena_pop_to(scratch, scratch_start);
++    if (body_audit) options->body_rows->tail_ticks += check_body_action_stamp() - audit_clock;
+     return result;
+ }
+ #endif
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 1433e7355..afd063e54 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12894,7 +12894,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+             }
+             else if (input_valid || input.diagnostic_graph)
+             {
++                CheckBodyActionRows arithmetic = { .dispatch = getenv("BUSTER_CHECK_ORDINARY_ACTION_ROWS") != NULL };
+                 const CheckOptions check_options = {
++                    .body_rows = arithmetic.dispatch ? &arithmetic : NULL,
+                     .verify = verify,
+                     .transitions = command->check_transitions,
+                     .verify_transitions = verify,
+@@ -12904,6 +12906,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                 };
+                 CheckStream stream;
+                 ready = check_graph_run(&types, &input.graph, output_arena, scratch, &check_options, &stream);
++                if (arithmetic.dispatch && getenv("BUSTER_CHECK_ORDINARY_ACTION_RECEIPT") != NULL)
++                {
++                    fprintf(stderr, "ordinary-action-rows\tnodes=%u\ttested=%llu\tready=%llu\ttaken=%llu\tfallback=%llu\n",
++                            input.graph.count, (unsigned long long)arithmetic.integer_ops, (unsigned long long)arithmetic.ready,
++                            (unsigned long long)arithmetic.taken, (unsigned long long)arithmetic.fallback);
++                }
+                 if (stage_clock != NULL)
+                 {
+                     stage_clock->transition_hits += stream.statistics.transition_hits;

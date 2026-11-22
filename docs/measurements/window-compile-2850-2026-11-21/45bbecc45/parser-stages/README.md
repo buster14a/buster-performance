@@ -1,0 +1,5 @@
+# Fresh SQLite parser-stage timing
+
+Seven independent rounds ran four instrumented ordinary SQLite compilations apiece on Ryzen 7 9700X CPU 2. The starting compiler alternated between rounds, with the order reversed at each round’s midpoint. Every process produced the same complete ELF object. The [per-process times](samples.tsv), [paired stage medians](summary.tsv), [complete stage reports](reports.tar.xz), [object manifest](objects.tsv) and [command](command.sh) record the comparison. The parent directory reports uninstrumented elapsed time separately.
+
+This exploratory stage screen held the hardware lock across the four instrumented invocations in each round. The independent PMU and wall series released the lock after each benchmark invocation.
