@@ -1203,3 +1203,27 @@ compile at the piece's `f9f39dbd9` against the branch it stands on, seven paired
 `alone-split.sh` as the scan's): 274.6 ticks a position on `sqlite3.c` (its reading 14.73 ms, the machine's first run
 26.44) where `90c42e997` read 272.9 (14.24 and 26.68), and 220.3 on Lua where it read 219.2. The keeping is in the
 driver's second pass, which keeps the results and is not timed.
+
+## The return flow's silence, proved from the controls (`silence-bodies/flow-default/`)
+
+The token test above (void, or `main`, or ending in a return with a value) held for 63% of the whole bodies' tokens.
+The return flow itself (`check_program_return_flow`) reads only the body's controls, a branch's truth where it is known,
+and whether an expression never returns: it warns where the body's END is reached. So its silence is proved from the
+controls a producer has to make anyway: the function is `main`; or it has no result and is not `noreturn`; or END is
+not reached from the first control with every branch taken both ways, which is every edge the program's walk can take
+and more. On the branch `claude/2850-bodies-before`, after `c08fcf7b0`, the controls' twin from the tokens proves it
+so for each body it attempts, and the program's own verdict of the body (`CheckProgramBody.return_warning`, its
+return flow run in the shadow's pipeline for this) is read beside it. `measure-node-machine --shadow --front-alone
+--bodies --passes 0`, the default warnings, Develop builds on this session's machine (counts):
+
+| | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| bodies the twin attempts | 1,791 | 572 | 205 | 1,308 |
+| the return flow's silence proved | 1,790 | 557 | 205 | 1,301 |
+| … of the attempted bodies' tokens | 99.9% | 98.8% | 100% | 99.9% |
+| bodies the program's return flow warns of | 0 | 0 | 0 | 0 |
+| … of them proved silent | 0 | 0 | 0 | 0 |
+
+So the first row of the inventory costs a producer nearly nothing, where the token test cost a third. The corpora have
+no body the return flow warns of, so they say nothing of the proof's soundness; the fixture has one (a body that falls
+off its end), which the proof leaves unproved and the test asserts.
