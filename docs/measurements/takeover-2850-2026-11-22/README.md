@@ -609,3 +609,22 @@ CPU 2, one lane; paired medians). Every run's objects and diagnostics are one se
 The kernel's cycles do not move (within a round's noise on three of the four; musl's fall 2.9%). So the build is worth
 3.3 ms of the frozen compile and 6% to 10% of the other three, and no pull request's CI builds it: nothing would have
 said it broke. Every other pair in this record is of ordinary Release builds, and stays so.
+
+### A profile fitted to the benchmark (`pgo-168c45a88/fitted/`, `scripts/job-pgo3.sh`, `scripts/train-sqlite.sh`)
+
+The same sources with `BUSTER_PGO_TRAIN` naming a script that compiles the frozen `sqlite3.c` once, as the timed
+compile does, in place of the default training. This profile is fitted to the benchmark: it is the bound of what a
+profile gives the timed compile, and what it costs the other three, not a lever. Seven rounds each, paired medians;
+every run's objects and diagnostics are the ordinary build's:
+
+| wall ms | ordinary | fitted profile | paired | | default training, from above |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 111.312 | 106.174 | -5.337 | -4.8% | -3.293, -2.9% |
+| `main.c` | 601.084 | 584.532 | -16.005 | -2.7% | -36.897, -6.1% |
+| Lua | 64.155 | 59.959 | -4.357 | -6.8% | -4.262, -6.6% |
+| musl | 668.769 | 615.514 | -53.895 | -8.1% | -64.973, -9.7% |
+
+Fitted against default training on `sqlite3.c`, paired: -2.056 ms (-3.054 to -1.664, seven of seven), 44.988 M fewer
+instructions. So a profile is worth 3.3 ms of the frozen compile as the build trains it today and 5.3 at most; the
+fitted one gives up 21 ms of `main.c` and 11 of musl for its 2. One round of the first pair read +8.9 ms (its range's
+upper end); the cycles' range has no such reading.
