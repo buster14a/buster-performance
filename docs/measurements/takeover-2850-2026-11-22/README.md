@@ -859,3 +859,7 @@ under the lock; medians of 7 runs, musl's of 3; ms at 3,792.9 MHz, and ticks a b
 The tests are half the machine's run on each corpus, and a third of the piece whole (89 of `sqlite3.c`'s 270 ticks a
 position; the front is 37, the graph's writing 32, T 41). So the first cheaper form to bring in is the tests': in the
 machine's own form they read half the census's in their own piece, and on the window a fifth.
+
+The same branch (`f5073d2dd`) counts what the walk's marks are read against: `sqlite3.c`'s bodies hold 3,642 tokens the
+walk's class actions left to its visit, and none of the 50,323 roots the machine took has one among its expression's
+tokens (the fixture's bodies hold 7, which it asserts).
