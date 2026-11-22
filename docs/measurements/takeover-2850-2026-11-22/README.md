@@ -838,3 +838,22 @@ piece's head, the ordinary compile, seven paired rounds a workload, the objects 
 **Its fixture's faults** (`machine-alone/faults/`, `scripts/alone-faults.py`): fifteen single changes to the piece
 and to the two functions it leans on, each built and run against the fixture at `eda9d7b51` (its fixture then had 17
 of the head's 18 bodies): each fails it.
+
+### The machine's run by sweep (`machine-alone/9700x-split/`, branch `claude/2850-alone-split` at `2aeb81306`)
+
+`measure-node-machine --shadow --front-alone-split`: the same run with a clock's read before each sweep and after the
+last (five a root; the run's whole reads the same with them, 100.8 M ticks on `sqlite3.c`). The 9700X, CPU 2, Release,
+under the lock; medians of 7 runs, musl's of 3; ms at 3,792.9 MHz, and ticks a body's postorder position:
+
+| | `sqlite3.c` | | Lua | | musl | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| T | 6.20 | 41.3 | 2.04 | 38.1 | 9.79 | 26.1 |
+| the census's tests | 13.37 | 89.2 | 3.65 | 68.1 | 15.44 | 41.1 |
+| C | 2.90 | 19.3 | 0.78 | 14.5 | 3.69 | 9.8 |
+| X | 2.44 | 16.3 | 0.59 | 11.0 | 2.90 | 7.7 |
+| the rest of the run (its loop, the roots' ranges, the settling) | 1.67 | 11.2 | 0.40 | 7.5 | 2.04 | 5.4 |
+| the machine's first run | 26.56 | 177.3 | 7.48 | 139.9 | 34.01 | 90.6 |
+
+The tests are half the machine's run on each corpus, and a third of the piece whole (89 of `sqlite3.c`'s 270 ticks a
+position; the front is 37, the graph's writing 32, T 41). So the first cheaper form to bring in is the tests': in the
+machine's own form they read half the census's in their own piece, and on the window a fifth.
