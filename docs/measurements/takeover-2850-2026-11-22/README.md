@@ -817,4 +817,5 @@ not make), and 26.6 for the reference's sweeps with the census's tests, where th
 A taken body token is worth 295 ticks, so this machine as it stands gains 25 ticks a token it takes and loses 270 a
 token it sweeps and refuses: nothing at a third of the tokens taken. What its parts were measured at in their own
 pieces says where it goes: the tests in the machine's own form are half the census's, and on the window a fifth; the
-window's kernel, C and X are 39 ticks a record where T, C and X here are about 150.
+window's kernel, C and X are 39 ticks a record, where the reference's four sweeps here are 345 a record together (the
+run is not split by sweep).
