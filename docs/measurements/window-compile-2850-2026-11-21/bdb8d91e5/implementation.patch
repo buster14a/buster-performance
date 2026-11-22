@@ -1,0 +1,208 @@
+diff --git a/src/buster/compiler/c_check_expression_input.c b/src/buster/compiler/c_check_expression_input.c
+index 60bd42a86..1e2cd8eb1 100644
+--- a/src/buster/compiler/c_check_expression_input.c
++++ b/src/buster/compiler/c_check_expression_input.c
+@@ -128,6 +128,7 @@ struct CheckInputBatch
+     uint32_t leaf_base;
+     uint32_t count;
+     uint32_t leaves;
++    bool commit_windows;
+     // The batch's nodes' columns, as check_graph_add and the actions write them; the flush gathers the rest.
+     uint32_t ops[BUSTER_CHECK_EXPRESSION_BATCH];
+     uint32_t tokens[BUSTER_CHECK_EXPRESSION_BATCH];
+@@ -1229,6 +1230,9 @@ static bool check_input_expression_string(CheckInputReader* reader, CheckInputBa
+     return true;
+ }
+ 
++static bool check_input_pending_return(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint32_t child);
++static bool check_input_pending_store(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token);
++
+ // A return statement: its one value converted to the function's return type (a CONVERT node, the token's node but no value
+ // of an operand's), or without one a report where the function's type isn't void, but in a system header, as clang
+ // warns (-Wreturn-mismatch). A return outside a function's body, or of more values, is the walk's.
+@@ -1238,6 +1242,11 @@ static bool check_input_expression_return(CheckInputReader* reader, CheckInputBa
+     const bool acted = type != 0 && values.count <= 1;
+     if (acted && values.count == 1)
+     {
++        if (batch->commit_windows && type == BUSTER_TYPE_INT && batch->count != 0 && values.first == batch->base + batch->count - 1 &&
++            batch->ops[batch->count - 1] == CHECK_OP_VALUE && check_input_pending_return(reader, batch, token, values.first))
++        {
++            return true;
++        }
+         const uint32_t node = check_input_expression_operator(reader, batch, CHECK_OP_CONVERT, token, values.first, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
+         if (node != BUSTER_CHECK_NONE)
+         {
+@@ -1280,6 +1289,12 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
+     {
+         region->result = values.first;
+     }
++    if (batch->commit_windows && !condition && region == NULL && values.count == 1 && batch->count >= 3 &&
++        values.first == batch->base + batch->count - 1 && batch->ops[batch->count - 1] == CHECK_OP_ASSIGN &&
++        check_input_pending_store(reader, batch, token))
++    {
++        return true;
++    }
+     uint32_t last = BUSTER_CHECK_NONE;
+     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
+     {
+@@ -2110,6 +2125,121 @@ static bool check_input_window_assign(CheckInputReader* reader, CheckInputBatch*
+     return node != BUSTER_CHECK_NONE;
+ }
+ 
++// A closed, unflushed leaf that the published window can read directly. The object and type have
++// already been resolved by the reader. The source form excludes enumerators, volatile and special
++// storage, and any token whose value the ordinary diagnostic or lowering paths can observe separately.
++static bool check_input_pending_local(const CheckInputReader* reader, const CheckGraphLeaf* leaf, uint32_t token)
++{
++    const CheckInput* input = reader->output;
++    const uint32_t declaration = leaf->object - 1;
++    return reader->parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && leaf->type == BUSTER_TYPE_INT &&
++           leaf->category == CHECK_LVALUE && leaf->flags == BUSTER_CHECK_NONNULL_ADDRESS && leaf->constant_kind == CHECK_CONSTANT_ADDRESS &&
++           leaf->integer == 0 && leaf->row == 0 && leaf->overload_head == 0 && declaration < input->token_count && input->declarations[token] == declaration &&
++           input->declaration_kinds[declaration] == C_BINDING_OBJECT && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) &&
++           check_sparse_get(input->declaration_bodies, declaration) < input->token_count;
++}
++
++static bool check_input_pending_number(const CheckInputReader* reader, const CheckGraphLeaf* leaf, uint32_t token)
++{
++    return reader->parser->tokens.kinds[token] == PARSE_KIND_NUMBER && leaf->type == BUSTER_TYPE_INT && leaf->category == CHECK_RVALUE &&
++           leaf->constant_kind == CHECK_CONSTANT_INTEGER && (leaf->flags & ~BUSTER_CHECK_LITERAL_ZERO) == BUSTER_CHECK_ICE &&
++           leaf->integer <= INT32_MAX && leaf->object == 0 && leaf->row == 0 && leaf->overload_head == 0;
++}
++
++// Replace the final nodes of the pending batch. Until publication succeeds their existing records
++// remain untouched. Allocation refusal restores both cursors and the reader continues normally.
++static uint32_t check_input_pending_commit(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, CheckValue value,
++                                           const CheckInputWindowRow* rows, uint32_t length, uint32_t nodes, uint32_t leaves)
++{
++    batch->count -= nodes;
++    batch->leaves -= leaves;
++    const uint32_t summary = check_input_window_publish(reader, batch, token, value, rows, length, nodes + 1);
++    if (summary == BUSTER_CHECK_NONE)
++    {
++        batch->count += nodes;
++        batch->leaves += leaves;
++    }
++    return summary;
++}
++
++static bool check_input_pending_return(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token, uint32_t child)
++{
++    const Parser* parser = reader->parser;
++    const uint32_t place = child - batch->base;
++    const uint32_t operand = batch->tokens[place];
++    if (operand != token + 1 || parser->tokens.count - token < 3 || parser->tokens.kinds[token + 2] != PARSE_KIND_SEMI ||
++        parser->tree.parents[operand] != token || batch->contexts[place] != 0)
++    {
++        return false;
++    }
++    const CheckGraphLeaf* leaf = reader->output->graph.leaf_records + batch->leaf_slots[place];
++    const bool local = check_input_pending_local(reader, leaf, operand);
++    if (!local && !check_input_pending_number(reader, leaf, operand))
++    {
++        return false;
++    }
++    CheckValue value = { .type = BUSTER_TYPE_INT, .category = CHECK_RVALUE };
++    value.flags = local ? BUSTER_CHECK_NONNULL_ADDRESS : BUSTER_CHECK_ICE;
++    value.object = local ? leaf->object : 0;
++    value.constant_kind = local ? CHECK_CONSTANT_NONE : CHECK_CONSTANT_INTEGER;
++    value.integer = local ? 0 : leaf->integer;
++    CheckInputWindowRow row;
++    check_node_window_int_entry(&row, local ? leaf->object : (uint32_t)leaf->integer, local ? operand : token, local);
++    const uint32_t summary = check_input_pending_commit(reader, batch, token, value, &row, 1, 1, 1);
++    if (summary != BUSTER_CHECK_NONE)
++    {
++        reader->first_value[operand] = BUSTER_CHECK_NONE;
++        reader->output->token_nodes[operand] = BUSTER_CHECK_NONE;
++        reader->output->token_nodes[token] = summary;
++    }
++    return summary != BUSTER_CHECK_NONE;
++}
++
++static bool check_input_pending_store(CheckInputReader* reader, CheckInputBatch* batch, uint32_t token)
++{
++    const uint32_t first = batch->count - 3;
++    const uint32_t left = batch->base + first;
++    const Parser* parser = reader->parser;
++    const uint32_t parent = parser->tree.parents[token];
++    if (token < 3 || parser->tokens.kinds[token] != PARSE_KIND_SEMI || parser->tree.roles[token] != PARSE_ROLE_TERMINATOR || parent >= parser->tokens.count ||
++        (parser->tree.roles[parent] != PARSE_ROLE_CLOSE_BODY && parser->tree.roles[parent] != PARSE_ROLE_CLOSE_BLOCK) ||
++        batch->ops[first] != CHECK_OP_VALUE || batch->ops[first + 1] != CHECK_OP_VALUE || batch->operand0[first + 2] != left ||
++        batch->operand1[first + 2] != left + 1 || batch->tokens[first] != token - 3 || batch->tokens[first + 1] != token - 1 ||
++        batch->tokens[first + 2] != token - 2 || parser->tree.parents[token - 2] != token || parser->tree.parents[token - 3] != token - 2 ||
++        parser->tree.parents[token - 1] != token - 2 || (batch->contexts[first] | batch->contexts[first + 1] | batch->contexts[first + 2]) != 0)
++    {
++        return false;
++    }
++    const CheckGraph* graph = &reader->output->graph;
++    const CheckGraphLeaf* target = graph->leaf_records + batch->leaf_slots[first];
++    const CheckGraphLeaf* source = graph->leaf_records + batch->leaf_slots[first + 1];
++    const bool local = check_input_pending_local(reader, source, token - 1);
++    if (!check_input_pending_local(reader, target, token - 3) || (local ? source->object == target->object : !check_input_pending_number(reader, source, token - 1)))
++    {
++        return false;
++    }
++    CheckInputWindowRow rows[3];
++    check_node_window_int_entry(rows, local ? source->object : (uint32_t)source->integer, token - 1, local);
++    check_node_window_store(rows + 1, target->object, token - 2);
++    const CheckValue value = { .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE, .flags = BUSTER_CHECK_SIDE_EFFECT | (local ? BUSTER_CHECK_NONNULL_ADDRESS : 0),
++                               .integer = local ? 0 : source->integer, .object = local ? source->object : 0 };
++    const uint32_t summary = check_input_pending_commit(reader, batch, token, value, rows, 3, 3, 2);
++    if (summary != BUSTER_CHECK_NONE)
++    {
++        for (uint32_t t = token - 3; t < token; t += 1)
++        {
++            reader->first_value[t] = BUSTER_CHECK_NONE;
++            reader->output->token_nodes[t] = BUSTER_CHECK_NONE;
++        }
++        reader->output->token_nodes[token - 3] = summary;
++        if (reader->region_roots != NULL)
++        {
++            reader->region_roots[token] = summary;
++        }
++    }
++    return summary != BUSTER_CHECK_NONE;
++}
++
+ // Collect candidate ends in one pass over the action classes. Each caller selects its scan once per chunk.
+ static inline __attribute__((always_inline)) uint32_t check_input_window_ends(uint32_t* ends, const uint32_t* classes, uint32_t acting, bool assignments)
+ {
+@@ -2294,6 +2424,12 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
+     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
+     const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed && front == NULL &&
+                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
++    if (batch != NULL)
++    {
++        batch->commit_windows = reader->pp->options.native_expression_windows && coded && begin == 0 && stop == count && count >= 8192 && !timed && front == NULL && reader->expression_declined == NULL &&
++                                reader->parser->errors == 0 && input->musttail_count == 0 && input->overload_heads == NULL && input->graph.fp_environments == NULL &&
++                                input->graph.leaf_records != NULL && input->graph.dense_leaves == NULL;
++    }
+     const bool profile = !reader->pp->options.skip_expression_profile;
+     uint64_t* visit_ticks = profile ? &visited : NULL;
+     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index d866ab66f..daaa174ce 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -14946,6 +14946,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
+     }
+     options.published_unused_only = (emit_object || link) && !dump && !dump_static && attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY;
++    options.native_expression_windows = (emit_object || link) && !scalar && !verify && !check_transitions && !dump && !dump_static &&
++                                        attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY && !source_rows && !node_window && !node_window_constants;
+     const CheckDriverCommand command = {
+         .options = options,
+         .scalar = scalar,
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 16d77c83e..21b86a081 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -397,6 +397,8 @@ struct PPOptions
+     // --node-window-assignments also considers discarded local assignments.
+     bool node_window_assignments;
+     bool node_window_constants;
++    // An ordinary artifact compile can publish closed pending expressions directly to the native writer.
++    bool native_expression_windows;
+     // The node machine's front in the shadow (c_check_node_machine_front.c, #2524): its records made beside the coded
+     // walk's nodes and compared with them (CheckInput.node_front). 1: after the walk acted at a chunk; 2: before it, where
+     // the machine would run; with 4, the lean front; with 8, its arrays touched beforehand (BUSTER_NODE_FRONT_*). Off in
