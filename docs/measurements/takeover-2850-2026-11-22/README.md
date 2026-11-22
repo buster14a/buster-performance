@@ -392,7 +392,7 @@ reader's, and every later stage lives in memory an earlier one touched (its mino
 | the reader's own arena, released at its end | 11.2 | 10.9 | 11.2 |
 | the parser's columns (two arenas) | 10.3 | 10.3 | 13.7 |
 | the preprocessor's (file caches, tables, the interner) | 16.6 | 16.6 | 24.9 |
-| the program's, the object's and Tier 0's small arenas | 4.2 | 3.5 | 14.1 |
+| the program's, the object's and Tier 0's small arenas | 4.2 | 4.0 | 14.1 |
 | the compiler's own file pages and the source | 22.9 | | 22.9 |
 | peak of the process | 185.8 | | 237.7 |
 
@@ -403,10 +403,12 @@ What it says:
   take a 2 MB page each), columns written at a few places across their extent (2.7 MB of huge pages for 0.1 MB of
   written 4 KB pages, three times), and small arenas that touch one huge page for a few hundred KB (the program's 6.0
   MB for 1.0, Tier 0's inline body's 2.0 for nothing, the preprocessor's 8.2 for 4.1).
-- About 9 MB more are pages touched and left zero (the scratch arena's 16 less what is its slack; one 2.9 MB column
-  the reader's intrinsics initialize and `sqlite3.c` never writes).
-- The rest, about 177 MB, holds data. At 51 µs a MB (`floor/`) that is 9 ms of the 112 that no layout removes: it is
-  the cost of whole-unit columns, and goes only with them.
+- Of what a base-page run touches, about 28 MB are 4 KB pages left zero at the marks (16 in the scratch arena, 7 in
+  the retained, 5 in the output; the arenas' most resident less their filled): cleared columns that few tokens write,
+  and one 2.9 MB column the reader's intrinsics initialize and `sqlite3.c` never writes.
+- The rest holds data: the base-page peak is 185.8 MB, 22.9 of them file pages the kernel doesn't clear, so about 135
+  MB of anonymous memory with something in it. At 51 µs a MB (`floor/`) that is 7 ms of the 112 that no layout removes:
+  it is the cost of whole-unit columns, and goes only with them.
 - The parser pushes 98 MB of scratch and touches 59 in huge pages (25 in base pages), but the reader's scratch then
   takes the same pages, so the union is what counts.
 
