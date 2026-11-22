@@ -1,0 +1,3 @@
+# Pre-EOF typed and native handoff
+
+A complete speculative checker runs at original-source window 24. The final source-owned body path compares the typed function, ABI and auxiliary input columns before it calls instruction selection. A match returns the earlier bytes and unwind metadata. The first version admits scalar bodies without symbolic references. It skipped selection for 276 SQLite functions (10,824 typed entries) and 50 Buster functions (3,004 entries). Both full native objects matched independent ordinary reference bytes. The final reader still checks and lowers the prefix. [Acceptance](acceptance.tsv), [SQLite functions](sqlite-bodies.tsv), [Buster functions](main-bodies.tsv), [source](source.patch), [logs and commands](records.tar.gz).
