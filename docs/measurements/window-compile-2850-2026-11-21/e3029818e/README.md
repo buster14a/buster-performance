@@ -1,3 +1,5 @@
 # Expression producer presence masks
 
 Actual builtin, specifier-job and intrinsic writers publish per-64-token presence masks that suppress wide probes of empty columns during expression classification. A validation arm computes masks separately from the original columns and checks each block. All 6,860 independent comparisons preserve the reference exit status, stdout, stderr and full object, including 863 expected failures. The results cover the ordinary, enabled and checked variants of the experimental executable. [Source against 40ae34f9d](source.patch), [qualification and commands](qualification.tar.gz), [counts](results.tsv).
+
+Five fresh local paired wall rounds gave SQLite a median paired change of −2.243 ms (4/5 lower), and Buster −28.868 ms (3/5). Four PMU rounds removed 3.121 million SQLite and 10.550 million Buster instructions in all four comparisons per source. SQLite user cycles increased by 16.256 million in the median pair. Buster user cycles fell by 39.782 million. [Observations, per-run counters and commands](local-timing.tar.gz).
