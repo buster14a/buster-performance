@@ -482,3 +482,53 @@ when bodies cost nothing is about what the gate allowed in all. What is left is 
 Main `f1fcdf2a0` against the scaffold with nothing recorded or supplied, seven ABBA rounds of the ordinary `-c
 sqlite3.c`: 111.73 and 111.32 ms (paired -0.47, between -0.84 and +0.67), 1,215.957 M and 1,215.946 M user instructions,
 one set of objects and diagnostics.
+
+## After the boundary: what the stream must cover, and what the host does when bodies are free
+
+### The bodies' constructs (`boundary-census/`, `scripts/boundary-census.py`)
+
+The recording lists each body's control kinds and expression ops (`sqlite3.bodies`: tokens, refusal, entries, name, the
+two masks, nodes, controls). `sqlite3.c`'s 2,668 bodies (568,438 tokens, 290,681 nodes, 381,191 entries) use 9 of the 22
+control kinds (END, EVALUATE, BRANCH_FALSE, RETURN, JUMP, INITIALIZE, BRANCH_TRUE, SWITCH, CASE) and 56 of the 69
+expression ops. Adding constructs in the order that frees the most tokens (`sqlite3-census.txt`):
+
+| constructs supported | bodies whole | their tokens |
+| --- | ---: | ---: |
+| every op that 2% of the bodies have, and END, EVALUATE, RETURN, INITIALIZE (46 constructs) | 24.8% | 4.6% |
+| and BRANCH_FALSE | 47.3% | 13.3% |
+| and JUMP | 86.3% | 53.1% |
+| and the rest but SWITCH and CASE | 96.9% | 79.8% |
+| all | 100% | 100% |
+
+So nothing smaller than the expression language whole, with branches and jumps, takes a body: a slice by constructs
+does not exist. What takes bodies takes nearly all of them or nearly none.
+
+### References from the function (`scripts/boundary-references.py`)
+
+Of `sqlite3.c`'s 2,589 supplied bodies, 2,587 have a reference list equal to the set of objects their lowered function
+names; the other two name one object more (a runtime function the unit declares, which their code calls and their
+source doesn't). So a supplier that makes the function has the references.
+
+### Profiles: every body masked, the eligible bodies supplied, the ordinary compile (`profile-*/`)
+
+`scripts/profile-env.sh` (the 9700X, CPU 2, one lane, eight runs each, `perf record` of cycles, by symbol):
+
+| | ordinary (`bbe80f1a9`) | bodies supplied (`bbe80f1a9`) | every body masked (`0b150b71b` + the mask) |
+| --- | ---: | ---: | ---: |
+| cycles a run, M | 631.7 | 370.7 | 243.8 |
+| kernel | 13.0% | 20.7% | 25.3% |
+| `clear_page_erms` | 8.65% | 13.73% | 18.17% |
+| `memset` | 1.89% | 3.00% | 4.40% |
+
+With every body masked, a quarter of the compile is the kernel and the largest symbol by far is the page clearing
+(44 M cycles, 7.7 ms): the reader still makes its columns for every token of the unit, masked or not (the peak is 216
+to 222 MB against 238). The bodies' tokens removed from the source left 14.2 ms between `check-input` and `lower`
+("With no function body" above); masked in place they leave 25.5. The 11 ms between the two is what the masked tokens
+cost by being there, and a reader that reads a view without them (as it reads a view without a unit's attested
+declarations) would not pay it.
+
+In the ordinary compile no function is 5%: `check_input_expressions_coded_range` 4.66, `check_input_resolve_range`
+4.24, `check_graph_run` 4.17, `check_lower_drain` 3.55, `tier0_generate` 2.72, `check_program_references` 2.42. A
+lowering made lean for simple bodies could drop the controls' building (about 3 ms), most of the lowering's walk (8 to
+10) and, with the references from the function, their walk (2.6): about 11 ms net of its own cost, with every body
+covered. The rest of `check-program`'s 18.8 ms is the warnings' analyses, which are owed either way.
