@@ -438,8 +438,9 @@ compile's cycles for all the fills, 2 ms).
 
 So sparse columns are worth at most 26.7 MB of first touches, 1.4 ms at 51 µs a MB, if every one of some twenty
 columns were made sparse at no cost to its readers; the four never-written ones alone are 0.35 ms. Under the 1.5 ms
-at which the track was to be dropped: dropped. In huge pages the same count is 98.1 MB of 217.0 (`fresh-huge-pages-
-reduced.txt`), the difference being the slack counted above, which is a layout's, not a fill's.
+at which the track was to be dropped: dropped. In huge pages the same count is 98.1 MB of 217.0
+(`memory/fresh-huge-pages-reduced.txt`), the difference being the slack counted above, which is a layout's, not a
+fill's.
 
 ## The body boundary with a recorded supplier (`boundary-*/`, `boundary-b1/`)
 
