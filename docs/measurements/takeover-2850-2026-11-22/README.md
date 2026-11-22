@@ -687,6 +687,27 @@ beside it: with the mask seen by the passes before the resolution, the intrinsic
 arrays' pass left the supplied bodies out and `main.c` and musl failed (first attempt); a type name's variably
 modified bound in a `sizeof` failed one unit of musl (third).
 
+**What it costs** (`boundary-resolve/9700x/`, `scripts/boundary4.sh`: the 9700X, CPU 2, one lane, Release, under the
+lock; 14 `--time-stages` runs each in turn, medians; `sqlite3.c` with its 2,588 eligible bodies supplied, 480,192 of
+its 568,438 body tokens; all 42 objects one):
+
+| ms | ordinary | supplied, masked whole | supplied, the resolution kept |
+| --- | ---: | ---: | ---: |
+| `check-input` | 40.994 | 26.595 | 34.358 |
+| `check-expressions` | 10.624 | 2.061 | 2.054 |
+| `check-declarations` | 2.139 | 0.808 | 0.965 |
+| `check-program` | 18.845 | 5.408 | 5.401 |
+| `lower` | 11.352 | 2.696 | 3.032 |
+| the middle | 85.474 | 38.822 | 47.106 |
+| **total** | **110.894** | **65.406** | **73.585** |
+| least and most | 110.453 to 113.701 | 65.059 to 66.597 | 73.001 to 74.272 |
+| peak, MB | 238.5 | 230.9 | 236.3 |
+
+The resolution of the supplied bodies is 8.2 ms (7.8 of them in `check-input`), against the 10.7 the profiles'
+difference gave all the bodies' ("What the bodies cost each stage"). A body taken with its resolution kept leaves the
+compile 37.3 ms at this coverage: 77.7 ns a supplied body token, 295 TSC ticks, 427 cycles. That is what a machine
+has to stay under, a token of the bodies it takes, with what it sweeps and then refuses counted in.
+
 So what a kept resolution gives a taken body is checked, not read off the code: its strings in the unit's order, its
 uses, and the unit's end's warnings, with no replay; a block's static object is still refused (its initializer's data
 are the walk's nodes).
