@@ -1,0 +1,425 @@
+== Test deterministic work and growth contracts [1 CPU]
+# #2041: bounded dependency admission and sparse SSA storage at N, 2N and 4N, with semantic checks, deterministic
+# work/byte records, real excessive-work mutations and a check that production builds cannot enable the counters.
+# The standalone harnesses inherit this row's host and sanitizer flags; no elapsed time or RSS decides their verdict.
+bash tests/work-contracts/run.sh
+== Check unity fixture ownership without rebuilding
+# The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
+# one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records
+# fail closed. Internally guarded roots also retain their complete standalone preprocessing.
+# It reads the build's tree, not the executable. A hosted shard that runs its row's shared compiler (BUSTER_PRODUCT,
+# docs/ci.md's "Shared row products") has no such tree: the job that built the product ran this heading on its tree
+# before packing it (tools/ci/hosted-product.sh ownership), and the product records that it passed.
+if [ -z "${BUSTER_PRODUCT:-}" ]; then
+cc -std=c17 -O2 -Wall -Wextra -Werror -o build/build-regression tools/ci/build_regression.c
+build/build-regression --ownership-only "$BUSTER_COMPILER"
+else
+test "$(head -n 1 "$BUSTER_PRODUCT/provenance/ownership")" = passed
+printf 'SKIP: unity fixture ownership, which passed on the shared product'"'"'s build tree (%s)\n' "$BUSTER_PRODUCT"
+exit 77
+fi
+== Test SQLite's shell by both tiers against clang's [4 CPUs]
+# #146: the frozen corpus's sqlite3.c and shell.c built into the sqlite3 shell by Tier 0, --tier1 and clang -O0; SQLite's
+# own CLI tests (test/shellB.test's .sql files, from the tree fetch-sqlite.sh fetches) must pass, and they and
+# tests/sqlite's scripts must print clang's shell's output, byte for byte (docs/commands/c-testsuite.md). The harness's
+# own cases: the work directory is relative and the scripts' and tests' paths have blanks (the shells run in directories
+# of their own); a script that prints nothing passes (its run proves itself by a sentinel line, not its output); and a
+# dangling link, a directory, a FIFO without a writer (within a minute, not hung) or an unreadable file named as a script
+# fails the command before any build.
+unset CPATH C_INCLUDE_PATH
+directory=$(mktemp -d "build/test sqlite.XXXXXX")
+trap 'rm -rf "$directory"' EXIT
+mkdir "$directory/sqlite scripts" "$directory/sqlite tests" "$directory/bad scripts" "$directory/bad scripts/directory.sql"
+cp tests/sqlite/*.sql "$directory/sqlite scripts/"
+printf 'CREATE TABLE t(x);\n' > "$directory/sqlite scripts/silent.sql"
+cp build/sqlite/test/*.sql "$directory/sqlite tests/"
+cp tests/sqlite/core.sql "$directory/bad scripts/"
+ln -s missing "$directory/bad scripts/dangling.sql"
+# A file it may not read, but for root, who may read any file.
+cp tests/sqlite/core.sql "$directory/bad scripts/unreadable.sql"
+chmod 000 "$directory/bad scripts/unreadable.sql"
+# A FIFO without a writer, which a blocking open would wait on forever.
+mkfifo "$directory/bad scripts/hang.sql"
+expected=4
+if [ "$(id -u)" = 0 ]; then expected=3; fi
+if timeout 60 "$BUSTER_COMPILER" test-sqlite --clang clang --sqlite "$BUSTER_CORPUS/sqlite" --tests "$directory/sqlite tests" --scripts "$directory/bad scripts" \
+    --directory "$directory" > "$directory/bad.txt" 2>&1; then exit 1; fi
+test "$(grep -c ': not a readable regular file (FAILED)$' "$directory/bad.txt")" -eq "$expected"
+grep -q 'bad scripts/dangling.sql: not a' "$directory/bad.txt"
+grep -q 'bad scripts/directory.sql: not a' "$directory/bad.txt"
+grep -q 'bad scripts/hang.sql: not a' "$directory/bad.txt"
+if grep -q "shell by\|shell: built" "$directory/bad.txt"; then exit 1; fi
+"$BUSTER_COMPILER" test-sqlite --clang clang --sqlite "$BUSTER_CORPUS/sqlite" --tests "$directory/sqlite tests" --scripts "$directory/sqlite scripts" \
+    --directory "$directory" > "$directory/good.txt" 2>&1 || { cat "$directory/good.txt"; exit 1; }
+cat "$directory/good.txt"
+grep -q "^test-sqlite: silent.sql: every build's output is clang -O0's$" "$directory/good.txt"
+grep -q "^test-sqlite: 9 of SQLite's CLI tests and 5 scripts: every build agrees with clang -O0's$" "$directory/good.txt"
+== Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
+# #146: testfixture (tclsqlite.c, SQLite's test sources and the amalgamation its Makefile generates, which must be the
+# frozen corpus's sqlite3.c) built by SQLite's configure and Makefile with clang -O0, Tier 0 and --tier1, against Tcl 8.6's
+# distribution package (hosted: Ubuntu 26.04's tcl8.6-dev, pinned below); each runs tests/sqlite/testfixture-subset.txt's
+# scripts of SQLite's `full` permutation, which clang's must all pass, and the other builds' every script must have
+# clang's state, errors and test count (docs/commands/c-testsuite.md). The full permutation runs on main, in a job of its
+# own (hosted-correctness.yml's `sqlite-full`). A host without Tcl's development package skips it, but a hosted runner.
+unset CPATH C_INCLUDE_PATH
+tcl=$(bash tools/ci/tcl-config.sh) || exit $?
+"$BUSTER_COMPILER" test-sqlite-testfixture --clang clang --tree build/sqlite --tcl "$tcl" --amalgamation "$BUSTER_CORPUS/sqlite/sqlite3.c" \
+    --subset tests/sqlite/testfixture-subset.txt --jobs "${CORES:-4}" --directory build
+== Test c-testsuite's programs with Tier 1's code [4 CPUs]
+# #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
+# others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
+# both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
+# The declared subset must pass. #1116 and #2646 also require all Tier 1 function bytes, of objects compiled with
+# --tier1-no-inline, to be at most clang -O0's matching bytes; --check-code-size implies the object/Clang cross-check
+# and validates the evidence.
+"$BUSTER_COMPILER" test-c-testsuite --tier1 --check-code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Test -S of c-testsuite's programs against -c and GNU as
+# #1362: each program's -S at Tier 0 and with --tier1, assembled by GNU as into -c's object but for the form contract's
+# normalizations (docs/commands/driver.md's "-S"), then linked from GNU as's object and run. The declared subset must
+# pass.
+"$BUSTER_COMPILER" test-assembly-output --c-testsuite build/c-testsuite --subset tests/c-testsuite/subset.txt
+== Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
+# #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
+# native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
+# status and record checked.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --self-test
+== Promote and run random C programs of structured and unstructured control flow [4 CPUs]
+# #134: programs whose functions have gotos into and out of loops, switches whose cases fall through and breaks and
+# continues at depth, each built by clang -O0 and run for its output, then checked as c-testsuite's programs are.
+# --tier1 also compiles both host paths strictly, without Tier 0 fallback, and compares their native runs with the
+# interpreted forms. Native builds and runs follow the interpreter children, within this group's CPU grant.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --generate 48 --clang clang
+== Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
+# #141: the same programs' generator at a seed of its own, the IR with its blocks' lifetime markers, at whose starts
+# promotion makes a block's locals undefined; each block's own locals are assigned and read under one condition, and
+# all three forms must give clang -O0's output.
+"$BUSTER_COMPILER" test-ssa-source --tier1 --generate 24 --seed 141 --lifetimes --clang clang
+# Check same-block values, loop-carried values, an escaped local and a scalar wrapper around an inlined vector body.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --lifetimes --clang clang tests/ir-source/private-values.c
+"$BUSTER_COMPILER" --tier1 --tier1-strict --verify -DBUSTER_TEST_INLINE_VECTOR=1 tests/ir-source/private-values.c -o build/test-tier1-private-vector
+./build/test-tier1-private-vector
+== Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
+# #134: each function -c compiles lowered with every local in memory and promoted by both of ssa_ir.c's paths, with
+# ssa.c's verifier on each promotion and no trivial phi left, then each program run by the shared IR's interpreter
+# in its three forms at once (all locals in memory, and each path's SSA), which must agree with each other and with
+# the program's expected output. Both strict Tier 1 builds must then give that same status and output; unsupported
+# compilation, a timeout or abnormal native execution fails rather than falling back to Tier 0 or leaving a test out.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+== Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
+# Preserve the interpreter's 520-byte aggregate; Tier 1 admits stack arguments up to 512 bytes, so compare a 64-long
+# variant strictly through both native paths as well (docs/tier1-selection.md, "By-value aggregates").
+"$BUSTER_COMPILER" test-ssa-source --typed tests/interpreter/source.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 -DBUSTER_INTERPRETER_LARGE_WORDS=64 tests/interpreter/source.c
+"$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
+== Lower c-testsuite's programs and the frozen SQLite source with node templates as the tasks do
+# #1048: each file's selected program lowered by the task loop and with c_check_program_templates.c's templates forced,
+# on any host, every function's entries, locals, calls and arguments the same. sqlite3.c with test-ir-source's options.
+unset CPATH C_INCLUDE_PATH
+corpus=$BUSTER_CORPUS
+"$BUSTER_COMPILER" test-lowering-templates $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+"$BUSTER_COMPILER" test-lowering-templates --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+== Lower every function of c-testsuite's programs and the frozen SQLite and musl sources into the IR
+# #131: each function -c compiles lowered by both paths, which must agree and verify, then promoted by both of
+# ssa_ir.c's paths, whose results verify with dominance. sqlite3.c with benchmark-backend-source's options, and
+# musl's 1,355 units with its build's (of which -c compiles 1,049; it refuses the others' features by name).
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+"$BUSTER_COMPILER" test-ir-source --dominators $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+"$BUSTER_COMPILER" test-ir-source --dominators --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+"$BUSTER_COMPILER" test-ir-source --dominators --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
+# #139: each function lowered and promoted as test-ir-source does, then SROA, #866's solver, the optimizer's SCCP, dead-code
+# removal and CFG cleanup alone and together (and with Tier 1's layout and identities), value numbering with memory (#2718)
+# alone and with Tier 1's set, LICM, and each caller's unit
+# inlining, each by its vector and scalar versions, which must agree: exactly, and the solver against its exact oracle
+# and, semantically, its scalar twin (ir_source_passes.c).
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+"$BUSTER_COMPILER" test-ir-source --passes $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+"$BUSTER_COMPILER" test-ir-source --passes --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+"$BUSTER_COMPILER" test-ir-source --passes --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Allocate every function of c-testsuite's programs and the frozen SQLite and musl sources over its CFG
+# #140: each function -c compiles, lowered and promoted as test-ir-source does, adapted to an allocation problem
+# (tier1_cfg_ir.c's machine model), allocated by both of tier1_cfg.c's paths and checked by tier1_cfg_verify.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+"$BUSTER_COMPILER" test-tier1-cfg-source $(sed -n 's|^\([0-9][0-9]*\)$|build/c-testsuite/tests/single-exec/\1.c|p' tests/c-testsuite/subset.txt)
+# #179: #732's SIMD functions, which the SSA promoter refuses, allocated as lowered, their vcmp masks in the opmask class,
+# and the _k* builtins' functions of masks alone, which it promotes, allocated as any other; #141's machine rows' row
+# calls; and #1280's SSE carriers, f32 and f64 values in and out of rows.
+"$BUSTER_COMPILER" test-tier1-cfg-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c
+"$BUSTER_COMPILER" test-tier1-cfg-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+"$BUSTER_COMPILER" test-tier1-cfg-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Test the IR and typed-stream lowering
+"$BUSTER_COMPILER" test-ir
+"$BUSTER_COMPILER" test-ir-simd
+"$BUSTER_COMPILER" test-ir-lowering
+"$BUSTER_COMPILER" test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c tests/ir/carrier-rows.c
+"$BUSTER_COMPILER" test-ir-source --dataflow-self-test
+# #1374: qualify the benchmark's corpus preparation and both measured lowerings at each function's own target.
+# The fixture adds features on the baseline and removes them at znver5; it never executes generated instructions.
+"$BUSTER_COMPILER" test-ir-source --benchmark-self-test -march=x86-64 tests/ir-source/bit-builtins.c
+"$BUSTER_COMPILER" test-ir-source --benchmark-self-test -march=znver5 tests/ir-source/bit-builtins.c
+"$BUSTER_COMPILER" test-ir-parse
+"$BUSTER_COMPILER" test-ir-reduce
+"$BUSTER_COMPILER" test-ir-metamorphic --seed 731 --count 6
+"$BUSTER_COMPILER" test-interpreter
+"$BUSTER_COMPILER" test-interpreter-native
+"$BUSTER_COMPILER" test-interpreter-link
+"$BUSTER_COMPILER" test-ir-interpreter
+# A native that only libm defines, which the compiler's link doesn't take (#652): --bind finds it through dlopen, or in a
+# static executable in test_libm.c's table.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=fegetround tests/ir/libm-call.ir
+# And one of the C library's, which a static executable's table names too.
+"$BUSTER_COMPILER" interpret-ir --result --bind 100=getpid tests/ir/libm-call.ir
+== Promote every function of the frozen SQLite and musl sources to SSA with the verifier's checks
+# #134: each function -c compiles promoted by both of ssa_ir.c's paths, the vector path's constructor on every
+# function its memory bound admits, with ssa.c's verifier on each promotion and no trivial phi left.
+unset CPATH C_INCLUDE_PATH
+export SOURCE_DATE_EPOCH=1792454400
+corpus=$BUSTER_CORPUS
+musl="$corpus/libc/musl"
+"$BUSTER_COMPILER" test-ssa-source --predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
+"$BUSTER_COMPILER" test-ssa-source --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=c99 -ffreestanding -nostdinc -D_XOPEN_SOURCE=700 -Os \
+  -I "$musl/arch/x86_64" -I "$musl/arch/generic" -I "$corpus/musl-generated/obj/src/internal" -I "$musl/src/include" -I "$musl/src/internal" -I "$corpus/musl-generated/obj/include" -I "$musl/include" \
+  "$musl"/src/*/*.c "$musl"/src/*/x86_64/*.c
+== Test the C driver's source rows and DWARF
+# --cross-check: the fixture linked with -g, read by llvm-dwarfdump --verify and gdb; and the unwind tables,
+# through backtrace() and gdb at every instruction, Tier 1's frames' among them (#177).
+"$BUSTER_COMPILER" test-check-debug --cross-check
+== Test shared IR local promotion and typed-stream semantics
+"$BUSTER_COMPILER" test-ssa-ir
+== Test Tier 1 selection, liveness and native fragments
+"$BUSTER_COMPILER" test-tier1-select --manifest > build/tier1-plan-manifest.csv
+"$BUSTER_COMPILER" test-tier1-liveness
+"$BUSTER_COMPILER" test-tier1-emit
+"$BUSTER_COMPILER" test-tier1-pipeline --cross-check
+# #179: hand-written IR of AVX-512's masks (and #141's vectors) through Tier 1's selection and CFG consumer, natively
+# against the IR's interpreter where the host has every feature of x86-64-v4 (compiled and checked only elsewhere).
+"$BUSTER_COMPILER" test-tier1-masks
+# #141: the 128-bit integers split into 64-bit halves (ir_wide.c): hand-written and random 128-bit IR and Tier 0's random
+# 128-bit programs through the split, the optimizer and Tier 1 natively, against the IR's interpreter and the programs'
+# stack machine.
+"$BUSTER_COMPILER" test-tier1-wide
+# #179's measure-mask-spills programs: encoded alike by both encoders, and their masks' values where the host runs them.
+"$BUSTER_COMPILER" test-mask-spills
+"$BUSTER_COMPILER" test-tier1-model
+"$BUSTER_COMPILER" measure-tier1-model --manifest build/tier1-plan-manifest.csv --verify
+== Test local SSA construction and its memory interpreter
+"$BUSTER_COMPILER" test-ssa
+== Test Tier 1 allocation, reload splitting and rematerialization
+"$BUSTER_COMPILER" test-tier1-allocation
+== Test Tier 1 frame planning and slot coloring
+"$BUSTER_COMPILER" test-tier1-frame
+"$BUSTER_COMPILER" test-tier1-frame-execution
+== Test Tier 1 allocation over CFGs, edge moves and the independent checker
+"$BUSTER_COMPILER" test-tier1-cfg
+== Dispatch Tier 1's program measurement and refuse its incomplete commands
+# #1189's measure-tier1-programs runs on the 9700X only where `tier1_programs` changes (Tier 1's input and pipeline, and
+# the measurement), so its dispatch in main.c is checked here, on every run, without timing anything: a command without
+# its inputs must print the command's usage and fail, and one whose inputs aren't there must fail its first build.
+errors=$(mktemp)
+directory=$(mktemp -d)
+if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$directory/none" --speedtest "$directory/none" --lua "$directory/none" \
+    --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
+if "$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite "$directory/none" --lua "$directory/none" \
+    --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q '^measure-tier1-programs: code-size compile failed:' "$errors"
+grep -q '^measure-tier1-programs: retained files in ' "$errors"
+rm -rf "$errors" "$directory"
+# #1116: original tiny sources stand in for SQLite and all 34 Lua units. Exact per-unit matching keeps their
+# identical function names distinct. Missing luac.c, a failed oracle and an invalid producer option must fail.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+test "${#host_flags[@]}" -gt 0
+clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_code_size.c -o build/test-driver-tier1-code-size
+./build/test-driver-tier1-code-size "$BUSTER_COMPILER" clang
+# #1116 is a deterministic object-size bound, independent of the machine's timing. Reuse this row's compiler and
+# frozen SQLite, and Lua 5.4.8 from the run's verified offline input bundle; include luac.c, not only the interpreter.
+# Enforce #1116's Lua corpus bound and #2646's SQLite one.
+directory=$(mktemp -d)
+bash tools/ci/hosted-offline.sh lua "$directory/lua"
+"$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite "$BUSTER_CORPUS/sqlite" \
+    --lua "$directory/lua/src" --directory "$directory"
+rm -rf "$directory"
+== Measure the frames and keep the frame pointer on request
+# #177: measure-frames reads each function's frame from an object's code, and -fno-omit-frame-pointer keeps one in every
+# function, by Tier 0 and by Tier 1, a leaf among them, which -momit-leaf-frame-pointer leaves out; without the option
+# neither tier keeps one. The depth follows the control flow (#1415's review): an early return's epilogue takes nothing
+# from the deeper path after it (168 bytes, where the instructions' address order would say 128), a jump table's target
+# takes its indirect jump's depth (assumed), and two paths that join at different depths are unresolved and left out of
+# the comparison. rbp's depth is each path's too: two arms that set it at different depths, each with its own `leave`,
+# make an 80-byte frame, resolved. A command without files prints its usage and fails.
+directory=$(mktemp -d)
+printf 'int g(char*);\nint f(int x) { char b[4096]; b[x & 4095] = 1; return g(b); }\nint leaf(int x) { return x + 1; }\n' > "$directory/f.c"
+"$BUSTER_COMPILER" -c -o "$directory/t0.o" "$directory/f.c"
+"$BUSTER_COMPILER" -c -fno-omit-frame-pointer -o "$directory/t0fp.o" "$directory/f.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -o "$directory/t1fp.o" "$directory/f.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -momit-leaf-frame-pointer -o "$directory/t1leaf.o" "$directory/f.c"
+"$BUSTER_COMPILER" measure-frames --functions t0="$directory/t0.o" t0fp="$directory/t0fp.o" t1fp="$directory/t1fp.o" t1leaf="$directory/t1leaf.o" > "$directory/frames.txt"
+grep -q "$(printf '^frame\tt0\tleaf\t0\t0\t0\t0\tresolved$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt0fp\tleaf\t8\t0\t1\t0\tresolved$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt1fp\tleaf\t8\t0\t1\t0\tresolved$')" "$directory/frames.txt"
+grep -q "$(printf '^frame\tt1leaf\tleaf\t0\t0\t0\t0\tresolved$')" "$directory/frames.txt"
+awk -F'\t' '$1 == "frame" && $3 == "f" && $4 > 4096 && ($2 == "t0") == ($6 == 0) && $8 == "resolved" { found += 1 } END { exit found != 4 }' "$directory/frames.txt"
+grep -q "$(printf '^frames\tt1leaf\tfunctions=2\tbytes=[0-9]*\tassumed=0\tunresolved=0\tpartial=0\t')" "$directory/frames.txt"
+printf '%s\n' '    .text' '    .globl early' '    .type early, @function' 'early:' '    push %rbp' '    sub $32, %rsp' '    test %edi, %edi' '    je 1f' \
+    '    add $32, %rsp' '    pop %rbp' '    ret' '1:' '    sub $128, %rsp' '    add $160, %rsp' '    pop %rbp' '    ret' '    .size early, .-early' \
+    '    .globl table' '    .type table, @function' 'table:' '    push %rbx' '    sub $16, %rsp' '    lea 2f(%rip), %rax' '    jmp *%rax' '    int3' '2:' \
+    '    sub $64, %rsp' '    add $80, %rsp' '    pop %rbx' '    ret' '    .size table, .-table' '    .globl conflict' '    .type conflict, @function' \
+    'conflict:' '    test %edi, %edi' '    je 3f' '    push %rbx' '3:' '    ret' '    .size conflict, .-conflict' '    .globl tail' '    .type tail, @function' \
+    'tail:' '    push %rbx' '    test %edi, %edi' '    je 4f' '    pop %rbx' '    jmp elsewhere' '4:' '    sub $16, %rsp' '    add $16, %rsp' '    pop %rbx' '    ret' \
+    '    .size tail, .-tail' '    .globl padded' '    .type padded, @function' 'padded:' '    push %rbx' '    test %edi, %edi' '    je 5f' '    jmp 6f' '    nop' \
+    '7:' '    dec %rdi' '6:' '    cmp $0, %rdi' '    jne 7b' '    pop %rbx' '    jmp *(%rax)' '5:' '    pop %rbx' '    ret' '    .size padded, .-padded' \
+    '    .globl split' '    .type split, @function' 'split:' '    test %edi, %edi' '    je 8f' '    push %rbp' '    mov %rsp, %rbp' '    sub $32, %rsp' '    leave' \
+    '    ret' '8:' '    push %rbx' '    push %rbp' '    mov %rsp, %rbp' '    sub $64, %rsp' '    leave' '    pop %rbx' '    ret' '    .size split, .-split' > "$directory/paths.s"
+"$BUSTER_COMPILER" -c -o "$directory/paths.o" "$directory/paths.s"
+"$BUSTER_COMPILER" measure-frames --functions paths="$directory/paths.o" > "$directory/paths.txt"
+grep -q "$(printf '^frame\tpaths\tearly\t168\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frame\tpaths\ttable\t88\t0\t0\t0\tassumed$')" "$directory/paths.txt"
+grep -q "$(printf '^frame\tpaths\tconflict\t[0-9]*\t0\t0\t0\tunresolved$')" "$directory/paths.txt"
+# A tail call's jump, whose displacement an object leaves to its relocation, leaves the function: no edge to the next
+# instruction, whose depth the other path gives.
+grep -q "$(printf '^frame\tpaths\ttail\t24\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+# An indirect tail call gives the code no edge reaches its depth, but not the nop that pads a loop's head after a jump.
+grep -q "$(printf '^frame\tpaths\tpadded\t8\t0\t0\t0\tresolved$')" "$directory/paths.txt"
+# Each arm sets rbp at its own depth (8 and 16) and its `leave` goes back to it: the deeper arm's 80 bytes, resolved.
+grep -q "$(printf '^frame\tpaths\tsplit\t80\t0\t1\t0\tresolved$')" "$directory/paths.txt"
+grep -q "$(printf '^frames\tpaths\tfunctions=6\tbytes=[0-9]*\tassumed=1\tunresolved=1\tpartial=0\tagainst=paths\tcommon=5\texcluded=1\t')" "$directory/paths.txt"
+if "$BUSTER_COMPILER" measure-frames > /dev/null 2> "$directory/errors"; then exit 1; fi
+grep -q '^usage: compiler measure-frames' "$directory/errors"
+rm -rf "$directory"
+== Dispatch Tier 1's vector code measurement and refuse its incomplete commands
+# #1283's measure-tier1-rows runs on the 9700X only where `tier1_programs` changes, so its dispatch is checked here, on
+# every run, without timing anything: a command without --clang must print its usage and fail, and one whose --base isn't
+# there must fail that build, after this compiler's Tier 0 builds (compiled for x86-64-v4 on any host, never run).
+errors=$(mktemp)
+directory=$(mktemp -d)
+if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-rows --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-rows --runs 1 --clang clang --base "$directory/none" --march x86-64-v4 --directory "$directory" > "$errors" 2>&1; then exit 1; fi
+grep -q "^measure-tier1-rows: Tier 0's builds built$" "$errors"
+grep -q "^measure-tier1-rows: --tier1 (base)'s builds FAILED$" "$errors"
+rm -rf "$errors" "$directory"
+== Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
+# #1344: with inlining, a body's code holds its inlined callees' calls of runtime functions, whatever their parts, and the
+# emission's merge gave those calls their symbols only in the parts that lowered such a call. On more than one lane
+# tokenize_chunks's memmove calls, inlined into the nine tokenize_c functions, went to a case of the scalar lexer's
+# switch, and the object depended on the lanes. It must be the same bytes on one lane and on four (as many of the four
+# as the command's CPUs allow; compiled for znver5 on any host, never run), with every one of those calls memmove's.
+objects=$(mktemp -d)
+lexer=(--tier1 -fno-asynchronous-unwind-tables -march=znver5 -Isrc -fwrapv -funsigned-char -fno-strict-aliasing -c src/buster/compiler/c_lexer_benchmark.c)
+"$BUSTER_COMPILER" --lanes 1 "${lexer[@]}" -o "$objects/one.o"
+"$BUSTER_COMPILER" --lanes 4 "${lexer[@]}" -o "$objects/four.o"
+cmp "$objects/one.o" "$objects/four.o"
+test "$(objdump -dr "$objects/four.o" | grep -c 'R_X86_64_PLT32.*memmove')" -ge 18
+rm -r "$objects"
+== Link Tier 1's literal pools with clang's and merge their equal entries
+# #2744: a vector constant no broadcast makes is a literal its function's code loads rip-relative, which -c's object puts
+# in the unit's pool: .rodata.cst16 here, mergeable (SHF_MERGE, entry size 16) and aligned to 16, its load relocated
+# against a local symbol. Two units with the same constant, by strict Tier 1 for the baseline (any host runs them), linked
+# with a main by clang: the program prints clang -O0's output, and the linker merged the two entries into one.
+objects=$(mktemp -d)
+printf '%s\n' '#include <emmintrin.h>' 'long long a(long long x)' '{' \
+    '    return _mm_cvtsi128_si64(_mm_add_epi32(_mm_cvtsi64_si128(x), _mm_set_epi32(0x0badf00d, 0x0ddba11, 0x5eed1e55, 0x7e57ab1e)));' '}' > "$objects/a.c"
+sed 's/long long a(/long long b(/' "$objects/a.c" > "$objects/b.c"
+printf '%s\n' '#include <stdio.h>' 'long long a(long long x);' 'long long b(long long x);' \
+    'int main(void) { printf("%llx %llx\n", (unsigned long long)a(1), (unsigned long long)b(2)); return 0; }' > "$objects/main.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64 -c -o "$objects/a.o" "$objects/a.c"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64 -c -o "$objects/b.o" "$objects/b.c"
+readelf -SW "$objects/a.o" | grep -Eq '\.rodata\.cst16 +PROGBITS +0+ +[0-9a-f]+ +0+10 +10 +AM +0 +0 +16$'
+objdump -dr "$objects/a.o" | grep -q 'R_X86_64_PC32[[:space:]]*\.Lbuster_literal_0-0x4$'
+clang -o "$objects/tier1" "$objects/main.c" "$objects/a.o" "$objects/b.o"
+clang -O0 -o "$objects/clang" "$objects/main.c" "$objects/a.c" "$objects/b.c"
+cmp <("$objects/tier1") <("$objects/clang")
+test "$(od -An -tx1 -v "$objects/tier1" | tr -d ' \n' | grep -o 1eab577e551eed5e11badd000df0ad0b | wc -l)" -eq 1
+rm -r "$objects"
+== Test dominators, frontiers and natural loops
+"$BUSTER_COMPILER" test-dominators
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/dominators.c
+== Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
+# #1059: each fence of a constant order is the typed stream's FENCE and the IR's fence, which both lowerings, both
+# promotions and the text's round trip keep, and which the program's run in the IR's three forms passes through.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/fences.c
+"$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/fences.c
+# Each aligned atomic load and store of a constant order is the typed stream's marked LOAD or SET and the IR's atomic
+# access, which promotion leaves in memory and the run passes through alike. Seq_cst stores become xchg at emission.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomics.c
+"$BUSTER_COMPILER" test-ssa-source --clang clang tests/ir-source/atomics.c
+# #1396: initializing stores and assignment results, with the desired value live past xchg, through both interpreters
+# and both native Tier 1 paths. Unit tests also keep undefined-byte checking enabled for the initializing stores.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/atomic-stores.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/atomic-stores.c
+# The verifier refuses an atomic access aligned below its size; the long's store and load, lowered and promoted,
+# print their natural alignment.
+test "$("$BUSTER_COMPILER" test-ir-source --print published tests/ir-source/atomics.c | grep -c 'align=8 atomic')" -eq 4
+# Each compare-exchange of the fixture's (GNU's, __sync's, C11's and the generic one, twice each, and three implicit
+# objects' loops) is the typed stream's ATOMIC_CAS and the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print exchanged tests/ir-source/atomics.c | grep -c ' cas ')" -eq 26
+# Each bitwise, minimum and maximum read/modify/write of the fixture's (twelve, GNU's, __sync's and C11's) is a loop of
+# compare-exchanges, the IR's `rmw ... cas`, none a helper's call, in both forms.
+test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomics.c | grep -c ' cas ')" -eq 24
+== Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang
+# #1385: signed longs' rows of the operation and seto are the IR's saddo, ssubo and smulo, the other classes' recipes
+# 64-bit operations and 128-bit products; the program runs in the IR's forms, the typed stream's interpreter and Tier 1.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/overflow-builtins.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/overflow-builtins.c
+== Test experimental Tier 1 scheduling, model coverage and native execution
+"$BUSTER_COMPILER" test-tier1-schedule
+== Test verified Tier 1 optimization passes
+"$BUSTER_COMPILER" test-ir-optimize
+"$BUSTER_COMPILER" test-ir-gvn
+"$BUSTER_COMPILER" test-ir-licm
+"$BUSTER_COMPILER" test-ir-unroll
+"$BUSTER_COMPILER" test-ir-sroa
+# #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
+"$BUSTER_COMPILER" test-ir-vectorize
+"$BUSTER_COMPILER" test-ir-inline
+== Test the tier-neutral emitted function and its frame verifier
+# #1056: row programs against the fixed CFI writer for every descriptor; Tier 0's generated programs and the Tier 1
+# frame planner's every flag resolved into the previous readers' descriptors byte for byte; the frame verifier on them
+# and their mutants; and a probe frame (its CFA in r11 through the loop) under gdb at every instruction.
+"$BUSTER_COMPILER" test-emitted-code --cross-check
+== Test Tier 1 integer truth round trips against native and instruction-shape oracles
+# #1218: the subject must compile at Tier 1 with no fallback, by both host paths. Clang builds the independent
+# execution oracle; objdump checks all branch-only fixtures for one comparison and no setcc materialization.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_truth.c -o build/test-driver-tier1-truth
+./build/test-driver-tier1-truth "$BUSTER_COMPILER" "$(command -v clang)"
+== Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
+# #2554: the subject compiles at Tier 1 with no fallback, by both host paths, and runs against Clang's oracle; objdump
+# checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
+# computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc,
+# (#2791) a select of a floating comparison by <, <=, > or >= a cmov of its ucomis's flags, on NaN and signed-zero
+# operands, (#2922) one of == or != two cmovs, the parity flag's too, unless its values recur through it, and
+# (#2745) no object a vector's value writes whole is zeroed first.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns
+./build/test-driver-tier1-patterns "$BUSTER_COMPILER" "$(command -v clang)"
+# #1371: sparse signed/unsigned cases, ranges, side effects and control flow, strictly at Tier 1 on both host paths.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_sparse_switch.c -o build/test-driver-tier1-sparse-switch
+./build/test-driver-tier1-sparse-switch "$BUSTER_COMPILER" "$(command -v clang)"
+== Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+# #2573: every width's loads, stores, comparisons with an immediate after the displacement field, operations, floating
+# accesses, a sequentially consistent store and a loop, by both host paths without fallback, linked by the system linker
+# against a Clang oracle; objdump checks that no direct access goes through a lea of its symbol, each branch keeps its
+# fused comparison, and the GOT's and thread-locals' accesses keep their sequences.
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_symbols.c -o build/test-driver-tier1-symbols
+./build/test-driver-tier1-symbols "$BUSTER_COMPILER" "$(command -v clang)"
