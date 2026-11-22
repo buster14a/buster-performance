@@ -886,7 +886,7 @@ their tokens) and 14.0% (4.26 ms).
 - **A scan of the tokens decides nearly every root-lost body before any work on it:** 98.1% of their tokens on
   `sqlite3.c`. It costs the whole bodies it also finds one in: 33 of 1,856, 7.1% of their tokens (a `sizeof` under a
   declarator or a label loses no root).
-- **The bodies refused after their sweeps are 15.4% of `sqlite3.c`'s body tokens and 6.25 ms of the piece's 40.6**
+- **The bodies refused after their sweeps are 15.4% of `sqlite3.c`'s body tokens and 6.25 ms of the 38.2 its lowered bodies take**
   (5.77 if a body stopped at the chunk that refuses it). They are the loss the forecasts lacked.
 - **Stopping at the first refusal saves little:** 11.30 of 17.37 ms for the root-lost bodies, and 5.77 of 6.25 for
   the rest: a refused root is late in its body as often as early.
