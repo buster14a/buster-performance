@@ -1,0 +1,376 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 16d77c83e..169fec236 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -657,6 +657,7 @@ struct PPFileData
+     // The directive table: per directive, its '#' token, the token past its line, its kind, and for a conditional the
+     // index of the next directive of its group (#elif, #else or #endif), or BUSTER_PP_NONE if the group is unterminated.
+     uint32_t directive_count;
++    uint32_t stream_end; // First byte of the next lazy primary fragment, or zero at EOF.
+     uint32_t* directive_hash;
+     uint32_t* directive_end;
+     uint8_t* directive_kind;
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 5cf14e5a4..d85cb564c 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -726,11 +726,128 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+ // Prepares a file this unit enters for the first time: one it made (the predefines, the command line) into its own
+ // arenas, and any other through the file cache, which prepares each file once for every unit (file_cache_prepare) and
+ // whose record the unit's data then copies. Diagnoses a file that can't be prepared, and returns false.
++// Fragment boundaries are before a physical directive at column one, after an unspliced newline.
++// A cut still inside a block comment is rejected after lexical preparation.
++static uint32_t pp_fragment_cut(const uint8_t* bytes, uint32_t length, uint32_t from)
++{
++    for (uint32_t pos = from; pos < length;)
++    {
++        const uint8_t* hash = memchr(bytes + pos, '#', length - pos);
++        if (hash == NULL)
++        {
++            break;
++        }
++        pos = (uint32_t)(hash - bytes);
++        if (pos > 0 && bytes[pos - 1] == '\n')
++        {
++            uint32_t tail = pos - 1;
++            while (tail != 0 && (bytes[tail - 1] == '\r' || bytes[tail - 1] == ' ' || bytes[tail - 1] == '\t' || bytes[tail - 1] == '\v' || bytes[tail - 1] == '\f'))
++            {
++                tail -= 1;
++            }
++            if (tail == 0 || (bytes[tail - 1] != '\\' && !(tail >= 3 && memcmp(bytes + tail - 3, "?" "?/", 3) == 0)))
++            {
++                return pos;
++            }
++        }
++        pos += 1;
++    }
++    return length;
++}
++
++static PPPrepareStatus pp_prepare_fragment(Preprocessor* pp, const PPFileData* original, PPFileData* result,
++                                          uint32_t from, bool terminal, uint64_t* ticks)
++{
++    const PPPrepare prepare = pp_prepare_config(pp);
++    const uint32_t length = original->length;
++    const uint8_t* bytes = original->bytes;
++    const uint32_t target = 64u << 10;
++    uint32_t end = terminal || length - from <= target ? length : pp_fragment_cut(bytes, length, from + target);
++    for (;;)
++    {
++        PPFileData part = { .bytes = bytes + from, .length = end - from, .device = original->device, .inode = original->inode,
++                            .modified = original->modified, .has_modified = original->has_modified, .record = original->record,
++                            .included = original->included, .once = original->once, .dependency = original->dependency };
++        const PPPrepareStatus status = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, &part, ticks);
++        if (status != PP_PREPARE_DONE)
++        {
++            return status;
++        }
++        if (end != length && (part.unterminated_comment != 0 || part.raw_error_count != 0))
++        {
++            // Retry this fragment without a cut in a token or malformed lexical construct.
++            end = length;
++            continue;
++        }
++        if (from != 0)
++        {
++            const __m512i offset = _mm512_set1_epi32((int32_t)from);
++            for (uint32_t i = 0; i < part.token_count; i += 16)
++            {
++                const __mmask16 valid = part.token_count - i >= 16 ? 0xffffu : (__mmask16)_bzhi_u32(0xffff, part.token_count - i);
++                const __m128i kinds = _mm_maskz_loadu_epi8(valid, part.kinds + i);
++                const __mmask16 positions = _mm_mask_cmpneq_epi8_mask(valid, _mm_and_si128(kinds, _mm_set1_epi8(127)), _mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++                const __m512i starts = _mm512_maskz_loadu_epi32(valid, part.starts + i);
++                const __m512i values = _mm512_maskz_loadu_epi32(positions, part.values + i);
++                _mm512_mask_storeu_epi32(part.starts + i, valid, _mm512_add_epi32(starts, offset));
++                _mm512_mask_storeu_epi32(part.values + i, positions, _mm512_add_epi32(values, offset));
++            }
++            for (uint32_t i = 0; i < part.raw_error_count; i += 1)
++            {
++                part.raw_errors[i].offset += from;
++            }
++            if (part.unterminated_comment != 0)
++            {
++                part.unterminated_comment += from;
++            }
++        }
++        part.bytes = bytes;
++        part.length = length;
++        part.line_pages = NULL;
++        part.stream_end = end != length ? end : 0;
++        if (end != length || from != 0)
++        {
++            part.guard = 0;
++            part.guard_opener = BUSTER_PP_NONE;
++        }
++        *result = part;
++        return PP_PREPARE_DONE;
++    }
++}
++
++// Switch a live file context while existing macro bodies keep their immutable raw columns and source offsets.
++static bool pp_enter_fragment(Preprocessor* pp, PPContext* context, uint32_t from, bool terminal)
++{
++    const uint32_t index = pp->data_count;
++    if (index >= (BUSTER_PP_MAX_FILES >> pp->capacity_shift) ||
++        pp_prepare_fragment(pp, &pp->datas[context->data], &pp->datas[index], from, terminal, pp->options.timing ? pp->ticks : NULL) != PP_PREPARE_DONE)
++    {
++        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory preparing the next source fragment");
++        return false;
++    }
++    pp->data_count += 1;
++    const PPFileData* next = &pp->datas[index];
++    pp->input_tokens += next->token_count;
++    context->data = index;
++    context->position = 0;
++    context->next_directive = 0;
++    context->end = next->token_count;
++    context->comment_read = false;
++    context->hidden_directives = false;
++    return true;
++}
++
+ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
+ {
+     uint64_t* ticks = pp->options.timing ? pp->ticks : 0;
+     PPPrepareStatus status;
+-    if (data->record == BUSTER_PP_NONE)
++    const bool primary = pp->main_file < pp->file_count && data == pp->datas + pp->files[pp->main_file].data;
++    if (primary && data->record != BUSTER_PP_NONE && !pp->cache->records[data->record].prepared && data->length >= (1u << 20) &&
++        data->length <= INT32_MAX && !(pp->refine_flags & (C_TOKENIZER_CPLUSPLUS | C_TOKENIZER_NO_LINE_COMMENTS)))
++    {
++        status = pp_prepare_fragment(pp, data, data, 0, false, ticks);
++    }
++    else if (data->record == BUSTER_PP_NONE)
+     {
+         const PPPrepare prepare = pp_prepare_config(pp);
+         status = pp_prepare_into(&prepare, pp->table, pp->columns, &pp->arena, data, ticks);
+@@ -1929,7 +2046,7 @@ BUSTER_INLINE void pp_reserved_macro_name(Preprocessor* pp, const PPFileData* da
+ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
+ {
+     const PPFileData* data = &pp->datas[data_index];
+-    const uint32_t location = base + (begin < data->token_count ? data->starts[begin] : data->length);
++    const uint32_t location = base + (begin < data->token_count ? data->starts[begin] : data->stream_end ? data->stream_end : data->length);
+     if (begin >= end)
+     {
+         pp_diagnose(pp, PP_SEVERITY_ERROR, pp_line_end_location(pp, data, base, begin - 1), "macro name missing");
+@@ -2823,6 +2940,11 @@ static void pp_note_file_run(Preprocessor* pp)
+ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
+ {
+     PPContext* context = &pp->contexts[pp->context_count - 1];
++    if (context->kind == BUSTER_PP_CONTEXT_FILE && pp->datas[context->data].stream_end != 0 && !pp->fatal)
++    {
++        pp_enter_fragment(pp, context, pp->datas[context->data].stream_end, false);
++        return;
++    }
+     const bool relexed = context->relexed;
+     const uint32_t relex_position = context->relex_position;
+     const uint32_t relex_file = context->relex_file;
+@@ -5083,6 +5205,11 @@ static void pp_collect_step(Preprocessor* pp)
+                 pp_directive(pp, context);
+             }
+         }
++        else if (data->stream_end != 0)
++        {
++            pp_enter_fragment(pp, context, data->stream_end, false);
++            return;
++        }
+         else if (pp->context_count > 1)
+         {
+             // An included file's end: clang's lexer goes back to the includer and the collection goes on there, whether
+@@ -9036,11 +9163,168 @@ static uint32_t pp_skip_relexed_group(Preprocessor* pp, const PPContext* context
+     return next;
+ }
+ 
++// Starting after a false directive's physical line, find the branch its real evaluator wants next.
++// The source cursor emits no token rows and interns no identifiers. Unusual directive spellings,
++// diagnostics in nested conditions, and raw strings use the normal lexer and directive handler.
++static bool pp_scan_false_branch(const Preprocessor* pp, const PPFileData* data, uint32_t begin, uint32_t* sibling)
++{
++    const ScalarLexer lexer = { .source = data->bytes, .length = data->length, .trigraphs = (pp->refine_flags & C_TOKENIZER_TRIGRAPHS) != 0 };
++    uint64_t p = begin;
++    bool sol = true;
++    uint32_t depth = 0;
++    uint64_t seen_else = 0;
++    int32_t quote = 0;
++    int32_t previous = 0;
++    enum { NORMAL, COMMENT, LINE } mode = NORMAL;
++    while (p < data->length)
++    {
++        uint64_t size, at;
++        const int32_t c = get_char(&lexer, p, &size, &at);
++        p += size;
++        if (c == BUSTER_LEX_END_OF_FILE)
++        {
++            break;
++        }
++        if (mode == COMMENT)
++        {
++            if (c == '*' && peek_char(&lexer, p, &size) == '/')
++            {
++                p += size;
++                mode = NORMAL;
++            }
++        }
++        else if (c == '\n' || c == '\r')
++        {
++            if (quote != 0)
++            {
++                return false;
++            }
++            mode = NORMAL;
++            sol = true;
++        }
++        else if (mode == LINE)
++        {
++            continue;
++        }
++        else if (quote != 0)
++        {
++            if (c == '\\')
++            {
++                peek_char(&lexer, p, &size);
++                p += size;
++            }
++            else if (c == quote)
++            {
++                quote = 0;
++            }
++        }
++        else if (c == '/' && peek_char(&lexer, p, &size) == '*')
++        {
++            p += size;
++            mode = COMMENT;
++        }
++        else if (c == '/' && peek_char(&lexer, p, &size) == '/')
++        {
++            p += size;
++            mode = LINE;
++        }
++        else if (c == '"' || c == '\'')
++        {
++            if ((c == '"' && previous == 'R') || (c == '\'' && ((previous >= '0' && previous <= '9') || previous == '.')))
++            {
++                return false;
++            }
++            sol = false;
++            quote = c;
++        }
++        else if (sol && c == '#')
++        {
++            const uint32_t hash = (uint32_t)at;
++            const uint8_t* bytes = data->bytes;
++            while (p < data->length && (bytes[p] == ' ' || bytes[p] == '\t')) { p += 1; }
++            const uint64_t word = p;
++            while (p < data->length && ((bytes[p] >= 'a' && bytes[p] <= 'z') || (bytes[p] >= 'A' && bytes[p] <= 'Z') ||
++                                        (bytes[p] >= '0' && bytes[p] <= '9') || bytes[p] == '_')) { p += 1; }
++            const uint32_t length = (uint32_t)(p - word);
++            if (p < data->length && (bytes[p] == '\\' || bytes[p] == '?' || bytes[p] >= 128 || bytes[p] == '$' ||
++                                     (length == 0 && (bytes[p] == '/' || bytes[p] == '\v' || bytes[p] == '\f'))))
++            {
++                return false;
++            }
++            const uint8_t* name = bytes + word;
++            const bool open = (length == 2 && memcmp(name, "if", 2) == 0) || (length == 5 && memcmp(name, "ifdef", 5) == 0) ||
++                              (length == 6 && memcmp(name, "ifndef", 6) == 0);
++            const bool close = length == 5 && memcmp(name, "endif", 5) == 0;
++            const bool otherwise = length == 4 && memcmp(name, "else", 4) == 0;
++            const bool modern = (length == 7 && memcmp(name, "elifdef", 7) == 0) || (length == 8 && memcmp(name, "elifndef", 8) == 0);
++            const bool branch = otherwise || modern || (length == 4 && memcmp(name, "elif", 4) == 0);
++            if (depth == 0 && (close || branch))
++            {
++                *sibling = hash;
++                return true;
++            }
++            if (open)
++            {
++                if (depth == 64) { return false; }
++                seen_else &= ~(UINT64_C(1) << depth);
++                depth += 1;
++            }
++            else if (close)
++            {
++                depth -= 1;
++            }
++            else if (branch)
++            {
++                const uint64_t bit = UINT64_C(1) << (depth - 1);
++                if ((seen_else & bit) || modern)
++                {
++                    return false;
++                }
++                if (otherwise) { seen_else |= bit; }
++            }
++            sol = false;
++        }
++        else if (sol && (c == '%' || c == 0 || c > 127))
++        {
++            return false;
++        }
++        else if (c != ' ' && c != '\t' && c != '\v' && c != '\f')
++        {
++            sol = false;
++        }
++        previous = c;
++    }
++    return false;
++}
++
+ // Skip to the next branch of d's group, reporting the skipped directives' structural diagnostics.
+ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
+ {
+     const PPFileData* data = &pp->datas[context->data];
+-    const uint32_t next = context->hidden_directives ? pp_skip_relexed_group(pp, context, data) : data->directive_next[d];
++    bool diagnosed = false;
++    uint32_t next = context->hidden_directives ? pp_skip_relexed_group(pp, context, data) : data->directive_next[d];
++    if (data->stream_end != 0 && next == BUSTER_PP_NONE)
++    {
++        const uint32_t hash = data->starts[data->directive_hash[d]];
++        const uint32_t begin = pp_directive_resume(pp, context, d) - pp->ranges[context->range].base;
++        uint32_t sibling = 0;
++        const bool found = !context->hidden_directives && pp_scan_false_branch(pp, data, begin, &sibling);
++        if (!pp_enter_fragment(pp, context, found ? sibling : hash, !found))
++        {
++            return;
++        }
++        data = &pp->datas[context->data];
++        if (found)
++        {
++            next = 0;
++        }
++        else
++        {
++            context->next_directive = 1;
++            next = pp_skip_relexed_group(pp, context, data);
++        }
++        diagnosed = true;
++    }
+     if (next == BUSTER_PP_NONE)
+     {
+         context->position = data->token_count;
+@@ -9055,7 +9339,7 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
+     {
+         pp->conditionals[pp->conditional_count - 1].skipping = true;
+     }
+-    if (!context->hidden_directives && data->note_count != 0)
++    if (!diagnosed && !context->hidden_directives && data->note_count != 0)
+     {
+         pp_report_skipped(pp, context, data, d, context->next_directive);
+     }
+@@ -9750,7 +10034,7 @@ static void pp_include(Preprocessor* pp, PPContext* context, uint32_t d, uint8_t
+     const uint32_t base = pp->ranges[context->range].base;
+     const uint32_t location = base + data->starts[hash];
+     const uint32_t first = hash + 2;
+-    const uint32_t line_end = end < data->token_count ? data->starts[end] : data->length;
++    const uint32_t line_end = end < data->token_count ? data->starts[end] : data->stream_end ? data->stream_end : data->length;
+     const uint32_t room = first < end ? line_end - data->starts[first] : 0;
+     Scratch scratch = scratch_begin(0);
+     uint8_t* name = arena_push(scratch.arena, (uint64_t)room + 1, 1);
+@@ -10901,7 +11185,7 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
+                 // where the directive's line ends: the note starts there, before blanks and lines without tokens, so that
+                 // an #embed's tokens, which start the line there (pp_embed_line), are in the system header. A _Pragma's
+                 // note starts at the token after it.
+-                const uint32_t next = range->base + (context->position < data->token_count ? data->starts[context->position] : data->length);
++                const uint32_t next = range->base + (context->position < data->token_count ? data->starts[context->position] : data->stream_end ? data->stream_end : data->length);
+                 const uint32_t at = from_operator ? next : pp_directive_resume(pp, context, context->next_directive - 1);
+                 const uint32_t latest = range->last_line_directive;
+                 pp_add_line_note(pp, context->range, at, latest != BUSTER_PP_NONE ? pp->line_directives[latest].delta : 0, 0, 0, BUSTER_PP_SYSTEM_FILE, 0);
