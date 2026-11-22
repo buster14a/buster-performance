@@ -1,0 +1,381 @@
+diff --git a/src/buster/compiler/tier0.c b/src/buster/compiler/tier0.c
+index 959ac5d4a..6dce53edc 100644
+--- a/src/buster/compiler/tier0.c
++++ b/src/buster/compiler/tier0.c
+@@ -13402,21 +13402,10 @@ static __m512i tier0_shift_back(__m512i current, __m512i previous, uint32_t back
+     return _mm512_permutex2var_epi8(previous, index, current);
+ }
+ 
+-// The vector fusion's bitsets and columns: P0's predicates of each entry's value (as an immediate of 32 bits, a count up
+-// to 255, zero, a size below 2^31, the product with the entry before's fitting 32 bits, the value of three entries back),
+-// P1's leaf fusions per consumer and P2's compound ones.
++// The control-flow labels and fusion decisions that neighbouring blocks need.
+ typedef struct Tier0Bits Tier0Bits;
+ struct Tier0Bits
+ {
+-    uint64_t* fits;
+-    uint64_t* count;
+-    uint64_t* zero;
+-    uint64_t* size;
+-    uint64_t* product;
+-    uint64_t* same;
+-    uint64_t* sib;
+-    uint64_t* sequential;
+-    uint8_t* sib_log2;
+     uint64_t* labels;
+     // A consumer takes the leaf before it; takes a local and a constant (HOME_CONST); takes a pointer addition, a
+     // compare or a test before it; takes a pointer addition two back; takes the entry three back (x = x op v's x, and
+@@ -13429,40 +13418,26 @@ struct Tier0Bits
+     uint32_t blocks;
+ };
+ 
+-// P0: each entry's value predicates, 8 entries at a time (a byte of each bitset), and its SIB scale's log2.
+-static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
++// A value's low byte and the redundant sign bits above its magnitude. In the latter byte, bit 7 is the sign and
++// the low seven bits count leading zeros in the value (in its complement when negative). One byte compare over 64
++// entries then answers each signed or unsigned width question. Only the last group may end short of eight values.
++static void tier0_vector_value_bytes(const uint64_t* values, uint32_t count, __m512i* low_bytes, __m512i* width_bytes)
+ {
+-    const uint32_t count = function->count;
+-    const __m512i int32_max = _mm512_set1_epi64(INT32_MAX);
+-    for (uint32_t first = 0; first < count; first += 8)
++    _Alignas(64) uint8_t low[64];
++    _Alignas(64) uint8_t width[64];
++    for (uint32_t lane = 0; lane < count; lane += 8)
+     {
+-        const __mmask8 lanes = (__mmask8)tier0_lanes((int64_t)first, count);
+-        const __mmask8 lanes_1 = (__mmask8)(tier0_lanes((int64_t)first - 1, count));
+-        const __mmask8 lanes_3 = (__mmask8)(tier0_lanes((int64_t)first - 3, count));
+-        const __m512i value = _mm512_maskz_loadu_epi64(lanes, function->values + first);
+-        const __m512i previous = _mm512_maskz_loadu_epi64(lanes_1, (const void*)((uintptr_t)(function->values + first) - 8));
+-        const __m512i back3 = _mm512_maskz_loadu_epi64(lanes_3, (const void*)((uintptr_t)(function->values + first) - 24));
+-        const __m512i narrowed = _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(value));
+-        const __m512i product = _mm512_mullo_epi64(previous, value);
+-        const __m512i narrowed_product = _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(product));
+-        const __m512i previous_narrowed = _mm512_cvtepi32_epi64(_mm512_cvtepi64_epi32(previous));
+-        const uint32_t byte = first / 8;
+-        ((uint8_t*)bits->fits)[byte] = (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes, value, narrowed);
+-        ((uint8_t*)bits->count)[byte] = (uint8_t)_mm512_mask_cmple_epu64_mask(lanes, value, _mm512_set1_epi64(255));
+-        ((uint8_t*)bits->zero)[byte] = (uint8_t)_mm512_mask_testn_epi64_mask(lanes, value, value);
+-        ((uint8_t*)bits->size)[byte] = (uint8_t)_mm512_mask_cmple_epu64_mask(lanes, value, int32_max);
+-        ((uint8_t*)bits->product)[byte] =
+-            (uint8_t)(_mm512_mask_cmpeq_epi64_mask(lanes, product, narrowed_product) & _mm512_cmpeq_epi64_mask(previous, previous_narrowed));
+-        ((uint8_t*)bits->same)[byte] = (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes & lanes_3, back3, value);
+-        ((uint8_t*)bits->sequential)[byte] =
+-            (uint8_t)_mm512_mask_cmpeq_epi64_mask(lanes, value, _mm512_set1_epi64(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST));
+-        // A SIB scale: one bit set, at most 8; its log2 is 63 less its leading zeros.
+-        const __mmask8 one_bit = _mm512_cmpeq_epi64_mask(_mm512_popcnt_epi64(value), _mm512_set1_epi64(1));
+-        const __mmask8 small = _mm512_cmple_epu64_mask(value, _mm512_set1_epi64(8));
+-        ((uint8_t*)bits->sib)[byte] = (uint8_t)(lanes & one_bit & small);
+-        const __m512i log2 = _mm512_sub_epi64(_mm512_set1_epi64(63), _mm512_lzcnt_epi64(value));
+-        _mm_storel_epi64((__m128i*)(bits->sib_log2 + first), _mm512_cvtepi64_epi8(_mm512_maskz_mov_epi64(one_bit & small, log2)));
++        const __mmask8 live = (__mmask8)tier0_lanes(lane, count);
++        const __m512i value = _mm512_maskz_loadu_epi64(live, values + lane);
++        const __m512i sign = _mm512_srai_epi64(value, 63);
++        const __m512i zeros = _mm512_lzcnt_epi64(_mm512_xor_si512(value, sign));
++        const __m512i signed_width = _mm512_or_si512(zeros, _mm512_and_si512(sign, _mm512_set1_epi64(128)));
++        _mm_storel_epi64((__m128i*)(low + lane), _mm512_cvtepi64_epi8(value));
++        _mm_storel_epi64((__m128i*)(width + lane), _mm512_cvtepi64_epi8(signed_width));
+     }
++    const __mmask64 live = tier0_lanes(0, count);
++    *low_bytes = _mm512_maskz_loadu_epi8(live, low);
++    *width_bytes = _mm512_maskz_loadu_epi8(live, width);
+ }
+ 
+ // The labels, a bit per entry: the control entries' targets (found 64 at a time, then set one at a time: they are few),
+@@ -13523,7 +13498,15 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+     const __m512i one = _mm512_set1_epi8(1);
+     __m512i previous_kinds = _mm512_setzero_si512();
+     __m512i previous_classes = _mm512_setzero_si512();
+-    __m512i previous_kinds_2 = _mm512_setzero_si512();
++    __m512i previous_variants = _mm512_setzero_si512();
++    __m512i previous_key_classes = _mm512_setzero_si512();
++    __m512i previous_fused = _mm512_setzero_si512();
++    uint64_t previous_fits = 0;
++    uint64_t previous_count = 0;
++    uint64_t previous_zero = 0;
++    uint64_t previous_tests = 0;
++    uint64_t previous_equals = 0;
++    uint64_t previous_takable = 0;
+     // P1: raw effects, leaf fusions, the entries' own variants and keys.
+     for (uint32_t block = 0; block < bits->blocks; block += 1)
+     {
+@@ -13534,7 +13517,6 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         const __m512i kinds_1 = tier0_shift_back(kinds, previous_kinds, 1);
+         const __m512i classes_1 = tier0_shift_back(classes, previous_classes, 1);
+         const __m512i kinds_2 = tier0_shift_back(kinds, previous_kinds, 2);
+-        (void)previous_kinds_2;
+         const __m512i shape = tier0_lookup(tier0_vector_shapes, kinds);
+         const __m512i flags = tier0_lookup(tier0_vector_kind_flags, kinds);
+         const __m512i stack = tier0_lookup(tier0_vector_stacks, classes);
+@@ -13579,22 +13561,38 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         // The value predicates for this block, and one back and two back.
+         const uint64_t labels = bits->labels[block];
+         const uint64_t labels_1 = tier0_bits_back(bits->labels, block, 1);
+-        const uint64_t fits_1 = tier0_bits_back(bits->fits, block, 1);
+-        const uint64_t count_1 = tier0_bits_back(bits->count, block, 1);
+-        const uint64_t size = bits->size[block];
+-        const uint64_t product = bits->product[block];
++        __m512i low_bytes;
++        __m512i width_bytes;
++        tier0_vector_value_bytes(function->values + first, count - first < 64 ? count - first : 64, &low_bytes, &width_bytes);
++        const uint64_t fits_values = _mm512_cmpge_epi8_mask(_mm512_and_si512(width_bytes, _mm512_set1_epi8(127)), _mm512_set1_epi8(33));
++        const uint64_t count_values = _mm512_cmpge_epi8_mask(width_bytes, _mm512_set1_epi8(56));
++        const uint64_t zero = _mm512_cmpeq_epi8_mask(width_bytes, _mm512_set1_epi8(64));
++        const uint64_t fits_1 = tier0_mask_back(fits_values, previous_fits, 1);
++        const uint64_t count_1 = tier0_mask_back(count_values, previous_count, 1);
++        const uint64_t size = _mm512_cmpge_epi8_mask(width_bytes, _mm512_set1_epi8(33));
+         const uint64_t wide = _mm512_movepi8_mask(tier0_lookup(tier0_vector_wide, key_class));
+         const uint64_t shift = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_SHIFT));
+         const uint64_t exempt = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_EXEMPT));
+         const uint64_t pointer_add = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_PTR_ADD));
+         const uint64_t discard = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_DISCARD));
+-        const uint64_t sequential = bits->sequential[block] & _mm512_movepi8_mask(tier0_lookup(tier0_vector_integer, classes)) &
++        const uint64_t sequential_value = count_values & _mm512_cmpeq_epi8_mask(low_bytes, _mm512_set1_epi8(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST));
++        const uint64_t sequential = sequential_value & _mm512_movepi8_mask(tier0_lookup(tier0_vector_integer, classes)) &
+                                     (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_STORE)) |
+                                      _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_SET)));
+         // Whether the constant before fits the consumer's immediate.
+         const uint64_t general_fits = exempt | ~wide | fits_1;
+-        const uint64_t fits = (shift & count_1) | (pointer_add & fits_1 & size & product) | (~shift & ~pointer_add & general_fits);
+         const uint64_t constant_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_CONST));
++        uint64_t product = pointer_add & constant_1 & fits_1 & size & lanes & (block != 0 ? ~0ull : ~1ull);
++        for (uint64_t rest = product; rest != 0; rest &= rest - 1)
++        {
++            const uint32_t entry = first + (uint32_t)__builtin_ctzll(rest);
++            const int64_t scaled = (int64_t)function->values[entry - 1] * (int64_t)function->values[entry];
++            if (scaled < INT32_MIN || scaled > INT32_MAX)
++            {
++                product ^= rest & -rest;
++            }
++        }
++        const uint64_t fits = (shift & count_1) | product | (~shift & ~pointer_add & general_fits);
+         const uint64_t integer_1 = _mm512_movepi8_mask(tier0_lookup(tier0_vector_integer, classes_1));
+         const uint64_t local_1 = _mm512_cmpeq_epi8_mask(kinds_1, _mm512_set1_epi8(BUSTER_TYPED_LOCAL));
+         const uint64_t local_2 = _mm512_cmpeq_epi8_mask(kinds_2, _mm512_set1_epi8(BUSTER_TYPED_LOCAL));
+@@ -13613,10 +13611,14 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         // The variants: the entry's own, then the leaf fusion's.
+         __m512i variant = _mm512_setzero_si512();
+         const uint64_t floating_zero = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2)) &
+-                                       bits->zero[block];
++                                       zero;
+         variant = _mm512_mask_mov_epi8(variant, floating_zero, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+-        const __m512i sib_log2 = _mm512_maskz_loadu_epi8(lanes, bits->sib_log2 + first);
+-        variant = _mm512_mask_add_epi8(variant, pointer_add & bits->sib[block], sib_log2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0)));
++        const uint64_t small_scale = pointer_add & count_values;
++        for (uint32_t log2 = 0; log2 <= 3; log2 += 1)
++        {
++            const uint64_t scale = small_scale & _mm512_cmpeq_epi8_mask(low_bytes, _mm512_set1_epi8((char)(1u << log2)));
++            variant = _mm512_mask_mov_epi8(variant, scale, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(log2)));
++        }
+         variant = _mm512_mask_mov_epi8(variant, lanes & pointer_add & ~size, tier0_variant(BUSTER_TIER0_VARIANT_WIDE_SCALE));
+         const uint64_t last_entry = count != 0 && count - 1 >= first && count - 1 < first + 64 ? 1ull << (count - 1 - first) : 0;
+         variant = _mm512_mask_mov_epi8(variant, _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_RETURN)) & last_entry,
+@@ -13628,74 +13630,22 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         variant = _mm512_mask_mov_epi8(variant, home_const, tier0_variant(BUSTER_TIER0_VARIANT_HOME_CONST));
+         variant = _mm512_mask_mov_epi8(variant, home_home, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME));
+         variant = _mm512_mask_mov_epi8(variant, sequential, tier0_variant(BUSTER_TIER0_VARIANT_ATOMIC));
+-        _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
+-        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes, key_kind);
+-        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes, key_class);
+-        previous_kinds_2 = previous_kinds;
+-        previous_kinds = kinds;
+-        previous_classes = classes;
+-    }
+-    // The calls' effects, from the calls table (they are few), and the tail calls' in a function with them.
+-    const __m512i tail_kind = _mm512_set1_epi8(function->call_tails != 0 ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL);
+-    for (uint32_t first = 0; first < count; first += 64)
+-    {
+-        const __m512i block_kinds = tier0_bytes_at(function->kinds, first, count);
+-        uint64_t calls = (_mm512_cmpeq_epi8_mask(block_kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) | _mm512_cmpeq_epi8_mask(block_kinds, tail_kind)) &
+-                         tier0_lanes(first, count);
+-        while (calls != 0)
+-        {
+-            const uint32_t entry = first + (uint32_t)__builtin_ctzll(calls);
+-            int32_t integer = 0;
+-            int32_t floating = 0;
+-            tier0_raw_effects(function, entry, &integer, &floating);
+-            entries->integer_effects[entry] = (int8_t)integer;
+-            entries->floating_effects[entry] = (int8_t)floating;
+-            calls &= calls - 1;
+-        }
+-    }
+-    // P2: the compound fusions, from P1's variants of the entries before. A branch's rules read three masks of the
+-    // entries behind it, each block's kept for the next: the tests against zero, those of them that are EQ, and the
+-    // compares a branch can take. A compare that leaves its flags to a branch behind its tests takes the flags'
+-    // variant from the branch's lane, three or five on: in the block before for a block's first branches, whose
+-    // variants are kept for that.
+-    __m512i previous_variants = _mm512_setzero_si512();
+-    __m512i previous_key_classes = _mm512_setzero_si512();
+-    __m512i previous_fused = _mm512_setzero_si512();
+-    previous_kinds = _mm512_setzero_si512();
+-    previous_classes = _mm512_setzero_si512();
+-    uint64_t previous_tests = 0;
+-    uint64_t previous_equals = 0;
+-    uint64_t previous_takable = 0;
+-    for (uint32_t block = 0; block < bits->blocks; block += 1)
+-    {
+-        const uint32_t first = block * 64;
+-        const __mmask64 lanes = tier0_lanes(first, count);
+-        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+-        const __m512i classes = tier0_bytes_at(function->classes, first, count);
+-        const __m512i variants = _mm512_maskz_loadu_epi8(lanes, entries->variants + first);
+-        const __m512i key_classes = _mm512_maskz_loadu_epi8(lanes, entries->key_classes + first);
+-        const __m512i kinds_1 = tier0_shift_back(kinds, previous_kinds, 1);
+-        const __m512i kinds_2 = tier0_shift_back(kinds, previous_kinds, 2);
++        // Resolve compound consumers while the leaf variants and keys are still in registers.
++        const __m512i variants = variant;
+         const __m512i kinds_3 = tier0_shift_back(kinds, previous_kinds, 3);
+         const __m512i kinds_5 = tier0_shift_back(kinds, previous_kinds, 5);
+-        const __m512i classes_1 = tier0_shift_back(classes, previous_classes, 1);
+         const __m512i classes_3 = tier0_shift_back(classes, previous_classes, 3);
+         const __m512i variants_1 = tier0_shift_back(variants, previous_variants, 1);
+         const __m512i variants_2 = tier0_shift_back(variants, previous_variants, 2);
+-        const __m512i key_classes_1 = tier0_shift_back(key_classes, previous_key_classes, 1);
+-        const __m512i key_classes_3 = tier0_shift_back(key_classes, previous_key_classes, 3);
+-        const __m512i key_classes_5 = tier0_shift_back(key_classes, previous_key_classes, 5);
+-        const uint64_t labels = bits->labels[block];
+-        const uint64_t labels_1 = tier0_bits_back(bits->labels, block, 1);
++        const __m512i key_classes_1 = tier0_shift_back(key_class, previous_key_classes, 1);
++        const __m512i key_classes_3 = tier0_shift_back(key_class, previous_key_classes, 3);
++        const __m512i key_classes_5 = tier0_shift_back(key_class, previous_key_classes, 5);
+         const uint64_t labels_2 = tier0_bits_back(bits->labels, block, 2);
+-        const uint64_t leaf = bits->leaf[block];
+-        const uint64_t leaf_2 = tier0_bits_back(bits->leaf, block, 2);
+-        const uint64_t home_const_2 = tier0_bits_back(bits->home_const, block, 2);
+         const uint64_t valid_1 = block != 0 ? ~0ull : ~1ull;
+         const uint64_t valid_2 = block != 0 ? ~0ull : ~3ull;
+         const uint64_t valid_3 = block != 0 ? ~0ull : ~7ull;
+-        const __m512i row = tier0_lookup(tier0_vector_rows, kinds);
+-        const __m512i properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(row, 4), classes));
++        const __m512i raw_row = tier0_lookup(tier0_vector_rows, kinds);
++        const __m512i raw_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(raw_row, 4), classes));
+         const __m512i flags_1 = tier0_lookup(tier0_vector_kind_flags, kinds_1);
+         const uint64_t index_1 = _mm512_cmpge_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0))) &
+                                  _mm512_cmple_epu8_mask(variants_1, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(3)));
+@@ -13705,8 +13655,8 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         const uint64_t index_2 = _mm512_cmpge_epu8_mask(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0))) &
+                                  _mm512_cmple_epu8_mask(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(3)));
+         const uint64_t constant_variant_2 = _mm512_cmpeq_epi8_mask(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_CONST));
+-        const uint64_t property_address = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_ADDRESS));
+-        const uint64_t property_address_const = _mm512_test_epi8_mask(properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_ADDRESS_CONST));
++        const uint64_t property_address = _mm512_test_epi8_mask(raw_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_ADDRESS));
++        const uint64_t property_address_const = _mm512_test_epi8_mask(raw_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_ADDRESS_CONST));
+         // A load's address.
+         const uint64_t load = lanes & valid_1 & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_LOAD)) & ~labels & pointer_add_1 &
+                               (index_1 | constant_variant_1) & property_address;
+@@ -13722,12 +13672,11 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         // branches' templates).
+         const uint64_t branch_true = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_TRUE));
+         const uint64_t branch = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_FALSE)) | branch_true;
+-        const __m512i own_flags = tier0_lookup(tier0_vector_kind_flags, kinds);
+-        const __m512i own_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(row, 4), key_classes));
++        const __m512i own_properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(raw_row, 4), key_class));
+         const uint64_t equals = lanes & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_EQ));
+         const uint64_t tests = (equals | (lanes & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_NE)))) & value_constant &
+-                               tier0_bits_back(bits->zero, block, 1) & ~labels_1;
+-        const uint64_t takable = lanes & _mm512_test_epi8_mask(own_flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) &
++                               tier0_mask_back(zero, previous_zero, 1) & ~labels_1;
++        const uint64_t takable = lanes & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE)) &
+                                  _mm512_test_epi8_mask(own_properties, _mm512_set1_epi8(BUSTER_TIER0_PROPERTY_BRANCH)) &
+                                  _mm512_cmple_epu8_mask(variants, tier0_variant(BUSTER_TIER0_VARIANT_HOME_HOME));
+         // Then the branch: the compare behind two tests, five back; or behind one, three back (#2877: a compare's value
+@@ -13750,17 +13699,22 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         const uint64_t x_local = _mm512_cmpeq_epi8_mask(kinds_3, _mm512_set1_epi8(BUSTER_TYPED_LOCAL));
+         // x is never absorbed already: the entry after it is a leaf, which absorbs nothing, and the op two after it
+         // isn't a kind that takes a local and a constant.
+-        (void)home_const_2;
+-        (void)leaf_2;
+-        const uint64_t rmw = lanes & valid_3 & set_local & ~labels & ~labels_1 & ~labels_2 & rmw_kind_1 & rmw_property & x_local &
+-                             bits->same[block] & _mm512_cmpeq_epi8_mask(classes_3, classes) & _mm512_cmpeq_epi8_mask(classes_1, classes);
++        uint64_t rmw = lanes & valid_3 & set_local & ~labels & ~labels_1 & ~labels_2 & rmw_kind_1 & rmw_property & x_local &
++                             _mm512_cmpeq_epi8_mask(classes_3, classes) & _mm512_cmpeq_epi8_mask(classes_1, classes);
++        for (uint64_t rest = rmw; rest != 0; rest &= rest - 1)
++        {
++            const uint32_t entry = first + (uint32_t)__builtin_ctzll(rest);
++            if (function->values[entry - 3] != function->values[entry])
++            {
++                rmw ^= rest & -rest;
++            }
++        }
+         // A branch behind its tests takes the test before it; behind two, the first one too, three back, as x = x op v's
+         // SET_LOCAL takes the op and x.
+         bits->one[block] = load | fused_branch | tested | rmw;
+         bits->two[block] = store;
+         bits->rmw[block] = rmw | twice;
+         // The keys and variants of the compound fusions.
+-        __m512i variant = variants;
+         variant = _mm512_mask_mov_epi8(variant, load & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET));
+         variant = _mm512_mask_mov_epi8(variant, load & index_1, variants_1);
+         const __m512i store_index = _mm512_sub_epi8(variants_2, tier0_variant(BUSTER_TIER0_VARIANT_INDEX(0)));
+@@ -13784,19 +13738,40 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
+         variant = _mm512_mask_mov_epi8(variant, rmw & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_CONST));
+         variant = _mm512_mask_mov_epi8(variant, rmw & inner_home_1, tier0_variant(BUSTER_TIER0_VARIANT_RMW_HOME));
+         _mm512_mask_storeu_epi8(entries->variants + first, lanes, variant);
+-        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & (fused_branch | rmw), kinds_1);
+-        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes & tested, taken_kinds);
+-        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & fused_branch, key_classes_1);
+-        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes & tested, taken_classes);
++        const __m512i final_kinds = _mm512_mask_blend_epi8(fused_branch | rmw, key_kind, kinds_1);
++        const __m512i final_classes = _mm512_mask_blend_epi8(fused_branch, key_class, key_classes_1);
++        _mm512_mask_storeu_epi8(entries->key_kinds + first, lanes, _mm512_mask_blend_epi8(tested, final_kinds, taken_kinds));
++        _mm512_mask_storeu_epi8(entries->key_classes + first, lanes, _mm512_mask_blend_epi8(tested, final_classes, taken_classes));
+         previous_variants = variants;
+-        previous_key_classes = key_classes;
++        previous_key_classes = key_class;
+         previous_fused = variant;
+         previous_kinds = kinds;
+         previous_classes = classes;
++        previous_fits = fits_values;
++        previous_count = count_values;
++        previous_zero = zero;
+         previous_tests = tests;
+         previous_equals = equals;
+         previous_takable = takable;
+     }
++    // The calls' effects, from the calls table (they are few), and the tail calls' in a function with them.
++    const __m512i tail_kind = _mm512_set1_epi8(function->call_tails != 0 ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL);
++    for (uint32_t first = 0; first < count; first += 64)
++    {
++        const __m512i block_kinds = tier0_bytes_at(function->kinds, first, count);
++        uint64_t calls = (_mm512_cmpeq_epi8_mask(block_kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) | _mm512_cmpeq_epi8_mask(block_kinds, tail_kind)) &
++                         tier0_lanes(first, count);
++        while (calls != 0)
++        {
++            const uint32_t entry = first + (uint32_t)__builtin_ctzll(calls);
++            int32_t integer = 0;
++            int32_t floating = 0;
++            tier0_raw_effects(function, entry, &integer, &floating);
++            entries->integer_effects[entry] = (int8_t)integer;
++            entries->floating_effects[entry] = (int8_t)floating;
++            calls &= calls - 1;
++        }
++    }
+ }
+ 
+ // P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, and up to BUSTER_TIER0_ABSORB_REACH
+@@ -14646,8 +14621,7 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
+     Tier0Bits bits;
+     memset(&bits, 0, sizeof(bits));
+     bits.blocks = blocks;
+-    uint64_t** columns[] = { &bits.fits, &bits.count, &bits.zero, &bits.size, &bits.product, &bits.same, &bits.sib, &bits.sequential, &bits.labels, &bits.leaf,
+-                             &bits.home_const, &bits.one, &bits.two, &bits.rmw };
++    uint64_t** columns[] = { &bits.labels, &bits.leaf, &bits.home_const, &bits.one, &bits.two, &bits.rmw };
+     bool pushed = tier0_push_entries(&entries, scratch.arena, count);
+     // A word past the blocks for the labels' target past the last entry (the function's end).
+     const uint64_t words = (uint64_t)blocks + 2;
+@@ -14661,13 +14635,11 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
+             *columns[c] = column_words + words * c;
+         }
+     }
+-    bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
+-    Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
++    Tier0Error error = pushed ? TIER0_OK : TIER0_ERROR_MEMORY;
+     if (error == TIER0_OK)
+     {
+         tier0_vector_labels(function, bits.labels);
+         entries.labels = bits.labels;
+-        tier0_vector_values(function, &bits);
+         tier0_vector_fuse(function, &bits, &entries);
+         if (function->vectors)
+         {

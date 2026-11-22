@@ -1,0 +1,164 @@
+diff --git a/src/buster/compiler/c_parser_benchmark.c b/src/buster/compiler/c_parser_benchmark.c
+index 353e1ab29..1df1e3144 100644
+--- a/src/buster/compiler/c_parser_benchmark.c
++++ b/src/buster/compiler/c_parser_benchmark.c
+@@ -555,7 +555,6 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
+         case PARSE_TIMED_VECTOR_K2: parse_roles_avx512(k, count, buffers->typed, &buffers->groups, buffers->contexts, buffers->rounds); break;
+         case PARSE_TIMED_VECTOR_SECONDARY:
+             parse_secondary_avx512(k, count, buffers->secondary);
+-            parse_after_colons_avx512(k, count);
+             break;
+         // K4's three loops alone, in turn; a file too deep for them gets the token-at-a-time K4 in the first.
+         case PARSE_TIMED_VECTOR_K4_PREPARE:
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index 15e597e3c..b26ba87c9 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -9110,6 +9110,24 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
+ {
+     kernels->depth_work = NULL;
+     uint32_t open = 0;
++    // The node depths: +1 at an opener, -1 at a closer, exclusive prefix sums, added to the depth of ( [ {, less one
++    // at a closer of any group.
++    int8_t deltas[128] = { 0 };
++    deltas[PARSE_ROLE_OPEN_TERNARY] = 1;
++    deltas[PARSE_ROLE_OPEN_CASE] = 1;
++    deltas[PARSE_ROLE_CLOSE_TERNARY] = -1;
++    deltas[PARSE_ROLE_CLOSE_CASE] = -1;
++    int8_t closers[128] = { 0 };
++    for (uint32_t r = 0; r < PARSE_ROLE_COUNT; r += 1)
++    {
++        closers[r] = (int8_t)(parse_role_deltas[r] < 0);
++    }
++    const __m512i delta_low = _mm512_loadu_si512(deltas);
++    const __m512i delta_high = _mm512_loadu_si512(deltas + 64);
++    const __m512i closer_low = _mm512_loadu_si512(closers);
++    const __m512i closer_high = _mm512_loadu_si512(closers + 64);
++    uint32_t inner = 0;
++    __m512i depth_bits = _mm512_setzero_si512();
+     for (uint32_t block = 0; block < count; block += 64)
+     {
+         const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+@@ -9146,40 +9164,22 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
+                     kernels->roles[i] = PARSE_ROLE_LABEL;
+                     kernels->flags[i] |= previous != PARSE_KIND_IDENTIFIER && previous != PARSE_VKIND_TYPE_NAME;
+                 }
++                // K2 initially treats a colon as an operand separator. A resolved statement label
++                // starts a block when its next token is a brace, including in the following tile.
++                if (kernels->roles[i] != PARSE_ROLE_CLOSE_TERNARY && i + 1 < count && kernels->vkinds[i + 1] == PARSE_KIND_L_BRACE)
++                {
++                    kernels->roles[i + 1] = PARSE_ROLE_OPEN_BLOCK;
++                    kernels->flags[i + 1] = 0;
++                }
+             }
+         }
+-    }
+-    while (open != 0)
+-    {
+-        kernels->flags[secondary[open - 1]] = 1;
+-        kernels->unbalanced = true;
+-        open -= 1;
+-    }
+-    // The node depths: +1 at an opener, -1 at a closer, exclusive prefix sums, added to the depth of ( [ {, less one
+-    // at a closer of any group.
+-    int8_t deltas[128] = { 0 };
+-    deltas[PARSE_ROLE_OPEN_TERNARY] = 1;
+-    deltas[PARSE_ROLE_OPEN_CASE] = 1;
+-    deltas[PARSE_ROLE_CLOSE_TERNARY] = -1;
+-    deltas[PARSE_ROLE_CLOSE_CASE] = -1;
+-    int8_t closers[128] = { 0 };
+-    for (uint32_t r = 0; r < PARSE_ROLE_COUNT; r += 1)
+-    {
+-        closers[r] = (int8_t)(parse_role_deltas[r] < 0);
+-    }
+-    const __m512i delta_low = _mm512_loadu_si512(deltas);
+-    const __m512i delta_high = _mm512_loadu_si512(deltas + 64);
+-    const __m512i closer_low = _mm512_loadu_si512(closers);
+-    const __m512i closer_high = _mm512_loadu_si512(closers + 64);
+-    uint32_t inner = 0;
+-    __m512i depth_bits = _mm512_setzero_si512();
+-    for (uint32_t block = 0; block < count; block += 64)
+-    {
+-        const __m512i role = _mm512_loadu_si512(kernels->roles + block);
+-        const __m512i delta = _mm512_permutex2var_epi8(delta_low, role, delta_high);
++        // Only this tile's colons can change its secondary deltas. K4 and the reader
++        // consume these final depths and roles without a second pass over the input.
++        const __m512i closed = _mm512_loadu_si512(kernels->roles + block);
++        const __m512i delta = _mm512_permutex2var_epi8(delta_low, closed, delta_high);
+         const __m512i after = parse_prefix_sum8(delta);
+         // The secondary depth before each token, less one at a closer.
+-        const __m512i before = _mm512_sub_epi8(_mm512_sub_epi8(after, delta), _mm512_permutex2var_epi8(closer_low, role, closer_high));
++        const __m512i before = _mm512_sub_epi8(_mm512_sub_epi8(after, delta), _mm512_permutex2var_epi8(closer_low, closed, closer_high));
+         const ParseBracketBlock* brackets = &kernels->bracket_blocks[block / 64];
+         __m512i bracket_depths = _mm512_load_si512(brackets->relative_depths);
+         if (brackets->clamps != 0)
+@@ -9217,35 +9217,17 @@ static void parse_secondary_avx512(ParseKernels* kernels, uint32_t count, uint32
+         const __m512i last = _mm512_permutexvar_epi8(_mm512_set1_epi8((char)(live - 1)), after);
+         inner += (uint32_t)(int32_t)(int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(last));
+     }
++    while (open != 0)
++    {
++        kernels->flags[secondary[open - 1]] = 1;
++        kernels->unbalanced = true;
++        open -= 1;
++    }
+     // K4 only needs to know whether any depth exceeds its eleven-bit key. The OR retains every high bit.
+     _Static_assert((BUSTER_PARSE_MAX_VECTOR_DEPTH & (BUSTER_PARSE_MAX_VECTOR_DEPTH + 1u)) == 0, "K4's depth bound consists of consecutive low bits");
+     kernels->deep_node_depths = _mm512_test_epi32_mask(depth_bits, _mm512_set1_epi32(~BUSTER_PARSE_MAX_VECTOR_DEPTH)) != 0;
+ }
+ 
+-// The roles that depend on whether a `:` before them ends a case label or a label (a statement starts) or a ternary's
+-// middle (an operand follows), which the first K2 pass guessed as the latter: a `{` after a case label is a block; a
+-// typedef name there stays flagged, since what follows it was decided from the guess. Only the `{` tokens after a
+-// resolved colon are looked at.
+-static void parse_after_colons_avx512(ParseKernels* kernels, uint32_t count)
+-{
+-    for (uint32_t block = 0; block < count; block += 64)
+-    {
+-        const __m512i previous = _mm512_loadu_si512(kernels->roles + block - 1);
+-        const __m512i kind = _mm512_loadu_si512(kernels->vkinds + block);
+-        uint64_t lanes = (parse_equal8(previous, PARSE_ROLE_CLOSE_CASE) | parse_equal8(previous, PARSE_ROLE_LABEL)) & parse_equal8(kind, PARSE_KIND_L_BRACE) &
+-                         (count - block < 64 ? (((uint64_t)1 << (count - block)) - 1) : ~(uint64_t)0);
+-        // Token 0 has no colon before it.
+-        lanes &= block == 0 ? ~(uint64_t)1 : ~(uint64_t)0;
+-        while (lanes != 0)
+-        {
+-            const uint32_t i = block + (uint32_t)__builtin_ctzll(lanes);
+-            lanes &= lanes - 1;
+-            kernels->roles[i] = PARSE_ROLE_OPEN_BLOCK;
+-            kernels->flags[i] = 0;
+-        }
+-    }
+-}
+-
+ static BUSTER_BAKED_FRONTEND uint8_t parse_statement_classes[128];
+ 
+ static void parse_statement_tables_init(void)
+@@ -11126,7 +11108,6 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+     parse_roles_avx512(kernels, count, buffers->typed, &buffers->groups, buffers->contexts, buffers->rounds);
+     // K1's second part, and the roles after the colons it resolved.
+     parse_secondary_avx512(kernels, count, buffers->secondary);
+-    parse_after_colons_avx512(kernels, count);
+     // K4, K5 and K6.
+     parse_parents_vector(kernels, count, buffers);
+     const bool statements_ok = parse_statements_vector(kernels, count, buffers);
+diff --git a/src/buster/compiler/c_parser_test.c b/src/buster/compiler/c_parser_test.c
+index 1b802035a..312acab5f 100644
+--- a/src/buster/compiler/c_parser_test.c
++++ b/src/buster/compiler/c_parser_test.c
+@@ -2343,7 +2343,6 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
+         }
+         // K1's second part and the roles after colons.
+         parse_secondary_avx512(kernels, count, buffers.secondary);
+-        parse_after_colons_avx512(kernels, count);
+         // K4 as the vector path runs it, then with windows of fewer lanes and through its deep fallback.
+         parse_parents_vector(kernels, count, &buffers);
+         const bool deep = !kernels->unbalanced && parse_deepest(kernels, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+@@ -3034,7 +3033,6 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
+                 }
+                 parse_roles_avx512(&kernels, count, buffers.typed, &buffers.groups, buffers.contexts, buffers.rounds);
+                 parse_secondary_avx512(&kernels, count, buffers.secondary);
+-                parse_after_colons_avx512(&kernels, count);
+                 parse_parents_vector(&kernels, count, &buffers);
+                 if (!kernels.unbalanced)
+                 {

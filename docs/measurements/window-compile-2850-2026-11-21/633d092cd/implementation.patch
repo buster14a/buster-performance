@@ -1,0 +1,118 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index f69dfa1c9..fc52a479f 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -2205,6 +2205,8 @@ struct CheckInputReader
+     // walk in source order's marks (BUSTER_CHECK_RESOLVE_*), then the expressions' walk's classes (BUSTER_CHECK_EXPRESSION_*).
+     // Lanes (#113) share it, each writing its own body's.
+     uint8_t* visits;
++    // For a single source walk, the tokens with nonzero reasons, one word per 64 tokens.
++    uint64_t* resolved_visits;
+     // The tokens of the declarations attested declarations skip (#2531: a bit a token, 64 a word, from
+     // check_attested_skips), which the walk passes and the unit-wide passes that size or prepare what the walk reads leave
+     // out; null where nothing is skipped.
+@@ -3276,6 +3278,10 @@ static void check_input_lane_refuse(CheckInputReader* reader, bool refused, cons
+ static void check_input_visit(CheckInputReader* reader, uint32_t token, uint8_t reason)
+ {
+     reader->visits[token] |= reason;
++    if (reader->resolved_visits != NULL)
++    {
++        reader->resolved_visits[token / 64] |= UINT64_C(1) << (token % 64);
++    }
+ }
+ 
+ static void check_input_report(CheckInputReader* reader, uint32_t token, CheckInputMessage message)
+@@ -14028,6 +14034,22 @@ static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_
+ {
+     const uint32_t stop = reader->resolve_limit > token && reader->resolve_limit < end ? reader->resolve_limit : end;
+     uint32_t next = token + 1;
++    if (next < stop && reader->resolved_visits != NULL)
++    {
++        uint32_t word = next / 64;
++        uint64_t pending = reader->resolved_visits[word] & (UINT64_MAX << (next % 64));
++        const uint32_t last = (stop - 1) / 64;
++        while (pending == 0 && word < last)
++        {
++            pending = reader->resolved_visits[++word];
++        }
++        if (pending != 0)
++        {
++            const uint32_t found = word * 64 + (uint32_t)__builtin_ctzll(pending);
++            return found < stop ? found : stop;
++        }
++        return stop;
++    }
+     if (next < stop)
+     {
+         const uint8_t* const visits = reader->visits;
+@@ -16719,7 +16741,7 @@ struct CheckInputTokenCounts
+ // (check_input_role_tests). A name of 0 counts no token: tokens without a name have 0. Without roles, every token is
+ // marked.
+ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
+-                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits)
++                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits, uint64_t* resolved_visits)
+ {
+     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
+     // The last name also gates the declaration-specifier column. Keep it in the filter of possible names.
+@@ -16865,6 +16887,10 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
+                                  named | attributes | strings);
+             }
+             _mm512_mask_storeu_epi8(visits + token, lanes, _mm512_maskz_mov_epi8(visit, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX)));
++            if (resolved_visits != NULL)
++            {
++                resolved_visits[token / 64] = visit;
++            }
+         }
+         attribute_depth += __builtin_popcountll(list_opens) - __builtin_popcountll(list_closes);
+     }
+@@ -17160,7 +17186,15 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
+     // With BUSTER_CHECK_VISITS_PADDING bytes past its count + 1, which the coded walk's gathers of four bytes may read.
+     uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
+-    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits);
++    // Deferred bodies can share a mask word across their boundary. Their general walk uses
++    // disjoint byte columns. Small inputs have too few visits to need another index.
++    uint64_t* resolved_visits = visits != NULL && deferred == NULL && attested == NULL && count >= 8192 && !parser->options.scalar ?
++                                arena_push_array(scratch, (uint64_t)count / 64 + 1, sizeof(uint64_t), 8) : NULL;
++    if (resolved_visits != NULL)
++    {
++        resolved_visits[count / 64] = 0;
++    }
++    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, resolved_visits);
+     input->vla_capacity = counts.subscripts;
+     input->asm_capacity = counts.asms;
+     const uint32_t vector_members = counts.vector_members;
+@@ -17202,6 +17236,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+         .deferred = deferred,
+         .syntax = syntax,
+         .visits = visits,
++        .resolved_visits = resolved_visits,
+         .skips = attested != NULL ? check_attested_skips(attested) : NULL,
+         .token_levels = attested != NULL ? check_attested_token_levels(attested) : NULL,
+     };
+diff --git a/src/buster/compiler/c_check_input_scan_test.c b/src/buster/compiler/c_check_input_scan_test.c
+index c9a9f8373..90f4c11da 100644
+--- a/src/buster/compiler/c_check_input_scan_test.c
++++ b/src/buster/compiler/c_check_input_scan_test.c
+@@ -984,7 +984,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+         uint32_t syntax_differences = 0;
+         memset(syntax, 0xa5, (uint64_t)count + 1);
+         memset(visits, 0xa5, (uint64_t)count + 1);
+-        const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits);
++        const CheckInputTokenCounts counts = check_input_count_tokens(&parser, sought, groups, BUSTER_ARRAY_LENGTH(sought), syntax, visits, NULL);
+         char description[200];
+         snprintf(description, sizeof(description), "token counts of %u tokens: subscripts %u (%u), operands %u (%u), group 0 %u (%u), group 3 %u (%u)",
+                  count, counts.subscripts, expected.subscripts, counts.operands, expected.operands, counts.groups[0],
+diff --git a/src/buster/compiler/c_check_overload_test.c b/src/buster/compiler/c_check_overload_test.c
+index f40c85603..5e14b239b 100644
+--- a/src/buster/compiler/c_check_overload_test.c
++++ b/src/buster/compiler/c_check_overload_test.c
+@@ -633,7 +633,7 @@ static __attribute__((noinline)) void check_test_overloadable_counts(CheckTest*
+                 spelled += named;
+                 expected += named && listed;
+             }
+-            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL);
++            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL, NULL);
+             char description[200];
+             snprintf(description, sizeof(description), "source %u's names of overloadable: %u of %u counted, the tree's %u, expected %u", s,
+                      counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE], spelled, expected, sources[s].counted);
