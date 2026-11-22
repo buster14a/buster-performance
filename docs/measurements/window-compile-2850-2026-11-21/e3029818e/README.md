@@ -1,0 +1,3 @@
+# Expression producer presence masks
+
+Actual builtin, specifier-job and intrinsic writers publish per-64-token presence masks that suppress wide probes of empty columns during expression classification. A validation arm computes masks separately from the original columns and checks each block. All 6,860 independent comparisons preserve the reference exit status, stdout, stderr and full object, including 863 expected failures. The results cover the ordinary, enabled and checked variants of the experimental executable. [Source against 40ae34f9d](source.patch), [qualification and commands](qualification.tar.gz), [counts](results.tsv).

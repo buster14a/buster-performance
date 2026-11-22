@@ -1,0 +1,3 @@
+# Independent vector-produced parser input and traversal
+
+Two independently initialized preprocessors and parsers compiled the original input. The source path consumed all 716,136 SQLite and 2,433,563 Buster grammar tokens through the vector entry point. The ordinary per-item scalar fallback within those kernels visited 8,391 SQLite and 21,068 Buster tokens. The producer published 709,161 SQLite and 2,421,290 Buster rows before end of preprocessing. All 13 columns and all 44 Buster pragma source mappings matched at every position. [Source patch](source.patch), [independent comparator](driver.c), [SQLite grammar](sqlite.tsv), [SQLite coverage](sqlite.stderr), [Buster grammar](main.tsv), [Buster coverage](main.stderr).
