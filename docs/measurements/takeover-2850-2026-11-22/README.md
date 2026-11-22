@@ -368,3 +368,47 @@ read whole (`eager.txt`), the comparison `pp != 0` has its operands at type 608;
 (`lazy.txt`: the planner masks the unused body, `deferred=1`), at type 568. So a type made after a masked body has
 another id than in the whole read, and nothing recorded from a whole read that names a type by its id can be given to a
 masked read. A lowered function (`Tier0Function`) names nothing by type id: only symbols.
+
+## Where the unit's memory is (`memory/`)
+
+`scripts/experiment-memory.patch` on main `3b518936a` (not for merge): every arena reservation registered with its
+caller and stage; at each of the stage clock's marks, each arena's resident bytes (`mincore`) and the bytes of its 4 KB
+pages that hold a nonzero byte; the same at an arena's release; and for every push of 512 KB or more, its range's
+resident and filled bytes at the reader's end and at the object's. Release build, the frozen `sqlite3.c` with the
+record's flags, one lane, on this session's machine (not the 9700X: sizes, not times), once with the arenas in base
+pages (`BUSTER_EXPERIMENT_BASE_PAGES`, `base-pages.txt`) and once in huge pages (`BUSTER_HUGE_PAGES=1`,
+`huge-pages.txt`); `scripts/memory-attribute.py` reduces them (`*-reduced.txt`). The peak here is 237.7 MB in huge
+pages, the 9700X's 238.5.
+
+By stage on the 9700X (`mask-exp-mask3/c-whole-3.stages`' `peak-kb-added`): setup 4.7 MB, preprocess 39.6, parse 59.1,
+`check-input` 118.8 (106.0 with every body masked), `check-declarations` 5.5, and nothing after. So the peak is the
+reader's, and every later stage lives in memory an earlier one touched (its minor faults are a few hundred).
+
+| at its most resident, MB | base pages | filled | huge pages |
+| --- | ---: | ---: | ---: |
+| the driver's scratch arena | 71.7 | 55.6 | 84.1 |
+| the driver's retained arena (the reader's output) | 52.0 | 45.3 | 78.0 |
+| the driver's output arena (the checked graph and after) | 35.9 | 31.4 | 46.1 |
+| the reader's own arena, released at its end | 11.2 | 10.9 | 11.2 |
+| the parser's columns (two arenas) | 10.3 | 10.3 | 13.7 |
+| the preprocessor's (file caches, tables, the interner) | 16.6 | 16.6 | 24.9 |
+| the program's, the object's and Tier 0's small arenas | 4.2 | 3.5 | 14.1 |
+| the compiler's own file pages and the source | 22.9 | | 22.9 |
+| peak of the process | 185.8 | | 237.7 |
+
+What it says:
+
+- Of the 238 MB the kernel clears on the 9700X, about 52 are huge pages' slack: columns pushed at their capacity and
+  filled in part, each leaving the rest of its last huge page (the graph's twelve 3.1 MB columns hold 1.1 MB each and
+  take a 2 MB page each), columns written at a few places across their extent (2.7 MB of huge pages for 0.1 MB of
+  written 4 KB pages, three times), and small arenas that touch one huge page for a few hundred KB (the program's 6.0
+  MB for 1.0, Tier 0's inline body's 2.0 for nothing, the preprocessor's 8.2 for 4.1).
+- About 9 MB more are pages touched and left zero (the scratch arena's 16 less what is its slack; one 2.9 MB column
+  the reader's intrinsics initialize and `sqlite3.c` never writes).
+- The rest, about 177 MB, holds data. At 51 µs a MB (`floor/`) that is 9 ms of the 112 that no layout removes: it is
+  the cost of whole-unit columns, and goes only with them.
+- The parser pushes 98 MB of scratch and touches 59 in huge pages (25 in base pages), but the reader's scratch then
+  takes the same pages, so the union is what counts.
+
+Candidates this leaves, none measured as a change: the graph's columns at a tight capacity and packed (about 10 MB),
+the small arenas in base pages (about 17 MB), the never-written columns (about 6 MB). Together under 2 ms.

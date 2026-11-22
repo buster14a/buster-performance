@@ -1,0 +1,434 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index fc65220fc..e45a3bad4 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -324,10 +324,156 @@ static inline void check_clock_lower(CheckClock* stage_clock, CheckClockLower ph
+     }
+ }
+ 
++// EXPERIMENT (#2850's memory attribution; not for merge): at a mark, each registered mapping's resident bytes (mincore
++// over its first GB) and, at the marks that ask, the bytes of its resident 4 KB pages that hold a nonzero byte, read
++// through process_vm_readv so that a page the arena made inaccessible is skipped rather than faulted on.
++static uint32_t experiment_mark_count;
++static const char* experiment_mark_names[BUSTER_EXPERIMENT_MARKS];
++static uint32_t experiment_mark_rss_kb[BUSTER_EXPERIMENT_MARKS];
++
++static void experiment_memory_mark(const char* name, bool nonzero)
++{
++    if (experiment_on && experiment_mark_count < BUSTER_EXPERIMENT_MARKS)
++    {
++        const uint32_t mark = experiment_mark_count;
++        experiment_mark_names[mark] = name;
++        FILE* statm = fopen("/proc/self/statm", "r");
++        unsigned long pages = 0, resident_pages = 0;
++        if (statm != NULL)
++        {
++            if (fscanf(statm, "%lu %lu", &pages, &resident_pages) != 2)
++            {
++                resident_pages = 0;
++            }
++            fclose(statm);
++        }
++        experiment_mark_rss_kb[mark] = (uint32_t)(resident_pages * 4);
++        for (uint32_t a = 0; a < experiment_arena_count; a += 1)
++        {
++            ExperimentArena* arena = &experiment_arenas[a];
++            uint64_t resident = 0;
++            uint64_t filled = 0;
++            if (arena->dead || !experiment_scan(arena->mapping, arena->mapping_bytes, nonzero, &resident, &filled))
++            {
++                arena->dead = true;
++            }
++            arena->resident_kb[mark] = (uint32_t)(resident * 4);
++            arena->nonzero_kb[mark] = (uint32_t)(filled * 4);
++        }
++        const int slot = strcmp(name, "check-declarations") == 0 ? 0 : strcmp(name, "object-write") == 0 ? 1 : -1;
++        for (uint32_t push = 0; slot >= 0 && push < experiment_push_count; push += 1)
++        {
++            ExperimentPush* row = &experiment_pushes[push];
++            uint64_t resident = 0;
++            uint64_t filled = 0;
++            uint32_t a = 0;
++            while (a < experiment_arena_count && experiment_arenas[a].mapping != row->mapping)
++            {
++                a += 1;
++            }
++            if (a < experiment_arena_count && !experiment_arenas[a].dead && row->begin + row->bytes <= (1u << 30) &&
++                experiment_scan(row->address, row->bytes, true, &resident, &filled))
++            {
++                row->resident_kb[slot] = (uint32_t)(resident * 4);
++                row->nonzero_kb[slot] = (uint32_t)(filled * 4);
++            }
++        }
++        experiment_mark_count += 1;
++    }
++}
++
++// The mappings of 1 MB or more resident, as /proc/self/smaps has them at the mark: start, end, permissions, resident
++// kB, anonymous huge pages' kB and the path.
++static char experiment_smaps[1u << 16];
++static uint32_t experiment_smaps_length;
++
++static void experiment_memory_smaps(const char* name)
++{
++    FILE* smaps = fopen("/proc/self/smaps", "r");
++    char line[512];
++    char header[512] = "";
++    unsigned long rss = 0;
++    while (smaps != NULL && fgets(line, sizeof(line), smaps) != NULL)
++    {
++        unsigned long value = 0;
++        if (strchr(line, '-') != NULL && strchr(line, '-') < line + 17 && line[0] != 'V' && strstr(line, " kB") == NULL)
++        {
++            snprintf(header, sizeof(header), "%s", line);
++            header[strcspn(header, "\n")] = 0;
++            rss = 0;
++        }
++        else if (sscanf(line, "Rss: %lu kB", &value) == 1)
++        {
++            rss = value;
++        }
++        else if (sscanf(line, "AnonHugePages: %lu kB", &value) == 1 && rss >= 1024 && experiment_smaps_length + 600 < sizeof(experiment_smaps))
++        {
++            experiment_smaps_length += (uint32_t)snprintf(experiment_smaps + experiment_smaps_length, sizeof(experiment_smaps) - experiment_smaps_length,
++                                                          "experiment-smaps\t%s\t%lu\t%lu\t%s\n", name, rss, value, header);
++        }
++    }
++    if (smaps != NULL)
++    {
++        fclose(smaps);
++    }
++}
++
++static void experiment_memory_report(FILE* stream)
++{
++    if (experiment_on)
++    {
++        fwrite(experiment_smaps, 1, experiment_smaps_length, stream);
++        for (uint32_t push = 0; push < experiment_push_count; push += 1)
++        {
++            const ExperimentPush* row = &experiment_pushes[push];
++            uint32_t arena = 0;
++            while (arena < experiment_arena_count && experiment_arenas[arena].mapping != row->mapping)
++            {
++                arena += 1;
++            }
++            fprintf(stream, "experiment-push\t%s\t%u\t%llu\t%llu\t%p\t%u/%u\t%u/%u\n", row->stage, arena, (unsigned long long)row->begin, (unsigned long long)row->bytes,
++                    row->caller, row->resident_kb[0], row->nonzero_kb[0], row->resident_kb[1], row->nonzero_kb[1]);
++        }
++        fprintf(stream, "experiment-marks");
++        for (uint32_t m = 0; m < experiment_mark_count; m += 1)
++        {
++            fprintf(stream, "\t%s", experiment_mark_names[m]);
++        }
++        fprintf(stream, "\nexperiment-rss-kb");
++        for (uint32_t m = 0; m < experiment_mark_count; m += 1)
++        {
++            fprintf(stream, "\t%u", experiment_mark_rss_kb[m]);
++        }
++        fprintf(stream, "\n");
++        for (uint32_t a = 0; a < experiment_arena_count; a += 1)
++        {
++            const ExperimentArena* arena = &experiment_arenas[a];
++            fprintf(stream, "experiment-released\t%u\t%s\t%u\t%u\t%u\n", a, arena->released_stage != NULL ? arena->released_stage : "-", arena->releases,
++                    arena->released_resident_kb, arena->released_nonzero_kb);
++            fprintf(stream, "experiment-arena\t%u\t%s\t%p\t%llu\t%llu\t%u", a, arena->stage, arena->caller, (unsigned long long)arena->requested,
++                    (unsigned long long)arena->capacity, arena->takes);
++            for (uint32_t m = 0; m < experiment_mark_count; m += 1)
++            {
++                fprintf(stream, "\t%u/%u", arena->resident_kb[m], arena->nonzero_kb[m]);
++            }
++            fprintf(stream, "\n");
++        }
++    }
++}
++
+ // A lap that also charges the resource use since the last mark to `stage`; nothing without a clock.
+ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ {
+     check_clock_lap(stage_clock, stage);
++    if (stage_clock != NULL && experiment_on)
++    {
++        experiment_memory_mark(check_stage_names[stage], true);
++        if (stage == CHECK_STAGE_PARSE || stage == CHECK_STAGE_CHECK_DECLARATIONS)
++        {
++            experiment_memory_smaps(check_stage_names[stage]);
++        }
++        experiment_stage = check_stage_names[stage];
++    }
+     if (stage_clock != NULL)
+     {
+         uint64_t system_us = 0;
+@@ -411,6 +557,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
+         }
+     }
+     fprintf(stream, "time-stage\ttotal\t%.3f\t100.0\n", total);
++    experiment_memory_report(stream);
+     const double expressions = (double)stage_clock->expression_ticks / ticks_per_millisecond;
+     fprintf(stream, "time-check\texpressions\t%.3f\t%.1f\n", expressions, total > 0 ? expressions * 100.0 / total : 0.0);
+     for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 95adc3a96..1928c0ff6 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -14742,6 +14742,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         else if (match.exact == C_OPTION_TIME_STAGES)
+         {
+             time_stages = true;
++            experiment_on = getenv("BUSTER_EXPERIMENT_MEMORY") != NULL;
+         }
+         else if (match.exact == C_OPTION_FNO_LAZY_SYSTEM_HEADERS)
+         {
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 42f1bdfea..981e2fd76 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -212,6 +212,71 @@ _Thread_local uint64_t arena_small_floor;
+ #else
+ static _Thread_local uint64_t arena_small_floor;
+ #endif
++// EXPERIMENT (#2850's memory attribution; not for merge): every reservation's mapping, who reserved it and in which
++// stage, and at the stage clock's marks its resident bytes and the bytes of its 4 KB pages that hold a nonzero byte.
++#include <sys/uio.h>
++#define BUSTER_EXPERIMENT_ARENAS 1024
++#define BUSTER_EXPERIMENT_MARKS 32
++typedef struct ExperimentArena ExperimentArena;
++struct ExperimentArena
++{
++    const uint8_t* mapping;
++    uint64_t mapping_bytes;
++    uint64_t requested;
++    uint64_t capacity;
++    const void* caller;
++    const char* stage;
++    uint32_t takes;
++    bool dead;
++    uint32_t resident_kb[BUSTER_EXPERIMENT_MARKS];
++    uint32_t nonzero_kb[BUSTER_EXPERIMENT_MARKS];
++    // At its releases: the most it had resident and filled, and the stage of that release.
++    uint32_t released_resident_kb;
++    uint32_t released_nonzero_kb;
++    const char* released_stage;
++    uint32_t releases;
++};
++#define BUSTER_EXPERIMENT_PUSHES 8192
++typedef struct ExperimentPush ExperimentPush;
++struct ExperimentPush
++{
++    const uint8_t* mapping;
++    const uint8_t* address;
++    uint64_t begin;
++    uint64_t bytes;
++    const void* caller;
++    const char* stage;
++    // At two marks (the reader's end and the object's): its range's resident and filled kB.
++    uint32_t resident_kb[2];
++    uint32_t nonzero_kb[2];
++};
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern ExperimentPush experiment_pushes[BUSTER_EXPERIMENT_PUSHES];
++extern uint32_t experiment_push_count;
++#elif defined(BUSTER_UNIT)
++ExperimentPush experiment_pushes[BUSTER_EXPERIMENT_PUSHES];
++uint32_t experiment_push_count;
++#else
++static ExperimentPush experiment_pushes[BUSTER_EXPERIMENT_PUSHES];
++static uint32_t experiment_push_count;
++#endif
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern ExperimentArena experiment_arenas[BUSTER_EXPERIMENT_ARENAS];
++extern uint32_t experiment_arena_count;
++extern const char* experiment_stage;
++extern bool experiment_on;
++#elif defined(BUSTER_UNIT)
++ExperimentArena experiment_arenas[BUSTER_EXPERIMENT_ARENAS];
++uint32_t experiment_arena_count;
++const char* experiment_stage = "start";
++bool experiment_on;
++#else
++static ExperimentArena experiment_arenas[BUSTER_EXPERIMENT_ARENAS];
++static uint32_t experiment_arena_count;
++static const char* experiment_stage = "start";
++static bool experiment_on;
++#endif
++
+ // The arenas a thread keeps, emptied, for its next reservations (#152). Reusing a mapping avoids repeating its
+ // allocation, alignment and page advice, and keeping its committed prefix writable avoids repeating its commits (#1128):
+ // each of those calls takes the address space's lock for writing, which the other lanes' reservations, commits and
+@@ -894,7 +959,106 @@ static bool arena_grow(Arena* arena, uint64_t end)
+ // (arena_commit), which a host whose transparent huge pages are `madvise` needs. An arena that stays in its base pages,
+ // as most of a small unit's 70 do, takes one mmap and one mprotect, without the two madvise calls, which also split its
+ // mapping in three, that each reservation made before.
+-static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounded)
++// The resident 4 KB pages of [start, start + bytes) and those of them that hold a nonzero byte, read through
++// process_vm_readv so that a page made inaccessible is skipped rather than faulted on. False where the range isn't mapped.
++static __attribute__((noinline)) bool experiment_scan(const uint8_t* from, uint64_t bytes, bool nonzero, uint64_t* resident, uint64_t* filled)
++{
++    static unsigned char vector[(1u << 30) / 4096];
++    static uint8_t buffer[1u << 20];
++    bytes = bytes < (1u << 30) ? bytes : (1u << 30);
++    const uintptr_t start = (uintptr_t)from & ~(uintptr_t)4095;
++    const uint64_t page_count = ((uintptr_t)from + bytes - start + 4095) / 4096;
++    *resident = 0;
++    *filled = 0;
++    const bool mapped = page_count != 0 && mincore((void*)start, page_count * 4096, vector) == 0;
++    for (uint64_t page = 0; mapped && page < page_count; page += 1)
++    {
++        *resident += vector[page] & 1;
++    }
++    for (uint64_t page = 0; mapped && nonzero && page < page_count;)
++    {
++        if ((vector[page] & 1) == 0)
++        {
++            page += 1;
++            continue;
++        }
++        uint64_t run = 0;
++        while (page + run < page_count && run < sizeof(buffer) / 4096 && (vector[page + run] & 1) != 0)
++        {
++            run += 1;
++        }
++        struct iovec local = { .iov_base = buffer, .iov_len = run * 4096 };
++        struct iovec remote = { .iov_base = (void*)(start + page * 4096), .iov_len = run * 4096 };
++        const long got = syscall(SYS_process_vm_readv, (long)getpid(), &local, 1L, &remote, 1L, 0L);
++        for (uint64_t k = 0; got > 0 && k < (uint64_t)got / 4096; k += 1)
++        {
++            const uint64_t* words = (const uint64_t*)(const void*)(buffer + k * 4096);
++            uint64_t any = 0;
++            for (uint32_t w = 0; w < 512; w += 1)
++            {
++                any |= words[w];
++            }
++            *filled += any != 0;
++        }
++        page += run;
++    }
++    return mapped;
++}
++
++static __attribute__((noinline)) void experiment_release_note(const Arena* arena)
++{
++    const uint8_t* const mapping = arena->base - arena->mapping_offset;
++    for (uint32_t at = 0; experiment_on && at < experiment_arena_count; at += 1)
++    {
++        ExperimentArena* row = &experiment_arenas[at];
++        uint64_t resident = 0;
++        uint64_t filled = 0;
++        if (row->mapping == mapping && experiment_scan(mapping, arena->mapping_bytes, true, &resident, &filled))
++        {
++            row->releases += 1;
++            if (resident * 4 >= row->released_resident_kb)
++            {
++                row->released_resident_kb = (uint32_t)(resident * 4);
++                row->released_nonzero_kb = (uint32_t)(filled * 4);
++                row->released_stage = experiment_stage;
++            }
++        }
++    }
++}
++
++static __attribute__((noinline)) void experiment_arena_note(const Arena* arena, uint64_t requested, const void* caller)
++{
++    if (arena->base != 0 && arena->mapping_bytes != 0)
++    {
++        const uint8_t* const mapping = arena->base - arena->mapping_offset;
++        uint32_t at = 0;
++        while (at < experiment_arena_count && experiment_arenas[at].mapping != mapping)
++        {
++            at += 1;
++        }
++        if (at == experiment_arena_count && experiment_arena_count < BUSTER_EXPERIMENT_ARENAS)
++        {
++            experiment_arenas[at] = (ExperimentArena){ .mapping = mapping, .mapping_bytes = arena->mapping_bytes, .requested = requested, .capacity = arena->capacity,
++                                                       .caller = caller, .stage = experiment_stage };
++            experiment_arena_count += 1;
++        }
++        if (at < experiment_arena_count)
++        {
++            experiment_arenas[at].takes += 1;
++            experiment_arenas[at].dead = false;
++        }
++    }
++}
++
++static Arena arena_reserve_policy_inner(uint64_t capacity, uint64_t small, bool bounded);
++static __attribute__((noinline)) Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounded)
++{
++    const Arena result = arena_reserve_policy_inner(capacity, small, bounded);
++    experiment_arena_note(&result, capacity, __builtin_return_address(0));
++    return result;
++}
++
++static Arena arena_reserve_policy_inner(uint64_t capacity, uint64_t small, bool bounded)
+ {
+     Arena result = { 0 };
+     const uint64_t requested = capacity;
+@@ -1128,6 +1292,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+     {
+         tables[i].base = base != 0 ? base + starts[i] : 0;
+     }
++    experiment_arena_note(&result, result.capacity, __builtin_return_address(0));
+     return result;
+ }
+ 
+@@ -1245,6 +1410,10 @@ static void arena_page_policy(const char* setting)
+     // Asked only where neither the setting nor the machine decides: off as the process was started.
+     const bool inherited = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) != 0;
+     arena_pages_busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
++    if (getenv("BUSTER_EXPERIMENT_BASE_PAGES") != NULL)
++    {
++        arena_pages_busy = true;
++    }
+     arena_executable_huge_pages = recent && !off && !(virtual_machine && !on) && !inherited;
+     if (off || (virtual_machine && !on))
+     {
+@@ -1277,6 +1446,10 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+ 
+ static void arena_release(Arena* arena)
+ {
++    if (arena->base != 0 && arena->mapping_bytes != 0)
++    {
++        experiment_release_note(arena);
++    }
+     if (arena->base != 0 && arena->grows)
+     {
+         // Its mapping as far as its slot says a copy of it may have grown it, unmapped whole, and its slot freed: under the
+@@ -1484,7 +1657,17 @@ static bool arena_commit(Arena* arena, uint64_t end)
+     return result;
+ }
+ 
+-static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
++static __attribute__((noinline)) void experiment_push_note(const Arena* arena, uint64_t begin, uint64_t size)
++{
++    if (experiment_push_count < BUSTER_EXPERIMENT_PUSHES)
++    {
++        experiment_pushes[experiment_push_count] = (ExperimentPush){ .mapping = arena->base - arena->mapping_offset, .address = arena->base + begin, .begin = begin, .bytes = size,
++                                                                     .caller = __builtin_return_address(0), .stage = experiment_stage };
++        experiment_push_count += 1;
++    }
++}
++
++static inline __attribute__((always_inline)) void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+     void* result = 0;
+     const uintptr_t base = (uintptr_t)arena->base;
+@@ -1500,6 +1683,10 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            if (__builtin_expect(size >= (512u << 10), 0))
++            {
++                experiment_push_note(arena, begin, size);
++            }
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+@@ -1509,7 +1696,7 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+     return result;
+ }
+ 
+-static void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment)
++static inline __attribute__((always_inline)) void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment)
+ {
+     void* result = 0;
+     uint64_t size = 0;
