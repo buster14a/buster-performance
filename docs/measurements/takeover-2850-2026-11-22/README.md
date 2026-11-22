@@ -443,7 +443,22 @@ With `-Wall -Wextra` (`wall-bbe80f1a9.txt`) the objects are the ordinary compile
 are not: a supplied body's uses of its parameters and of the unit's declarations are missing from the reader's unused
 analysis, which then warns of them. B1's second half is open.
 
-By default flags it holds on these corpora and not in general (`boundary-b1/unit-end/`): `w1.c` has a `static`
+**Closed at `666262658`** (`wall-666262658.txt`, `default-666262658.txt`): with `-Wall -Wextra` and by default flags, every
+variant's objects and diagnostics are the ordinary compile's on the four corpora, 0 differences in 32 comparisons
+(`sqlite3.c` with 2,565 bodies supplied under `-Wall -Wextra`, 24 refused for a warning in them; musl with 1,256, 922
+refused), and on the three units that showed the holes (`boundary-b1/fixtures/`: `w1.c` the unit-end warning, `w3.c`
+the unused analysis, `w6.c` a common warning). What closed it:
+
+- the reader's unused analysis records each body's uses of the declarations outside it (its function's parameters,
+  the unit's declarations) and whether each reads, and a supplying compile marks the declarations' chains from them;
+- the driver's unit-end check runs for a unit with a mask (main's own `-flazy-system-headers` had the same hole:
+  [buster14a/buster#3274](https://github.com/buster14a/buster/pull/3274)), and the body with the first use that an
+  undefined internal function's warning notes is refused;
+- a warning refuses the body its own token or a note's is in, not the body at its place among the diagnostics: a
+  common warning is published right after its body's closing brace, and an unused parameter's at its body's end. A
+  diagnostic placed between two bodies refuses both.
+
+Before that, by default flags it held on these corpora and not in general (`boundary-b1/unit-end/`): `w1.c` has a `static`
 function that is used and never defined, of which the ordinary compile warns at the unit's end
 (`-Wundefined-internal`, on by default; `w1-plain.err`). The driver gives a unit with a mask no unit-end warnings, so
 the compile with `w1.c`'s two bodies supplied is silent about it (`w1-sup.err`; the object is the same). None of the
