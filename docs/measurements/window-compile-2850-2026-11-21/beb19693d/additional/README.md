@@ -1,0 +1,5 @@
+# Real source and language probes
+
+Five unmodified frozen musl translation units compiled in a single source-first invocation each. All five fully owned their source functions and kept the persistent graph at one reserved slot with zero live nodes. The five ordinary ELF files matched byte-for-byte, including externally resolved calls to memcmp, strchr and strrchr. Runtime evaluation of string contents, pointer positions and the real opaque directory layout produced checksum 10385017237368935265 with each of ordinary Buster, one-pass Buster and separately compiled Clang. [Per-file digests, operations and relocations](frozen-musl.tsv)
+
+Twenty-five additional language probes compared exit code, stdout, stderr and every successfully emitted object. The probes include malformed returns, volatile accesses, ABI and asm declarations, pointer types, nested calls, data initialization, and diagnostic cases. All 75 comparisons matched across the default, `-Wall -Wextra`, and `-Weverything -Wno-c++-compat` policies. [Process results](language-edges.tsv) [Source probes and raw native receipts](oracles.tar.gz)
