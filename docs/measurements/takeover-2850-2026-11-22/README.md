@@ -660,3 +660,74 @@ GHz. The two profiles are of two trees, so each line is an estimate; their sum i
   emission owed either way.
 - With every body masked the unit is still 340 cycles a token, 44 ms: the preprocessor and the parser 14, the
   reader's file scope 11, the kernel and the rest 14.
+
+## The boundary with the reader's resolution kept (`boundary-resolve/`, scaffold `cc5d1f8c4`)
+
+B1 and B2 above masked a supplied body's tokens whole: nothing of it was resolved, and the scaffold replayed its
+strings and its uses from the recording. A stream that keeps the reader's resolution for a body it takes runs in another
+state: the body's names are bound and its locals declared and typed, and nothing after the resolution reads it. That
+state had never run. `BUSTER_BOUNDARY_RESOLVE` (the scaffold, `cc5d1f8c4`, not for merge) makes it with the same
+recordings:
+
+- the mask is withheld from the reader until `check_input_resolve_range` has read the unit, then given to it, so every
+  pass before the resolution and the resolution itself read a supplied body as any body, and the expressions' walk and
+  every stage after leave it out;
+- the scaffold's replays of a supplied body's strings and of its uses are off: the resolution makes both
+  (`check_input_resolve_range` calls `check_input_string` at a string's token; the uses are its binding events);
+- the initializers' stage skips a supplied body's declarations (`check_init_declarations`): they are declared, and
+  their initializers have no node;
+- a recording made in this mode refuses a body with a stack allocation or a variably modified type's bound (a
+  declaration's or a type name's), whose bound is the walk's node: 10 of musl's bodies, none of the other three's.
+
+**Exact** (`scripts/b1m.sh`, Develop builds on this session's machine; `boundary-resolve/b1/`): 0 differences in
+objects, diagnostics and status on `sqlite3.c`, Lua, `main.c` and musl, with every eligible body supplied and with each
+half, with the default warnings and with `-Wall -Wextra` (32 comparisons; 2,588, 1,081, 1,357 and 2,149 bodies
+supplied by default). The masked supply on the same build is still exact. What it took to get there, each a run kept
+beside it: with the mask seen by the passes before the resolution, the intrinsics' scan and the variable-length
+arrays' pass left the supplied bodies out and `main.c` and musl failed (first attempt); a type name's variably
+modified bound in a `sizeof` failed one unit of musl (third).
+
+So what a kept resolution gives a taken body is checked, not read off the code: its strings in the unit's order, its
+uses, and the unit's end's warnings, with no replay; a block's static object is still refused (its initializer's data
+are the walk's nodes).
+
+## What the machine takes whole at reader time (`reader-verdicts/`)
+
+`measure-node-machine --shadow --front --front-types --front-tests --front-sweeps` on `sqlite3.c`, with two dumps
+(the scaffold's, `BUSTER_EXPERIMENT_BODY_VERDICTS` and `BUSTER_EXPERIMENT_ROOT_VERDICTS`): for each root the lowering
+popped, whether the reference machine ran on it at reader time (the front made its expression whole), T took it, the
+census's tests left it silent, and C and X took it. `scripts/reader-verdicts.py` groups them by body against the
+recording's list; `scripts/reader-blockers.py` sorts what stops a root.
+
+Of 52,368 roots, 2,092 are not taken at reader time (4.0%), and they are in the large bodies:
+
+| a body, by the first step that stops one of its roots | bodies | body tokens | |
+| --- | ---: | ---: | ---: |
+| every root taken | 1,855 | 202,636 | 35.6% |
+| a root the front made no expression of | 519 | 279,730 | 49.2% |
+| a root the tests refuse | 131 | 37,014 | 6.5% |
+| a root C or X refuses | 107 | 28,144 | 5.0% |
+| a root T refuses | 56 | 20,914 | 3.7% |
+
+Of the 1,855, the boundary takes 1,825 (34.8% of the body tokens), and 1,793 have no `switch`, label, cleanup or
+stack allocation (32.3%).
+
+What stops a root, and the order that frees the most body tokens soonest (a class by the source line where the
+front left the expression):
+
+| | roots | bodies | whole so far |
+| --- | ---: | ---: | ---: |
+| nothing more | | | 35.6% |
+| `sizeof` or `_Alignof`, which the front leaves | 597 | 379 | 45.6% |
+| a bit-field (the tests) | 495 | 187 | 53.3% |
+| a call or value with no template (a struct by value, long double, 128 bits) | 279 | 192 | 64.7% |
+| a callee T refuses (a library call computed in place, returns_twice, no prototype) | 133 | 90 | 70.0% |
+| no expression of the front's, another reason, a statement's | 152 | 92 | 75.2% |
+| the same, a condition's | 90 | 62 | 80.7% |
+| a brace initializer's element | 82 | 19 | 88.5% |
+| an aggregate's value (the tests) | 66 | 33 | 94.8% |
+| a character or string with an escape, an initializer's, a builtin, a return's, a declaration's flag | 198 | | 100% |
+
+So a first version that takes a body whole, with the machine as it stands, takes a third of `sqlite3.c`'s body
+tokens, and would sweep the other two thirds for nothing unless a body is refused before its sweeps. Six classes
+take it to 80%.
