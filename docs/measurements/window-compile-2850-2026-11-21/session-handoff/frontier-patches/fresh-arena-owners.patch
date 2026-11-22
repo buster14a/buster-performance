@@ -1,0 +1,114 @@
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index fc65220fc..773ddf948 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -325,11 +325,47 @@ static inline void check_clock_lower(CheckClock* stage_clock, CheckClockLower ph
+ }
+ 
+ // A lap that also charges the resource use since the last mark to `stage`; nothing without a clock.
++
++static void check_clock_page_owners(CheckStage stage)
++{
++    if (getenv("BUSTER_PAGE_OWNER_AUDIT") == NULL) return;
++    const char* name=check_stage_names[stage];
++    if (!(stage == CHECK_STAGE_PREPROCESS || stage == CHECK_STAGE_PARSE || stage == CHECK_STAGE_CHECK_INPUT ||
++          stage == CHECK_STAGE_CHECK_EXPRESSIONS || stage == CHECK_STAGE_CHECK_PROGRAM || stage==CHECK_STAGE_OBJECT_BUILD)) return;
++    FILE* maps=fopen("/proc/self/maps","r");
++    if (maps == NULL) return;
++    const int fd=open("/proc/self/pagemap",O_RDONLY);
++    char line[1024];
++    struct timespec now;
++    clock_gettime(CLOCK_MONOTONIC,&now);
++    fprintf(stderr,"owner-stage\t%lld.%09ld\t%s\tbusy=%d\tsmall=%llu\n",(long long)now.tv_sec,now.tv_nsec,name,(int)arena_pages_busy,(unsigned long long)arena_small_floor);
++    while (fd>=0 && fgets(line,sizeof(line),maps)!=NULL)
++    {
++        unsigned long begin=0,end=0;
++        char perms[8]={0};
++        if (sscanf(line,"%lx-%lx %7s",&begin,&end,perms)!=3 || perms[0]!='r') continue;
++        LaneExitRegion ranges[256];
++        while(begin<end)
++        {
++            LaneExitScan scan = { .size=sizeof(scan), .start=begin, .end=end, .vector=(uintptr_t)ranges,
++                .vector_length=256, .category_mask=BUSTER_LANE_EXIT_PAGE_PRESENT, .return_mask=0x6c };
++            const long rc=syscall(SYS_ioctl,fd,BUSTER_LANE_EXIT_PAGEMAP_SCAN,&scan);
++            if (rc<0) { fprintf(stderr,"owner-ioctl-error\t%s\t%lu\t%d\n",name,begin,errno); break; }
++            for (long i=0;i<rc;i++)
++                fprintf(stderr,"owner-page\t%s\t%lx\t%lx\t%lx\n",name,(unsigned long)ranges[i].start,(unsigned long)ranges[i].end,(unsigned long)ranges[i].categories);
++            if (scan.walk_end<=begin) break;
++            begin=scan.walk_end;
++        }
++    }
++    if (fd>=0) close(fd);
++    fclose(maps);
++}
+ static void check_clock_mark(CheckClock* stage_clock, CheckStage stage)
+ {
+     check_clock_lap(stage_clock, stage);
+     if (stage_clock != NULL)
+     {
++        check_clock_page_owners(stage);
+         uint64_t system_us = 0;
+         uint64_t minor_faults = 0;
+         uint64_t peak_kb = 0;
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 42f1bdfea..392a1498c 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -72,6 +72,7 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ 
+ // OS-dependent includes
+ #include <pthread.h>
+@@ -1520,6 +1521,49 @@ static void* arena_push_array(Arena* arena, uint64_t count, uint64_t element_byt
+     return result;
+ }
+ 
++
++// Diagnostic only. The records join actual tracked slices to anonymous resident page extents.
++static __attribute__((unused)) void* arena_audit_slice(void* result, Arena* arena, uint64_t size, const char* file, int line)
++{
++    if (result != NULL && size >= 2048 && getenv("BUSTER_PAGE_OWNER_AUDIT") != NULL)
++    {
++        const char* name = strrchr(file,'/');
++        name = name == NULL ? file : name + 1;
++        struct timespec now;
++        clock_gettime(CLOCK_MONOTONIC, &now);
++        fprintf(stderr, "alloc-site\t%lld.%09ld\t%lx\t%llu\t%lx\t%llu\t%llu\t%llu\t%s\t%d\n",
++                (long long)now.tv_sec, now.tv_nsec, (unsigned long)result, (unsigned long long)size,
++                (unsigned long)arena->base, (unsigned long long)arena->small,
++                (unsigned long long)arena->capacity, (unsigned long long)arena->committed, name, line);
++    }
++    return result;
++}
++static __attribute__((unused)) void* arena_audit_push(Arena* arena, uint64_t size, uint64_t alignment, const char* file, int line)
++{
++    return arena_audit_slice(arena_push(arena,size,alignment),arena,size,file,line);
++}
++static __attribute__((unused)) void* arena_audit_array(Arena* arena, uint64_t count, uint64_t size, uint64_t alignment, const char* file, int line)
++{
++    return arena_audit_slice(arena_push_array(arena,count,size,alignment),arena,count*size,file,line);
++}
++static __attribute__((unused)) Arena arena_audit_tables(ArenaTable* tables, uint32_t count, const char* file, int line)
++{
++    Arena result = arena_reserve_tables(tables,count);
++    if (getenv("BUSTER_PAGE_OWNER_AUDIT") != NULL)
++    {
++        for (uint32_t i=0;i<count;i+=1)
++        {
++            char name[512];
++            snprintf(name,sizeof(name),"%s[table%u]",file,i);
++            arena_audit_slice(tables[i].base,&result,tables[i].bytes,name,line);
++        }
++    }
++    return result;
++}
++#define arena_reserve_tables(t,n) arena_audit_tables((t),(n),__FILE__,__LINE__)
++#define arena_push(a,s,b) arena_audit_push((a),(s),(b),__FILE__,__LINE__)
++#define arena_push_array(a,n,s,b) arena_audit_array((a),(n),(s),(b),__FILE__,__LINE__)
++
+ static void arena_pop_to(Arena* arena, uint64_t length)
+ {
+     assert(length <= arena->length);

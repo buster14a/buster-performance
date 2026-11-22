@@ -1,0 +1,446 @@
+diff --git a/src/buster/compiler/c_pp_structural_prepare.c b/src/buster/compiler/c_pp_structural_prepare.c
+new file mode 100644
+index 000000000..d6cdd0b17
+--- /dev/null
++++ b/src/buster/compiler/c_pp_structural_prepare.c
+@@ -0,0 +1,206 @@
++// Research-only source projection. Its first pass executes the ordinary directive
++// evaluator on the complete directive stream. A second pass keeps each predicted
++// live source gap. Every omission must also fall within a real second-pass skip.
++#include "buster/compiler/c_pp_structure.c"
++
++typedef struct PPStructSegment
++{
++    uint32_t from, to, length;
++} PPStructSegment;
++
++typedef struct PPProjection
++{
++    PPSourceStructure index;
++    const char* path;
++    uint8_t* virtual_bytes;
++    PPStructSegment* segments;
++    uint8_t *predicted, *observed;
++    uint32_t virtual_length, segment_count, prepared, original_length;
++    uint64_t device,inode;
++    bool forecast, failed, live;
++    uint32_t handled,main_range,reached,reached_bytes,reached_rows;
++    PPContext* gap_context;
++    PPContext resume;
++    PPFileData* primary;
++} PPProjection;
++
++static _Thread_local PPProjection* pp_projection;
++
++static void pp_projection_segment(PPProjection* plan, const uint8_t* source, uint32_t from, uint32_t end, bool keep)
++{
++    if (from==end) return;
++    if (keep)
++    {
++        PPStructSegment* seg=plan->segments+plan->segment_count++;
++        *seg=(PPStructSegment){from,plan->virtual_length,end-from};
++        memcpy(plan->virtual_bytes+plan->virtual_length,source+from,end-from);
++        plan->virtual_length+=end-from;
++    }
++    else
++    {
++        // The next kept directive must still be a new logical line even if
++        // physical trivia before its hash was part of the omitted source gap.
++        plan->virtual_bytes[plan->virtual_length++]='\n';
++    }
++}
++
++static PPPrepareStatus pp_projection_prepare(Preprocessor* pp, PPFileData* data, uint64_t* ticks)
++{
++    PPProjection* plan=pp_projection;
++    const uint32_t length=data->length, count=plan->index.count;
++    const uint8_t* original=data->bytes;
++    plan->prepared++;
++    plan->primary=data;
++    const PPPrepare config=pp_prepare_config(pp);
++    if (length!=plan->original_length || data->device!=plan->device || data->inode!=plan->inode)
++    {
++        plan->failed=true;
++        return pp_prepare_into(&config,pp->table,pp->columns,&pp->arena,data,ticks);
++    }
++    PPFileData part=*data;
++    plan->virtual_length=0;
++    plan->segment_count=0;
++    uint32_t from=0;
++    for (uint32_t i=0;i<count;i+=1)
++    {
++        const PPSourceDirective directive=plan->index.directives[i];
++        pp_projection_segment(plan,original,from,directive.hash,!plan->forecast && !plan->predicted[i]);
++        pp_projection_segment(plan,original,directive.hash,directive.end,true);
++        from=directive.end;
++    }
++    pp_projection_segment(plan,original,from,length,!plan->forecast && !plan->predicted[count]);
++    part.bytes=plan->virtual_bytes;
++    part.length=plan->virtual_length;
++    PPPrepareStatus status=pp_prepare_into(&config,pp->table,pp->columns,&pp->arena,&part,ticks);
++    if (status!=PP_PREPARE_DONE) return status;
++    if (part.raw_error_count || part.unterminated_comment || part.directive_count!=count)
++    {
++        plan->failed=true;
++        return pp_prepare_into(&config,pp->table,pp->columns,&pp->arena,data,ticks);
++    }
++    uint32_t token=0;
++    for (uint32_t seg=0;seg<plan->segment_count;seg+=1)
++    {
++        const PPStructSegment piece=plan->segments[seg];
++        const uint32_t limit=piece.to+piece.length;
++        const __m512i delta=_mm512_set1_epi32((int32_t)(piece.from-piece.to));
++        while (token<part.token_count && part.starts[token]<limit)
++        {
++            const uint32_t available=part.token_count-token;
++            const __mmask16 fit=available>=16?0xffffu:(__mmask16)_bzhi_u32(0xffff,available);
++            const __m512i starts=_mm512_maskz_loadu_epi32(fit,part.starts+token);
++            const __mmask16 lanes=_mm512_mask_cmplt_epu32_mask(fit,starts,_mm512_set1_epi32((int32_t)limit));
++            const __m128i kinds=_mm_maskz_loadu_epi8(lanes,part.kinds+token);
++            const __mmask16 values=_mm_mask_cmpneq_epi8_mask(lanes,_mm_and_si128(kinds,_mm_set1_epi8(127)),_mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++            _mm512_mask_storeu_epi32(part.starts+token,lanes,_mm512_add_epi32(starts,delta));
++            _mm512_mask_storeu_epi32(part.values+token,values,_mm512_add_epi32(_mm512_maskz_loadu_epi32(values,part.values+token),delta));
++            token+=(uint32_t)__builtin_popcount(lanes);
++        }
++    }
++    part.bytes=original;
++    part.length=length;
++    part.line_pages=NULL;
++    part.guard=0;
++    part.guard_opener=BUSTER_PP_NONE;
++    *data=part;
++    for (uint32_t d=0;d<count;d+=1)
++    {
++        if (part.starts[part.directive_hash[d]]!=plan->index.directives[d].hash) {plan->failed=true;break;}
++    }
++    return status;
++}
++
++static void pp_projection_skip(const PPFileData* data,uint32_t directive,uint32_t next,bool hidden)
++{
++    PPProjection* plan=pp_projection;
++    if (plan != NULL && data==plan->primary)
++    {
++        if (plan->live)
++        {
++            if(hidden || next>plan->index.count) plan->failed=true;
++            plan->handled=next;
++            return;
++        }
++        if (hidden || next>plan->index.count || next<directive) plan->failed=true;
++        else if (next>directive)
++        {
++            uint8_t* flags=plan->forecast ? plan->predicted : plan->observed;
++            memset(flags+directive+1,1,next-directive);
++        }
++    }
++}
++
++// A gap contains no directive. Its raw token addresses remain stable for macro
++// collection and deferred history until this preprocessing unit releases them.
++static bool pp_projection_gap(Preprocessor* pp,PPContext* context,PPProjection* plan,uint32_t gap)
++{
++    const PPFileData* source=plan->primary;
++    const uint32_t begin=gap?plan->index.directives[gap-1].end:0;
++    const uint32_t end=gap<plan->index.count?plan->index.directives[gap].hash:source->length;
++    if (begin==end) return true;
++    // Prefix whitespace before a directive is usually the only content.
++    uint32_t p=begin;
++    while(p<end && (source->bytes[p]==' ' || source->bytes[p]=='\t' || source->bytes[p]=='\n' || source->bytes[p]=='\r' ||
++                    source->bytes[p]=='\v' || source->bytes[p]=='\f')) p++;
++    if(p==end) return true;
++    if(pp->data_count >= (BUSTER_PP_MAX_FILES >> pp->capacity_shift)) return false;
++    const PPPrepare config=pp_prepare_config(pp);
++    PPFileData part={.bytes=source->bytes+begin,.length=end-begin,.record=source->record,.device=source->device,.inode=source->inode,.modified=source->modified,.has_modified=source->has_modified};
++    if (pp_prepare_into(&config,pp->table,pp->columns,&pp->arena,&part,NULL)!=PP_PREPARE_DONE || part.directive_count || part.raw_error_count || part.unterminated_comment) return false;
++    plan->reached++;
++    plan->reached_bytes+=end-begin;
++    plan->reached_rows+=part.token_count;
++    pp->input_tokens+=part.token_count;
++    if (!part.token_count) return true;
++    const __m512i delta=_mm512_set1_epi32((int32_t)begin);
++    for(uint32_t i=0;i<part.token_count;i+=16)
++    {
++        const uint32_t available=part.token_count-i;
++        const __mmask16 valid=available>=16?0xffffu:(__mmask16)_bzhi_u32(0xffff,available);
++        const __m128i kinds=_mm_maskz_loadu_epi8(valid,part.kinds+i);
++        const __mmask16 values=_mm_mask_cmpneq_epi8_mask(valid,_mm_and_si128(kinds,_mm_set1_epi8(127)),_mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++        _mm512_mask_storeu_epi32(part.starts+i,valid,_mm512_add_epi32(_mm512_maskz_loadu_epi32(valid,part.starts+i),delta));
++        _mm512_mask_storeu_epi32(part.values+i,values,_mm512_add_epi32(_mm512_maskz_loadu_epi32(values,part.values+i),delta));
++    }
++    if(begin) part.space[0]|=1;
++    part.bytes=source->bytes;
++    part.length=source->length;
++    part.line_pages=source->line_pages;
++    const uint32_t index=pp->data_count++;
++    pp->datas[index]=part;
++    plan->gap_context=context;
++    plan->resume=*context;
++    context->data=index;
++    context->position=0;
++    context->end=part.token_count;
++    context->next_directive=0;
++    return true;
++}
++
++static void pp_projection_live_step(Preprocessor* pp,PPContext* context)
++{
++    PPProjection* plan=pp_projection;
++    if (plan==NULL || !plan->live || context->kind!=BUSTER_PP_CONTEXT_FILE) return;
++    if (plan->gap_context==context)
++    {
++        if(context->position<context->end) return;
++        uint8_t pending=context->pending_flags;
++        *context=plan->resume;
++        context->pending_flags=pending;
++        plan->gap_context=NULL;
++    }
++    if (&pp->datas[context->data]!=plan->primary) return;
++    const PPFileData* source=plan->primary;
++    const uint32_t gap=context->next_directive;
++    if(gap>source->directive_count || gap==plan->handled) return;
++    if(plan->main_range!=BUSTER_PP_NONE && plan->main_range!=context->range)
++    {
++        pp->fatal=plan->failed=true;return;
++    }
++    plan->main_range=context->range;
++    uint32_t anchor=gap<source->directive_count?source->directive_hash[gap]:source->token_count;
++    if(context->position!=anchor) return;
++    plan->handled=gap;
++    if (pp->conditional_count && pp->conditionals[pp->conditional_count-1].skipping) return;
++    if (!pp_projection_gap(pp,context,plan,gap)) pp->fatal=plan->failed=true;
++}
+diff --git a/src/buster/compiler/c_pp_structure.c b/src/buster/compiler/c_pp_structure.c
+new file mode 100644
+index 000000000..4e12b2761
+--- /dev/null
++++ b/src/buster/compiler/c_pp_structure.c
+@@ -0,0 +1,181 @@
++// A physical-source directive index. Unusual phase-two or header spellings leave
++// the fully general original lexer in charge. No preprocessing symbols are used.
++#include <immintrin.h>
++#include <stdbool.h>
++#include <stdint.h>
++#include <string.h>
++
++typedef struct PPSourceDirective
++{
++    uint32_t hash;
++    uint32_t end;
++} PPSourceDirective;
++typedef struct PPSourceStructure
++{
++    PPSourceDirective* directives;
++    uint32_t capacity, count, comments, comment_bytes, physical_lines;
++    uint32_t unsafe;
++    bool trigraphs, digit_separators;
++} PPSourceStructure;
++
++static inline uint64_t pp_structure_lt(uint32_t bit)
++{
++    return bit >= 64 ? UINT64_MAX : (UINT64_C(1) << bit) - 1;
++}
++
++static inline void pp_structure_text(bool* clean, uint64_t text, uint64_t breaks)
++{
++    if (breaks)
++    {
++        const uint32_t last = 63u - (uint32_t)__builtin_clzll(breaks);
++        *clean = (text & ~pp_structure_lt(last + 1)) == 0;
++    }
++    else if (text)
++    {
++        *clean = false;
++    }
++}
++
++// Tokens between '<' and '>' in a direct header-name operand use distinct
++// lexical rules. Any ambiguous quote or comment delimiter declines the file.
++static bool pp_structure_possible_header(const uint8_t* source,uint32_t hash,uint32_t pos)
++{
++    uint32_t word=hash+1;
++    while (word<pos && (source[word]==' ' || source[word]=='\t')) word++;
++    if (pos-word>6 && memcmp(source+word,"define",6)==0 && (source[word+6]==' ' || source[word+6]=='\t')) return false;
++    for (uint32_t b=pos;b>word;)
++    {
++        const uint8_t prior=source[--b];
++        if (prior=='>') return false;
++        if (prior=='<') return true;
++    }
++    return false;
++}
++
++// A failed certificate leaves the source untouched. A successful one lists the
++// first byte after each complete directive, including the line terminator.
++static bool pp_structure_scan(const uint8_t* source, uint32_t length, PPSourceStructure* result)
++{
++    enum { Plain, Block, Line, Double, Single } state = Plain;
++    if (length >= 3 && source[0] == 0xef && source[1] == 0xbb && source[2] == 0xbf) return false;
++    bool clean = true;
++    bool directive = false;
++    uint32_t comment = 0, skip = 0;
++    const __m512i space = _mm512_set1_epi8(' ');
++    for (uint32_t base = 0; base < length;)
++    {
++        const uint32_t n = length - base < 64 ? length - base : 64;
++        const uint64_t valid = pp_structure_lt(n);
++        const __m512i bytes = _mm512_maskz_loadu_epi8(valid, source + base);
++#define PP_STRUCTURE_MASK(c) _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8(c))
++        const uint64_t nl = PP_STRUCTURE_MASK('\n') & valid;
++        const uint64_t ret = PP_STRUCTURE_MASK('\r') & valid;
++        const uint64_t breaks = nl | ret;
++        const uint64_t slash = PP_STRUCTURE_MASK('/');
++        const uint64_t star = PP_STRUCTURE_MASK('*');
++        const uint64_t back = PP_STRUCTURE_MASK('\\');
++        const uint64_t dq = PP_STRUCTURE_MASK('"');
++        const uint64_t sq = PP_STRUCTURE_MASK('\'');
++        const uint64_t hash = PP_STRUCTURE_MASK('#');
++        const uint64_t percent = PP_STRUCTURE_MASK('%');
++        const uint64_t question = PP_STRUCTURE_MASK('?');
++        const uint64_t control = valid & _mm512_cmplt_epu8_mask(bytes, space) & ~(breaks | PP_STRUCTURE_MASK('\t') | PP_STRUCTURE_MASK('\v') | PP_STRUCTURE_MASK('\f'));
++        const uint64_t text = valid & ~(_mm512_cmple_epu8_mask(bytes,space));
++        const uint8_t next = base + n < length ? source[base+n] : 0;
++        const uint64_t start_block = slash & ((star >> 1) | ((uint64_t)(next == '*') << 63));
++        const uint64_t start_line = slash & ((slash >> 1) | ((uint64_t)(next == '/') << 63));
++        const uint64_t close_block = star & ((slash >> 1) | ((uint64_t)(next == '/') << 63));
++        const uint64_t special = start_block | start_line | dq | sq | hash | back | percent | question | control;
++        result->physical_lines += (uint32_t)__builtin_popcountll(nl);
++        uint32_t cursor = skip > base ? skip - base : 0;
++        while (cursor < n)
++        {
++            const uint64_t tail = valid & ~pp_structure_lt(cursor);
++            uint64_t marks;
++            if (state == Block) marks = close_block | back | question;
++            else if (state == Line) marks = breaks | back | question;
++            else if (state == Double) marks = dq | back | breaks | question;
++            else if (state == Single) marks = sq | back | breaks | question;
++            else marks = special | (directive ? breaks : 0);
++            marks &= tail;
++            const uint32_t at = marks ? (uint32_t)__builtin_ctzll(marks) : n;
++            const uint64_t before = tail & pp_structure_lt(at);
++            if (state == Plain) pp_structure_text(&clean,text & before,breaks & before);
++            if (at == n) break;
++            const uint32_t pos = base + at;
++            const uint8_t c = source[pos];
++            uint32_t advance = 1;
++            if (state==Plain && directive && (c=='/' || c=='"' || c=='\'') &&
++                pp_structure_possible_header(source,result->directives[result->count-1].hash,pos))
++            {result->unsafe=pos;return false;}
++            if (result->trigraphs && c == '?' && pos + 2 < length && source[pos+1] == '?' && strchr("=/'()!<>-", source[pos+2]) != NULL) { result->unsafe=pos; return false; }
++            if (c == '\\')
++            {
++                uint32_t p = pos + 1;
++                while (p < length && (source[p]==' ' || source[p]=='\t' || source[p]=='\v' || source[p]=='\f')) p++;
++                if (p < length && (source[p]=='\n' || source[p]=='\r'))
++                {
++                    advance = p - pos + 1;
++                    if (source[p]=='\r' && p+1 < length && source[p+1]=='\n') advance++;
++                    // Adjacent delimiters split across a splice need translated lookahead.
++                    if ((state==Block || state==Plain) && pos && pos+advance<length)
++                    {
++                        const uint8_t left=source[pos-1],right=source[pos+advance];
++                        const bool prefix=left=='/' || left=='*' || left=='#' || left=='%' || left=='R';
++                        if ((left=='/' && (right=='/' || right=='*')) || (left=='*' && right=='/') ||
++                            (left=='#' && right=='#') || (left=='%' && right==':') || (left=='R' && right=='"') ||
++                            (prefix && (right=='\\' || (right=='?' && result->trigraphs))))
++                        { result->unsafe=pos; return false; }
++                    }
++                }
++                else if ((state==Double || state==Single) && pos+1<length) advance=2;
++                else if (state==Plain) clean=false;
++            }
++            else if (state == Block)
++            {
++                if (c=='*') { state=Plain;advance=2;result->comments++;result->comment_bytes+=pos+2-comment; }
++            }
++            else if (state == Line)
++            {
++                if (c=='\n' || c=='\r')
++                {
++                    state=Plain;clean=true;result->comments++;result->comment_bytes+=pos-comment;
++                    if (directive) { result->directives[result->count-1].end=pos+1+(c=='\r' && pos+1<length && source[pos+1]=='\n');directive=false; }
++                }
++            }
++            else if (state==Double || state==Single)
++            {
++                if (c=='\n' || c=='\r') { result->unsafe=pos;return false; }
++                if ((state==Double && c=='"') || (state==Single && c=='\'')) state=Plain;
++            }
++            else if (c=='/' && pos+1<length && (source[pos+1]=='/' || source[pos+1]=='*'))
++            {
++                state=source[pos+1]=='*'?Block:Line;comment=pos;advance=2;
++            }
++            else if (c=='\n' || c=='\r')
++            {
++                clean=true;
++                if (directive) { result->directives[result->count-1].end=pos+1+(c=='\r' && pos+1<length && source[pos+1]=='\n');directive=false; }
++            }
++            else
++            {
++                if (c=='#' && clean && !(pos+1<length && source[pos+1]=='#'))
++                {
++                    if (result->count==result->capacity) {result->unsafe=pos;return false;}
++                    result->directives[result->count++]=(PPSourceDirective){pos,length};directive=true;
++                }
++                if (c=='\'' && result->digit_separators && pos && ((source[pos-1]>='0' && source[pos-1]<='9') || ((source[pos-1]|32)>='a' && (source[pos-1]|32)<='z'))) {result->unsafe=pos;return false;}
++                if (c=='%' && pos+1<length && source[pos+1]==':') {result->unsafe=pos;return false;}
++                if (c<' ' || (c=='"' && pos && source[pos-1]=='R')) {result->unsafe=pos;return false;}
++                if (c=='"') state=Double;
++                if (c=='\'') state=Single;
++                clean=false;
++            }
++            skip=pos+advance;cursor=skip-base;
++        }
++        base+=n;
++    }
++    if (state==Line) {result->comments++;result->comment_bytes+=length-comment;}
++    return state!=Block && state!=Double && state!=Single;
++#undef PP_STRUCTURE_MASK
++}
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index 5cf14e5a4..1451d2da3 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -726,10 +726,21 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+ // Prepares a file this unit enters for the first time: one it made (the predefines, the command line) into its own
+ // arenas, and any other through the file cache, which prepares each file once for every unit (file_cache_prepare) and
+ // whose record the unit's data then copies. Diagnoses a file that can't be prepared, and returns false.
++#ifdef BUSTER_PP_STRUCTURAL_EXPERIMENT
++#include "buster/compiler/c_pp_structural_prepare.c"
++#endif
++
+ static bool pp_prepare_data(Preprocessor* pp, PPFileData* data, const char* path)
+ {
+     uint64_t* ticks = pp->options.timing ? pp->ticks : 0;
+     PPPrepareStatus status;
++#ifdef BUSTER_PP_STRUCTURAL_EXPERIMENT
++    if (pp_projection != NULL && strcmp(path, pp_projection->path)==0)
++    {
++        status=pp_projection_prepare(pp,data,ticks);
++    }
++    else
++#endif
+     if (data->record == BUSTER_PP_NONE)
+     {
+         const PPPrepare prepare = pp_prepare_config(pp);
+@@ -8588,6 +8599,10 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
+     while (!pp->fatal && pp->context_count > stop_depth)
+     {
+         PPContext* context = &pp->contexts[pp->context_count - 1];
++#ifdef BUSTER_PP_STRUCTURAL_EXPERIMENT
++        pp_projection_live_step(pp,context);
++        if (pp->fatal) break;
++#endif
+         if (pp_collecting(pp))
+         {
+             pp_collect_step(pp);
+@@ -9051,6 +9066,9 @@ static void pp_skip_group(Preprocessor* pp, PPContext* context, uint32_t d)
+         context->position = data->directive_hash[next];
+         context->next_directive = next;
+     }
++#ifdef BUSTER_PP_STRUCTURAL_EXPERIMENT
++    pp_projection_skip(data,d,context->next_directive,context->hidden_directives);
++#endif
+     if (pp->conditional_count > context->conditional_base)
+     {
+         pp->conditionals[pp->conditional_count - 1].skipping = true;
