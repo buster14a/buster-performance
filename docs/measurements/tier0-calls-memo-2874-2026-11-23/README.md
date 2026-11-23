@@ -7,7 +7,8 @@ area's base and displacement and the callee's symbol patched in. Asm bodies, agg
 masks take today's emitter. Gate: `tier0` 0.30 ms lower or more on `-c sqlite3.c`, refuted under 0.15, every object
 unchanged.
 
-**Result: exact, and 0.200 ms lower: the gate missed, not refuted.**
+**Result: exact, and 0.200 ms lower on main `9d927943`, 0.258 ms lower on main `e5c975f1`, where the pull request is
+rebased: the gate missed, not refuted.**
 
 ## What was measured
 
@@ -31,6 +32,23 @@ unchanged.
 | the compile | 115.264 | 115.047 | -0.217 |
 
 Every round: main's `tier0` 4.744 to 4.808, the piece's 4.563 to 4.773. Both objects hash `ea9b6d14…8088`.
+
+## On today's main (`results/ab-branch`, medians of 9, ms)
+
+Main moved to `e5c975f1` before the pull request went up. #3388 had added a `vzeroupper` before a dirty function's calls
+(`Tier0Function.zero_upper`), an input of the call's records, and the key now holds it (`tier0_call_zeroes_upper`).
+`bin/main2` is main `e5c975f1`; `bin/branch` is the pull request's commit on it.
+
+| stage | main `e5c975f1` | the pull request | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 5.032 | 4.774 | -0.258 |
+| `emit-setup` | 1.034 | 1.013 | -0.021 |
+| the compile | 116.155 | 115.892 | -0.263 |
+
+Every round: main's `tier0` 5.002 to 5.079, the pull request's 4.755 to 4.821. Both objects hash `f4149786…3e3f`. On
+the rebased tree, 2,928 compiles gave every object as today's main does, and `test-tier0 --cross-check` passed 21,675,526
+checks. Its new check (a function compiled again with an empty table must get the same code) fails on 221 functions
+when the key lacks the vzeroupper's bit, with the twins' check (`tier0_compile_scalar`, which #2924 removes) taken out.
 
 ## The forms measured
 
