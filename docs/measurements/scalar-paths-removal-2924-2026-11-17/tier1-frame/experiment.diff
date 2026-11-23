@@ -1,0 +1,231 @@
+diff --git a/src/buster/compiler/tier1_frame.c b/src/buster/compiler/tier1_frame.c
+index 0323070b..4970ee9e 100644
+--- a/src/buster/compiler/tier1_frame.c
++++ b/src/buster/compiler/tier1_frame.c
+@@ -994,7 +994,87 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
+     return error;
+ }
+ 
++// EXPERIMENT (#2699 re-measure; never merged): BUSTER_FRAME_SCALAR=1/2 forces the scalar/vector path,
++// BUSTER_FRAME_DUMP=FILE appends each request, BUSTER_FRAME_PROBE=N prints per-size ticks at call N (0: every call).
++#include <stdio.h>
++#include <stdlib.h>
++static uint64_t tier1_frame_probe_ticks[10];
++static uint64_t tier1_frame_probe_bins[10];
++static uint64_t tier1_frame_probe_calls;
++static int tier1_frame_probe_init;
++static int tier1_frame_probe_force;
++static long tier1_frame_probe_at = -1;
++static FILE* tier1_frame_probe_dump;
++static uint32_t tier1_frame_probe_bin(uint32_t count)
++{
++    uint32_t bin = 0;
++    while (bin < 9 && count > (bin == 0 ? 0u : 1u << (bin - 1)))
++    {
++        bin += 1;
++    }
++    return bin;
++}
++static Tier1FrameError tier1_frame_plan_path_probed(const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool scalar, Tier1Frame* result);
+ static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool scalar, Tier1Frame* result)
++{
++    if (!tier1_frame_probe_init)
++    {
++        tier1_frame_probe_init = 1;
++        const char* const force = getenv("BUSTER_FRAME_SCALAR");
++        tier1_frame_probe_force = force != 0 ? atoi(force) : 0;
++        const char* const at = getenv("BUSTER_FRAME_PROBE");
++        tier1_frame_probe_at = at != 0 ? atol(at) : -1;
++        const char* const dump = getenv("BUSTER_FRAME_DUMP");
++        tier1_frame_probe_dump = dump != 0 ? fopen(dump, "ab") : 0;
++    }
++    scalar = tier1_frame_probe_force == 1 ? true : (tier1_frame_probe_force == 2 ? false : scalar);
++    if (tier1_frame_probe_dump != 0)
++    {
++        const Tier1FrameSlots* const slots = &request->slots;
++        const uint32_t header[6] = { slots->count, slots->column_count, slots->indices != 0, request->call_count, request->used_callee_saved, request->flags };
++        fwrite(header, 4, 6, tier1_frame_probe_dump);
++        const uint32_t rows = slots->indices != 0 ? slots->column_count : slots->count;
++        if (rows != 0)
++        {
++            fwrite(slots->start, 4, rows, tier1_frame_probe_dump);
++            fwrite(slots->end, 4, rows, tier1_frame_probe_dump);
++            fwrite(slots->size, 4, rows, tier1_frame_probe_dump);
++            fwrite(slots->alignment, 4, rows, tier1_frame_probe_dump);
++        }
++        if (slots->indices != 0 && slots->count != 0)
++        {
++            fwrite(slots->indices, 4, slots->count, tier1_frame_probe_dump);
++        }
++        if (request->call_count != 0)
++        {
++            fwrite(request->calls, sizeof(AbiCall), request->call_count, tier1_frame_probe_dump);
++        }
++        fflush(tier1_frame_probe_dump);
++    }
++    const uint64_t before = __rdtsc();
++    const Tier1FrameError error = tier1_frame_plan_path_probed(request, output, scratch, scalar, result);
++    const uint64_t ticks = __rdtsc() - before;
++    const uint32_t bin = tier1_frame_probe_bin(request->slots.count);
++    tier1_frame_probe_ticks[bin] += ticks;
++    tier1_frame_probe_bins[bin] += 1;
++    tier1_frame_probe_calls += 1;
++    if (tier1_frame_probe_at == 0 || (tier1_frame_probe_at > 0 && tier1_frame_probe_calls == (uint64_t)tier1_frame_probe_at))
++    {
++        uint64_t total = 0;
++        for (uint32_t i = 0; i < 10; i += 1)
++        {
++            total += tier1_frame_probe_ticks[i];
++        }
++        fprintf(stderr, "FRAMEPROBE path=%s calls=%llu ticks=%llu", scalar ? "scalar" : "vector", (unsigned long long)tier1_frame_probe_calls, (unsigned long long)total);
++        for (uint32_t i = 0; i < 10; i += 1)
++        {
++            fprintf(stderr, " b%u=%llu/%llu", i, (unsigned long long)tier1_frame_probe_bins[i], (unsigned long long)tier1_frame_probe_ticks[i]);
++        }
++        fprintf(stderr, "\n");
++    }
++    return error;
++}
++static Tier1FrameError tier1_frame_plan_path_probed(const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool scalar, Tier1Frame* result)
+ {
+     (void)scalar;
+ 
+diff --git a/src/buster/compiler/tier1_frame_benchmark.c b/src/buster/compiler/tier1_frame_benchmark.c
+index 0a2477c9..019fb503 100644
+--- a/src/buster/compiler/tier1_frame_benchmark.c
++++ b/src/buster/compiler/tier1_frame_benchmark.c
+@@ -150,8 +150,134 @@ static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchm
+     return error;
+ }
+ 
++// EXPERIMENT (#2699 re-measure; never merged): --replay FILE plans every dumped request once a pass, in order, on both
++// paths, and prints rdtsc ticks a plan by object-count bin (the bins of tier1_frame.c's probe), medians of 21 passes.
++static int tier1_frame_benchmark_replay(const char* path)
++{
++    FILE* file = fopen(path, "rb");
++    int status = file != 0 ? 0 : 1;
++    uint32_t* words = 0;
++    uint64_t length = 0;
++    if (status == 0)
++    {
++        fseek(file, 0, SEEK_END);
++        length = (uint64_t)ftell(file) / 4;
++        fseek(file, 0, SEEK_SET);
++        words = malloc(length * 4 + 64);
++        status = words != 0 && fread(words, 4, length, file) == length ? 0 : 1;
++        fclose(file);
++    }
++    uint32_t frames = 0;
++    Tier1FrameRequest* requests = status == 0 ? malloc(sizeof(Tier1FrameRequest) * (length / 6 + 1)) : 0;
++    for (uint64_t at = 0; status == 0 && at + 6 <= length; frames += 1)
++    {
++        const uint32_t* header = words + at;
++        Tier1FrameRequest* request = &requests[frames];
++        const uint32_t count = header[0];
++        const uint32_t rows = header[2] != 0 ? header[1] : count;
++        at += 6;
++        *request = (Tier1FrameRequest){
++            .slots = {
++                .start = words + at,
++                .end = words + at + rows,
++                .size = words + at + rows * 2,
++                .alignment = words + at + rows * 3,
++                .count = count,
++                .column_count = header[1],
++            },
++            .call_count = header[3],
++            .used_callee_saved = header[4],
++            .flags = header[5],
++        };
++        at += (uint64_t)rows * 4;
++        if (header[2] != 0)
++        {
++            request->slots.indices = words + at;
++            at += count;
++        }
++        request->calls = (const AbiCall*)(words + at);
++        at += (uint64_t)header[3] * 4;
++        status = at <= length ? 0 : 1;
++    }
++    Arena output = arena_reserve(BUSTER_TIER1_FRAME_BENCHMARK_ARENA_BYTES);
++    Arena scratch = arena_reserve(BUSTER_TIER1_FRAME_BENCHMARK_ARENA_BYTES);
++    uint64_t bins[10] = {0};
++    uint64_t mismatches = 0;
++    for (uint32_t f = 0; status == 0 && f < frames; f += 1)
++    {
++        bins[tier1_frame_probe_bin(requests[f].slots.count)] += 1;
++        Tier1Frame a;
++        Tier1Frame b;
++        const Tier1FrameError ea = tier1_frame_plan_scalar(&requests[f], &output, &scratch, &a);
++        const Tier1FrameError eb = tier1_frame_plan(&requests[f], &output, &scratch, &b);
++        bool same = ea == eb;
++        if (same && ea == TIER1_FRAME_OK)
++        {
++            same = a.slot_count == b.slot_count && a.object_bytes == b.object_bytes && a.stack_adjust_bytes == b.stack_adjust_bytes &&
++                (a.count == 0 || (memcmp(a.slot, b.slot, a.count * 4) == 0 && memcmp(a.offset, b.offset, a.count * 4) == 0));
++        }
++        mismatches += !same;
++        arena_pop_to(&output, 0);
++        arena_pop_to(&scratch, 0);
++    }
++    double ticks[2][10][BUSTER_TIER1_FRAME_BENCHMARK_PASSES];
++    double totals[2][BUSTER_TIER1_FRAME_BENCHMARK_PASSES];
++    for (uint32_t pass = 0; status == 0 && pass < BUSTER_TIER1_FRAME_BENCHMARK_PASSES; pass += 1)
++    {
++        for (uint32_t order = 0; order < 2; order += 1)
++        {
++            const uint32_t which = order ^ (pass & 1);
++            uint64_t sums[10] = {0};
++            uint64_t total = 0;
++            for (uint32_t f = 0; f < frames; f += 1)
++            {
++                Tier1Frame frame;
++                const uint64_t before = __rdtsc();
++                const Tier1FrameError error = which == 0 ? tier1_frame_plan_scalar(&requests[f], &output, &scratch, &frame) : tier1_frame_plan(&requests[f], &output, &scratch, &frame);
++                const uint64_t spent = __rdtsc() - before;
++                __asm__ volatile("" : : "r"(&frame), "r"(error) : "memory");
++                sums[tier1_frame_probe_bin(requests[f].slots.count)] += spent;
++                total += spent;
++                arena_pop_to(&output, 0);
++                arena_pop_to(&scratch, 0);
++            }
++            for (uint32_t bin = 0; bin < 10; bin += 1)
++            {
++                ticks[which][bin][pass] = bins[bin] != 0 ? (double)sums[bin] / bins[bin] : 0;
++            }
++            totals[which][pass] = (double)total;
++        }
++    }
++    if (status == 0)
++    {
++        printf("replay file=%s frames=%u mismatches=%llu\n", path, frames, (unsigned long long)mismatches);
++        const char* const names[10] = {"0", "1", "2", "3-4", "5-8", "9-16", "17-32", "33-64", "65-128", "129+"};
++        for (uint32_t bin = 0; bin < 10; bin += 1)
++        {
++            if (bins[bin] != 0)
++            {
++                tier1_frame_benchmark_sort(ticks[0][bin]);
++                tier1_frame_benchmark_sort(ticks[1][bin]);
++                const double sc = ticks[0][bin][BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2];
++                const double vc = ticks[1][bin][BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2];
++                printf("  bin=%s frames=%llu scalar_ticks/plan=%.1f vector_ticks/plan=%.1f vector/scalar=%.3f\n", names[bin], (unsigned long long)bins[bin], sc, vc, vc / sc);
++            }
++        }
++        tier1_frame_benchmark_sort(totals[0]);
++        tier1_frame_benchmark_sort(totals[1]);
++        const double sc = totals[0][BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2];
++        const double vc = totals[1][BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2];
++        printf("  total scalar_ticks=%.0f vector_ticks=%.0f vector/scalar=%.3f\n", sc, vc, vc / sc);
++    }
++    return status | (mismatches != 0);
++}
++
+ int run_tier1_frame_benchmark(int argc, char** argv)
+ {
++    if (argc == 3 && strcmp(argv[1], "--replay") == 0)
++    {
++        return tier1_frame_benchmark_replay(argv[2]);
++    }
+     int only = -1;
+     int selected_phase = -1;
+     uint32_t after_ms = 0;
