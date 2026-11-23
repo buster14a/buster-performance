@@ -1,0 +1,23 @@
+# The fault round's mutants (buster#3394): each one replacement in tier0.c, on the new rules' terms.
+MUTANTS = [
+ ("call-within", "valid = !check || (quarter.refused | (quarter.lanes & ~within)) == 0;", "valid = !check || (quarter.refused | (quarter.lanes & ~within & 0)) == 0;"),
+ ("call-alignment", "_mm512_cmpgt_epu32_mask(_mm512_and_si512(alignments, byte), _mm512_set1_epi32(BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)) |", "_mm512_cmpgt_epu32_mask(_mm512_and_si512(alignments, byte), _mm512_set1_epi32(255)) |"),
+ ("call-memory-result", "_mm512_cmpeq_epi32_mask(_mm512_and_si512(kinds, byte), _mm512_set1_epi32(BUSTER_ABI_RESULT_MEMORY)));", "_mm512_cmpeq_epi32_mask(_mm512_and_si512(kinds, byte), _mm512_set1_epi32(BUSTER_ABI_RESULT_MEMORY + 100)));"),
+ ("x87-part-bytes", "_mm512_cmpeq_epi64_mask(_mm512_and_si512(_mm512_srli_epi64(results, 16), byte), _mm512_set1_epi64(16)) &", "(__mmask8)0xff &"),
+ ("argument-conflict", " | _mm512_test_epi64_mask(conflicts, conflicts)", " | _mm512_test_epi64_mask(conflicts, _mm512_setzero_si512())"),
+ ("argument-taken", "taken |= count > 8 ? (uint64_t)_mm512_mask_reduce_or_epi64(registers, bit) : 0;", "taken |= 0;"),
+ ("short-one", "refused |= block->one_operand & _mm512_cmpneq_epi8_mask(top, block->operand_first);", "refused |= 0;"),
+ ("short-second", " | _mm512_cmpneq_epi8_mask(second, block->operand_first));", ");"),
+ ("long-fed", "refused |= block->fed & _mm512_cmpneq_epi8_mask(wanted, classes);", "refused |= block->fed & _mm512_cmpneq_epi8_mask(wanted, wanted);"),
+ ("long-callee", "const __m512i wanted = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(argument_tables[0], at, argument_tables[1]), block->callees,\n                                                                _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64));",
+                 "const __m512i wanted = _mm512_permutex2var_epi8(argument_tables[0], at, argument_tables[1]);"),
+ ("zero-gather", "valid = _mm512_mask_test_epi32_mask(quarter & ~end, at, _mm512_set1_epi32(0xff)) == 0;", "valid = _mm512_mask_test_epi32_mask(quarter & ~end & 0, at, _mm512_set1_epi32(0xff)) == 0;"),
+ ("zero-compress", "            for (uint32_t q = 0; q < 4; q += 1)\n            {\n                const __mmask16 quarter = (__mmask16)(empty >> (16 * q));",
+                   "            for (uint32_t q = 0; q < 1; q += 1)\n            {\n                const __mmask16 quarter = (__mmask16)(empty >> (16 * q));"),
+ ("carried-update", "if (valid && left_depth != 0)", "if (valid && left_depth != 0 && false)"),
+ ("lowest-base", "refused |= lanes & _mm512_cmplt_epi8_mask(block->lowest, _mm512_set1_epi8((char)-(int32_t)base));", "refused |= 0;"),
+ ("call-result-class", "refused |= calls & bounded & ~tier0_scan_member(results_low, results_high, classes);", "refused |= calls & bounded & ~tier0_scan_member(results_low, results_high, classes) & 0;"),
+ ("previous-class", "previous_class = tier0_scan_lane(classes, live - 1);", "previous_class = tier0_scan_lane(classes, 0);"),
+ ("call-qwords", "const __m512i odd = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);", "const __m512i odd = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);"),
+ ("group-reach", "const uint32_t place = base + (uint32_t)block->reach;", "const uint32_t place = base;"),
+]
