@@ -48,8 +48,13 @@ branch predictor learns, while a compile's frames never repeat (#2699's earlier 
 Frames in parentheses. Every bin of every corpus is a vector win, 0.31 to 0.96; mismatches 0 in all three. Bins past 32
 objects use the radix sort on both paths (more than 64 events), so they differ only in the rows and the layout scan.
 
-Later rounds, the in-compile probe (`logs/probe-*`) and the synthetic counts (`logs/synthetic-*`) are added below as
-they finish.
+**Rounds 2 and 3** (`logs/replay-*-2.log`, `-3.log`; musl's third round was not run) agree: every bin of every corpus
+reads 0.31 to 0.97, the whole corpora 0.495 to 0.515. Across the eight replays the largest bin ratio is 0.970 (Lua,
+frames of no objects, where both paths run only the header and layout) and no bin reads 1 or more.
+
+The run was stopped after the replays, while the 9700X's lock had about 28 waiters, before the in-compile probe and
+the synthetic counts: #3459 had merged on the replays, and those two were for information only. `experiment.diff`'s
+probe (`BUSTER_FRAME_PROBE`) and `run1.sh`'s last two loops still run them.
 
 ## Tests and mutation
 
