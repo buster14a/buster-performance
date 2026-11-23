@@ -127,7 +127,7 @@ targets, #3410's validation, and two other merges), medians of 11 in turn, both 
 | the compile | 113.882 | 112.679 | -1.203 |
 
 `tier0` moved 0.018 where #3411 alone read -0.070 against `8d3002eb2`: the merges between move its build by a few
-hundredths, as between any two builds. The row is about 51 cycles a token (6.849 ms at 5.45 GHz over 716,136 tokens).
+hundredths, as between any two builds. The row is about 52 cycles a token (6.849 ms at 5.45 GHz over 716,136 tokens).
 
 ## Then measuring takes selection's list (piece 5f, `results/ab-p5f`)
 
