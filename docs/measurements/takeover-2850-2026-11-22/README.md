@@ -1467,6 +1467,21 @@ lower), Lua -0.183 (5/5), the compiler's own source -4.950 (5/5), musl -2.637 (5
   hook and the reader's pass, each built and run against the driver's eight parts: each fails the option's test. Two
   were reworded (a pattern that matched twice; one that hit the scalar twin, which the option never runs).
 
+**At the head the PR has** (`develop-4fcadeb45/`: main's head merged in, #3365 and #3366 among it; `scripts/job-round7.sh`,
+`job-c1-extra.sh`): the driver's eight parts pass, and `test-checker --part 45/64` (197 checks); the corpora's objects,
+diagnostics and statuses the same plain and with `-fPIC` (`objects-y2*.txt`), with each half of the producer's bodies
+(877 and 876 of `sqlite3.c`'s, 278 and 267 of Lua's, 2,458 and 1,984 of musl's) and with `-Wall -Wextra` (no body
+taken); the 349 units the same (`units.txt`), under 104 option sets 31,016 pairs the same (`sweep-results.txt`), under
+`-Wall -Wextra` 299 the same; the 34 blocks pass forced, with every body and with each half; the journal has 44,274
+commands, 1,529 take a body, every output and status the same and 22 differ in `--time-stages`' text (`replay.txt`);
+the gate under the forced run reads 112,680 units, 4,962 with a taken body, none with a diagnostic in one. The memory
+and address rows with the option forced (`sanitizer-rows.txt`): 34 blocks each, 34 passed, 0 reports; the sanitized
+compiler with the option forced on `sqlite3.c`, Lua and a quarter of musl's units, 418 units, 407 to an object, each
+object the plain compile's, 0 reports. Four more single faults (`faults/splice-faults-c-4fcadeb45.txt`, `-d-`: the
+thread-local refusal, the initializers' skip, a taken body's direct calls' references, and the own-type term of T's
+rule for a pointer's update against the gate's test): each fails a test; one was reworded (it did not build). Twelve
+in all.
+
 **What the outputs found that no test of a program's behaviour did,** each fixed in the producer's branch before this
 one's result: a floating sum on a target that fuses one with a product; an `always_inline` wrapper's call and its own
 body; a volatile access (main's #3310, with six of musl's objects differing); and `int a[2]; a++;`, which was
