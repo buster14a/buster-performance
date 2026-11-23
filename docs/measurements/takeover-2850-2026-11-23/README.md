@@ -284,3 +284,67 @@ form pays only where units are small enough that capacity and use are the same p
 thousand of musl's faults (the scratch's discards inside a unit and the tables' arenas are as they were). What the
 count above offers is the other form: the sites that never read their zeros take kept pages with no clearing at all,
 which needs those sites named.
+
+## Main with the three pull requests merged (`state-f26d9c012/`)
+
+Main `f26d9c012` has buster14a/buster#3373, buster14a/buster#3405 and buster14a/buster#3398. `scripts/job-state.sh`:
+its ordinary Release build's stages and profile by symbol (`prof2/`), and the profile-guided build (`BUSTER_PGO=1`,
+the default training) paired against the ordinary one (`pair2-*/summary.txt`; each workload's objects and
+diagnostics are one set in every run):
+
+| | rounds | ordinary, ms | profile-guided, ms | paired, ms | lower | user instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | 115.811 | 112.557 | -3.322 | 7/7 | 1,273.202 to 1,206.644 |
+| the compiler's own source | 5 | 615.575 | 580.610 | -36.218 | 5/5 | 9,122.285 to 8,257.853 |
+| Lua, 34 units | 5 | 65.204 | 60.841 | -4.363 | 5/5 | 742.244 to 687.346 |
+| musl, 1,336 units | 5 | 666.843 | 601.591 | -66.065 | 5/5 | 6,728.522 to 6,127.441 |
+
+The ordinary build's stages (`prof2/stages.txt`, medians of seven, ms): the total 114.807; preprocess 9.527, parse
+6.785, check-input 40.816, check-expressions 10.872, check-declarations 2.148, check-program 23.769, select 1.016,
+lower 11.527, Tier 0 4.216, the emission and the object 3.6. The profile is 656.0 M cycles a run, the kernel 12.7% of
+them (`clear_page_erms` 54.6 M). The target is 9.507 ms: the compile is twelve times it.
+
+## Main through a day, 15 of its 115 merges (`sweep-day1/`)
+
+`scripts/sweep.sh`: every eighth first-parent merge from `d541430bf` (2026-11-22 04:33Z) to `94ec1ca8c` (2026-11-23
+11:04Z), each built (Release) and run in one hold of the lock: a warm-up, three counted runs and five `--time-stages`
+runs of `-c sqlite3.c` on CPU 2. `table.txt`'s columns: the revision, user instructions (M), user and kernel cycles
+(M, means of three, one hold; some held a busy host's base pages), then the stages' medians, ms: preprocess, parse,
+check-input, check-expressions, check-declarations, check-program, select, lower, Tier 0, the total; and the object's
+hash.
+
+The instructions are exact to a thousandth and place each step:
+
+| between | instructions, M | the stage that moves, ms | the merge |
+| --- | ---: | --- | --- |
+| `8cd0dd307` and `4874b2a90` | +32.340 | check-program 18.78 to 20.92 | buster14a/buster#3181, the statements clang does not emit (its own pair: +30.7 M, +1.883 ms) |
+| `9ba3d792b` and `d43345393` | +8.747 | check-program 20.84 to 21.09 | eight merges, not separated |
+| `d43345393` and `2a613c7b6` | +16.035 | check-program 21.09 to 22.81 | buster14a/buster#3324, clang's CFG heuristics (its symbols are 8.7 M cycles of the profile) |
+| `2a613c7b6` and `9730190c3` | +18.214 | check-expressions 10.53 to 12.15 | buster14a/buster#2937, constant logical operands (buster14a/buster#3398 takes 11.5 M back: 10.87 at `f26d9c012`) |
+| `ff9bad73b` and `94ec1ca8c` | +139.591 | check-program 23.53 to 34.61 | buster14a/buster#3381, the expansion history asked of every discarded statement (buster14a/buster#3405 takes it back) |
+
+So the day cost the compile 18 ms (110.84 to 128.81), of which the two fixes return 12.3; the 5.2 ms that stay are
+three features' own work (115.8 ordinary at `f26d9c012` against 110.8). No check of a pull request reads this number.
+
+## The statements' reach, two cuts: under the line (`reach/`)
+
+buster14a/buster#3181's walk (`c_check_program_reach.c`), against main `a5e760845`, throwaway patches
+(`scripts/reach1.patch`, `scripts/reach2.patch`; `scripts/job-reach1.sh`):
+
+- `reach1`: a `while`'s and a `for`'s body is scanned for a `break` only where the answer needs it (a condition
+  constantly true, a `for (;;)`), where main scans every loop's body.
+- `reach2`: that, and a block asks whether a statement completes only when a later kept statement needs the answer:
+  the block's last statement's is never read.
+
+| | rounds | paired, ms | lower | user instructions, M |
+| --- | ---: | ---: | ---: | ---: |
+| `reach1`, `sqlite3.c` | 7 | +0.022 | 3/7 | -2.042 |
+| `reach2`, `sqlite3.c` | 7 | -0.269 | 6/7 | -12.022 |
+| `reach2`, the compiler's own source | 5 | +1.698 | 2/5 | -24.509 |
+| `reach2`, Lua | 5 | -0.280 | 5/5 | -3.414 |
+| `reach2`, musl | 5 | +0.201 | 2/5 | -4.883 |
+
+Every object and diagnostic is the parent's; on this session's machine also the 1,568 files under `tests/` each
+compiled two ways, Lua's 34 two ways and `sqlite3.c` and `shell.c` five ways (3,214 commands, 1,200 objects, none
+differs). The walk gives up 12.0 M of the 30.7 M instructions the change added and a quarter of a millisecond: they
+were its cheap ones. Under 1 ms, so not specified.
