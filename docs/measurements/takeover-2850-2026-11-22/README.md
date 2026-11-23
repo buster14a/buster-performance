@@ -1684,3 +1684,15 @@ their ticks; `counts-1b9821afe.txt` has three runs of a Release build on this se
 | `check_program_emission_truth` (the last among it) | 10,458 | 4,075 conditions | 62 | 2.04 |
 | `check_control_fold_truth` (the same) | 29,883 | 11,346 expressions | 97 | 6.89 |
 | `check_control_emit_sequence`, with the statements it emits | 19,854 | | | 17.81 |
+
+`counts-finer-1b9821afe.txt` (the same patch with a clock's read around each check of `check_cfg_leaf` and around
+`check_cfg_logic`; the reads are in the ticks, about 5 M of `check_program_branch_truth`'s 16.4 M there, so these say
+what is called and how often, and less well what it costs):
+
+| inside `check_program_branch_truth` | calls | distinct nodes | that answer | with a literal operand |
+| --- | ---: | ---: | ---: | ---: |
+| `check_cfg_equality` | 15,347 | 6,923 | 0 | 12,400 |
+| `check_cfg_relational` | 5,734 | 3,420 | 0 | 2,943 |
+| `check_cfg_logic` | 6,038 | 3,035 | 0 | |
+| `check_cfg_fold` | 31,841 | 16,669 | 118 | |
+| an operand of `*` or `&` that is a constant 0 | 785 | 538 | 0 | |
