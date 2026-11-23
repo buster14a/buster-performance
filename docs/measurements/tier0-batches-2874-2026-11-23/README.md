@@ -98,6 +98,32 @@ By pass, 32 functions a batch:
   an entry, a block of emission is about 400 uops with a chain through its eight lanes' choice fields, and a function
   still has about 1,500 cycles of fixed cost.
 
+## Then the three gathers as eight loads each: refuted (`results/loads1`)
+
+The census counted 10 microcoded uops an entry, 16 in the long bodies, all the three gathers': selection's slot words,
+the homes past 32 locals, and measuring's case words. `scripts/loads-knob.patch` (on `tune`: `tune2`) makes each one
+eight loads put together in registers (`tier0_load_qwords`), by a bit of `BUSTER_TIER0_LOADS`. One executable,
+`-c sqlite3.c`, medians of 7 in turn, every object the same (`table.txt`):
+
+| the gathers replaced | `tier0`, ms |
+| --- | ---: |
+| none | 3.695 |
+| selection's (1) | 3.686 |
+| the homes' (2) | 3.674 |
+| measuring's (4) | 3.681 |
+| all three (7) | 3.683 |
+
+And the benchmark in batches of 32 (`benchmark.txt`: cycles, uops retired and microcoded uops an entry):
+
+| | every function | | | 512 entries or more | | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| the gathers replaced | cycles | uops | microcoded | cycles | uops | microcoded |
+| none | 45.90 | 170.1 | 10.18 | 35.76 | 150.6 | 16.07 |
+| all three | 45.81 | 170.9 | 0.74 | 35.63 | 150.5 | 0.56 |
+
+The microcoded uops go and nothing else moves: on the 9700X a gather of eight costs what eight loads and their
+inserts cost. Nothing lands.
+
 ## Exactness and tests
 
 - **Objects** (`scripts/exact.sh`, `scripts/exact-avx.sh`, the piece against main `b7d0b5ed`, both built `native` in a
@@ -117,7 +143,8 @@ By pass, 32 functions a batch:
   `run-tune.sh`: the holds; `census_table.py`, `census_summary.py`: the census's tables.
 - `scripts/batch-knobs.patch`: on the piece, the limits from `BUSTER_TIER0_BATCH_JOBS` and `BUSTER_TIER0_BATCH_ENTRIES`,
   the benchmark's batches (`BUSTER_TIER0_GROUP`), the stop (`BUSTER_TIER0_STOP`) and the raw events. Not for main.
+- `scripts/loads-knob.patch`, `knobs.sh`: the gathers as loads, by `BUSTER_TIER0_LOADS`, and its runs. Not for main.
 - `scripts/exact.sh`, `exact-avx.sh`: the objects' comparison, as the records before this one have them.
 - `results/ab-batch1`, `ab-batch1-w8192`: each run's `--time-stages`, the tables, the objects' hashes;
-  `results/scan1`: the table and `stages.tar.zst`; `results/census2-*`: a line a run, `table.txt` (every event by
+  `results/scan1`, `results/loads1`: the tables and `stages.tar.zst`; `results/census2-*`: a line a run, `table.txt` (every event by
   pass), `summary.md`.
