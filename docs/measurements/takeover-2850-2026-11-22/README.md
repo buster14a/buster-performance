@@ -1421,3 +1421,59 @@ The trees are removed and the job now stops where a build leaves no compiler.
 17 reworded, and one was not caught (a floating arm converted to a smaller floating type: the fixture has a body for it
 since). The one not caught at the end is the compound shift's width in the tests' form on the window
 (`node_tests_constants`), which no path of this piece runs.
+
+## The compile that takes the producer's bodies (`node-bodies/`, buster branch `claude/2850-node-bodies-compile`)
+
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7085227363), half 2: `--node-bodies`
+on a compile to an object. The reader masks the bodies the producer takes before the walk, and the lowering writes each
+one's function from its kept controls and tapes. Off by default.
+
+**Its price** (`9700x-06681bbdb/pair2-*`: the 9700X, Release, CPU 2, `scripts/job-bodies3.sh`'s pairs at `06681bbdb`;
+each pair one set of objects and one of diagnostics). The same binary with the option against without:
+
+| | rounds | without, ms | with `--node-bodies` | paired; its least and most | lower |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | 117.382 | 140.247 | +23.064; +22.266, +23.419 | 0/7 |
+| Lua's 34 units | 5 | 65.663 | 76.331 | +10.680; +10.403, +10.776 | 0/5 |
+| the compiler's own source | 5 | 617.975 | 636.013 | +18.549; +14.735, +21.119 | 0/5 |
+| musl's 1,336 units | 5 | 662.998 | 757.900 | +95.027; +94.254, +95.739 | 0/5 |
+
+On `sqlite3.c`: user cycles 570.3 M to 666.7 M (+95.7 M), kernel cycles 75.8 M to 107.3 M (+31.9 M), user instructions
++207.8 M, page faults +160. The producer's piece predicted about 16 ms and named 22 as the line that refutes it: the
+reading is past it. The compiler's own source takes no body and pays 18.5 ms.
+
+The option off against main's commit the branch stood on (`89362fd0f` to `06681bbdb`): `sqlite3.c` -0.120 ms (5/7
+lower), Lua -0.183 (5/5), the compiler's own source -4.950 (5/5), musl -2.637 (5/5). Nothing is slower.
+
+**Exact, by its outputs** (`develop-d06fbb705/`, Develop, this session's machine):
+
+- `corpus-objects.txt`, `corpus-objects-pic.txt` (`scripts/corpus-objects.sh`): each unit's object, diagnostics and
+  status the ordinary compile's, plain and with `-fPIC`: `sqlite3.c` (1,753 of 2,674 bodies taken), Lua 34 of 34 units
+  (545 taken), the compiler's own source (none taken), musl 1,336 of 1,336 (4,442 taken).
+- `units.txt` (`scripts/gen.py`, `gen2.py`, `run.py`): 349 units, each one loud or unusual body between two that say
+  nothing; 139 say something (53 an error), a body is taken in 329 (120 of them loud); none differs, and the gate's log
+  has no diagnostic in a taken body.
+- `sweep-results.txt` (`scripts/sweep.sh`): those units and three fixtures under 230 option sets; 104 accept a unit;
+  31,017 pairs of compiles, each the same.
+- `replay.txt` (`BUSTER_TEST_NODE_BODIES_KEEP`, `scripts/replay.py`): the 43,914 distinct commands the 34 blocks run
+  with the option forced, each replayed as ever and with the bodies taken (a check without an object as a compile to
+  one): 1,529 take a body, 1,041 of them make an output both ways; every output and status the same; 22 differ in
+  their text, each `--time-stages`' own.
+- `round.txt`: the 34 blocks with the option forced, with every body the producer takes and with each half of them
+  (`scripts/forced.sh`): 34 passed each way; the gate under the forced run reads 111,952 units, 4,951 with a taken
+  body, 36,468 bodies taken, none with a diagnostic. The whole inventory (156 commands) forced: no block fails that
+  passes without the option (26 fail both ways on this machine: frozen corpora and CPU counts it does not have).
+- `faults/` (`scripts/splice-faults.py`, `splice-faults-b.py`): eight single changes to the splice, the program's
+  hook and the reader's pass, each built and run against the driver's eight parts: each fails the option's test. Two
+  were reworded (a pattern that matched twice; one that hit the scalar twin, which the option never runs).
+
+**What the outputs found that no test of a program's behaviour did,** each fixed in the producer's branch before this
+one's result: a floating sum on a target that fuses one with a product; an `always_inline` wrapper's call and its own
+body; a volatile access (main's #3310, with six of musl's objects differing); and `int a[2]; a++;`, which was
+accepted with no diagnostic (the replay's one command whose status differed). The tests with the option forced passed
+with the first two wrong.
+
+**Two runs that were blind, and one tool that hung.** The list of the driver's eight parts used for the faults and
+for "the eight parts pass" had an empty block for part 1, where the option's test is dealt: two fault runs read 0 of 8
+caught, and are replaced by the run above. The journal of forced commands read every input, and a test that feeds its
+source through a named pipe hung on it: it keeps a command only where each input is a regular file.

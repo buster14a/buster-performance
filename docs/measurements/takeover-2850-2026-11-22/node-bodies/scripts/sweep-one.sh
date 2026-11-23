@@ -7,6 +7,7 @@ work=$out/work-$index; mkdir -p "$work"
 accepted=0; rejected=0; same=0; differ=0
 : > "$out/$index.differences"
 while IFS= read -r f; do
+    : > "$work/off.o"; : > "$work/on.o"
     "$cc" --lanes 1 -std=gnu17 "$@" -c -nostdinc "$f" -o "$work/off.o" > "$work/off.err" 2>&1; s0=$?
     "$cc" --lanes 1 --node-bodies -std=gnu17 "$@" -c -nostdinc "$f" -o "$work/on.o" > "$work/on.err" 2>&1; s1=$?
     if [[ $s0 -ne 0 && $s1 -ne 0 ]] && cmp -s "$work/off.err" "$work/on.err"; then rejected=$((rejected + 1)); continue; fi
