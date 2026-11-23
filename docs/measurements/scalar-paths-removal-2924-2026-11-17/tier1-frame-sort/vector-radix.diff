@@ -1,0 +1,183 @@
+diff --git a/src/buster/compiler/tier1_frame.c b/src/buster/compiler/tier1_frame.c
+index 017fd2fa1..1a70528a1 100644
+--- a/src/buster/compiler/tier1_frame.c
++++ b/src/buster/compiler/tier1_frame.c
+@@ -218,39 +218,82 @@ static __m512i tier1_frame_scan64(__m512i values)
+ 
+ // Stable eight-bit radix passes over the key bytes that differ between keys, so a function's small positions and few
+ // classes take two or three passes of the eight (#2699). Event positions have the full u32 range: a dense counting
+-// table would make memory depend on the producer's position numbering. The ordered scatter is shared; its cost is
+-// included in preparation. Returns whether the sorted columns are the temporary ones: an odd number of passes ran.
++// table would make memory depend on the producer's position numbering. Each pass takes 16 keys a step: their digits
++// in one register, conflict masks ranking each lane within its bucket, so only a bucket's last lane in the step moves
++// its cursor; the stores use scalar addresses, never Zen 5's slow scatter, and the 256 buckets' offsets are a
++// 16-lane scan (#3450). Returns whether the sorted columns are the temporary ones: an odd number of passes ran.
+ static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_key, uint32_t* temporary_id, uint32_t count)
+ {
+-    uint64_t differing = 0;
+-    for (uint32_t i = 1; i < count; i += 1)
++    __m512i differ = _mm512_setzero_si512();
++    const __m512i first = _mm512_set1_epi64(count != 0 ? (long long)key[0] : 0);
++    for (uint32_t i = 0; i < count; i += 8)
+     {
+-        differing |= key[i] ^ key[0];
++        const uint32_t left = count - i;
++        const __mmask8 mask = left >= 8 ? 0xff : (__mmask8)((1u << left) - 1);
++        differ = _mm512_or_si512(differ, _mm512_maskz_xor_epi64(mask, _mm512_maskz_loadu_epi64(mask, key + i), first));
+     }
++    const uint64_t differing = (uint64_t)_mm512_reduce_or_epi64(differ);
++    const __m512i shift_one = _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14);
++    const __m512i shift_two = _mm512_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13);
++    const __m512i shift_four = _mm512_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11);
++    const __m512i shift_eight = _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7);
+     bool swapped = false;
+     for (uint32_t shift = 0; shift < 64; shift += 8)
+     {
+         if (((differing >> shift) & 255) != 0)
+         {
+-            uint32_t offsets[256] = {0};
+-            for (uint32_t i = 0; i < count; i += 1)
+-            {
+-                offsets[(key[i] >> shift) & 255] += 1;
+-            }
+-            uint32_t sum = 0;
+-            for (uint32_t bucket = 0; bucket < 256; bucket += 1)
+-            {
+-                const uint32_t amount = offsets[bucket];
+-                offsets[bucket] = sum;
+-                sum += amount;
+-            }
+-            for (uint32_t i = 0; i < count; i += 1)
++            uint32_t offsets[256] __attribute__((aligned(64))) = { 0 };
++            for (uint32_t phase = 0; phase < 2; phase += 1)
+             {
+-                const uint32_t bucket = (key[i] >> shift) & 255;
+-                const uint32_t at = offsets[bucket];
+-                offsets[bucket] += 1;
+-                temporary_key[at] = key[i];
+-                temporary_id[at] = id[i];
++                if (phase == 1)
++                {
++                    uint32_t total = 0;
++                    for (uint32_t bucket = 0; bucket < 256; bucket += 16)
++                    {
++                        const __m512i amounts = _mm512_load_si512(offsets + bucket);
++                        __m512i sums = _mm512_add_epi32(amounts, _mm512_maskz_permutexvar_epi32(0xfffe, shift_one, amounts));
++                        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfffc, shift_two, sums));
++                        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xfff0, shift_four, sums));
++                        sums = _mm512_add_epi32(sums, _mm512_maskz_permutexvar_epi32(0xff00, shift_eight, sums));
++                        _mm512_store_si512(offsets + bucket, _mm512_add_epi32(_mm512_sub_epi32(sums, amounts), _mm512_set1_epi32((int)total)));
++                        total += (uint32_t)_mm512_reduce_add_epi32(amounts);
++                    }
++                }
++                for (uint32_t begin = 0; begin < count; begin += 16)
++                {
++                    const uint32_t lanes = count - begin < 16 ? count - begin : 16;
++                    const uint32_t low_lanes = lanes < 8 ? lanes : 8;
++                    const uint32_t high_lanes = lanes - low_lanes;
++                    // The upper eight keys' address only where one is read.
++                    const uint64_t* const upper = high_lanes != 0 ? key + begin + 8 : key + begin;
++                    const __m512i amount = _mm512_set1_epi64(shift);
++                    const __m256i low = _mm512_cvtepi64_epi32(_mm512_srlv_epi64(_mm512_maskz_loadu_epi64((__mmask8)((1u << low_lanes) - 1), key + begin), amount));
++                    const __m256i high = _mm512_cvtepi64_epi32(_mm512_srlv_epi64(_mm512_maskz_loadu_epi64((__mmask8)((1u << high_lanes) - 1), upper), amount));
++                    const __mmask16 mask = (__mmask16)((1u << lanes) - 1);
++                    const __m512i digits = _mm512_and_si512(_mm512_inserti64x4(_mm512_castsi256_si512(low), high, 1), _mm512_set1_epi32(255));
++                    const __m512i conflicts = _mm512_maskz_conflict_epi32(mask, digits);
++                    const uint32_t earlier = (uint32_t)_mm512_reduce_or_epi32(conflicts);
++                    uint32_t buckets[16];
++                    uint32_t ranks[16];
++                    _mm512_storeu_si512(buckets, digits);
++                    _mm512_storeu_si512(ranks, _mm512_popcnt_epi32(conflicts));
++                    if (phase == 1)
++                    {
++                        for (uint32_t lane = 0; lane < lanes; lane += 1)
++                        {
++                            const uint32_t at = offsets[buckets[lane]] + ranks[lane];
++                            temporary_key[at] = key[begin + lane];
++                            temporary_id[at] = id[begin + lane];
++                        }
++                    }
++                    uint32_t last = (uint32_t)mask & ~earlier;
++                    while (last != 0)
++                    {
++                        const uint32_t lane = (uint32_t)__builtin_ctz(last);
++                        offsets[buckets[lane]] += ranks[lane] + 1;
++                        last &= last - 1;
++                    }
++                }
+             }
+             uint64_t* swap_key = key;
+             key = temporary_key;
+@@ -586,9 +629,12 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
+                 candidate.event[i] = i;
+             }
+             const uint64_t* const sorted = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count) ? temporary_key : key;
+-            for (uint32_t i = 1; i < count; i += 1)
++            // Adjacent equal indices, eight pairs a step.
++            for (uint32_t i = 0; i + 1 < count; i += 8)
+             {
+-                different |= sorted[i] == sorted[i - 1];
++                const uint32_t pairs = count - 1 - i < 8 ? count - 1 - i : 8;
++                const __mmask8 mask = (__mmask8)((1u << pairs) - 1);
++                different |= _mm512_mask_cmpeq_epi64_mask(mask, _mm512_maskz_loadu_epi64(mask, sorted + i), _mm512_maskz_loadu_epi64(mask, sorted + i + 1));
+             }
+         }
+         if (different != 0)
+@@ -626,16 +672,51 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
+             const bool swapped = tier1_frame_sort(key, candidate.event, temporary_key, temporary_event, count);
+             const uint64_t* const sorted_key = swapped ? temporary_key : key;
+             const uint32_t* const sorted_item = swapped ? temporary_event : candidate.event;
+-            for (uint32_t i = 0; i < count; i += 1)
++            // A sorted key that differs from the one before starts a class: eight keys a step against their
++            // predecessors, the classes numbered by the starts' running count.
++            for (uint32_t i = 0; i < count; i += 8)
+             {
+-                if (i == 0 || sorted_key[i] != sorted_key[i - 1])
++                const uint32_t left = count - i;
++                const __mmask8 mask = left >= 8 ? 0xff : (__mmask8)((1u << left) - 1);
++                const __m512i keys = _mm512_maskz_loadu_epi64(mask, sorted_key + i);
++                // The predecessors: the step's keys shifted one lane up, and the key before the step in lane 0.
++                const __m512i before = _mm512_mask_set1_epi64(_mm512_maskz_permutexvar_epi64(0xfe, _mm512_setr_epi64(0, 0, 1, 2, 3, 4, 5, 6), keys), (__mmask8)(i != 0),
++                    i != 0 ? (long long)sorted_key[i - 1] : 0);
++                uint32_t starts = (uint32_t)_mm512_mask_cmpneq_epi64_mask(mask, keys, before) | (i == 0 ? 1u : 0u);
++                uint64_t stored[8];
++                _mm512_storeu_si512(stored, keys);
++                while (starts != 0)
+                 {
+-                    const uint32_t group = candidate.class_count;
+-                    candidate.class_stride[group] = (uint32_t)sorted_key[i];
+-                    candidate.class_alignment[group] = UINT32_MAX - (uint32_t)(sorted_key[i] >> 32);
++                    const uint32_t lane = (uint32_t)__builtin_ctz(starts);
++                    candidate.class_stride[candidate.class_count] = (uint32_t)stored[lane];
++                    candidate.class_alignment[candidate.class_count] = UINT32_MAX - (uint32_t)(stored[lane] >> 32);
+                     candidate.class_count += 1;
++                    starts &= starts - 1;
++                }
++            }
++            // Each sorted item's class is the number of starts at or before it, less one: a running count of starts.
++            uint32_t group = 0;
++            for (uint32_t i = 0; i < count; i += 8)
++            {
++                const uint32_t left = count - i;
++                const __mmask8 mask = left >= 8 ? 0xff : (__mmask8)((1u << left) - 1);
++                const __m512i keys = _mm512_maskz_loadu_epi64(mask, sorted_key + i);
++                const __m512i before = _mm512_mask_set1_epi64(_mm512_maskz_permutexvar_epi64(0xfe, _mm512_setr_epi64(0, 0, 1, 2, 3, 4, 5, 6), keys), (__mmask8)(i != 0),
++                    i != 0 ? (long long)sorted_key[i - 1] : 0);
++                const uint32_t starts = ((uint32_t)_mm512_mask_cmpneq_epi64_mask(mask, keys, before) | (i == 0 ? 1u : 0u)) & mask;
++                // Inclusive counts of starts per lane: popcount of the starts at or below each lane.
++                const __m256i below = _mm256_setr_epi32(1, 3, 7, 15, 31, 63, 127, 255);
++                const __m256i counts = _mm256_popcnt_epi32(_mm256_and_si256(_mm256_set1_epi32((int)starts), below));
++                const __m256i groups = _mm256_add_epi32(counts, _mm256_set1_epi32((int)group - 1));
++                uint32_t lanes[8];
++                uint32_t items[8];
++                _mm256_storeu_si256((__m256i*)lanes, groups);
++                _mm256_storeu_si256((__m256i*)items, _mm256_maskz_loadu_epi32(mask, sorted_item + i));
++                for (uint32_t lane = 0; lane < left && lane < 8; lane += 1)
++                {
++                    candidate.object_class[items[lane]] = lanes[lane];
+                 }
+-                candidate.object_class[sorted_item[i]] = candidate.class_count - 1;
++                group += (uint32_t)__builtin_popcount(starts);
+             }
+         }
+         // Either sort keeps all ends before starts at an equal position, allowing adjacent lifetimes to share, and
