@@ -1,4 +1,4 @@
-# Tier 0: the deferred entries in loops of their own (buster#2874's pieces 5a and 5b), 2026-11-23
+# Tier 0: the deferred entries in loops of their own (buster#2874's pieces 5a to 5d), 2026-11-23
 
 [buster#2874](https://github.com/buster14a/buster/issues/2874), on the branch of
 [buster#3403](https://github.com/buster14a/buster/pull/3403) after its VEX scan (`c4cec46e`).
@@ -52,6 +52,25 @@ with the templates').
 On a quiet host: every round of the change (4.120 to 4.205) below every round of the base (4.279 to 4.372). Both
 objects the same.
 
+## Then a body's columns in a few pushes, and the remaining lanes in lists (pieces 5c and 5d)
+
+- **5c** (`scripts/columns-pushes.patch`, `results/ab-push`): each column of a body's scratch and output took a push
+  of the arena, about 30 a body, about 250 cycles a body in the profile. `tier0_column` carves a push's columns:
+  the entries' columns in one push, the homes and references' counts in one, the choice requests' columns and the
+  deferred entries' references in one, and the output's in one. Emission writes the deferred entries' references in
+  place where no template has one, with nothing to merge.
+- **5d** (`scripts/lists.patch`, `results/ab-access`): fusion's global entries' accesses, fusion's calls' effects and
+  the labels' branch targets were loops over a block's lanes inside a loop over the blocks; each is a list and a loop
+  of its own now.
+
+| | before | after | `tier0` |
+| --- | ---: | ---: | ---: |
+| 5c (`bin/emit` against `bin/push`) | 4.138 | 4.084 | -0.054 |
+| 5d (`bin/push` against `bin/access`) | 4.081 | 4.053 | -0.028 |
+
+Each on a quiet host, medians of 11 in turn, both objects the same; each exact on the corpora (2,928 compiles) and at
+the AVX targets (4,446) against the commit before it, `test-tier0 --cross-check` passing.
+
 ## The pull request's head against main (`results/ab-main2-emit`, medians of 11 in turn, ms)
 
 Main `e5c975f1` (`bin/main2`) against buster#3403's head `b3e3ba79` (`bin/emit`: the calls' memo, the VEX scan, and
@@ -87,5 +106,6 @@ the gate's 10.
 
 ## Files
 
-- `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`; `ab.sh`, `abtable.sh`; `exact.sh`, `exact-avx.sh`.
+- `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`, `columns-pushes.patch`, `lists.patch`; `ab.sh`,
+  `abtable.sh`; `exact.sh`, `exact-avx.sh`.
 - `results/`: the A/Bs' stage clocks, tables (`table.txt`), objects' hashes and the host's processes before and after.
