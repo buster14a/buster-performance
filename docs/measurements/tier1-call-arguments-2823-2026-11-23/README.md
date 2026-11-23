@@ -1,24 +1,40 @@
-# Tier 1: a call's arguments out of each other's registers (#2823)
+# Tier 1 call arguments out of each other's registers (#2823)
 
-buster14a/buster PR #3330 (`claude/tier1-call-arguments-2823`, head `2dfce0d9`) against main `a891cc05`.
+The 9700X record for [PR #3330](https://github.com/buster14a/buster/pull/3330), which fixes [#2823](https://github.com/buster14a/buster/issues/2823).
 
-- `local/`: this session's static and callgrind counts, from a cloud container. Tier 1 objects of speedtest1
-  (SQLite 3.53.2's `speedtest1.c` with the frozen corpus's `sqlite3.c`, one unit) and Lua 5.4.8's 33 sources, made by
-  `count.sh`. `swaps.awk` counts swaps through `r11` whose third move is followed by a call within six instructions with
-  no jump between (`swaps.txt`). `cg.sh` runs callgrind on speedtest1 (`--size 5 --testset mix1`) and Lua's five scripts.
-  `fn.py` names the functions and diffs them (`callgrind-functions.txt`, `callgrind-totals.txt`). `base` is main and
-  `new2` is the PR's head.
-- `9700x/`: benchpress, every run under `exclusive.sh` and pinned to CPU 2.
-  - `measure.sh` built both trees' Release compilers, Lua in three link orders (`lua-orders.txt`), speedtest1 and
-    clang -O0's Lua, then checked outputs (`check.txt`). Its own timing steps failed on a path bug.
-  - `timing.sh` timed the checked builds with `time-runs`, one hold of the lock per program (`results/final2/`).
-  - The first run (`final`) was killed mid-check by something outside it. `bp-build.sh` and `bp-next.sh` made the
-    builds.
+- **Base:** main at `a891cc0588d75f1f3067bb641ff650afeb05bfa7`.
+- **Head:** the same commit plus [head.patch](9700x/head.patch), the PR's source change at `2dfce0d9a5d80e43eda999edb2954fbe28a987b3` (`tier1_cfg.c` and its test; identical, apart from `index` lines, to `git diff a891cc05 2dfce0d9 -- src`).
+- **Host:** benchpress, the Ryzen 7 9700X. Release compilers built with the 9700X job's Clang 23.1.4. Every program ran under `exclusive.sh`, one hold per program, pinned to CPU 2. [busy.txt](9700x/busy.txt) has the load and the busiest processes before and after each hold.
+- **Scripts:** [measure.sh](9700x/measure.sh) built Lua 5.4.8 (in three link orders, [lua-orders.txt](9700x/lua-orders.txt)) and speedtest1 by each compiler's `--tier1 -fno-asynchronous-unwind-tables`, and by `clang -O0`, then checked outputs ([check.txt](9700x/check.txt)). [timing.sh](9700x/timing.sh) then timed them with `time-runs` over the same builds ([builds.sha256](9700x/builds.sha256), [identity.txt](9700x/identity.txt)).
+- The runs were made by session `session_01Egbxnd67mUu2isTgj2N7JT` on 2026-11-23 between 00:41Z and 02:45Z, and archived here by session `session_01NNmNQuxtH8CVoBPk9j5b9y`.
 
-| | main | PR |
-| --- | ---: | ---: |
-| Lua's five scripts, sum of medians (3 layouts x 11 runs) | 179.811 ms | 179.513 ms (-0.17%) |
-| speedtest1, median of 11 (one layout) | 148.889 ms | 149.132 ms (+0.16%) |
-| speedtest1's instructions | 2,418.92 M | 2,409.12 M (-0.41%) |
-| `--tier1 -c` of speedtest1's unit, median of 11 | 628.395 ms | 629.561 ms (+0.19%) |
-| `--tier1 -c` of `lvm.c`, median of 21 | 24.872 ms | 24.868 ms (-0.02%) |
+## Checks
+
+Every Lua script's output by base and head, in each link order, is the same as `clang -O0`'s; speedtest1's `--verify` hash is the same for all three builds.
+
+## Results (median, head against base)
+
+| Program | Wall | User cycles | Spread over link orders (wall) |
+| --- | ---: | ---: | --- |
+| Lua `arithmetic.lua` | +0.69% | +0.69% | −0.12% to +1.22% |
+| Lua `calls.lua` | +0.19% | +0.21% | −1.36% to +1.78% |
+| Lua `closures.lua` | −0.15% | −0.14% | −5.27% to +1.87% |
+| Lua `strings.lua` | −0.79% | −0.86% | −1.75% to +3.74% |
+| Lua `tables.lua` | −0.28% | −0.41% | −1.19% to +1.20% |
+| speedtest1 (`--size 5 --testset mix1`) | +0.16% | +0.31% | one link |
+| compile speedtest1's unity (`--tier1 -c`) | +0.19% | +0.26% | — |
+| compile Lua's `lvm.c` (`--tier1 -c`) | −0.02% | +0.08% | — |
+
+Every Lua difference lies inside the spread its link orders give, so wall time and cycles don't move measurably. speedtest1 retires 0.41% fewer instructions (2,418.9 M to 2,409.1 M), with +0.16% wall time inside its run-to-run range (148.4–149.9 ms base, 148.2–150.2 ms head). The compiler's own time doesn't change measurably.
+
+## Added by the measuring session
+
+- `9700x/measure.sh`, `9700x/timing.sh`, `9700x/bp-build.sh` and `9700x/bp-next.sh` are the scripts that made these runs:
+  the builds, the output checks, and then the timings.
+- `local/` has the static and callgrind counts from a cloud container: main `a891cc05` (`base`) against the PR's head
+  (`new2`).
+  - `count.sh` builds the Tier 1 objects.
+  - `swaps.awk` counts swaps through `r11` within six instructions of a call (`swaps.txt`): speedtest1 125 to 57, Lua
+    46 to 10.
+  - `cg.sh` and `fn.py` produce the callgrind totals and per-function differences (`callgrind-totals.txt`,
+    `callgrind-functions.txt`).
