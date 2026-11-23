@@ -1786,6 +1786,11 @@ Looked at for a cut and left: none of these is one.
   (`experiment-discards-switch.patch`, `rss2.py`): with the driver's discard after the reader off, `check_program`'s
   off, or both, the compile takes the same 5,790 to 5,797 faults and its peak grows by 11.8, 14.0 and 27.9 MB. The pages
   they give back are not touched again; the faults `check-program` takes are its own arenas'.
+- **The compile waits for memory.** `counters-e5c975f1e.txt` (this session's machine, a Zen 4): 1.75 instructions a
+  cycle; 1.86% of the branches missed; 24.3 M loads miss L1, and the data cache's demand fills come 10.1 M from L2,
+  1.50 M from L3 and **1.31 M from memory, 1.8 a token**. `dram-fills-by-function-e5c975f1e.txt` has the last by
+  function: `memset` 21.8%, then no function above 5.2% (`check_input_warning_graph`, the literals' pass, the
+  identifiers' resolution, `check_program_references`). The instruction TLB misses 747 times.
 
 ## The warning passes on a compile that prints nothing (`warning-passes/`)
 
