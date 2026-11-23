@@ -1598,3 +1598,70 @@ Release trees along main's first parents, five pairs of `pair2.sh`, seven rounds
 (`scripts/profile-diff.py`) is the plain arm's profile against `profile-d541430bf/`'s, by symbol: +25.7 M cycles a run;
 the symbols' names differ between the two trees where a function was split or moved, so its lines are where to look,
 not a measure of one change.
+
+## A unit pays for the bodies its producer reads (`swept-size/`, buster branch `claude/2850-swept-size`)
+
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7094116426). The producer asks what
+it asks before any reading of every body first; the machine's graph, its results by node, the tapes' store and the
+tests' columns are made for the positions of the bodies left; and a compile makes nothing the shadow alone reads (the
+walk's nodes' results and tests' state, the digests, the roots by token).
+
+**Its price** (`9700x-0f7795acd/`: the 9700X, Release, CPU 2, `scripts/job-size1.sh`; each pair one set of objects and
+of diagnostics; `summaries.txt` has every pair's reduction). The option against without, before (`b0ee1afaa`) and at
+`0f7795acd`, with the specification's prediction and the line it named as refuting it:
+
+| | rounds | before | predicted | refuted above | after; its least and most | lower |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, the reader's peak added, MB (`where-0f7795acd/reduced.txt`) | 7 | +145.6 | +55 | +75 | +60.2 | |
+| `sqlite3.c`, kernel cycles added, M | 7 | +31.0 | +12 | +18 | +12.486; +11.240, +13.489 | 0/7 |
+| `sqlite3.c`, ms | 7 | +23.659 | +18.0 | +19.7 | +18.876; +18.291, +19.185 | 0/7 |
+| musl, ms | 5 | +93.419 | +65 | +78 | **+80.265; +79.432, +81.342: refuted** | 0/5 |
+| Lua, ms | 5 | +10.650 | +8.5 | +9.7 | +8.053; +7.969, +8.413 | 0/5 |
+| the compiler's own source (no body taken), ms | 5 | -0.670 | | | -0.938; -7.766, +3.146 | 4/5 |
+| `sqlite3.c -Wall -Wextra` (no body taken), ms | 5 | +0.289 | | | +0.163; -0.133, +0.408 | 1/5 |
+
+The option in both arms, `b0ee1afaa` against `0f7795acd`: `sqlite3.c` 140.677 to 135.944 ms, -4.598 (-5.166, -4.329;
+7/7 lower), kernel cycles -20.385 M, user cycles -4.384 M, instructions -2.315 M; musl 757.376 to 744.811 ms, -12.794
+(-13.396, -12.056; 5/5), kernel cycles -55.454 M, user cycles -18.725 M, instructions -44.520 M.
+
+The option off, `b0ee1afaa` against `0f7795acd`: `sqlite3.c` +0.305 ms (-0.772, +0.822; 2/7 lower), instructions
+-0.011 M of 1,287.8; the compiler's own source -1.062 (4/5), instructions -0.149 M of 9,152.5; Lua +0.042 (+0.007,
++0.195; 0/5), instructions -0.005 M of 744.2; musl +1.996 (+1.105, +4.896; 0/5), instructions -0.232 M of 6,707.4. The
+instructions are the same to within 0.004%: the option's code is not on that path. Lua's and musl's rounds are all on
+one side with them: the two binaries place their code differently, which this pair cannot tell from a cost. (Pairs of
+other heads have read -2.637 and +0.655 ms on musl with the option off.)
+
+**Where the option's cost is now** (`where-0f7795acd/`, `where-musl-0f7795acd/`: as `node-bodies/where-b0ee1afaa/`).
+`sqlite3.c`: +19.96 ms by the profiles (+18.83 by the stage tables: check-input +28.74, the stages after it -10.05):
+the tests 7.0, the machine's sweeps and keeping 7.8, the machine with no node 5.2 (its loop 3.0, `node_alone_begin`
+1.7, the scan 0.5), the front 3.3, the kernel 2.2 (`clear_page_erms` 1.9, where it was 5.25), the twin 2.2, what the
+producer asks before a reading 0.9 (a symbol of its own now), `memset` and `memmove` 0.7; the process's peak 245.7 to
+296.2 MB (+50.6, where it was +134.7); `made=105,527,448` bytes of state for `swept=258,430` positions. musl: +79.8 ms:
+the kernel 30.3 (`clear_page_erms` 20.5), the tests 13.1, the machine with no node 11.1 (`node_alone_begin` 5.9, its
+loop 3.3, the scan 1.9), the sweeps 11.7, the front 5.3 (`node_front_started` 2.7), `memset` and `memmove` 3.2, the
+twin 2.9. A small unit's state is 3.3 MB whatever its bodies (`strlen.c`, 819 tokens, no body read: `made=3,274,500`;
+`vfprintf.c`, 16,184 tokens: `made=4,236,548`): this session's machine, a Develop build.
+
+**Exact** (Develop, this session's machine; `scripts/job-z2.sh` at `0f7795acd`, `scripts/job-z3.sh` at the head):
+`develop/job-z2-0f7795acd.txt`: the producer against the oracle, twenty runs, each status 0 and none taken outside the
+set (`oracle-0f7795acd.txt`, whose counts are those of the unit's cut); the corpora's objects, diagnostics and statuses
+the same plain, with `-fPIC`, with `-Wall -Wextra` (no body taken) and with each half of the bodies (877 and 876 of
+`sqlite3.c`'s, 278 and 267 of Lua's, 2,458 and 1,984 of musl's); the 349 units, none flagged; 31,016 pairs under the
+104 option sets that accept a unit; the driver's eight parts; `test-checker --part 45/64`, 197 checks; main.c compiled
+by itself; the 34 blocks with the option forced, every body and each half; the whole inventory, 132 blocks passed and
+24 failed, none failing that passes on main's own build; the no-recursion rule on a Release build, no cycle; the memory
+and the address rows with the option forced, 34 blocks passed each and no report; the sanitized compiler with the
+option forced on 418 of the corpora's units, 407 to an object, no failure and no report. (Its journal of the forced
+commands was not written: the job removed the directory the journal is kept in.) `develop/job-z3-3dc0e08f2.txt`, at
+the head the pull request has, whose compiler's code is `0f7795acd`'s (the driver's test's bound alone differs): the
+driver's eight parts, part 45, main.c by itself, the corpora's objects plain and the units again; the 34 blocks forced,
+the gate's log reading 112,860 units, the producer run in 51,432, 4,985 with a taken body, 36,510 bodies taken, none
+with a diagnostic in one; and the journal of its 44,274 commands replayed (`replay-3dc0e08f2.txt`): every output and
+status the same, 22 differing in their text, each with `--time-stages`. Against the unit's cut the gate has 25 more
+bodies in 23 more units: the test's own two new compiles (4 bodies) and 88 more runs of the reservations' test, which
+fails each reservation of two units' compile in turn and so runs once for each reservation the compile makes.
+
+**Single faults** (`faults.txt`, `scripts/size-faults.py`): seven single changes, each built and run against the
+driver's test (`test-checker-driver --part 1/8`); six fail it as written. The seventh (the roots by token made in a
+compile, 1.2 MB more of state for the test's large unit) passed under the bound the test first had (9 MB, where it makes
+9,046,976 bytes): the bound is 8.5 MB, and it fails it (`faults-head.txt`).
