@@ -158,7 +158,8 @@ passes. #2972's comments record that as the follow-up, not started here.
 
 ## The head against main
 
-- **Objects:** *pending.*
+- **Objects:** `-c --verify --lanes 1` of sqlite3.c, Lua, musl, buster's `main.c` and `tiny.c`, by main's executable and
+  the head's, every list exiting 0: 1,373 of 1,373 byte-identical ([`results/head/objects.txt`](results/head/objects.txt)).
 - **Main's #2874 merged in:** after these runs, main gained #2874's batched passes (`1f43095f`): five passes over a
   batch of up to 32 functions. The pull request merges it, keeping its passes' vector arms alone. `test-tier0`'s frozen
   digest, recorded before either change, still matches on the merge, so the code is the same.
