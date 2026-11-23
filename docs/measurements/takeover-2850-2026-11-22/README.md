@@ -1825,3 +1825,21 @@ of the first default-path cut's shape (work that can only answer no), and none f
   constant kind, the divisor's). The pass is 8.3 M cycles on the 9700X, about 126 a visit.
 - **No line carries it.** Inside the family no source line has more than 0.25% of the samples; the profile's hottest
   single lines are loads (`type_strip_aligned`'s read of a type's kind 1.35%, a sparse column's directory 0.56%).
+
+## Both open pull requests with main `94ec1ca8c` merged in, gated again (`swept-size/develop-3ef312992/`, `default-path/develop-b43c55d58/`)
+
+Main's lowering and Tier 0 changed under both branches after their gates (`c_check_program_lower.c`, `c_check_program_emit.c`,
+`tier0.c`), so each merged head was built whole and gated again on this session's machine (Develop builds):
+
+- **buster14a/buster#3373 at `3ef312992`** (`gates.txt`, `job-z5.sh`): the objects with and without `--node-bodies` the
+  same on the four corpora, plain, `-fPIC` and `-Wall -Wextra` (`sqlite3.c` takes 1,752 bodies, one fewer than before the
+  merge; Lua 544; musl 4,442); the producer against the oracle, 20 of 20; the units flagged 0; the 34 blocks forced
+  pass, and the gate's log reads 114,167 units, the producer run in 52,129, 4,996 with a taken body, 36,661 taken, 0
+  diagnostics in a taken body; the driver's eight parts, the producer's fixtures (part 45 of 64, 197 checks) and
+  `main.c` compiled by itself pass.
+- **buster14a/buster#3398 at `b43c55d58`** (`gates.txt`, `job-dp4.sh`): the driver's eight parts (233,285 checks) and
+  `main.c` compiled by itself pass. Its corpora's comparison, the inventory and the sanitizer rows ran on its head
+  before the merge (`0db36d75e`, `9ce6a9c54`).
+- **The driver test's part 3 of 8 after the fold** (buster14a/buster#3397), in its own merge-queue run 45164502147
+  (`driver-parts-queue-run-45164502147.txt`): 448.4 s, 305.7 s of CPU, where it took 486 to 541 s before and timed out
+  twice at 600 s on #3373.
