@@ -1,4 +1,4 @@
-# Tier 0: the deferred entries in loops of their own (buster#2874's piece 5a), 2026-11-23
+# Tier 0: the deferred entries in loops of their own (buster#2874's pieces 5a and 5b), 2026-11-23
 
 [buster#2874](https://github.com/buster14a/buster/issues/2874), on the branch of
 [buster#3403](https://github.com/buster14a/buster/pull/3403) after its VEX scan (`c4cec46e`).
@@ -37,17 +37,33 @@ for the calls' table lookups.
 - Every other stage within 0.01 ms but `lower` (-0.14 in the last, a stage the change doesn't touch). Each pair of
   objects the same (`objects.sha256`).
 
+## Then emission's (`results/ab-emit`, buster#3403's commit `b3e3ba79`, `scripts/deferred-emission.patch`)
+
+Emission wrote a block's deferred entries (the calls' records from the memo above all) in its loop over the blocks
+too. In a function without deep entries it now writes them after the blocks, in order, from measuring's list; their
+references go to a column of their own and then into the templates' by instruction, from the end, which keeps the
+entries' order. A function with deep entries keeps them in the blocks' loop (their branches and choice requests go
+with the templates').
+
+| | the commit above (`bin/split2`) | the change (`bin/emit`) | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 4.313 | 4.156 | -0.157 |
+
+On a quiet host: every round of the change (4.120 to 4.205) below every round of the base (4.279 to 4.372). Both
+objects the same.
+
 ## Exactness and tests
 
-- **Objects** (`scripts/exact.sh`, `scripts/exact-avx.sh`, against `bin/vex2`'s source built `native`): 2,928 compiles
-  the same (1,925 built) of `sqlite3.c` with and without `-g`, Lua 5.4.8, musl's 1,337 units, `main.c` and
-  `tests/**/*.c`; and 4,446 (2,452 built) of musl's units at `x86-64-v3` and `tests/**/*.c` at `x86-64-v3` and
-  `znver5`.
-- **`test-tier0 --cross-check`:** 21,675,530 checks, 0 failed. Its new "call effects" check compares a call's effects
-  with the stacks' definition for calls and tail calls of 0 to 200 arguments, every class among them, around each
-  64-class boundary, direct and indirect.
+- **Objects** (`scripts/exact.sh`, `scripts/exact-avx.sh`, each change against the commit before it, both built
+  `native`): 2,928 compiles the same (1,925 built) of `sqlite3.c` with and without `-g`, Lua 5.4.8, musl's 1,337 units,
+  `main.c` and `tests/**/*.c`; and 4,446 (2,452 built) of musl's units at `x86-64-v3` and `tests/**/*.c` at
+  `x86-64-v3` and `znver5`.
+- **`test-tier0 --cross-check`:** 21,675,530 checks, 0 failed (21,675,531 with emission's). Its new "call effects"
+  check compares a call's effects with the stacks' definition for calls and tail calls of 0 to 200 arguments, every
+  class among them, around each 64-class boundary, direct and indirect.
+- **The call graph:** 0 cycles at each commit.
 
 ## Files
 
-- `scripts/`: `deferred-loops.patch`; `ab.sh`, `abtable.sh`; `exact.sh`, `exact-avx.sh`.
+- `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`; `ab.sh`, `abtable.sh`; `exact.sh`, `exact-avx.sh`.
 - `results/`: the A/Bs' stage clocks, tables (`table.txt`), objects' hashes and the host's processes before and after.
