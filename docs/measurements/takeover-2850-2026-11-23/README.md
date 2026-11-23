@@ -349,3 +349,12 @@ Every object and diagnostic is the parent's; on this session's machine also the 
 compiled two ways, Lua's 34 two ways and `sqlite3.c` and `shell.c` five ways (3,214 commands, 1,200 objects, none
 differs). The walk gives up 12.0 M of the 30.7 M instructions the change added and a quarter of a millisecond: they
 were its cheap ones. Under 1 ms, so not specified.
+
+## Main from 17 to 22 November, 22 of its merges (`sweep-week1/`)
+
+The same sweep (`scripts/sweep.sh`) over every tenth first-parent merge from `4b9c9fa21` (17 November) to `d335da08d`
+(22 November), to see whether steps like the day's above hide earlier. `table.txt` has the same columns.
+
+They do not. User instructions of `-c sqlite3.c` go from 1,362.108 M to 1,262.185 M and only fall, but for one step
+of +3.854 M (`e31c90375` to `875c08e9d`); the total goes from 121.05 ms to 112.71. So what the compile gained by
+features in this window is the day of 22 to 23 November, whose five steps the section above places.
