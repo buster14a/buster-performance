@@ -1492,3 +1492,38 @@ with the first two wrong.
 for "the eight parts pass" had an empty block for part 1, where the option's test is dealt: two fault runs read 0 of 8
 caught, and are replaced by the run above. The journal of forced commands read every input, and a test that feeds its
 source through a named pipe hung on it: it keeps a command only where each input is a regular file.
+
+## A unit that takes no body pays nothing (`unit-reason/`, buster branch `claude/2850-unit-reason`)
+
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7092943885). With `--node-bodies` the
+reader began its machine and the machine with no node of the walk's for every unit, columns by the unit's tokens,
+before the producer asked the unit's own reason. A compile asks that first now (`node_producer_unit`), and a unit with
+a reason has no front.
+
+**Its price** (`9700x-b0ee1afaa/pair2-*`, `scripts/job-unit1.sh`, `job-unit2.sh`: the 9700X, Release, CPU 2; each pair
+one set of objects and of diagnostics; `sqlitewall` is `sqlite3.c` with `-Wall -Wextra`):
+
+| the option against without, ms | rounds | before | after, at `b0ee1afaa`; its least and most | lower |
+| --- | ---: | ---: | ---: | ---: |
+| the compiler's own source (no body taken) | 5 | +18.549 (`06681bbdb`) | -0.670; -2.062, +2.774 | 3/5 |
+| `sqlite3.c -Wall -Wextra` (no body taken) | 5 | +5.820; +5.270, +5.955 (`4fcadeb45`) | +0.289; -0.467, +0.429 | 2/5 |
+| `sqlite3.c` | 7 | +23.064 (`06681bbdb`) | +23.659; +23.366, +24.051 | 0/7 |
+| Lua | 5 | +10.680 (`06681bbdb`) | +10.650; +10.594, +10.987 | 0/5 |
+| musl | 5 | +95.027 (`06681bbdb`) | +93.419; +92.641, +96.511 | 0/5 |
+
+The option in both arms, `4fcadeb45` against `b0ee1afaa`, on `sqlite3.c` (7 rounds): 140.602 to 140.411 ms, -0.205
+(-0.483, +0.040; 6/7 lower): the cut does not slow a unit that takes bodies, and the 0.6 ms between the two readings of
+`sqlite3.c` in the table is between two jobs. The option off, `4fcadeb45` against `b0ee1afaa`: `sqlite3.c` +0.025 ms
+(3/7 lower), the compiler's own source -2.273 (4/5), Lua +0.093 (2/5), musl +0.655 (1/5).
+
+**Exact** (`develop-b0ee1afaa/nets.txt`, `scripts/job-u1-nets.sh`: Develop, this session's machine): the producer
+against the oracle, twenty runs, each status 0, none taken outside the set; the corpora's objects, diagnostics and
+statuses the same plain, with `-fPIC` and with `-Wall -Wextra`; the 349 units; 31,016 pairs under the option sets;
+`test-checker --part 45/64`, 197 checks; the driver's eight parts. `faults.txt`: two single faults, each fails the
+option's test.
+
+**The inventory's baseline on this machine** (`develop-b0ee1afaa/inventory-baseline.txt`, `scripts/job-baseline.sh`):
+the whole inventory on main's own build (`959da3b69`: 132 passed, 24 failed) and on the branch before this one
+(`52c907e6e`: 131 passed, 25 failed). The one block that fails on the branch alone refuses a report file an earlier
+run had left in that tree, and fails the same way on main's build when run twice. Before this baseline two blocks that
+failed for the branch's sake (the no-recursion rule, and main.c compiled by itself) had been read as the machine's.
