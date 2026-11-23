@@ -1782,3 +1782,41 @@ Looked at for a cut and left: none of these is one.
   many): 132 fills, 62.2 MB of zeros and 30.8 MB of `0xff`, mostly columns by token. 11.8 MB of the zeros (19%) and
   10.3 MB of the `0xff` (34%) land on pages not resident before, so leaving out the zero fills of fresh memory is worth
   under a millisecond, and `memset` itself is 2% of the cycles.
+- **The two discards of the scratch cost no second fault.** `discards-e5c975f1e.txt`
+  (`experiment-discards-switch.patch`, `rss2.py`): with the driver's discard after the reader off, `check_program`'s
+  off, or both, the compile takes the same 5,790 to 5,797 faults and its peak grows by 11.8, 14.0 and 27.9 MB. The pages
+  they give back are not touched again; the faults `check-program` takes are its own arenas'.
+
+## The warning passes on a compile that prints nothing (`warning-passes/`)
+
+`sqlite3.c` prints no warning, and `c_check_common_warnings.c` has 9.0% of the user samples of a Release build on this
+session's machine (`perf record -e cycles:u -c 100003 -b`, `lines.py` over `perf script -F ip,sym,srcline`); in the
+9700X's profile `check_common_*` and `check_driver_common_warnings` have about 50 M of 666 M cycles. Looked at for a cut
+of the first default-path cut's shape (work that can only answer no), and none found:
+
+- **The candidates' pass already rejects by operator.** `check_common_candidates` classes every node once, 64 at a
+  time, and `check_common_next_reach_op` gives `check_common_own_reach` the candidates alone.
+- **What it visits** (`own-reach-counts-e5c975f1e.txt`, plain counters, no clock): 65,725 of the graph's 295,115 nodes
+  (22.3%), of which 1,731 (2.6%) get a bit:
+
+| operator | nodes | visited | with a bit |
+| --- | ---: | ---: | ---: |
+| `ASSIGN` | 16,601 | 16,601 | 274 |
+| `CALL` | 13,690 | 13,690 | 113 |
+| `CONDITION` | 12,540 | 12,540 | 5 |
+| `SUBSCRIPT` | 7,130 | 7,130 | 0 |
+| `INITIALIZE` | 3,982 | 3,982 | 108 |
+| `CONVERT` | 3,888 | 3,888 | 87 |
+| `LOGICAL_AND`, `LOGICAL_OR` | 3,414 | 3,414 | 1 |
+| `DEREFERENCE` | 1,243 | 1,243 | 0 |
+| `NOT`, `CONDITIONAL` | 1,496 | 1,496 | 0 |
+| the shifts and their assignments | 894 | 894 | 781 |
+| `COMMA` | 362 | 362 | 362 |
+| the divisions, remainders and their assignments | 485 | 485 | 0 |
+| not visited: `VALUE` 144,755, `ARROW` 24,623, `CAST` 20,961, `MEMBER` 8,000, `EQUAL` 5,425, `ADDRESS` 3,623, ... | | | |
+
+  Every visited operator can warn in another unit (a constant index outside its array, a division by a constant
+  zero, a constant an assignment changes), and each one's test already starts with its cheapest reject (the source's
+  constant kind, the divisor's). The pass is 8.3 M cycles on the 9700X, about 126 a visit.
+- **No line carries it.** Inside the family no source line has more than 0.25% of the samples; the profile's hottest
+  single lines are loads (`type_strip_aligned`'s read of a type's kind 1.35%, a sparse column's directory 0.56%).
