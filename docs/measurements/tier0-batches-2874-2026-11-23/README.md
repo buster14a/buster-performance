@@ -124,6 +124,27 @@ And the benchmark in batches of 32 (`benchmark.txt`: cycles, uops retired and mi
 The microcoded uops go and nothing else moves: on the 9700X a gather of eight costs what eight loads and their
 inserts cost. Nothing lands.
 
+## Then emission's side work in loops after its blocks (piece B): refuted (`results/ab-lists`)
+
+[Specified here](https://github.com/buster14a/buster/issues/2874#issuecomment-7115512468). A block of emission is
+about 400 uops for 8 entries, and its choice requests' contexts go through a chain of its eight lanes' records. The
+piece (`scripts/emission-lists.patch`, on `tune2`: `tune3`) lists a block's entries with a choice request, a branch or
+a reference (three compressed stores of entry numbers) and does each list's work in a scalar loop after the blocks,
+in a function without deep entries.
+
+`-c sqlite3.c`, `tune2` (`a`) against `tune3` (`b`), medians of 11 in turn, both objects the same:
+
+| stage | before | the piece | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 3.696 | 3.808 | +0.112 |
+| the row | 6.408 | 6.511 | +0.103 |
+
+Every round of the piece (3.770 to 3.838) is above every round before it (3.682 to 3.732). The gate was 0.15 ms
+lower, refuted under 0.05: **refuted**, 0.11 ms slower. The block's vector side work (four compressed columns of a
+request, two of a branch) costs less than a scalar loop over `sqlite3.c`'s 50,712 requests and its branches, and the
+block was not waiting on the lanes' chain. The piece is exact (2,951 compiles and 4,492 at the AVX targets the same as
+main's, `test-tier0 --cross-check` passing), and it doesn't land.
+
 ## Exactness and tests
 
 - **Objects** (`scripts/exact.sh`, `scripts/exact-avx.sh`, the piece against main `b7d0b5ed`, both built `native` in a
@@ -143,8 +164,9 @@ inserts cost. Nothing lands.
   `run-tune.sh`: the holds; `census_table.py`, `census_summary.py`: the census's tables.
 - `scripts/batch-knobs.patch`: on the piece, the limits from `BUSTER_TIER0_BATCH_JOBS` and `BUSTER_TIER0_BATCH_ENTRIES`,
   the benchmark's batches (`BUSTER_TIER0_GROUP`), the stop (`BUSTER_TIER0_STOP`) and the raw events. Not for main.
+- `scripts/emission-lists.patch`: piece B, refuted. Not for main.
 - `scripts/loads-knob.patch`, `knobs.sh`: the gathers as loads, by `BUSTER_TIER0_LOADS`, and its runs. Not for main.
 - `scripts/exact.sh`, `exact-avx.sh`: the objects' comparison, as the records before this one have them.
-- `results/ab-batch1`, `ab-batch1-w8192`: each run's `--time-stages`, the tables, the objects' hashes;
+- `results/ab-batch1`, `ab-batch1-w8192`, `ab-lists`: each run's `--time-stages`, the tables, the objects' hashes;
   `results/scan1`, `results/loads1`: the tables and `stages.tar.zst`; `results/census2-*`: a line a run, `table.txt` (every event by
   pass), `summary.md`.
