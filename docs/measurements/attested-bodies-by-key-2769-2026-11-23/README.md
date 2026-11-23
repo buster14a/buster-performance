@@ -111,3 +111,19 @@ difference (the new check of every event in a function body by the body's names 
 musl's command on one lane skips the same 259,860 declarations as main, unit by unit, with 0 units read again and 0
 unlisted events; and every object and diagnostic is main's and `--attested=off`'s (musl on one and four lanes,
 `sqlite3.c` alone with a cold and a warm memo).
+
+## The census (`measure-attested --passes 5`, lane mode, least of 5 runs)
+
+`results/census-{sqlite,musl}-{basez5,final}.txt`, cycles a token (first run's after the slash):
+
+| pass | sqlite3.c with shell.c, main → final | musl's 1,336 units, main → final |
+| --- | --- | --- |
+| lists (with the own hashes) | 4.80/9.75 → 3.52/8.36 | 7.62/11.72 → 7.21/11.05 |
+| literals | 1.13/1.69 → 0.90/1.53 | 2.06/3.48 → 1.70/3.00 |
+| chain | 1.34/1.62 → 1.34/1.70 | 3.04/6.83 → 3.00/6.24 |
+| reach | 3.05/3.53 → 1.22/1.67 | 1.88/5.05 → 2.10/5.51 |
+| all | 10.34/16.63 → 7.00/13.30 | 14.78/27.84 → 14.20/26.55 |
+
+musl's reach rises a little: a unit's rise over every declared key's list and its builtins' loop are fixed costs, and
+musl's units have few bodies (musl's command itself is no slower, above).
+
