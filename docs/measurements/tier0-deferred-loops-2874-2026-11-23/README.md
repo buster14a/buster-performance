@@ -112,6 +112,41 @@ Exact against main `8d3002eb2` (both built `native`): 2,944 compiles the same (1
 entries as well as 13 (270 targets: a count whose low byte, 14, is under a vector's 16, where `_bzhi_u32`'s mask once
 wrapped).
 
+## Main through the children's pull requests (`results/ab-main4`)
+
+Main `8d3002eb2` (`bin/main3`) against `25b16886a` (`bin/main4`: buster14a/buster#3407's unit parts, #3411's branch
+targets, #3410's validation, and two other merges), medians of 11 in turn, both objects the same:
+
+| stage | `8d3002eb2` | `25b16886a` | change |
+| --- | ---: | ---: | ---: |
+| `lower.validate` | 1.148 | 1.073 | -0.075 |
+| `tier0` | 4.073 | 4.055 | -0.018 |
+| `emit-setup` | 1.061 | 0.661 | -0.400 |
+| `publish-data` | 0.490 | 0.309 | -0.181 |
+| the row, `tier0` to `object-write` | 7.464 | 6.849 | -0.615 |
+| the compile | 113.882 | 112.679 | -1.203 |
+
+`tier0` moved 0.018 where #3411 alone read -0.070 against `8d3002eb2`: the merges between move its build by a few
+hundredths, as between any two builds. The row is about 51 cycles a token (6.849 ms at 5.45 GHz over 716,136 tokens).
+
+## Then measuring takes selection's list (piece 5f, `results/ab-p5f`)
+
+`scripts/measuring-list.patch` (the pull request's commit), on main `25b16886a`: in a function without deep entries
+selection's list of deferred entries is measuring's (only `tier0_select_deep` defers an entry after selection, and no
+template's case word is deferred), so selection keeps the list's count, measuring counts those entries first
+(`tier0_measure_listed`), and its words' loop takes a deferred lane's length from that loop and each block's positions
+as its lengths' prefix sums from a carry; the listing and the third loop over the lengths go. A function with deep
+entries lists, counts and sums as before.
+
+| stage | main `25b16886a` | the piece | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 4.030 | 3.965 | -0.065 |
+| the compile | 112.665 | 112.532 | -0.133 |
+
+Every round: main 3.998 to 4.059, the piece 3.947 to 4.025 (its first round; the other ten 3.947 to 3.981). Both
+objects the same. Exact against main (both `native`): 2,944 compiles the same (1,937 built) and 4,478 (2,476 built) at
+the AVX targets; `test-tier0 --cross-check` 21,676,047 checks, 0 failed.
+
 ## Main's `check-program` between `e5c975f1` and `3431ed34` (`results/ab-mainmove`)
 
 The same Tier 0 code (5c and 5d) on main `e5c975f1`'s base (`bin/access`) and on `3431ed34` (`bin/base5e`), medians
@@ -168,6 +203,6 @@ the gate's 10.
 ## Files
 
 - `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`, `columns-pushes.patch`, `lists.patch`,
-  `memo-hashes.patch` (refuted), `branch-targets.patch`; `ab.sh`,
+  `memo-hashes.patch` (refuted), `branch-targets.patch`, `measuring-list.patch`; `ab.sh`,
   `abtable.sh`; `exact.sh`, `exact-avx.sh`.
 - `results/`: the A/Bs' stage clocks, tables (`table.txt`), objects' hashes and the host's processes before and after.
