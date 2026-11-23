@@ -192,3 +192,38 @@ sweep added its bit arithmetic to the same loads.
 `lines/reader.txt` is the same attribution for the reader's largest functions (`check_input_expressions_coded_range`,
 `check_graph_run`, `check_input_resolve_range`, `check_lower_drain`, `check_input_declaration`,
 `check_input_expression_flush`), at the fix: no line of any holds more than 6 M cycles.
+
+## Which fresh memory needs its zeros (`fresh-zeros/`)
+
+A count, on a build that is not for merge. The kernel's 15 ms of `-c sqlite3.c` are mostly faults (82% in the earlier
+census), and most of those the clearing of fresh pages: an arena promises that bytes no push took before are zero. This
+asks how much of the compile's fresh memory is ever read before it is written, which is what any reuse of memory
+without clearing (a pool kept between units or between processes, a window's arena) would need to know.
+
+- **The build** (`scripts/experiment-fresh-zeros.patch`, on `55008c81e` with the fix, Release with `BUSTER_BAKE=0`, on
+  this session's cloud container: counts, not times). Every `arena_push` and `arena_push_array` names its call site
+  (file and line). The bytes of a push past its arena's peak, which nothing pushed before, are counted by site; for the
+  sites a list marks they are filled with `0xA5`; and each site's resident pages are counted before its arena gives
+  them back and at exit (`mincore`, a page counted for the push that holds its first byte). A measuring arena's pushes
+  (`arena_measure`) have no memory and are left out. `lane.c`'s own pushes (its tables' reservations) are one site,
+  `internal`, never filled.
+- **The bisection** (`scripts/fresh-bisect.py`): 358 sites push fresh bytes in `-c sqlite3.c` (`fresh-zeros/sites.txt`:
+  bytes pushed, pushes, site). With every site filled the compile hangs. A site needs its zeros when the compile gives
+  the same object and an empty stderr with the sites before it filled, and not with it filled too; each one found is
+  left zero and the search repeated (`fresh-zeros/progress.txt`, 202 compiles).
+
+**15 of the 358 sites need their zeros** (`fresh-zeros/zero-sites.txt`); with the other 343 filled with garbage
+(`fresh-zeros/final.list`) the object is the default compile's. They are what the code says of them: the reader's
+sparse columns and its binding table's heads (`c_check_input.c:17982`, `:17998`, `:17983`, `c_bindings.c:120`), the
+sparse pool's directories (`c_check_sparse.c:246`), three of the reader's token columns (`c_check_input.c:17753`,
+`:17758`, `:17829`), the stream's sparse columns (`c_checker.c:4218` to `:4233`, six of them) and the intern table's
+(`c_intern.c:676`).
+
+**By resident memory** (`fresh-zeros/resident.txt`; base pages here, as this container has no huge pages): of 188.4 MB
+resident by fresh pushes (the process's peak is 180.2 MB), the 15 sites hold 20.8 MB, `lane.c`'s own 18.7 MB, and the
+343 sites that never read their zeros **148.9 MB, 79%**.
+
+**What it does not show.** One input and the default options. The same list filled with garbage gives a spurious
+diagnostic with `-Wall -Wextra` (241 bytes of stderr, the object the same) and another object with `-g`; `-fPIC` is
+the same object. So other options and other inputs have sites of their own, and a list for a change of the arenas'
+promise needs the whole inventory run this way, not `sqlite3.c`.
