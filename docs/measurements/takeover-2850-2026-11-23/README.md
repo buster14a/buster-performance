@@ -100,3 +100,74 @@ cycles a run: `node_census_node` 20.1, `node_alone_bodies` 16.6, `node_front_chu
 grow most. What it removes is about 61 M (11 ms) over the thirty that shrink most: `check_graph_run` 7.7,
 `check_lower_drain` 7.7, `check_program_references` 6.3, `check_input_expressions_coded_range` 5.1,
 `check_input_warning_graph` 4.3, `check_common_own_reach` 3.1.
+
+## A post-link layout of the executable from a branch profile (`bolt/`)
+
+A measurement, not a change to the build. The profile-guided build gives `sqlite3.c` about 3% (the earlier record),
+the default path's profile is flat, and an earlier survey read 28% of the compile's slots as front-end bound. This asks
+what laying out the linked executable's code from a branch profile would add.
+
+- **The executable:** the fix's tree linked again with its relocations kept (`scripts/relocs1.patch`: the fix and
+  `-Wl,--emit-relocs`; the tree is `relocs1`, the same code and sizes as `fix1`).
+- **The profile:** `scripts/lbr-train.sh relocs1 train1 main lua musl`: `perf record -e cycles:u -j any,u -c 20011`
+  of the compiler's own source, Lua's 34 units and musl's 1,336, **not `sqlite3.c`**, each a hold of the lock on CPU 2.
+  `perf script -F brstack` reduced by `scripts/preagg.py` to BOLT's pre-aggregated form: 110,290 samples, 30,244
+  branches and 33,212 fall-throughs (`bolt/train-preagg.log`; perf's rate cap kept about a third of the samples asked
+  for).
+- **The layout:** LLVM 23.1.6's `llvm-bolt` on this session's cloud container, on the executable with its debug
+  sections stripped and its file symbols kept: `llvm-bolt compiler-relocs1 -o compiler-bolt1 -p preagg-train1.txt -pa
+  -reorder-blocks=ext-tsp -reorder-functions=cdsort -split-functions -split-all-cold -dyno-stats`. It ran in its lite
+  mode: 1,277 of 14,455 functions have a profile, the blocks of 1,178 are laid out again, 1.21 MB of hot bytes split
+  from 2.83 MB of cold ones, and in its own count of the profile the taken branches fall by 56.7%.
+  (`perf2bolt` alone refuses the executable in strict mode: 1,755 relocations in `.sframe` and `.eh_frame` it does
+  not claim.)
+
+Paired against the same executable before the layout (`bolt/pair2-*/summary.txt`), every object and diagnostic the
+same:
+
+| | rounds | before, ms | after, ms | paired, ms | lower | user cycles, M | user instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, not in the training | 7 | 117.443 | 116.741 | -0.800 | 6/7 | -7.936 | -9.434 |
+| the compiler's own source | 5 | 624.299 | 617.750 | -4.559 | 5/5 | -34.731 | -72.290 |
+| Lua, 34 units | 5 | 65.908 | 62.708 | -3.168 | 5/5 | -15.972 | -6.636 |
+| musl, 1,336 units | 5 | 669.161 | 603.661 | -65.916 | 5/5 | -321.357 | -66.608 |
+| `sqlite3.c`, with `sqlite3.c` added to the training (`pair2-sqlite-fitted/`, a ceiling) | 7 | 117.730 | 116.533 | -1.146 | 7/7 | -5.085 | -9.579 |
+
+So the layout is worth 0.7% to `sqlite3.c` and 1% at most with the benchmark itself in its training, and 9.9% to a
+command of many small units, each of which runs every stage's code cold. It was measured on the ordinary Release
+build; what it adds to `BUSTER_PGO=1` is not measured.
+
+## The bodies' cost by batch size (`locality/`)
+
+Whether a unit's bodies cost less when fewer of them are in the compiler's memory at once: what a compile by windows
+(buster14a/buster#2536) would gain on one core beside the pages it no longer faults.
+
+`scripts/locality.sh fix1 fix1 5 4 16 64` preprocesses the frozen `sqlite3.c` once (`-E` of the fix's build) and
+`scripts/chunks.py` cuts it: `whole.i`; `none.i`, every function definition's body replaced by `;`; and for K of 4, 16
+and 64, K variants that each keep the bodies of one run of the bodies in source order (about equal body tokens) and
+replace the rest. Every variant ends with a table of pointers to the functions it defines, so that a static function
+is emitted in a batch whose callers of it are gone, as it is in the whole unit. Each variant is compiled five times
+(`-c -Wno-undefined-internal`, one lane on CPU 2), in a rotating order, each run a hold of the lock with a warm-up
+before its counters. No variant prints a diagnostic. `locality/kept/runs.tsv` has every run (variant, round, user
+cycles, kernel cycles, user instructions, first-level data misses, faults, the object's hash, stderr's lines), and
+`scripts/locality-reduce.py` gives the medians (`locality/kept/reduced.txt`):
+
+| medians of 5, M | user cycles | kernel cycles | user instructions | first-level misses |
+| --- | ---: | ---: | ---: | ---: |
+| the whole unit | 554.203 | 76.841 | 1,265.493 | 18.098 |
+| no bodies | 64.301 | 18.882 | 191.575 | 2.259 |
+| the bodies: the whole unit less none | 489.902 | 57.959 | 1,073.918 | 15.839 |
+| the bodies in 4 batches: each batch less none, summed | 458.129 | 83.838 | 1,096.573 | 15.484 |
+| in 16 batches | 461.354 | 121.731 | 1,114.738 | 15.693 |
+| in 64 batches | 553.479 | 154.564 | 1,188.196 | 16.444 |
+
+- **In 4 and in 16 batches the bodies take 6.5% and 5.8% fewer user cycles** for 2.1% and 3.8% more instructions (each
+  batch's own fixed work): 8.4% and 9.3% fewer cycles an instruction. That is about 32 M cycles, 6 ms.
+- **The first-level misses do not fall** (97.8% and 99.1% of the whole unit's): what a batch of 140 thousand or 35
+  thousand body tokens gains is in the levels behind.
+- **64 batches cost more than the whole unit:** a batch of 9 thousand body tokens is a process of its own here, and its
+  start and its file scope's code run cold 64 times. The kernel's cycles rise with the batches for the same reason
+  (each maps and faults its own memory), so this says nothing about a window that reuses its memory in one process.
+- **`locality/unkept/` is the first run, without the table of pointers**, and is confounded: a static function whose
+  callers' bodies are gone is not selected, so the batches ran 17% fewer instructions than the whole unit's bodies. It
+  is kept for that count alone.
