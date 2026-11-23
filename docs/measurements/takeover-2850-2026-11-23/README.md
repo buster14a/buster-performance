@@ -486,3 +486,33 @@ machine): the sum of the raw profile's counters of the instrumented compiler aft
 316,076,643, 316,077,895 and 316,078,023 at `ff9bad73b`, and 338,233,072 three times at `94ec1ca8c`, which has
 buster14a/buster#3381's second preprocessing: +7.0% where the instructions rose 10.8%, and a spread of 0.0004% at
 most.
+
+## The compile's memory by arena (`arenas/`)
+
+What a pool could take as the arenas stand, and what it could take if the pushes that need zeros moved out. On this
+session's machine (a virtual one; `BUSTER_HUGE_PAGES` 0 and 1), main `db3c3e22` with
+`scripts/experiment-arenas-census.patch` (not for merge): every reservation named by its call's file and line, each
+fresh push's resident pages (`mincore`, when its range is given back) added to its reservation's, and a push at a
+site of the list (`zero-sites-db3c3e22.list`, 30 entries; none of 4,714 cases differs with garbage elsewhere) or one
+of `lane.c`'s own counted as needing zeros; nothing is filled (`BUSTER_EXPERIMENT_FRESH_NOFILL`).
+`scripts/arenas.py` reduces the logs to `sqlite-base-pages.txt` and `sqlite-huge-pages.txt`.
+
+`-c sqlite3.c`, MB resident by the pushes of the registered reservations (base pages, then huge):
+
+| reservation | resident | of it, the zero-needing pushes' pages | such pushes |
+| --- | ---: | ---: | ---: |
+| the driver's arena (`c_checker_driver.c:15097`): the reader's output, the graph | 51.2, 78.6 | 15.2, 17.7 | 10 |
+| the driver's output arena (`:15099`): the run's stream, the program | 35.9, 44.0 | 13.5, 15.7 | 10 |
+| the preprocessor's files (`c_preprocessor.c:4394`, five) | 11.5, 15.4 | 0 | 0 |
+| the reader's sparse arena (`c_check_input.c:17666`) | 11.0, 11.0 | 6.8 | 40 |
+| the parser's tables (`c_parser_impl.c:11330`), the preprocessor's (`c_preprocessor_impl.c:50`) | 17.0, 25.8 | all | tables |
+| the object's two arenas (`c_checker_driver.c:10988`, `:10989`) | 3.3, 3.4 | 0 | 0 |
+| **all 27 reservation sites** | **136.2, 190.9** | 54.4, 67.9 | |
+| in arenas none of whose pushes needs zeros | 36.8, 55.8 | | |
+
+(The driver's scratch, `:15098`, reads nothing here: its pushes' pages are not attributed by this census, a gap of
+about 80 MB against the process's peak. It is the first thing the next census has to place.)
+
+So as the arenas stand a pool takes 37 to 56 MB, a fifth of the compile's memory. The two large arenas mix both
+kinds: ten pushes each need zeros and own 15 to 18 MB of 51 to 79 and 13.5 to 15.7 of 36 to 44. With those twenty
+pushes in an arena of their own, the two arenas' other 58 to 89 MB are the pool's too.
