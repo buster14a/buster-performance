@@ -61,3 +61,38 @@ up to 8 calls per step and the row is within 1.5% of main.
 
 `ab-84bacda1.tsv` and `ab-4bf5599a.tsv` are each run's rows (build, row, ns,
 cycles, instructions, and for the second, mispredicts per argument).
+
+## End to end (`raw/e2e/`)
+
+The micro rows decide nothing alone, so the same two builds (base `1b9821afe`
++ the benchmark file, head `4bf5599ab`) compiled real inputs. `e2e.sh` runs
+each comparison as one `time-runs --runs 21 --build base … --build head …`,
+in a Williams design's order, pinned with `taskset -c 2`, under the lock. Its
+counting part failed (the experiment tree lacked the commit) and `counts.sh`
+redid it. `inputs.sha256` gives the inputs: sqlite3.c from the frozen corpus,
+Lua 5.4.8's 34 files, and head's own `main.c`.
+
+| Compile | base median ms (range) | head median ms (range) | wall | user cycles | instructions |
+| --- | --- | --- | --- | --- | --- |
+| sqlite3.c `-c` (Tier 0) | 117.15 (116.66–120.55) | 117.34 (116.44–118.22) | +0.16% | +0.20% | +0.02% |
+| sqlite3.c `--tier1 -c` | 624.77 (623.76–625.64) | 626.63 (625.77–627.94) | +0.30% | +0.30% | +0.00% |
+| Lua, 34 files `-c` | 129.32 | 129.29 | −0.02% | +0.27% | +0.01% |
+| Lua, 34 files `--tier1 -c` | 249.46 | 250.04 | +0.23% | +0.38% | +0.00% |
+| `main.c -c` | 627.34 (625.66–635.82) | 629.21 (625.72–633.69) | +0.30% | +0.21% | +0.00% |
+| `main.c -fsyntax-only` | 561.33 (558.06–632.72) | 562.09 (558.13–569.89) | +0.14% | +0.18% | −0.00% |
+
+Both builds' objects are the same bytes (`objects.log`). `-fsyntax-only` never
+calls `abi_assign` (counts below), yet it moves as much as the rest. So the
+uniform +0.1–0.4% is the two executables' code layout, not the change:
+`abi_assign`'s whole share of a sqlite3.c compile is about 16k calls × 2.5
+arguments × 19 cycles ≈ 0.8M of 569M cycles.
+
+Counts, from a build with temporary counters (`count.patch`, never committed;
+summed over the unity units' copies):
+
+| Compile | `abi_assign` batches | calls | calls assigned alone | deferred calls (arguments) | kernel runs, one lane |
+| --- | --- | --- | --- | --- | --- |
+| sqlite3.c `-c` and `--tier1` | 534 | 16,260 | 22 | 0 | 0 |
+| Lua, 34 files | 680 | 5,720 | 39 | 0 | 0 |
+| `main.c -c` | 514 | 13,929 | 4 | 7 (45) | 5 of 6 |
+| `main.c -fsyntax-only` | 0 | 0 | 0 | 0 | 0 |
