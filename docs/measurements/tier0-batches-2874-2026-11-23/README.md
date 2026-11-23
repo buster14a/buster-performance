@@ -145,6 +145,53 @@ request, two of a branch) costs less than a scalar loop over `sqlite3.c`'s 50,71
 block was not waiting on the lanes' chain. The piece is exact (2,951 compiles and 4,492 at the AVX targets the same as
 main's, `test-tier0 --cross-check` passing), and it doesn't land.
 
+## Then five reorderings of the passes' chains, a knob each: one pays (`results/chain1`)
+
+In batches the back end stalls 32% of Tier 0's slots, so five places where a block's work goes through a chain or
+waits for a gather were reordered, each behind a bit of `BUSTER_TIER0_CHAIN` in one executable (`tune4`:
+`scripts/tune4.patch` on main `b7d0b5ed`), each exact: every value of the knob gives main's object for `sqlite3.c`,
+and with all five on, 2,951 compiles and 4,492 at the AVX targets are the same as main's and `test-tier0
+--cross-check` passes (21,676,047 checks).
+
+`-c sqlite3.c`, medians of 9 in turn (`table.txt`), and the benchmark in batches of 32 (`benchmark.txt`, cycles an
+entry):
+
+| the bit | what | `tier0`, ms | cycles an entry | in bodies of 512 entries or more |
+| ---: | --- | ---: | ---: | ---: |
+| 0 | none | 3.717 | 46.38 | 36.18 |
+| 1 | the labels' bits from bytes stored through the targets, then packed 64 at a time | 3.712 | 46.42 | 36.25 |
+| 2 | the depths' carry from a sum of the block's effects, off the scan's last lane | 3.720 | 46.34 | 36.22 |
+| 4 | selection's words gathered a block ahead | 3.673 | 45.74 | 35.46 |
+| 8 | the references counted in two tables by turns (256 locals or fewer) | 3.733 | 46.47 | 36.17 |
+| 16 | emission's hole blocks computed a block ahead | 3.722 | 46.32 | 36.13 |
+| 31 | all five | 3.684 | 45.87 | 35.50 |
+
+Four move nothing: those chains were not what their loops waited on. Selection's gather is: gathered while the block
+before it is worked on, selection is 0.6 to 0.7 cycles an entry faster, 0.04 ms of `tier0`. It goes on as piece C,
+without a knob, with an A/B of its own.
+
+## How often a statement's shape repeats (`results/shapes`, `scripts/shapes.py`)
+
+Whether a memo could stand in for the front's passes. The tuning build dumps each function's entries as selection
+leaves them (`BUSTER_TIER0_DUMP_FILE` in `scripts/tune4.patch`). A statement is a run of entries between two points
+where both value stacks are empty; its key is what the front's passes read of it (each entry's kind, class and label
+bit, the predicates of the values the fusion tests, a call's effect on the stacks), its answer what selection leaves
+(the fusion's key, the absorbed mark, the depths, the word).
+
+| | statements | entries each | distinct | entries in a statement seen before | with a table a unit |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 92,060 | 4.03 | 12,309 | 66.4% | 66.4% |
+| Lua 5.4.8, 32 units | 22,044 | 3.99 | 3,654 | 64.9% | 51.8% |
+| musl, 1,304 units | 47,358 | 4.05 | 8,233 | 60.9% | 29.9% |
+
+- A quarter of the entries are in statements seen once (25.0%, 25.8%, 27.8%), and the commonest 256 shapes hold 43%,
+  52% and 39% of the entries.
+- Blocks of 8 entries keyed with the 5 entries around them repeat for 3.3% of `sqlite3.c`'s entries.
+- This key is not yet enough: 4.7% of `sqlite3.c`'s entries (4.4%, 5.8%) are in statements whose key has two
+  answers, so the rates above are upper bounds.
+- So a memo of statements would skip the front's passes for at most two thirds of a large unit's entries and under a
+  third of a small unit's, and nothing of the homes, measuring or emission, which depend on the function's locals.
+
 ## Exactness and tests
 
 - **Objects** (`scripts/exact.sh`, `scripts/exact-avx.sh`, the piece against main `b7d0b5ed`, both built `native` in a
@@ -167,6 +214,9 @@ main's, `test-tier0 --cross-check` passing), and it doesn't land.
 - `scripts/emission-lists.patch`: piece B, refuted. Not for main.
 - `scripts/loads-knob.patch`, `knobs.sh`: the gathers as loads, by `BUSTER_TIER0_LOADS`, and its runs. Not for main.
 - `scripts/exact.sh`, `exact-avx.sh`: the objects' comparison, as the records before this one have them.
+- `scripts/tune4.patch`, `run-chain.sh`: the whole tuning tree against main `b7d0b5ed` (the piece, the limits' and
+  the gathers' knobs, the chains' knobs and the entries' dump). Not for main.
+- `scripts/shapes.py`: the statements' census from the dumps.
 - `results/ab-batch1`, `ab-batch1-w8192`, `ab-lists`: each run's `--time-stages`, the tables, the objects' hashes;
-  `results/scan1`, `results/loads1`: the tables and `stages.tar.zst`; `results/census2-*`: a line a run, `table.txt` (every event by
-  pass), `summary.md`.
+  `results/scan1`, `results/loads1`, `results/chain1`: the tables and `stages.tar.zst`; `results/census2-*`: a line a
+  run, `table.txt` (every event by pass), `summary.md`; `results/shapes`: the census's output a corpus.
