@@ -1,0 +1,361 @@
+diff --git a/src/buster/compiler/c_check_tier1.c b/src/buster/compiler/c_check_tier1.c
+index 5b753496..e0a104df 100644
+--- a/src/buster/compiler/c_check_tier1.c
++++ b/src/buster/compiler/c_check_tier1.c
+@@ -457,6 +457,8 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
+ // `revision`. A function's own pipeline runs them (check_tier1_compile) and so does a candidate's summary, once for the
+ // unit (c_check_tier1_inline.c's check_tier1_inline_build), whose callers copy its result and whose own code goes on
+ // from it. The outcome is the first failing pass's, as check_tier1_step classifies it.
++static _Thread_local bool check_tier1_experiment_gvn;
++
+ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTier1PassesInput* input, const X86Target* target, bool scalar, bool certify, const CheckTier1Fault* fault,
+                                             Arena* promotion, Arena* output, Arena* analyses, IrVerifiedRevision* revision, CheckTier1Passes* passes)
+ {
+@@ -691,6 +693,18 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
+     // vector and mask values' and their operands', in a function that has such values. A function it refuses
+     // (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other error is the
+     // function's.
++    if (stage == CHECK_TIER1_COMPILED && check_tier1_experiment_gvn)
++    {
++        IrGvnOptions options = ir_gvn_options();
++        options.scalar = scalar;
++        IrGvnResult after = { 0 };
++        const IrCheck check = ir_optimize_gvn(&wide.function, &lane->steps[7], scratch, options, &after);
++        const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
++        outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
++        stage = outcome.stage;
++        wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? after.function : wide.function;
++        passes->gvn_removed = check.error == IR_OK ? after.removed : 0;
++    }
+     const bool everywhere = (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0;
+     if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors))
+     {
+@@ -991,7 +1005,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
+     // capability refusal permits Tier 0 fallback; resource or invariant failures retain their original IrCheck.
+     IrGvnResult gvn_result = { 0 };
+     bool gvn_applied = false;
+-    if (stage == CHECK_TIER1_COMPILED && gvn)
++    check_tier1_experiment_gvn = gvn && getenv("GVN_AFTER") != NULL;
++    if (stage == CHECK_TIER1_COMPILED && gvn && !check_tier1_experiment_gvn)
+     {
+         IrGvnOptions options = ir_gvn_options();
+         options.scalar = scalar;
+diff --git a/src/buster/compiler/ir_optimize_gvn.c b/src/buster/compiler/ir_optimize_gvn.c
+index 53fc7158..e0a3a6d5 100644
+--- a/src/buster/compiler/ir_optimize_gvn.c
++++ b/src/buster/compiler/ir_optimize_gvn.c
+@@ -53,6 +53,7 @@ struct IrGvnFrame
+     uint32_t child;
+     uint32_t mark;
+     bool entered;
++    uint32_t calls_upto;
+ };
+ 
+ typedef struct IrGvnPayload IrGvnPayload;
+@@ -77,6 +78,8 @@ struct IrGvnWork
+     uint32_t* waiting;
+     uint64_t* fields;
+     uint64_t* hashes;
++    Dominators loops;
++    bool looped;
+     uint8_t* pure;
+     uint8_t* tainted;
+     uint8_t* awaited;
+@@ -813,8 +816,17 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+                 frame->entered = true;
+                 frame->mark = insertions;
+                 frame->child = work->ir.dominators.tree_offsets[frame->block];
++                bool block_calls = false;
+                 for (uint32_t i = f->block_offsets[frame->block]; i < f->block_offsets[(uint64_t)frame->block + 1]; i += 1)
+                 {
++                    block_calls = block_calls || f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT;
++                }
++                const uint32_t parent_calls = depth >= 2 ? frames[depth - 2].calls_upto : UINT32_MAX;
++                frame->calls_upto = block_calls ? depth - 1 : parent_calls;
++                bool call_seen = false;
++                for (uint32_t i = f->block_offsets[frame->block]; i < f->block_offsets[(uint64_t)frame->block + 1]; i += 1)
++                {
++                    call_seen = call_seen || f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT;
+                     if (work->pure[i] != 0 && work->alias[i] == i)
+                     {
+                         if (scalar)
+@@ -832,6 +844,48 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+                         {
+                             match = previous[match];
+                         }
++                        static int policy = -1;
++                        if (policy < 0)
++                        {
++                            const char* text = getenv("GVN_POLICY");
++                            policy = text != NULL ? atoi(text) : 0;
++                        }
++                        const bool remat = f->op[i] == IR_CONST || f->op[i] == IR_SYMBOL_ADDR || f->op[i] == IR_STACK_ADDR;
++                        const bool castlike = f->op[i] == IR_ADDRESS || f->op[i] == IR_INTTOPTR || f->op[i] == IR_PTRTOINT || f->op[i] == IR_BITCAST || f->op[i] == IR_COPY || f->op[i] == IR_TRUNC || f->op[i] == IR_ZEXT || f->op[i] == IR_SEXT;
++                        if (match != BUSTER_IR_NONE && policy != 0 && work->ir.cfg.instruction_blocks[match] != frame->block)
++                        {
++                            if ((policy & 2) != 0 || ((policy & 1) != 0 && remat))
++                            {
++                                match = BUSTER_IR_NONE;
++                            }
++                        }
++                        if (match != BUSTER_IR_NONE && (((policy & 4) != 0 && remat) || ((policy & 8) != 0 && (remat || castlike))))
++                        {
++                            match = BUSTER_IR_NONE;
++                        }
++                        if (match != BUSTER_IR_NONE && (policy & 16) != 0 && work->ir.cfg.instruction_blocks[match] != frame->block)
++                        {
++                            const uint32_t r = work->waiting[match];
++                            const uint32_t rblock = work->ir.cfg.instruction_blocks[match];
++                            bool crossing = call_seen || (parent_calls != UINT32_MAX && parent_calls > r);
++                            for (uint32_t j = match + 1; !crossing && j < f->block_offsets[(uint64_t)rblock + 1]; j += 1)
++                            {
++                                crossing = f->op[j] == IR_CALL || f->op[j] == IR_CALL_INDIRECT;
++                            }
++                            match = crossing ? BUSTER_IR_NONE : match;
++                        }
++                        if (match != BUSTER_IR_NONE && (policy & 64) != 0 && f->type[i] == IR_I1 && work->ir.cfg.instruction_blocks[match] != frame->block)
++                        {
++                            match = BUSTER_IR_NONE;
++                        }
++                        if (match != BUSTER_IR_NONE && (policy & 32) != 0 && work->looped && work->ir.cfg.instruction_blocks[match] != frame->block)
++                        {
++                            const uint32_t inner = work->loops.block_loop[frame->block];
++                            if (inner != BUSTER_DOMINATOR_NONE && !dominators_loop_contains(&work->loops, inner, work->ir.cfg.instruction_blocks[match]))
++                            {
++                                match = BUSTER_IR_NONE;
++                            }
++                        }
+                         if (match != BUSTER_IR_NONE)
+                         {
+                             work->alias[i] = match;
+@@ -845,6 +899,7 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+                             previous[i] = heads[bucket];
+                             heads[bucket] = i;
+                             inserted[insertions++] = i;
++                            work->waiting[i] = depth - 1;
+                         }
+                     }
+                 }
+@@ -1069,6 +1124,22 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+             work.statistics.acyclic = n - count;
+             work.statistics.classes = numbered + (count != 0 ? ir_gvn_refine(&work, count, numbered, options.sweep_limit) : 0);
+         }
++        const char* text = getenv("GVN_POLICY");
++        if (text != NULL && (atoi(text) & 32) != 0)
++        {
++            const DominatorCfg cfg = {
++                .block_count = work.ir.cfg.block_count,
++                .edge_count = work.ir.cfg.edge_count,
++                .entry = function->block_count == 0 ? BUSTER_DOMINATOR_NONE : 0,
++                .successor_offsets = work.ir.cfg.successor_offsets,
++                .successors = work.ir.cfg.successors,
++                .predecessor_offsets = work.ir.cfg.predecessor_offsets,
++                .predecessors = work.ir.cfg.predecessors,
++            };
++            DominatorOptions dom = dominators_options();
++            dom.outputs = BUSTER_DOMINATOR_LOOPS;
++            work.looped = dominators_analyze(output, scratch, &cfg, dom, &work.loops) == DOMINATOR_OK;
++        }
+         check.error = ir_gvn_available(&work, scratch, options.scalar);
+         if (check.error == IR_OK && options.vectors)
+         {
+diff --git a/src/buster/compiler/ir_optimize_licm.c b/src/buster/compiler/ir_optimize_licm.c
+index 3f821286..508af580 100644
+--- a/src/buster/compiler/ir_optimize_licm.c
++++ b/src/buster/compiler/ir_optimize_licm.c
+@@ -307,15 +307,89 @@ static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preh
+     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+     uint32_t end = first;
+     *found = 0;
++    static int policy = -1;
++    if (policy < 0)
++    {
++        const char* text = getenv("LICM_POLICY");
++        policy = text != NULL ? atoi(text) : 0;
++    }
++    bool loop_calls = false;
++    for (uint32_t r = first, left = loops->loop_size[loop]; (policy & 8) != 0 && left != 0 && r < work->ir.dominators.reachable_count; r += 1)
++    {
++        const uint32_t block = rpo[r];
++        const bool member = dominators_loop_contains(loops, loop, block);
++        left -= member;
++        for (uint32_t j = f->block_offsets[block]; member && j < f->block_offsets[(uint64_t)block + 1]; j += 1)
++        {
++            loop_calls = loop_calls || f->op[j] == IR_CALL || f->op[j] == IR_CALL_INDIRECT;
++        }
++    }
++    // Experiment: latches, live-through count, budget.
++    const uint32_t header = loops->loop_header[loop];
++    const IrCfg* cfg = &work->ir.cfg;
++    uint32_t through = 0;
++    if ((policy & 32) != 0)
++    {
++        for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
++        {
++            const uint32_t block = rpo[r];
++            const bool member = dominators_loop_contains(loops, loop, block);
++            left -= member;
++            for (uint32_t j = f->block_offsets[block]; member && j < f->block_offsets[(uint64_t)block + 1]; j += 1)
++            {
++                loop_calls = loop_calls || f->op[j] == IR_CALL || f->op[j] == IR_CALL_INDIRECT;
++                through += block == header && f->op[j] == IR_PHI && f->type[j] <= IR_PTR;
++            }
++        }
++        // Distinct outside values used inside: mark with the epoch in `available` is taken; use a bitset via tainted? approximate by counting uses of outside values once per value using candidate scratch.
++        for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
++        {
++            const uint32_t block = rpo[r];
++            const bool member = dominators_loop_contains(loops, loop, block);
++            left -= member;
++            for (uint32_t j = f->block_offsets[block]; member && j < f->block_offsets[(uint64_t)block + 1]; j += 1)
++            {
++                const uint32_t mask = f->op[j] == IR_PHI ? 0 : ir_value_mask3(f, j);
++                const uint32_t operands[3] = { f->a[j], f->b[j], (mask & 4) != 0 ? ir_value_third(f, j) : BUSTER_IR_NONE };
++                for (uint32_t k = 0; k < 3; k += 1)
++                {
++                    if (((mask >> k) & 1) != 0)
++                    {
++                        const uint32_t o = operands[k];
++                        const bool outside = !dominators_loop_contains(loops, loop, work->destination[o]);
++                        const bool general = f->type[o] >= IR_I8 && f->type[o] <= IR_PTR && f->op[o] != IR_CONST && f->op[o] != IR_SYMBOL_ADDR && f->op[o] != IR_STACK_ADDR;
++                        if (outside && general && work->available[o] != UINT32_MAX - epoch)
++                        {
++                            work->available[o] = UINT32_MAX - epoch;
++                            through += 1;
++                        }
++                    }
++                }
++            }
++        }
++    }
++    const uint32_t registers = loop_calls ? 5 : 12;
++    uint32_t budget = registers > through ? registers - through : 0;
+     for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
+     {
+         const uint32_t block = rpo[r];
+         const bool member = dominators_loop_contains(loops, loop, block);
+         left -= member;
+         end = member ? r + 1 : end;
++        bool every = true;
++        for (uint32_t edge = cfg->predecessor_offsets[header]; (policy & 16) != 0 && member && edge < cfg->predecessor_offsets[(uint64_t)header + 1]; edge += 1)
++        {
++            const uint32_t latch = cfg->predecessors[edge];
++            if (dominators_loop_contains(loops, loop, latch) && !dominators_dominates(loops, block, latch))
++            {
++                every = false;
++            }
++        }
+         for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+         {
+-            bool movable = work->safe[i] != 0 && dominators_loop_contains(loops, loop, work->destination[i]);
++            const bool remat = f->op[i] == IR_CONST || f->op[i] == IR_SYMBOL_ADDR || f->op[i] == IR_STACK_ADDR;
++            const bool excluded = ((policy & 1) != 0 && (policy & 2) == 0 && remat) || ((policy & 4) != 0 && f->type[i] == IR_I1) || ((policy & 8) != 0 && loop_calls);
++            bool movable = !excluded && work->safe[i] != 0 && dominators_loop_contains(loops, loop, work->destination[i]);
+             const uint32_t mask = movable ? ir_value_mask3(f, i) : 0;
+             const uint32_t operands[3] = { f->a[i], f->b[i], (mask & 4) != 0 ? ir_value_third(f, i) : BUSTER_IR_NONE };
+             for (uint32_t k = 0; k < 3; k += 1)
+@@ -327,6 +401,13 @@ static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preh
+                     movable = movable && (inside ? work->available[operand] == epoch && work->candidate[operand] != 0 : dominators_dominates(loops, work->destination[operand], preheader));
+                 }
+             }
++            const bool cheap = f->op[i] == IR_CONST || f->op[i] == IR_SYMBOL_ADDR || f->op[i] == IR_STACK_ADDR || f->op[i] == IR_INTTOPTR || f->op[i] == IR_PTRTOINT || f->op[i] == IR_BITCAST || f->op[i] == IR_COPY || f->op[i] == IR_TRUNC;
++            movable = movable && ((policy & 16) == 0 || every || cheap);
++            if ((policy & 32) != 0 && movable && !cheap && f->type[i] <= IR_PTR)
++            {
++                movable = budget != 0;
++                budget -= movable;
++            }
+             work->available[i] = epoch;
+             work->candidate[i] = movable;
+             *found += movable && f->type[i] >= IR_V4I32;
+@@ -386,6 +467,70 @@ static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader
+     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+     uint32_t found = 0;
+     const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
++    const char* text = getenv("LICM_POLICY");
++    const int policy = text != NULL ? atoi(text) : 0;
++    if ((policy & 2) != 0)
++    {
++        // free: a movable value all of whose operands are free or remat; kept: a non-free movable value, or a free one a kept value reads.
++        for (uint32_t r = first; r < end; r += 1)
++        {
++            const uint32_t block = rpo[r];
++            const bool member = dominators_loop_contains(loops, loop, block);
++            for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
++            {
++                if (work->available[i] == epoch && work->candidate[i] != 0)
++                {
++                    const uint32_t mask = ir_value_mask3(f, i);
++                    const uint32_t operands[3] = { f->a[i], f->b[i], (mask & 4) != 0 ? ir_value_third(f, i) : BUSTER_IR_NONE };
++                    const bool cast = f->op[i] == IR_INTTOPTR || f->op[i] == IR_PTRTOINT || f->op[i] == IR_BITCAST || f->op[i] == IR_COPY || f->op[i] == IR_TRUNC;
++                    bool free = f->op[i] == IR_CONST || f->op[i] == IR_SYMBOL_ADDR || f->op[i] == IR_STACK_ADDR || f->op[i] == IR_ADDRESS || f->op[i] == IR_ADD || f->op[i] == IR_SUB || f->op[i] == IR_MUL || f->op[i] == IR_NEG;
++                    for (uint32_t k = 0; !cast && k < 3; k += 1)
++                    {
++                        if (((mask >> k) & 1) != 0)
++                        {
++                            const uint32_t o = operands[k];
++                            free = free && work->available[o] == epoch && work->candidate[o] == 3;
++                        }
++                    }
++                    free = cast || (free && (mask != 0 || f->op[i] == IR_CONST || f->op[i] == IR_SYMBOL_ADDR || f->op[i] == IR_STACK_ADDR));
++                    work->candidate[i] = free ? 3 : 1;
++                }
++            }
++        }
++        for (uint32_t r = end; r != first; r -= 1)
++        {
++            const uint32_t block = rpo[r - 1];
++            const bool member = dominators_loop_contains(loops, loop, block);
++            for (uint32_t i = f->block_offsets[(uint64_t)block + 1]; member && i != f->block_offsets[block]; i -= 1)
++            {
++                const uint32_t value = i - 1;
++                if (work->available[value] == epoch && (work->candidate[value] == 1 || work->candidate[value] == 2))
++                {
++                    const uint32_t mask = ir_value_mask3(f, value);
++                    const uint32_t operands[3] = { f->a[value], f->b[value], (mask & 4) != 0 ? ir_value_third(f, value) : BUSTER_IR_NONE };
++                    for (uint32_t k = 0; k < 3; k += 1)
++                    {
++                        if (((mask >> k) & 1) != 0 && work->available[operands[k]] == epoch && work->candidate[operands[k]] == 3)
++                        {
++                            work->candidate[operands[k]] = 2;
++                        }
++                    }
++                }
++            }
++        }
++        for (uint32_t r = first; r < end; r += 1)
++        {
++            const uint32_t block = rpo[r];
++            const bool member = dominators_loop_contains(loops, loop, block);
++            for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
++            {
++                if (work->available[i] == epoch && work->candidate[i] == 3)
++                {
++                    work->candidate[i] = 0;
++                }
++            }
++        }
++    }
+     for (uint32_t r = first; r < end; r += 1)
+     {
+         const uint32_t block = rpo[r];
+@@ -396,6 +541,19 @@ static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader
+             {
+                 work->destination[i] = preheader;
+                 work->moves += 1;
++                if (getenv("LICM_TRACE") != NULL)
++                {
++                    bool calls = false;
++                    for (uint32_t r2 = first; r2 < end; r2 += 1)
++                    {
++                        const uint32_t b2 = rpo[r2];
++                        for (uint32_t j = f->block_offsets[b2]; dominators_loop_contains(loops, loop, b2) && j < f->block_offsets[(uint64_t)b2 + 1]; j += 1)
++                        {
++                            calls = calls || f->op[j] == IR_CALL || f->op[j] == IR_CALL_INDIRECT;
++                        }
++                    }
++                    fprintf(stderr, "LICM fn=%u loop=%u size=%u calls=%d op=%s type=%u\n", f->instruction_count, loop, loops->loop_size[loop], calls, ir_op_names[f->op[i]], f->type[i]);
++                }
+             }
+         }
+     }

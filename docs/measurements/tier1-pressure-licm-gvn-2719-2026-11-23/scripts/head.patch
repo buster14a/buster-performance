@@ -1,0 +1,1060 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index 9a583917..c9bb8770 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -512,8 +512,10 @@ struct CheckEmitGrowth
+ // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
+ // and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
+ // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
+-// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol.
+-#define BUSTER_CHECK_TIER1_STEPS 13
++// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol. LICM's
++// pressure policy (#2719, on by default) takes step 9 too, reserved at the lane's first function that has a loop, and step
++// 13 is the value numbering's on promoted SSA under the same policy (--tier1-passes=+numbering).
++#define BUSTER_CHECK_TIER1_STEPS 14
+ #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
+ // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
+ // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
+@@ -546,16 +548,22 @@ struct CheckEmitGrowth
+ // #3298's switches whose arms only give constants, as loads of their jump tables' values (ir_switch_table.c), on by
+ // default.
+ #define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
++// LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), on by default: in a function without
++// vector or mask values (VECTORS' policy takes those) that has a loop, where LICM doesn't run on every value.
++#define BUSTER_CHECK_TIER1_PASS_HOIST 16384u
++// #866's solver under #2719's pressure policy (ir_optimize_gvn.c's IrGvnOptions.pressure), on promoted SSA after
++// if-conversion and before LICM, off by default: its compile time is more than it gains.
++#define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
+ #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
+     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
+-     BUSTER_CHECK_TIER1_PASS_TABLES)
++     BUSTER_CHECK_TIER1_PASS_TABLES | BUSTER_CHECK_TIER1_PASS_HOIST)
+ // Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; off by default
+ // (docs/tier1-store-motion.md's MEASUREMENTS: of speedtest1's and Lua's code it changes one start-up loop, sqlite3.c's
+ // memsys5Init, and it costs a --tier1 compile of sqlite3.c 0.27% more instructions).
+ #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 8192u
+ #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
+     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
+-     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION)
++     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION | BUSTER_CHECK_TIER1_PASS_NUMBERING)
+ // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
+ // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
+ // IrVectorizeRefusal.
+diff --git a/src/buster/compiler/c_check_tier1.c b/src/buster/compiler/c_check_tier1.c
+index 5b753496..8966ec1b 100644
+--- a/src/buster/compiler/c_check_tier1.c
++++ b/src/buster/compiler/c_check_tier1.c
+@@ -470,7 +470,9 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
+     // built again at each use otherwise; the general registers' values, whose longer ranges the allocator spills
+     // (#2719), stay as they are. One scan of the types and operations decides, so that a function without such values
+     // pays that scan alone.
+-    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd(input->function);
++    // #2719's pressure policy for LICM takes the functions without such values alone, so the same scan decides it too.
++    const bool simd = (on & (BUSTER_CHECK_TIER1_PASS_VECTORS | BUSTER_CHECK_TIER1_PASS_HOIST)) != 0 && ir_function_has_simd(input->function);
++    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && simd;
+     // The solver's, in steps[7], before promotion as --tier1-gvn's is. A function it refuses or finds past its limits
+     // goes on as it was; any other error is the function's.
+     IrGvnResult shared = { 0 };
+@@ -686,17 +688,46 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
+         passes->table_values = stage == CHECK_TIER1_COMPILED ? switched.values : NULL;
+         passes->tables_converted = stage == CHECK_TIER1_COMPILED ? switched.converted : 0;
+     }
++    // --tier1-passes=+numbering (#2719's measurement): the solver on the promoted function under the pressure policy
++    // (IrGvnOptions.pressure), in steps[13], after if-conversion and before LICM, where it sees the values promotion made
++    // of the locals' loads and stores. A function where nothing merges goes on as it was, borrowed; one it refuses or finds
++    // past its limits too; any other error is the function's.
++    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_NUMBERING) != 0)
++    {
++        if (!check_tier1_lane_reserve(lane, 6))
++        {
++            outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
++        }
++        else
++        {
++            IrGvnOptions options = ir_gvn_options();
++            options.scalar = scalar;
++            options.pressure = true;
++            IrGvnResult numbered_ssa = { 0 };
++            const IrCheck check = ir_optimize_gvn(&wide.function, &lane->steps[13], scratch, options, &numbered_ssa);
++            const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
++            outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
++            outcome.dominance_checked = check.dominance_checked;
++            outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
++            wide.function = outcome.stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? numbered_ssa.function : wide.function;
++            passes->gvn_removed += check.error == IR_OK ? numbered_ssa.removed : 0;
++        }
++        stage = outcome.stage;
++    }
+     // Loop-invariant motion, in steps[9], before the optimizer, whose dead-code removal, CFG cleanup and final
+     // verification then take its result: every value's with --tier1-passes=+licm (#139's measurement), or #2781's, the
+-    // vector and mask values' and their operands', in a function that has such values. A function it refuses
+-    // (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other error is the
+-    // function's.
++    // vector and mask values' and their operands', in a function that has such values, or #2719's pressure policy in a
++    // function that has a loop (IrLicmOptions.pressure: what pays for the register it holds, in loops without calls). A
++    // function it refuses (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other
++    // error is the function's.
+     const bool everywhere = (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0;
+-    if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors))
++    const bool hoist = stage == CHECK_TIER1_COMPILED && !everywhere && !simd && (on & BUSTER_CHECK_TIER1_PASS_HOIST) != 0 && ir_function_cyclic(&wide.function);
++    if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors || hoist))
+     {
+         IrLicmOptions options = ir_licm_options();
+         options.scalar = scalar;
+-        options.vectors = !everywhere;
++        options.vectors = !everywhere && vectors;
++        options.pressure = hoist;
+         IrLicmResult moved = { 0 };
+         if (!everywhere && !check_tier1_lane_reserve(lane, 2))
+         {
+diff --git a/src/buster/compiler/c_check_tier1_driver_test.c b/src/buster/compiler/c_check_tier1_driver_test.c
+index fc7c46c3..cbcbb436 100644
+--- a/src/buster/compiler/c_check_tier1_driver_test.c
++++ b/src/buster/compiler/c_check_tier1_driver_test.c
+@@ -2481,7 +2481,7 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
+     static const char* const variants[] = {
+         "--tier1-passes=-sccp", "--tier1-passes=-dce", "--tier1-passes=-cfg", "--tier1-passes=+licm", "--tier1-passes=+sroa",
+         "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all", "--tier1-passes=-merge", "--tier1-passes=+unroll",
+-        "--tier1-passes=+memory",
++        "--tier1-passes=+memory", "--tier1-passes=-hoist", "--tier1-passes=+numbering",
+     };
+     for (uint32_t path = 0; ran && path < 2; path += 1)
+     {
+@@ -2492,11 +2492,12 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
+         char actual[256] = { 0 };
+         check_test_expect(test, plain_built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                           "the passes fixture's default --tier1 build prints clang's build's output, every function Tier 1's");
+-        // By default every pass of the pipeline but LICM, SROA, the solver and value numbering with memory does something.
++        // By default every pass of the pipeline but SROA, the solver and value numbering with memory does something: LICM
++        // under #2719's pressure policy moves the loop's invariant sum, the loop holding no call once the callee is inlined.
+         check_test_expect(test, plain_built && plain.inlined != 0 && plain.folded != 0 && plain.removed_instructions != 0 && plain.removed_blocks != 0 &&
+-                                    plain.merged_blocks != 0 && plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0 && plain.unrolled == 0 &&
++                                    plain.merged_blocks != 0 && plain.licm_moved != 0 && plain.sroa_split == 0 && plain.gvn_removed == 0 && plain.unrolled == 0 &&
+                                     plain.loads_forwarded == 0,
+-                          "the default pipeline inlines, folds, removes and merges, and runs neither LICM, SROA, the solver, the unroller nor value numbering with memory");
++                          "the default pipeline inlines, folds, removes, merges and hoists, and runs neither SROA, the solver, the unroller nor value numbering with memory");
+         printf("  Tier 1's passes, %s path: inlined %" PRIu64 ", folded %" PRIu64 ", removed %" PRIu64 " instructions and %" PRIu64 " blocks (%" PRIu64 " merged) by default\n",
+                path == 0 ? "vector" : "scalar", plain.inlined, plain.folded, plain.removed_instructions, plain.removed_blocks, plain.merged_blocks);
+         for (uint32_t v = 0; plain_built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+@@ -2518,7 +2519,9 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
+                                             with.licm_moved == 0 && with.sroa_split == 0 && with.gvn_removed == 0 && with.unrolled == 0 && with.loads_forwarded == 0 :
+                                  v == 9   ? with.merged_blocks == 0 && with.removed_blocks < plain.removed_blocks :
+                                  v == 10  ? with.unrolled != 0 :
+-                                            with.loads_forwarded != 0;
++                                 v == 11  ? with.loads_forwarded != 0 :
++                                 v == 12  ? with.licm_moved == 0 :
++                                            with.gvn_removed != 0;
+             check_test_expect(test, same, variants[v]);
+             check_test_expect(test, built && reached, variants[v]);
+             if (!(built && reached))
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index e301588f..e1dee373 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12047,8 +12047,8 @@ struct CheckDriverDeferred
+ };
+ 
+ // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
+-// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, storemotion, gvn or inline) or all, applied in turn to the passes the earlier
+-// options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining, vectors and tables), with
++// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, storemotion, hoist, numbering, gvn or inline) or all, applied in turn to the passes the earlier
++// options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining, vectors, tables and hoist), with
+ // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
+ // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
+ // an item without its sign, or an unknown name.
+@@ -12056,7 +12056,7 @@ struct CheckDriverDeferred
+ #define BUSTER_CHECK_DRIVER_PASS_INLINE 1024u
+ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool* gvn, bool* no_inline)
+ {
+-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "storemotion", "gvn", "inline", "all" };
++    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "storemotion", "hoist", "numbering", "gvn", "inline", "all" };
+     static const uint32_t bits[] = {
+         BUSTER_CHECK_TIER1_PASS_SCCP,
+         BUSTER_CHECK_TIER1_PASS_DCE,
+@@ -12070,6 +12070,8 @@ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool*
+         BUSTER_CHECK_TIER1_PASS_VECTORS,
+         BUSTER_CHECK_TIER1_PASS_TABLES,
+         BUSTER_CHECK_TIER1_PASS_STORE_MOTION,
++        BUSTER_CHECK_TIER1_PASS_HOIST,
++        BUSTER_CHECK_TIER1_PASS_NUMBERING,
+         BUSTER_CHECK_DRIVER_PASS_GVN,
+         BUSTER_CHECK_DRIVER_PASS_INLINE,
+         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
+diff --git a/src/buster/compiler/ir.c b/src/buster/compiler/ir.c
+index e3880426..e49b9042 100644
+--- a/src/buster/compiler/ir.c
++++ b/src/buster/compiler/ir.c
+@@ -2833,6 +2833,24 @@ static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
+     return result;
+ }
+ 
++// Whether some edge of a verified function goes to a block at or before its source (#2719): every cycle has one, so a
++// function without one has no loop, and Tier 1's LICM policy passes it over before any analysis. One terminator a block,
++// read as ir_build_cfg reads it.
++static __attribute__((unused)) bool ir_function_cyclic(const IrFunction* f)
++{
++    bool found = false;
++    for (uint32_t block = 0; !found && block < f->block_count; block += 1)
++    {
++        const uint32_t last = f->block_offsets[block + 1] - 1;
++        const uint32_t count = ir_successor_count(f, last);
++        for (uint32_t edge = 0; !found && edge < count; edge += 1)
++        {
++            found = ir_successor(f, last, edge) <= block;
++        }
++    }
++    return found;
++}
++
+ // Internal version also permits arena==scratch for the verifier, which discards the entire graph at its end.
+ // Public callers use disjoint arenas; their graph excludes the marks/cursors and survives scratch restoration.
+ static __attribute__((noinline, aligned(64))) IrError ir_cfg_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)
+diff --git a/src/buster/compiler/ir_optimize_gvn.c b/src/buster/compiler/ir_optimize_gvn.c
+index 53fc7158..bf5afe81 100644
+--- a/src/buster/compiler/ir_optimize_gvn.c
++++ b/src/buster/compiler/ir_optimize_gvn.c
+@@ -29,6 +29,28 @@ struct IrGvnOptions
+     // tables vector code shares, without the general registers' longer live ranges (#2719). The congruences are
+     // computed as without it; every other value stays its own, a forwarded copy included.
+     bool vectors;
++    // Apply only the congruences that pay for the live range they make (#2719, for promoted SSA): never a free value's
++    // (BUSTER_IR_GVN_FREE: a constant, an address, a cast), which selection folds into each user or recomputes at no
++    // cost, and whose merged copy would hold a register across blocks; and a truth value's only within its block, since a
++    // branch tests a comparison's flags where a merged one takes a register and a setcc. The congruences are computed as
++    // without it. A function where nothing merges is returned as it was given: *result's function is the input's, and
++    // nothing is written to the output.
++    bool pressure;
++};
++
++// IrGvnOptions.pressure's free values by operation: each copy costs nothing at its user.
++static const uint8_t ir_gvn_free[BUSTER_IR_OP_TABLE] = {
++    [IR_CONST] = 1,
++    [IR_SYMBOL_ADDR] = 1,
++    [IR_STACK_ADDR] = 1,
++    [IR_ADDRESS] = 1,
++    [IR_INTTOPTR] = 1,
++    [IR_PTRTOINT] = 1,
++    [IR_BITCAST] = 1,
++    [IR_COPY] = 1,
++    [IR_TRUNC] = 1,
++    [IR_ZEXT] = 1,
++    [IR_SEXT] = 1,
+ };
+ 
+ typedef struct IrGvnResult IrGvnResult;
+@@ -82,6 +104,9 @@ struct IrGvnWork
+     uint8_t* awaited;
+     uint32_t probes;
+     IrGvnResult statistics;
++    // IrGvnOptions.pressure, which ir_gvn_available applies, and the congruences it applied.
++    bool pressure;
++    uint32_t merged;
+ };
+ 
+ static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
+@@ -832,6 +857,12 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+                         {
+                             match = previous[match];
+                         }
++                        // IrGvnOptions.pressure: a free value stays its own, and a truth value too where its class's
++                        // representative is another block's. It is the representative of what it dominates instead.
++                        const bool refused = work->pressure && match != BUSTER_IR_NONE &&
++                                             (ir_gvn_free[f->op[i]] != 0 || (f->type[i] == IR_I1 && work->ir.cfg.instruction_blocks[match] != frame->block));
++                        match = refused ? BUSTER_IR_NONE : match;
++                        work->merged += match != BUSTER_IR_NONE;
+                         if (match != BUSTER_IR_NONE)
+                         {
+                             work->alias[i] = match;
+@@ -1048,6 +1079,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+         work.tainted = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
+         work.awaited = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
+         work.probes = options.probes;
++        work.pressure = options.pressure;
+         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+     }
+     if (check.error == IR_OK)
+@@ -1075,12 +1107,14 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+             ir_gvn_keep_vectors(&work, options.scalar);
+         }
+     }
++    // IrGvnOptions.pressure: a function where nothing merges stays the caller's, unwritten.
++    const bool rewritten = check.error == IR_OK && (!options.pressure || work.merged != 0);
+     IrFunction view = { 0 };
+-    if (check.error == IR_OK)
++    if (rewritten)
+     {
+         check.error = ir_gvn_alias_view(&work, scratch, &view);
+     }
+-    if (check.error == IR_OK)
++    if (rewritten && check.error == IR_OK)
+     {
+         work.ir.function = &view;
+         for (uint32_t block = 0; block < function->block_count; block += 1)
+@@ -1101,12 +1135,13 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+         rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
+         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
+     }
+-    if (check.error == IR_OK)
++    if (rewritten && check.error == IR_OK)
+     {
+         check = ir_optimize_verify_result(&work.statistics.function, output, scratch);
+     }
+     if (check.error == IR_OK)
+     {
++        work.statistics.function = rewritten ? work.statistics.function : *function;
+         work.statistics.removed = function->instruction_count - work.statistics.function.instruction_count;
+         work.statistics.scratch_bytes = scratch->length - scratch_mark;
+         *result = work.statistics;
+diff --git a/src/buster/compiler/ir_optimize_licm.c b/src/buster/compiler/ir_optimize_licm.c
+index 3f821286..7e342a79 100644
+--- a/src/buster/compiler/ir_optimize_licm.c
++++ b/src/buster/compiler/ir_optimize_licm.c
+@@ -20,8 +20,33 @@ struct IrLicmOptions
+     // in place of the walk of the loop's own blocks (ir_licm_loop_walk), whose exact oracle it is; with `vectors`, keep
+     // the vectors' candidates after (ir_licm_keep_vectors).
+     bool whole;
++    // Move what pays for the register it holds through the loop (#2719, Tier 1's policy for functions without vector or
++    // mask values; ir_licm_loop_pressure). Every value moved stays live from the preheader through the whole loop, which
++    // Tier 1's allocation then spills where its registers run out:
++    // - a loop that holds a call moves nothing: across a call a value needs one of the five callee-saved registers, and
++    //   the values the loop already keeps across its calls hold them (Lua's interpreter loop: +305% instructions);
++    // - a free value (BUSTER_IR_LICM_FREE: a constant, a symbol's or a frame object's address, a cast of no bits, or
++    //   arithmetic of free values of the loop alone) moves only as the operand of a costly value that moves: at its
++    //   users, selection folds it into an immediate or an address, or it costs nothing;
++    // - a truth value stays: a branch tests its comparison's flags, where a hoisted one takes a register and a setcc;
++    // - a loop moves at most BUSTER_IR_LICM_REGISTERS costly general-register values, less the ones live through it.
++    // A function where nothing moves is returned as it was given, as with `vectors`.
++    bool pressure;
+ };
+ 
++// IrLicmOptions.pressure's register budget: the general registers Tier 1 allocates past rsp, rbp and its scratch ones,
++// less two for the loop's own temporaries.
++#define BUSTER_IR_LICM_REGISTERS 12
++// ir_licm_classify's `free` kinds: 1, a value at no cost where it is used (a constant, an address, a cast of no bits); 2,
++// arithmetic that is free where its operands are free values of the loop (a constant's sum or an address's offset).
++#define BUSTER_IR_LICM_FREE 1
++#define BUSTER_IR_LICM_FREE_ARITHMETIC 2
++// IrLicmWork.candidate's states under IrLicmOptions.pressure: a costly movable value moves; a free one is pending until
++// a moving value reads it (ir_licm_loop_pressure's closure), then kept.
++#define BUSTER_IR_LICM_MOVES 1
++#define BUSTER_IR_LICM_KEPT 2
++#define BUSTER_IR_LICM_PENDING 3
++
+ typedef struct IrLicmResult IrLicmResult;
+ struct IrLicmResult
+ {
+@@ -29,6 +54,8 @@ struct IrLicmResult
+     uint32_t moved;
+     uint32_t eligible_loops;
+     uint32_t skipped_loops;
++    // IrLicmOptions.pressure: the eligible loops passed over because they hold a call.
++    uint32_t called_loops;
+     uint64_t sweeps;
+     uint64_t visits;
+     uint64_t scratch_bytes;
+@@ -45,6 +72,10 @@ struct IrLicmWork
+     uint8_t* safe;
+     uint8_t* tainted;
+     uint8_t* candidate;
++    // IrLicmOptions.pressure: each value's BUSTER_IR_LICM_FREE kind (0 costly), and the loop walk's stamps of the values
++    // outside a loop it has counted live through it.
++    uint8_t* free;
++    uint32_t* counted;
+     // The values sent to a preheader so far.
+     uint32_t moves;
+     IrLicmResult statistics;
+@@ -56,6 +87,24 @@ static __attribute__((unused)) IrLicmOptions ir_licm_options(void)
+     return options;
+ }
+ 
++// IrLicmOptions.pressure's free kinds by operation (BUSTER_IR_LICM_FREE and _ARITHMETIC): a truncation and the pointer
++// and bit casts change no bits a register holds.
++static const uint8_t ir_licm_free[BUSTER_IR_OP_TABLE] = {
++    [IR_CONST] = BUSTER_IR_LICM_FREE,
++    [IR_SYMBOL_ADDR] = BUSTER_IR_LICM_FREE,
++    [IR_STACK_ADDR] = BUSTER_IR_LICM_FREE,
++    [IR_INTTOPTR] = BUSTER_IR_LICM_FREE,
++    [IR_PTRTOINT] = BUSTER_IR_LICM_FREE,
++    [IR_BITCAST] = BUSTER_IR_LICM_FREE,
++    [IR_COPY] = BUSTER_IR_LICM_FREE,
++    [IR_TRUNC] = BUSTER_IR_LICM_FREE,
++    [IR_ADD] = BUSTER_IR_LICM_FREE_ARITHMETIC,
++    [IR_SUB] = BUSTER_IR_LICM_FREE_ARITHMETIC,
++    [IR_MUL] = BUSTER_IR_LICM_FREE_ARITHMETIC,
++    [IR_NEG] = BUSTER_IR_LICM_FREE_ARITHMETIC,
++    [IR_ADDRESS] = BUSTER_IR_LICM_FREE_ARITHMETIC,
++};
++
+ static void ir_licm_classify(IrLicmWork* work)
+ {
+     const IrFunction* f = work->ir.function;
+@@ -130,6 +179,11 @@ static void ir_licm_classify(IrLicmWork* work)
+                                                                            _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_PAIRWISE)));
+         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
+         _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
++        if (work->free != NULL)
++        {
++            const __m128i free = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(ir_licm_free), _mm512_zextsi128_si512(operations), _mm512_loadu_si512(ir_licm_free + 64)));
++            _mm_mask_storeu_epi8(work->free + first, valid, free);
++        }
+     }
+ }
+ 
+@@ -297,8 +351,10 @@ static void ir_licm_keep_vectors(IrLicmWork* work)
+ // of the loop whose operands are each a movable value of the loop or a value whose block dominates the preheader.
+ // `candidate` is the walk's state (1 movable), current for the values `available` stamps with this walk's `epoch`: a
+ // value the walk hasn't stamped doesn't move, whatever another loop's walk left there. Returns the reverse-postorder
+-// index past the loop's last block, and in *found the movable values of vector or mask type.
+-static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint32_t* found)
++// index past the loop's last block, and in *found the movable values of vector or mask type. With `budget`
++// (IrLicmOptions.pressure), a truth value doesn't move, a free value is BUSTER_IR_LICM_PENDING, and a costly
++// general-register value moves while *budget lasts, each taking one: in reverse postorder, so the header's come first.
++static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint32_t* found, uint32_t* budget)
+ {
+     const IrFunction* f = work->ir.function;
+     const Dominators* loops = &work->loops;
+@@ -318,6 +374,8 @@ static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preh
+             bool movable = work->safe[i] != 0 && dominators_loop_contains(loops, loop, work->destination[i]);
+             const uint32_t mask = movable ? ir_value_mask3(f, i) : 0;
+             const uint32_t operands[3] = { f->a[i], f->b[i], (mask & 4) != 0 ? ir_value_third(f, i) : BUSTER_IR_NONE };
++            // Whether every operand is a free value of the loop (IrLicmOptions.pressure's free arithmetic).
++            bool free_operands = mask != 0;
+             for (uint32_t k = 0; k < 3; k += 1)
+             {
+                 if (((mask >> k) & 1) != 0)
+@@ -325,10 +383,21 @@ static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preh
+                     const uint32_t operand = operands[k];
+                     const bool inside = dominators_loop_contains(loops, loop, work->destination[operand]);
+                     movable = movable && (inside ? work->available[operand] == epoch && work->candidate[operand] != 0 : dominators_dominates(loops, work->destination[operand], preheader));
++                    free_operands = free_operands && inside && work->candidate[operand] == BUSTER_IR_LICM_PENDING;
+                 }
+             }
++            uint8_t state = movable;
++            if (budget != NULL)
++            {
++                const bool free = work->free[i] == BUSTER_IR_LICM_FREE || (work->free[i] == BUSTER_IR_LICM_FREE_ARITHMETIC && free_operands);
++                const bool general = (f->type[i] >= IR_I8 && f->type[i] <= IR_I64) || f->type[i] == IR_PTR;
++                const bool charged = movable && !free && general;
++                movable = movable && f->type[i] != IR_I1 && (!charged || *budget != 0);
++                *budget -= charged && movable;
++                state = !movable ? 0 : free ? BUSTER_IR_LICM_PENDING : BUSTER_IR_LICM_MOVES;
++            }
+             work->available[i] = epoch;
+-            work->candidate[i] = movable;
++            work->candidate[i] = state;
+             *found += movable && f->type[i] >= IR_V4I32;
+         }
+         work->statistics.visits += member ? f->block_offsets[(uint64_t)block + 1] - f->block_offsets[block] : 0;
+@@ -346,7 +415,7 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
+     const uint32_t* rpo = work->ir.dominators.rpo;
+     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+     uint32_t found = 0;
+-    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
++    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found, NULL);
+     for (uint32_t r = end; found != 0 && r != first; r -= 1)
+     {
+         const uint32_t block = rpo[r - 1];
+@@ -385,7 +454,7 @@ static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader
+     const uint32_t* rpo = work->ir.dominators.rpo;
+     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
+     uint32_t found = 0;
+-    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
++    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found, NULL);
+     for (uint32_t r = first; r < end; r += 1)
+     {
+         const uint32_t block = rpo[r];
+@@ -401,6 +470,75 @@ static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader
+     }
+ }
+ 
++// IrLicmOptions.pressure's motion of one loop that holds no call (#2719). First the general-register values live through
++// it, each counted once: its header's phis and the costly values from outside that its instructions read (a phi's
++// incoming values aside, which live only to the header; the extra values of the few operations with more than three
++// operands aren't counted). What is left of BUSTER_IR_LICM_REGISTERS is the walk's budget (ir_licm_loop_walk). Then one
++// pass backward keeps each free value that a moving or kept value reads, before it reaches it (a value comes after its
++// operands), and every moving or kept value goes to the preheader; the other free values stay at their users.
++static void ir_licm_loop_pressure(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch)
++{
++    const IrFunction* f = work->ir.function;
++    const Dominators* loops = &work->loops;
++    const uint32_t* rpo = work->ir.dominators.rpo;
++    const uint32_t header = loops->loop_header[loop];
++    const uint32_t first = work->ir.dominators.rpo_index[header];
++    uint32_t through = 0;
++    for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
++    {
++        const uint32_t block = rpo[r];
++        const bool member = dominators_loop_contains(loops, loop, block);
++        left -= member;
++        for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
++        {
++            const bool phi = f->op[i] == IR_PHI;
++            through += phi && block == header && ((f->type[i] >= IR_I8 && f->type[i] <= IR_I64) || f->type[i] == IR_PTR);
++            const uint32_t mask = phi ? 0 : ir_value_mask3(f, i);
++            const uint32_t operands[3] = { f->a[i], f->b[i], (mask & 4) != 0 ? ir_value_third(f, i) : BUSTER_IR_NONE };
++            for (uint32_t k = 0; k < 3; k += 1)
++            {
++                const uint32_t operand = operands[k];
++                const bool read = ((mask >> k) & 1) != 0;
++                const bool counts = read && work->free[operand] != BUSTER_IR_LICM_FREE && work->counted[operand] != epoch &&
++                                    ((f->type[operand] >= IR_I8 && f->type[operand] <= IR_I64) || f->type[operand] == IR_PTR) &&
++                                    !dominators_loop_contains(loops, loop, work->destination[operand]);
++                if (counts)
++                {
++                    work->counted[operand] = epoch;
++                }
++                through += counts;
++            }
++        }
++    }
++    uint32_t budget = through < BUSTER_IR_LICM_REGISTERS ? BUSTER_IR_LICM_REGISTERS - through : 0;
++    uint32_t found = 0;
++    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found, &budget);
++    for (uint32_t r = end; r != first; r -= 1)
++    {
++        const uint32_t block = rpo[r - 1];
++        const bool member = dominators_loop_contains(loops, loop, block);
++        for (uint32_t i = f->block_offsets[(uint64_t)block + 1]; member && i != f->block_offsets[block]; i -= 1)
++        {
++            const uint32_t value = i - 1;
++            const uint8_t state = work->available[value] == epoch ? work->candidate[value] : 0;
++            if (state == BUSTER_IR_LICM_MOVES || state == BUSTER_IR_LICM_KEPT)
++            {
++                const uint32_t mask = ir_value_mask3(f, value);
++                const uint32_t operands[3] = { f->a[value], f->b[value], (mask & 4) != 0 ? ir_value_third(f, value) : BUSTER_IR_NONE };
++                for (uint32_t k = 0; k < 3; k += 1)
++                {
++                    if (((mask >> k) & 1) != 0 && work->available[operands[k]] == epoch && work->candidate[operands[k]] == BUSTER_IR_LICM_PENDING)
++                    {
++                        work->candidate[operands[k]] = BUSTER_IR_LICM_KEPT;
++                    }
++                }
++                work->destination[value] = preheader;
++                work->moves += 1;
++            }
++        }
++    }
++}
++
+ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions options)
+ {
+     bool ok = true;
+@@ -416,6 +554,23 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
+             holders[work->destination[i] / 64] |= UINT64_C(1) << (work->destination[i] % 64);
+         }
+     }
++    // IrLicmOptions.pressure: the blocks that hold a call, 64 operations at a time. A loop whose body has one moves
++    // nothing, and its instructions are not walked.
++    const bool pressure = options.pressure && !options.vectors;
++    uint64_t* callers = pressure ? ir_allocate(scratch, words, sizeof(uint64_t), &ok) : 0;
++    for (uint64_t first = 0; ok && pressure && first < work->ir.function->instruction_count; first += 64)
++    {
++        const uint64_t count = work->ir.function->instruction_count - first < 64 ? work->ir.function->instruction_count - first : 64;
++        const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
++        const __m512i operations = _mm512_maskz_loadu_epi8(valid, work->ir.function->op + first);
++        __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL)) | _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL_INDIRECT));
++        while (calls != 0)
++        {
++            const uint32_t block = work->destination[first + (uint64_t)__builtin_ctzll(calls)];
++            callers[block / 64] |= UINT64_C(1) << (block % 64);
++            calls &= calls - 1;
++        }
++    }
+     for (uint32_t loop = 0; ok && loop < work->loops.loop_count; loop += 1)
+     {
+         uint32_t at = loop;
+@@ -444,7 +599,20 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
+             {
+                 held = (body[word] & holders[word]) != 0;
+             }
+-            if (held && options.vectors && !options.whole)
++            bool called = false;
++            for (uint64_t word = 0; pressure && word < words; word += 1)
++            {
++                called = called || (body[word] & callers[word]) != 0;
++            }
++            work->statistics.called_loops += called;
++            if (pressure)
++            {
++                if (!called)
++                {
++                    ir_licm_loop_pressure(work, loop, preheader, at + 1);
++                }
++            }
++            else if (held && options.vectors && !options.whole)
+             {
+                 ir_licm_loop_vectors(work, loop, preheader, at + 1, holders);
+             }
+@@ -687,8 +855,9 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
+         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
+         check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+     }
+-    // IrLicmOptions.vectors: a function without loops moves nothing, and isn't classified.
+-    const bool looped = check.error == IR_OK && (!options.vectors || work.loops.loop_count != 0);
++    // IrLicmOptions.vectors and .pressure: a function without loops moves nothing, and isn't classified.
++    const bool restricted = options.vectors || options.pressure;
++    const bool looped = check.error == IR_OK && (!restricted || work.loops.loop_count != 0);
+     if (looped)
+     {
+         bool ok = true;
+@@ -698,6 +867,8 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
+         work.safe = ir_allocate(scratch, n, 1, &ok);
+         work.tainted = ir_allocate(scratch, n, 1, &ok);
+         work.candidate = ir_allocate(scratch, n, 1, &ok);
++        work.free = options.pressure && !options.vectors ? ir_allocate(scratch, n, 1, &ok) : NULL;
++        work.counted = options.pressure && !options.vectors ? ir_allocate(scratch, n, 4, &ok) : NULL;
+         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+     }
+     if (looped && check.error == IR_OK)
+@@ -705,8 +876,8 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
+         ir_licm_classify(&work);
+         check.error = ir_licm_analyze(&work, scratch, options);
+     }
+-    // IrLicmOptions.vectors: a function where nothing moves stays the caller's, unwritten.
+-    const bool rewritten = check.error == IR_OK && (!options.vectors || work.moves != 0);
++    // IrLicmOptions.vectors and .pressure: a function where nothing moves stays the caller's, unwritten.
++    const bool rewritten = check.error == IR_OK && (!restricted || work.moves != 0);
+     IrFunction view = { 0 };
+     if (rewritten)
+     {
+diff --git a/src/buster/compiler/ir_optimize_licm_test.c b/src/buster/compiler/ir_optimize_licm_test.c
+index 52496bba..4c27fa0b 100644
+--- a/src/buster/compiler/ir_optimize_licm_test.c
++++ b/src/buster/compiler/ir_optimize_licm_test.c
+@@ -166,6 +166,34 @@ static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
+     arena_pop_to(vector, vm);
+ }
+ 
++// IrLicmOptions.pressure on ir_licm_test_chain's loop (#2719): its header's two phis and the parameter live through it,
++// so BUSTER_IR_LICM_REGISTERS less three of the chain's costly values move, the first ones in order, and the rest stay;
++// a loop where nothing moves returns its input without writing a replacement. Every result keeps the input's returns,
++// faults and effects.
++static void ir_licm_test_pressure_chain(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch, uint32_t length)
++{
++    const uint64_t om = output->length;
++    const uint64_t tm = scratch->length;
++    IrLicmOptions options = ir_licm_options();
++    options.pressure = true;
++    IrLicmResult result = { 0 };
++    const IrCheck check = ir_optimize_licm(f, output, scratch, options, &result);
++    const uint32_t budget = BUSTER_IR_LICM_REGISTERS - 3;
++    const uint32_t expected = length < budget ? length : budget;
++    ir_optimize_test_expect(test, check.error == IR_OK && scratch->length == tm && result.moved == expected && result.called_loops == 0,
++                            "LICM's pressure policy moves the chain's first values while its budget lasts");
++    ir_optimize_test_expect(test, check.error != IR_OK || expected != 0 || (output->length == om && ir_optimize_test_equal(f, &result.function)),
++                            "LICM's pressure policy returns a loop that moves nothing as it was, unwritten");
++    for (uint32_t trial = 0; check.error == IR_OK && trial < 6; trial += 1)
++    {
++        const uint64_t parameter = trial == 5 ? UINT64_MAX : trial;
++        const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, parameter, trial & 1);
++        const IrOptimizeExecution after = ir_optimize_test_execute(&result.function, scratch, parameter, trial & 1);
++        ir_optimize_test_expect(test, before.status == after.status && before.value == after.value && before.effects == after.effects, "LICM's pressure policy keeps returns, faults and effects");
++    }
++    arena_pop_to(output, om);
++}
++
+ static void ir_licm_test_guards(IrOptimizeTest* test)
+ {
+     const long page = sysconf(_SC_PAGESIZE);
+@@ -299,6 +327,7 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
+             if (chain_created)
+             {
+                 ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, length);
++                ir_licm_test_pressure_chain(test, &f, &vector, &scratch, length);
+             }
+             arena_pop_to(&input, 0);
+         }
+diff --git a/src/buster/compiler/ir_optimize_text_test.c b/src/buster/compiler/ir_optimize_text_test.c
+index 0d265460..d8f78f2a 100644
+--- a/src/buster/compiler/ir_optimize_text_test.c
++++ b/src/buster/compiler/ir_optimize_text_test.c
+@@ -26,6 +26,9 @@ typedef enum IrOptimizeTextPass
+     IR_OPTIMIZE_TEXT_UNROLL,
+     // SROA with #3311's widening of a slot of mixed widths into its eightbytes (and `flagged`, which it needs).
+     IR_OPTIMIZE_TEXT_SROA_WIDEN,
++    // LICM and GVN under #2719's pressure policy (IrLicmOptions.pressure, IrGvnOptions.pressure).
++    IR_OPTIMIZE_TEXT_LICM_PRESSURE,
++    IR_OPTIMIZE_TEXT_GVN_PRESSURE,
+ } IrOptimizeTextPass;
+ 
+ typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
+@@ -60,6 +63,13 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
+     { .name = "memory-symbols", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+     { .name = "unroll-loops", .pass = IR_OPTIMIZE_TEXT_UNROLL, .effects = true },
+     { .name = "sroa-widen", .pass = IR_OPTIMIZE_TEXT_SROA_WIDEN, .effects = false },
++    // #2719: free values stay at their users unless a moving value reads them, a truth value stays, a costly value
++    // moves; a loop that holds a call moves nothing; a loop whose live values fill the budget moves nothing.
++    { .name = "licm-pressure", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
++    { .name = "licm-pressure-call", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
++    { .name = "licm-pressure-budget", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
++    // #2719: a free value is never merged, a truth value only within its block, a costly one across blocks.
++    { .name = "gvn-pressure", .pass = IR_OPTIMIZE_TEXT_GVN_PRESSURE, .effects = true },
+ };
+ 
+ // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
+@@ -139,19 +149,21 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture,
+     IrCheck check;
+     IrFunction result = { 0 };
+     uint64_t changed = 0;
+-    if (fixture->pass == IR_OPTIMIZE_TEXT_GVN)
++    if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
+     {
+         IrGvnOptions options = ir_gvn_options();
+         options.scalar = scalar;
++        options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE;
+         IrGvnResult pass = { 0 };
+         check = ir_optimize_gvn(input, output, scratch, options, &pass);
+         result = pass.function;
+         changed = pass.removed;
+     }
+-    else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM)
++    else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM || fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
+     {
+         IrLicmOptions options = ir_licm_options();
+         options.scalar = scalar;
++        options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE;
+         IrLicmResult pass = { 0 };
+         check = ir_optimize_licm(input, output, scratch, options, &pass);
+         result = pass.function;
+@@ -321,7 +333,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
+             uint64_t scalar_change = 0;
+             const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, &scalar, &scalar_change);
+             ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
+-            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN)
++            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
+             {
+                 // GVN's scalar twin is the available-expression oracle: it may find fewer congruences than the vector
+                 // partition refinement, and always finds no more of them.
+diff --git a/tests/ir/optimize/gvn-pressure-after.ir b/tests/ir/optimize/gvn-pressure-after.ir
+new file mode 100644
+index 00000000..7b92c54d
+--- /dev/null
++++ b/tests/ir/optimize/gvn-pressure-after.ir
+@@ -0,0 +1,21 @@
++function (i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = const.i64 0x00000000000000000000000000000003
++  %2 = add.i64 %0, %1
++  %3 = icmp.i1 %0, %1 gt
++  %4 = cbr.void %3, b1, b2
++b1:
++  %5 = const.i64 0x00000000000000000000000000000003
++  %6 = icmp.i1 %0, %5 gt
++  %7 = select.i64 %6, %2, %2
++  %8 = select.i64 %6, %7, %0
++  %9 = br.void b3
++b2:
++  %10 = const.i64 0x00000000000000000000000000000003
++  %11 = mul.i64 %2, %2
++  %12 = br.void b3
++b3:
++  %13 = phi.i64 [%8, b1], [%11, b2]
++  %14 = ret.void %13
++}
+diff --git a/tests/ir/optimize/gvn-pressure-before.ir b/tests/ir/optimize/gvn-pressure-before.ir
+new file mode 100644
+index 00000000..1aa1af0c
+--- /dev/null
++++ b/tests/ir/optimize/gvn-pressure-before.ir
+@@ -0,0 +1,24 @@
++function (i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = const.i64 0x00000000000000000000000000000003
++  %2 = add.i64 %0, %1
++  %3 = icmp.i1 %0, %1 gt
++  %4 = cbr.void %3, b1, b2
++b1:
++  %5 = const.i64 0x00000000000000000000000000000003
++  %6 = add.i64 %0, %5
++  %7 = icmp.i1 %0, %5 gt
++  %8 = select.i64 %7, %6, %2
++  %9 = icmp.i1 %0, %5 gt
++  %10 = select.i64 %9, %8, %0
++  %11 = br.void b3
++b2:
++  %12 = const.i64 0x00000000000000000000000000000003
++  %13 = add.i64 %0, %12
++  %14 = mul.i64 %13, %2
++  %15 = br.void b3
++b3:
++  %16 = phi.i64 [%10, b1], [%14, b2]
++  %17 = ret.void %16
++}
+diff --git a/tests/ir/optimize/licm-pressure-after.ir b/tests/ir/optimize/licm-pressure-after.ir
+new file mode 100644
+index 00000000..2c9f9b3f
+--- /dev/null
++++ b/tests/ir/optimize/licm-pressure-after.ir
+@@ -0,0 +1,30 @@
++function (i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = const.i64 0x00000000000000000000000000000000
++  %2 = const.i64 0x00000000000000000000000000000001
++  %3 = const.i64 0x00000000000000000000000000000008
++  %4 = br.void b1
++b1:
++  %5 = const.i64 0x00000000000000000000000000000007
++  %6 = mul.i64 %0, %5
++  %7 = trunc.i32 %0
++  %8 = zext.i64 %7
++  %9 = br.void b2
++b2:
++  %10 = phi.i64 [%1, b1], [%20, b3]
++  %11 = phi.i64 [%1, b1], [%19, b3]
++  %12 = icmp.i1 %10, %3 lt
++  %13 = cbr.void %12, b3, b4
++b3:
++  %14 = const.i64 0x00000000000000000000000000000005
++  %15 = add.i64 %10, %14
++  %16 = icmp.i1 %0, %3 gt
++  %17 = select.i64 %16, %15, %6
++  %18 = add.i64 %17, %8
++  %19 = add.i64 %11, %18
++  %20 = add.i64 %10, %2
++  %21 = br.void b2
++b4:
++  %22 = ret.void %11
++}
+diff --git a/tests/ir/optimize/licm-pressure-before.ir b/tests/ir/optimize/licm-pressure-before.ir
+new file mode 100644
+index 00000000..4856dc36
+--- /dev/null
++++ b/tests/ir/optimize/licm-pressure-before.ir
+@@ -0,0 +1,30 @@
++function (i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = const.i64 0x00000000000000000000000000000000
++  %2 = const.i64 0x00000000000000000000000000000001
++  %3 = const.i64 0x00000000000000000000000000000008
++  %4 = br.void b1
++b1:
++  %5 = br.void b2
++b2:
++  %6 = phi.i64 [%1, b1], [%20, b3]
++  %7 = phi.i64 [%1, b1], [%19, b3]
++  %8 = icmp.i1 %6, %3 lt
++  %9 = cbr.void %8, b3, b4
++b3:
++  %10 = const.i64 0x00000000000000000000000000000007
++  %11 = mul.i64 %0, %10
++  %12 = const.i64 0x00000000000000000000000000000005
++  %13 = add.i64 %6, %12
++  %14 = trunc.i32 %0
++  %15 = zext.i64 %14
++  %16 = icmp.i1 %0, %3 gt
++  %17 = select.i64 %16, %13, %11
++  %18 = add.i64 %17, %15
++  %19 = add.i64 %7, %18
++  %20 = add.i64 %6, %2
++  %21 = br.void b2
++b4:
++  %22 = ret.void %7
++}
+diff --git a/tests/ir/optimize/licm-pressure-budget-after.ir b/tests/ir/optimize/licm-pressure-budget-after.ir
+new file mode 100644
+index 00000000..a9c87b26
+--- /dev/null
++++ b/tests/ir/optimize/licm-pressure-budget-after.ir
+@@ -0,0 +1,53 @@
++function (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = param.i64 1
++  %2 = param.i64 2
++  %3 = param.i64 3
++  %4 = param.i64 4
++  %5 = param.i64 5
++  %6 = param.i64 6
++  %7 = param.i64 7
++  %8 = param.i64 8
++  %9 = param.i64 9
++  %10 = const.i64 0x00000000000000000000000000000000
++  %11 = const.i64 0x00000000000000000000000000000001
++  %12 = const.i64 0x00000000000000000000000000000008
++  %13 = br.void b1
++b1:
++  %14 = br.void b2
++b2:
++  %15 = phi.i64 [%10, b1], [%31, b3]
++  %16 = phi.i64 [%10, b1], [%30, b3]
++  %17 = icmp.i1 %15, %12 lt
++  %18 = cbr.void %17, b3, b4
++b3:
++  %19 = mul.i64 %0, %1
++  %20 = xor.i64 %15, %1
++  %21 = xor.i64 %20, %2
++  %22 = xor.i64 %21, %3
++  %23 = xor.i64 %22, %4
++  %24 = xor.i64 %23, %5
++  %25 = xor.i64 %24, %6
++  %26 = xor.i64 %25, %7
++  %27 = xor.i64 %26, %8
++  %28 = xor.i64 %27, %9
++  %29 = add.i64 %16, %28
++  %30 = add.i64 %29, %19
++  %31 = add.i64 %15, %11
++  %32 = br.void b2
++b4:
++  %33 = mul.i64 %0, %1
++  %34 = br.void b5
++b5:
++  %35 = phi.i64 [%10, b4], [%40, b6]
++  %36 = phi.i64 [%16, b4], [%39, b6]
++  %37 = icmp.i1 %35, %12 lt
++  %38 = cbr.void %37, b6, b7
++b6:
++  %39 = add.i64 %36, %33
++  %40 = add.i64 %35, %11
++  %41 = br.void b5
++b7:
++  %42 = ret.void %36
++}
+diff --git a/tests/ir/optimize/licm-pressure-budget-before.ir b/tests/ir/optimize/licm-pressure-budget-before.ir
+new file mode 100644
+index 00000000..8948ded3
+--- /dev/null
++++ b/tests/ir/optimize/licm-pressure-budget-before.ir
+@@ -0,0 +1,53 @@
++function (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = param.i64 1
++  %2 = param.i64 2
++  %3 = param.i64 3
++  %4 = param.i64 4
++  %5 = param.i64 5
++  %6 = param.i64 6
++  %7 = param.i64 7
++  %8 = param.i64 8
++  %9 = param.i64 9
++  %10 = const.i64 0x00000000000000000000000000000000
++  %11 = const.i64 0x00000000000000000000000000000001
++  %12 = const.i64 0x00000000000000000000000000000008
++  %13 = br.void b1
++b1:
++  %14 = br.void b2
++b2:
++  %15 = phi.i64 [%10, b1], [%31, b3]
++  %16 = phi.i64 [%10, b1], [%30, b3]
++  %17 = icmp.i1 %15, %12 lt
++  %18 = cbr.void %17, b3, b4
++b3:
++  %19 = mul.i64 %0, %1
++  %20 = xor.i64 %15, %1
++  %21 = xor.i64 %20, %2
++  %22 = xor.i64 %21, %3
++  %23 = xor.i64 %22, %4
++  %24 = xor.i64 %23, %5
++  %25 = xor.i64 %24, %6
++  %26 = xor.i64 %25, %7
++  %27 = xor.i64 %26, %8
++  %28 = xor.i64 %27, %9
++  %29 = add.i64 %16, %28
++  %30 = add.i64 %29, %19
++  %31 = add.i64 %15, %11
++  %32 = br.void b2
++b4:
++  %33 = br.void b5
++b5:
++  %34 = phi.i64 [%10, b4], [%40, b6]
++  %35 = phi.i64 [%16, b4], [%39, b6]
++  %36 = icmp.i1 %34, %12 lt
++  %37 = cbr.void %36, b6, b7
++b6:
++  %38 = mul.i64 %0, %1
++  %39 = add.i64 %35, %38
++  %40 = add.i64 %34, %11
++  %41 = br.void b5
++b7:
++  %42 = ret.void %35
++}
+diff --git a/tests/ir/optimize/licm-pressure-call-after.ir b/tests/ir/optimize/licm-pressure-call-after.ir
+new file mode 100644
+index 00000000..79296c6b
+--- /dev/null
++++ b/tests/ir/optimize/licm-pressure-call-after.ir
+@@ -0,0 +1,37 @@
++function (i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = const.i64 0x00000000000000000000000000000000
++  %2 = const.i64 0x00000000000000000000000000000001
++  %3 = const.i64 0x00000000000000000000000000000008
++  %4 = br.void b1
++b1:
++  %5 = br.void b2
++b2:
++  %6 = phi.i64 [%1, b1], [%14, b3]
++  %7 = phi.i64 [%1, b1], [%13, b3]
++  %8 = icmp.i1 %6, %3 lt
++  %9 = cbr.void %8, b3, b4
++b3:
++  %10 = mul.i64 %0, %0
++  %11 = call.i64 @1(%6) fixed=(i64) variadic=0
++  %12 = add.i64 %11, %10
++  %13 = add.i64 %7, %12
++  %14 = add.i64 %6, %2
++  %15 = br.void b2
++b4:
++  %16 = mul.i64 %0, %0
++  %17 = br.void b5
++b5:
++  %18 = phi.i64 [%1, b4], [%24, b6]
++  %19 = phi.i64 [%7, b4], [%23, b6]
++  %20 = icmp.i1 %18, %3 lt
++  %21 = cbr.void %20, b6, b7
++b6:
++  %22 = add.i64 %18, %16
++  %23 = add.i64 %19, %22
++  %24 = add.i64 %18, %2
++  %25 = br.void b5
++b7:
++  %26 = ret.void %19
++}
+diff --git a/tests/ir/optimize/licm-pressure-call-before.ir b/tests/ir/optimize/licm-pressure-call-before.ir
+new file mode 100644
+index 00000000..b37e9fa7
+--- /dev/null
++++ b/tests/ir/optimize/licm-pressure-call-before.ir
+@@ -0,0 +1,37 @@
++function (i64) -> i64 {
++b0:
++  %0 = param.i64 0
++  %1 = const.i64 0x00000000000000000000000000000000
++  %2 = const.i64 0x00000000000000000000000000000001
++  %3 = const.i64 0x00000000000000000000000000000008
++  %4 = br.void b1
++b1:
++  %5 = br.void b2
++b2:
++  %6 = phi.i64 [%1, b1], [%14, b3]
++  %7 = phi.i64 [%1, b1], [%13, b3]
++  %8 = icmp.i1 %6, %3 lt
++  %9 = cbr.void %8, b3, b4
++b3:
++  %10 = mul.i64 %0, %0
++  %11 = call.i64 @1(%6) fixed=(i64) variadic=0
++  %12 = add.i64 %11, %10
++  %13 = add.i64 %7, %12
++  %14 = add.i64 %6, %2
++  %15 = br.void b2
++b4:
++  %16 = br.void b5
++b5:
++  %17 = phi.i64 [%1, b4], [%24, b6]
++  %18 = phi.i64 [%7, b4], [%23, b6]
++  %19 = icmp.i1 %17, %3 lt
++  %20 = cbr.void %19, b6, b7
++b6:
++  %21 = mul.i64 %0, %0
++  %22 = add.i64 %17, %21
++  %23 = add.i64 %18, %22
++  %24 = add.i64 %17, %2
++  %25 = br.void b5
++b7:
++  %26 = ret.void %18
++}
