@@ -1,0 +1,179 @@
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index 2bc03866a..29e26ba67 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -908,6 +908,9 @@ struct CheckControlWriter
+     CheckControlExtents* extents;
+     // CheckProgramOptions.enterable_work, or null.
+     uint64_t* enterable_work;
++    uint16_t* completes;
++    uint64_t completes_visits;
++    uint64_t completes_misses;
+     // Ordinary breaks and continues carry their destinations on the statement worklist. Only a lifetime, VLA,
+     // cleanup or statement expression can query these token-indexed destinations while walking ancestors.
+     bool all_loop_targets;
+@@ -2970,6 +2973,21 @@ static void check_control_begin(CheckControlWriter* writer, uint32_t opening)
+     writer->first_entry = writer->count;
+     writer->opening = opening;
+     writer->closing = closing;
++    {
++        static int off = -1;
++        if (off < 0)
++        {
++            off = getenv("PROTO_NO_MEMO") != NULL;
++        }
++        if (off == 0 && writer->completes == NULL)
++        {
++            writer->completes = calloc((uint64_t)writer->parser->tokens.count + 1, sizeof(uint16_t));
++        }
++        else if (off == 0 && opening <= closing)
++        {
++            memset(writer->completes + opening, 0, ((uint64_t)closing - opening + 1) * sizeof(uint16_t));
++        }
++    }
+     check_control_children(writer, opening, closing);
+     // The body's cleanups, its records in source order, each with its parent: the last before it whose scope holds its
+     // declaration, which the parents of the one before it reach, as nested scopes are.
+@@ -3311,6 +3329,13 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
+         else
+         {
+             writer->region_final = source->final_statement;
++            uint32_t proto_low = 0;
++            uint32_t proto_high = 0;
++            check_control_extent(writer, source->block, &proto_low, &proto_high);
++            if (writer->completes != NULL && proto_low <= proto_high)
++            {
++                memset(writer->completes + proto_low, 0, ((uint64_t)proto_high - proto_low + 1) * sizeof(uint16_t));
++            }
+             for (uint32_t child = writer->last[source->block]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
+             {
+                 if (child != source->final_statement && writer->parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
+@@ -3321,6 +3346,10 @@ static void check_control_build(CheckControlWriter* writer, uint32_t opening)
+             check_control_drain(writer);
+             check_control_end(writer, source->closing);
+             writer->region_final = BUSTER_CHECK_NONE;
++            if (writer->completes != NULL && proto_low <= proto_high)
++            {
++                memset(writer->completes + proto_low, 0, ((uint64_t)proto_high - proto_low + 1) * sizeof(uint16_t));
++            }
+             // Its block's cleanups, after its END: they run once its value is computed (check_lower_region), and then its
+             // variable-length arrays' release (#1447), as a block's end has them.
+             const uint32_t ended = writer->count;
+@@ -7387,6 +7416,11 @@ static bool check_program_finish(CheckProgramRun* run)
+     }
+     arena_release(&run->return_facts.storage);
+     arena_release(&run->extents.arena);
++    if (getenv("PROTO_COUNTS") != NULL)
++    {
++        fprintf(stderr, "completes: visits=%llu computed=%llu\n", (unsigned long long)run->writer.completes_visits,
++                (unsigned long long)run->writer.completes_misses);
++    }
+     arena_release(&controls);
+     return valid;
+ }
+diff --git a/src/buster/compiler/c_check_program_reach.c b/src/buster/compiler/c_check_program_reach.c
+index b86d00202..2357e6caa 100644
+--- a/src/buster/compiler/c_check_program_reach.c
++++ b/src/buster/compiler/c_check_program_reach.c
+@@ -215,8 +215,7 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t
+         {
+             const uint32_t expression = check_control_reach_condition(writer, token);
+             const bool always = check_control_reach_always(writer, expression, false);
+-            const bool breaks = check_control_reach_breaks(writer, token, body);
+-            result = !always || breaks;
++            result = !always || check_control_reach_breaks(writer, token, body);
+         }
+         else
+         {
+@@ -241,8 +240,7 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t
+         // `for (;;)` leaves that block unused, so only then is there no insertion point after the loop.
+         const bool absent = condition != BUSTER_CHECK_NONE && check_control_statement_head(writer, condition) == BUSTER_CHECK_NONE &&
+                             (condition >= writer->program->input->token_count || writer->program->input->token_nodes[condition] == BUSTER_CHECK_NONE);
+-        const bool breaks = check_control_reach_breaks(writer, token, body);
+-        result = !absent || breaks;
++        result = !absent || check_control_reach_breaks(writer, token, body);
+     }
+     *completes = result;
+     return leaf;
+@@ -290,8 +288,22 @@ struct CheckReachFrame
+     bool ip;
+     bool skip_final;
+     bool then_ip;
++    uint32_t key;
++    bool key_entered;
++    bool keyed;
+ };
+ 
++static inline void check_control_completes_keep(uint16_t* memo, const CheckReachFrame* frame, uint32_t targets, bool result)
++{
++    if (memo != NULL)
++    {
++        const uint32_t bit = targets | (frame->entered ? 1u : 0u);
++        memo[frame->token] |= (uint16_t)((1u << bit) | ((result ? 1u : 0u) << (8 + bit)));
++        const uint32_t first = targets | (frame->key_entered ? 1u : 0u);
++        memo[frame->key] |= (uint16_t)((1u << first) | ((result ? 1u : 0u) << (8 + first)));
++    }
++}
++
+ // Whether control leaves `token` for the next statement. `entered` is false when the statement was reached only
+ // through a label inside it. An explicit stack: the call graph has no cycle here.
+ static bool check_control_completes(CheckControlWriter* writer, uint32_t token, bool entered, uint32_t stop, uint32_t repeat)
+@@ -301,6 +313,8 @@ static bool check_control_completes(CheckControlWriter* writer, uint32_t token,
+     bool result = true;
+     bool have = false;
+     bool overflow = token == BUSTER_CHECK_NONE;
++    uint16_t* const memo = writer->completes;
++    const uint32_t targets = (stop == BUSTER_CHECK_NONE ? 2u : 0u) | (repeat == BUSTER_CHECK_NONE ? 4u : 0u);
+     if (!overflow)
+     {
+         stack[0] = (CheckReachFrame){ .token = token, .step = CHECK_REACH_STATEMENT, .entered = entered };
+@@ -332,15 +346,32 @@ static bool check_control_completes(CheckControlWriter* writer, uint32_t token,
+         else if (have && frame->step == CHECK_REACH_IF_ELSE)
+         {
+             result = frame->then_ip || result;
++            check_control_completes_keep(memo, frame, targets, result);
+             depth -= 1;
+         }
+         else if (frame->step == CHECK_REACH_STATEMENT)
+         {
++            if (!frame->keyed)
++            {
++                frame->key = frame->token;
++                frame->key_entered = frame->entered;
++                frame->keyed = true;
++            }
++            const uint32_t bit = targets | (frame->entered ? 1u : 0u);
+             const uint8_t role = writer->parser->tree.roles[frame->token];
+             bool leaf_result = true;
+-            if (check_control_reach_leaf(writer, frame->token, stop, repeat, &leaf_result))
++            writer->completes_visits += 1;
++            if (memo != NULL && ((uint32_t)memo[frame->token] >> bit & 1u) != 0)
++            {
++                result = ((uint32_t)memo[frame->token] >> (8 + bit) & 1u) != 0;
++                check_control_completes_keep(memo, frame, targets, result);
++                have = true;
++                depth -= 1;
++            }
++            else if (++writer->completes_misses != 0 && check_control_reach_leaf(writer, frame->token, stop, repeat, &leaf_result))
+             {
+                 result = leaf_result;
++                check_control_completes_keep(memo, frame, targets, result);
+                 have = true;
+                 depth -= 1;
+             }
+@@ -354,6 +385,7 @@ static bool check_control_completes(CheckControlWriter* writer, uint32_t token,
+                 {
+                     // No else, or `if (0)` with no else: control continues after the if.
+                     result = true;
++                    check_control_completes_keep(memo, frame, targets, result);
+                     have = true;
+                     depth -= 1;
+                 }
+@@ -428,6 +460,7 @@ static bool check_control_completes(CheckControlWriter* writer, uint32_t token,
+             if (!pushed && !overflow)
+             {
+                 result = frame->ip;
++                check_control_completes_keep(memo, frame, targets, result);
+                 have = true;
+                 depth -= 1;
+             }

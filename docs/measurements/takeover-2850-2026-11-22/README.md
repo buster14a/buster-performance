@@ -1742,3 +1742,43 @@ present): the whole inventory 132 passed and 24 failed, none failing that passes
 main.c compiled by itself; the no-recursion rule on a Release build, no cycle and no split variable. `faults.txt`
 (`scripts/dp-faults.py`): the rule inverted, asked of the left operand's operator, and widened by a sum, each built and
 run against the driver's test: each fails it.
+
+## The statements clang does not emit: what buster14a/buster#3181 costs, and a cut not built (`statement-emission/`)
+
+buster14a/buster#3181 leaves out the statements after a `return`, `break`, `continue`, `goto` or
+`__builtin_unreachable()` (`check_control_emit_sequence`, `c_check_program_reach.c`). Its merge `2e4eb0036` against its
+first parent `44a308708` on the 9700X (`9700x/`, `job-3181.sh`; Release builds, CPU 2, alone; the two builds' objects
+differ, as the change means them to):
+
+| workload | rounds | parent, ms | #3181, ms | paired, ms | least to greatest | rounds lower | user instructions, M |
+| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: |
+| `sqlite3.c` | 7 | 111.135 | 113.076 | +1.883 | +1.146 to +2.089 | 0 of 7 | +30.697 |
+| the compiler's own source | 5 | 600.886 | 601.254 | +0.602 | -0.683 to +1.961 | 1 of 5 | +33.109 |
+| musl, 1,336 units | 5 | 669.667 | 671.964 | +1.725 | -1.457 to +3.755 | 2 of 5 | +18.278 |
+
+`check_control_completes` walks a statement's nested blocks, labels and `if` arms again for each block that encloses
+it, up to a loop or a switch, which are leaves. A throwaway prototype (`experiment-completes-kept.patch`,
+`proto-completes.py`, on main `e5c975f1e`; not for merge) keeps each statement's answer for one body's phase and
+runs a loop's break scan only where its answer is read. On this session's machine (`develop/prototype-e5c975f1e.txt`):
+the objects of `sqlite3.c` are main's, byte for byte; the walk's statement visits go from 119,791, all computed, to
+88,073, of which 67,672 computed; user instructions go from 1,288.19 M to 1,280.94 M, **-7.25 M**.
+
+That is a quarter of what #3181 added. At #3181's own rate (30.7 M instructions for 1.88 ms) it is about 0.4 ms, and a
+table by token cleared for each body is the shape of the default path's third cut, which lost 0.4 ms on the 9700X with
+3.2 M fewer instructions. `sqlite3.c`'s statements do not nest deep below their loops (1.77 visits a statement), and the
+walk's 128 frames already bound a deeper nest. **Not built.**
+
+## What the default path's memory costs (`default-path-memory/`)
+
+Looked at for a cut and left: none of these is one.
+
+- **The kernel's page clearing is the profile's first symbol.** In `node-bodies/where-b0ee1afaa/plain-*.report` (the
+  9700X, seven runs without the option) the kernel has 12.3% of the cycles and `clear_page_erms` 8.4%, for a peak of
+  238 MB. The arenas' pages are already placed by policy (`lane.c`).
+- **Huge pages hold about 52 MB the compile never writes.** `pages-e5c975f1e.txt` (this session's machine): 240.0 MB
+  and 5,747 faults as built, 188.0 MB and 56,314 faults with `BUSTER_HUGE_PAGES=0`, whose system time is 40 ms more.
+- **93 MB of fills.** `memsets-1ab5a3fd5.txt` (`memset3.py` under gdb: each `memset` of 16 KB or more, its bytes,
+  its fill byte, its address, its caller and line, and how many of its base pages were not resident before it, of how
+  many): 132 fills, 62.2 MB of zeros and 30.8 MB of `0xff`, mostly columns by token. 11.8 MB of the zeros (19%) and
+  10.3 MB of the `0xff` (34%) land on pages not resident before, so leaving out the zero fills of fresh memory is worth
+  under a millisecond, and `memset` itself is 2% of the cycles.
