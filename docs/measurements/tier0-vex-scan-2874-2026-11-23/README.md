@@ -108,11 +108,30 @@ On `sqlite3.c`, the object has 1,028 VEX forms of the legacy ones (372 `vmovups`
   window's last rows hold no entry). On the first form, two survivors showed its SS compare and its live mask
   redundant (they are gone), and two more needed the guard page, which the check now has.
 
+## 3. Pieces 4 and 4b, refuted (`results/ab-slots`, `results/ab-targets`, medians of 9 in turn, ms)
+
+Both on the memo's branch, each against it, each object the same:
+
+| piece | the memo's branch | the piece | change |
+| --- | ---: | ---: | ---: |
+| 4: selection's words from a dense table (`scripts/piece4-dense-slots.patch`) | 4.773 | 4.959 | +0.186 |
+| 4b: emission's branch targets after its loop (`scripts/piece4b-branch-targets.patch`) | 4.774 | 4.734 | -0.040 |
+
+- **4** gathered a 16-bit entry from a 64 KB table, then the entry's word from an 18 KB table, where selection
+  gathers its word from a 256 KB table: a fourth of the table's lines, and a second gather a block, about 20 cycles
+  an 8-lane block, more than the misses it removed.
+- **4b** took emission's gather of its branches' targets (one a block, about 46 thousand on `sqlite3.c`) out of its
+  loop into a pass of 16-lane gathers over the branches alone (about 1,700): 0.040 ms, too little to land. Its
+  first build kept 14 lanes where 16 were live in a step with 270 targets left (`_bzhi_u32(0xffff, 270)`: BZHI reads
+  its index's low byte), which `tests/checker/sources/quadratic-switches.c` caught against main's objects; the patch
+  has the fixed mask.
+
 ## Files
 
 - `scripts/`: `rowlog.patch`, `rowlog.sh`, `rowtables.py` (the row log); `profile-b.sh`, `profile-b-post.sh`,
   `passes.py` (the profiles by pass); `ab.sh`, `abtable.sh` (the A/B); `exact.sh`, `exact-avx.sh` (the objects
-  compared); `vex-scan.patch`; `vex-mutants.py` and `vex-harness.c` (the fault round).
+  compared); `vex-scan.patch`; `vex-mutants.py` and `vex-harness.c` (the fault round);
+  `piece4-dense-slots.patch` and `piece4b-branch-targets.patch` (on the memo's branch).
 - `results/`: the row logs and their tables; the profiles' samples charged to their callers (`samples.ips.zst`, one
   address a line) and their tables by pass (`passes.txt`); the A/Bs' stage clocks; the objects' comparisons; the
   fault round.
