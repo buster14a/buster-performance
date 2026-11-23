@@ -52,6 +52,28 @@ with the templates').
 On a quiet host: every round of the change (4.120 to 4.205) below every round of the base (4.279 to 4.372). Both
 objects the same.
 
+## The pull request's head against main (`results/ab-main2-emit`, medians of 11 in turn, ms)
+
+Main `e5c975f1` (`bin/main2`) against buster#3403's head `b3e3ba79` (`bin/emit`: the calls' memo, the VEX scan, and
+the deferred entries in loops of their own in selection, measuring and emission), on a quiet host:
+
+| stage | main | the pull request | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 5.027 | 4.150 | -0.877 |
+| `emit-setup` | 1.028 | 1.030 | +0.002 |
+| `branch-sizing` | 0.421 | 0.420 | -0.001 |
+| `encode` | 0.340 | 0.338 | -0.002 |
+| `unwind` | 0.217 | 0.219 | +0.002 |
+| `code-atoms` | 0.309 | 0.306 | -0.003 |
+| `publish-data` | 0.503 | 0.500 | -0.003 |
+| `object-build` | 0.408 | 0.397 | -0.011 |
+| `object-write` | 0.143 | 0.153 | +0.010 |
+| the compile | 116.013 | 114.889 | -1.124 |
+
+Every round: main's `tier0` 5.000 to 5.063, the pull request's 4.121 to 4.179. Both objects the same. The row (the
+stages from `tier0` to `object-write`) is 7.51 ms, about 57 cycles a token at 5.45 GHz over the 716,136 tokens, against
+the gate's 10.
+
 ## Exactness and tests
 
 - **Objects** (`scripts/exact.sh`, `scripts/exact-avx.sh`, each change against the commit before it, both built
