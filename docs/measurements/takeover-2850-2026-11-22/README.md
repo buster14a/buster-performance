@@ -1665,3 +1665,22 @@ fails each reservation of two units' compile in turn and so runs once for each r
 driver's test (`test-checker-driver --part 1/8`); six fail it as written. The seventh (the roots by token made in a
 compile, 1.2 MB more of state for the test's large unit) passed under the bound the test first had (9 MB, where it makes
 9,046,976 bytes): the bound is 8.5 MB, and it fails it (`faults-head.txt`).
+
+## The default path since `e9cbc3d72`: what three merged changes do for a unit that never needs it (`default-path/`)
+
+The five pairs of `node-bodies/regress-e9cbc3d72-89362fd0f/` give buster14a/buster#3296 +0.868 ms on `sqlite3.c`,
+buster14a/buster#3324 +1.785 and the ten merges after it +2.415. `default-path/experiment-regress-counts.patch` (on
+main `1b9821afe`, not for merge) counts the calls of what they added, their distinct keys, the ones that answer, and
+their ticks; `counts-1b9821afe.txt` has three runs of a Release build on this session's machine with other work running
+(the counts are exact; the ticks are 3,992.3 MHz's and high, the first run's the least):
+
+| | calls | distinct | that answer | ticks, M |
+| --- | ---: | ---: | ---: | ---: |
+| `-Wconstant-logical-operand`'s replay of a right operand that is a comparison, a `!`, a `&&`, a `||` or a condition | 2,524 | 2,524 | 0 | 9.53 |
+| the same, any other right operand | 441 | 441 | 71 a literal | 0.77 |
+| a `&&` or `||` the pass filters out before the replay (types, a macro, an enumerator beside it) | 449 | | | |
+| `check_program_branch_truth` | 16,964 | 16,573 conditions | 61 | 11.38 |
+| `check_program_const_integer` | 37,686 | 14,350 nodes | 0 | 3.93 |
+| `check_program_emission_truth` (the last among it) | 10,458 | 4,075 conditions | 62 | 2.04 |
+| `check_control_fold_truth` (the same) | 29,883 | 11,346 expressions | 97 | 6.89 |
+| `check_control_emit_sequence`, with the statements it emits | 19,854 | | | 17.81 |
