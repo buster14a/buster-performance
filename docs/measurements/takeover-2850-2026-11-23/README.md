@@ -171,3 +171,24 @@ cycles, kernel cycles, user instructions, first-level data misses, faults, the o
 - **`locality/unkept/` is the first run, without the table of pointers**, and is confounded: a static function whose
   callers' bodies are gone is not selected, so the batches ran 17% fewer instructions than the whole unit's bodies. It
   is kept for that count alone.
+
+## The references' pass as one descending sweep: refuted (`references/`)
+
+A prototype, paired before any specification. `check_program_references` walks each body's graph from its roots with a
+stack, about 50 cycles a node (16.1 M a compile; `lines/whole-unit-passes.txt` has its cycles by source line, from
+`scripts/lines.sh`). I took it for bound by misses in the order of the tree, and replaced the stack with a worklist of a
+bit a node read from the highest node down, the per-node rules unchanged (`scripts/references-sweep.patch`, on
+`55008c81e` with the fix; the tree is `refs1`). The objects and the diagnostics are the same.
+
+| against the fix | rounds | paired, ms | lower | user cycles, M | user instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | +0.388 | 1/7 | +1.953 | +6.316 |
+| the compiler's own source | 5 | +1.999 | 2/5 | +8.575 | |
+
+Predicted -1.8 ms on `sqlite3.c`, to be dropped above -0.9: dropped. A node's operands are the nodes made just before
+it, and the stack pops the last one pushed, so the walk already reads the columns nearly in descending order; the
+sweep added its bit arithmetic to the same loads.
+
+`lines/reader.txt` is the same attribution for the reader's largest functions (`check_input_expressions_coded_range`,
+`check_graph_run`, `check_input_resolve_range`, `check_lower_drain`, `check_input_declaration`,
+`check_input_expression_flush`), at the fix: no line of any holds more than 6 M cycles.
