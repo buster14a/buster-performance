@@ -1,0 +1,293 @@
+diff --git a/src/buster/compiler/c_check_program_emit.c b/src/buster/compiler/c_check_program_emit.c
+index c4e6dd98..0ef294bd 100644
+--- a/src/buster/compiler/c_check_program_emit.c
++++ b/src/buster/compiler/c_check_program_emit.c
+@@ -1761,6 +1761,66 @@ static uint32_t check_program_emit_inline_of(const EmittedCode* code, uint32_t o
+     return found;
+ }
+ 
++// Experiment (#2874, step 4's design): each body's row ticks, by part, logged where BUSTER_ROW_LOG names a file.
++typedef struct RowLogEntry
++{
++    uint32_t body;
++    uint32_t entries;
++    uint32_t records;
++    uint32_t branches;
++    uint32_t references;
++    uint32_t bytes;
++    uint64_t tier0;
++    uint64_t sizing;
++    uint64_t encode;
++    uint64_t debug;
++    uint64_t unwind;
++    uint64_t rest;
++    uint64_t passes[16];
++} RowLogEntry;
++static RowLogEntry row_log[1u << 18];
++static uint32_t row_log_count;
++static int row_log_state;
++static void row_log_dump(void)
++{
++    const char* path = getenv("BUSTER_ROW_LOG");
++    FILE* file = path != NULL ? fopen(path, "a") : NULL;
++    for (uint32_t i = 0; file != NULL && i < row_log_count; i += 1)
++    {
++        const RowLogEntry* e = row_log + i;
++        fprintf(file, "%u\t%u\t%u\t%u\t%u\t%u\t%llu\t%llu\t%llu\t%llu\t%llu\t%llu", e->body, e->entries, e->records, e->branches, e->references, e->bytes,
++                (unsigned long long)e->tier0, (unsigned long long)e->sizing, (unsigned long long)e->encode, (unsigned long long)e->debug,
++                (unsigned long long)e->unwind, (unsigned long long)e->rest);
++        for (uint32_t k = 0; k < 16; k += 1)
++        {
++            fprintf(file, "\t%llu", (unsigned long long)e->passes[k]);
++        }
++        fprintf(file, "\n");
++    }
++    if (file != NULL)
++    {
++        fclose(file);
++    }
++}
++static RowLogEntry* row_log_begin(uint32_t b, uint32_t entries)
++{
++    if (row_log_state == 0)
++    {
++        row_log_state = getenv("BUSTER_ROW_LOG") != NULL ? 1 : 2;
++        if (row_log_state == 1)
++        {
++            atexit(row_log_dump);
++        }
++    }
++    RowLogEntry* e = row_log_state == 1 && row_log_count < (1u << 18) ? row_log + row_log_count++ : NULL;
++    if (e != NULL)
++    {
++        *e = (RowLogEntry){ .body = b, .entries = entries };
++    }
++    return e;
++}
++static RowLogEntry* row_log_current;
++
+ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b)
+ {
+     const CheckProgram* program = run->program;
+@@ -1770,6 +1830,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+     Arena* bytes = lane->bytes;
+     const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+     *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
++    RowLogEntry* row = row_log_current;
++    row_log_current = NULL;
++    uint64_t row_last = __rdtsc();
+     // What the merge reads stays on the lane's scratch; the offsets don't.
+     body->fixup_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code->reference_count));
+     body->label_offsets = code->label_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, code->label_count) : 0;
+@@ -1826,8 +1889,24 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+         const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
+         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
++        uint64_t row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->sizing = row_now - row_last;
++            row->records = code->count;
++            row->branches = code->branch_count;
++            row->references = code->reference_count;
++        }
++        row_last = row_now;
+         const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
++        row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->encode = row_now - row_last;
++            row->bytes = length > 0 ? (uint32_t)length : 0;
++        }
++        row_last = row_now;
+         valid = length >= 0;
+         if (valid && run->sources)
+         {
+@@ -1870,6 +1949,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+             }
+             check_clock_lap(run->stage_clock, CHECK_STAGE_DEBUG);
+         }
++        row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->debug = row_now - row_last;
++        }
++        row_last = row_now;
+         if (valid && sled != 0 && (uint64_t)length + sled > INT32_MAX)
+         {
+             body->reason = "a function of 2 GB of code or more, past its unwind table's offsets";
+@@ -1891,6 +1976,12 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+             body->reason = valid ? body->reason : reason;
+             check_clock_lap(run->stage_clock, CHECK_STAGE_UNWIND);
+         }
++        row_now = __rdtsc();
++        if (row != NULL)
++        {
++            row->unwind = row_now - row_last;
++        }
++        row_last = row_now;
+         if (valid)
+         {
+             const uint64_t end = (uint64_t)(encoded - bytes->base) + (uint64_t)length + sled;
+@@ -1938,6 +2029,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
+         }
+     }
+     check_clock_lap(run->stage_clock, CHECK_STAGE_CODE_ATOMS);
++    if (row != NULL)
++    {
++        row->rest = __rdtsc() - row_last;
++    }
+     return valid;
+ }
+ 
+@@ -2271,6 +2366,10 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+         }
+         else
+         {
++            uint64_t row_start = __rdtsc();
++            memset(row_pass_ticks, 0, sizeof(row_pass_ticks));
++            row_pass_last = row_start;
++            uint64_t row_cold = 0;
+             if (!tier1 && !forbidden)
+             {
+                 // Tier 0's code as the emission takes it (emitted_from_tier0), with its frame's events where the tables
+@@ -2280,6 +2379,25 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+                 Tier0Inlined inlined;
+                 const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &inlined);
+                 const Tier0Function* source = spliced ? &inlined.function : function;
++                // Experiment (#2874): with BUSTER_ROW_WARM, Tier 0 runs once more first, its output popped, so that the
++                // logged run is warm; the first run's ticks go to passes[13].
++                static int row_warm = -1;
++                if (row_warm < 0)
++                {
++                    row_warm = getenv("BUSTER_ROW_WARM") != NULL ? 1 : 0;
++                }
++                if (row_warm == 1 && naked == 0 && !run->scalar)
++                {
++                    const uint64_t mark = lane->code->length;
++                    const Tier0Code first_run = tier0_compile(source, lane->code);
++                    (void)first_run;
++                    arena_pop_to(lane->code, mark);
++                    const uint64_t now = __rdtsc();
++                    row_cold = now - row_start;
++                    row_start = now;
++                    memset(row_pass_ticks, 0, sizeof(row_pass_ticks));
++                    row_pass_last = now;
++                }
+                 Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(source, lane->code) : tier0_compile(source, lane->code);
+                 if (spliced)
+                 {
+@@ -2296,6 +2414,14 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
+                 lane->frame_code = compiled;
+             }
+             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
++            row_pass_lap(15);
++            row_log_current = row_log_begin(b, function->count);
++            if (row_log_current != NULL)
++            {
++                row_log_current->tier0 = __rdtsc() - row_start;
++                memcpy(row_log_current->passes, row_pass_ticks, sizeof(row_pass_ticks));
++                row_log_current->passes[13] = row_cold;
++            }
+             if (forbidden || run->codes[b].error != TIER0_OK)
+             {
+                 part->tier0_failed = b;
+diff --git a/src/buster/compiler/tier0.c b/src/buster/compiler/tier0.c
+index 3c4a9256..91b227e7 100644
+--- a/src/buster/compiler/tier0.c
++++ b/src/buster/compiler/tier0.c
+@@ -11820,6 +11820,16 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
+     }
+ }
+ 
++// Experiment (#2874, step 4's design): Tier 0's passes' ticks for the emission's row log (c_check_program_emit.c).
++static uint64_t row_pass_ticks[16];
++static uint64_t row_pass_last;
++static inline void row_pass_lap(uint32_t pass)
++{
++    const uint64_t now = __rdtsc();
++    row_pass_ticks[pass] += now - row_pass_last;
++    row_pass_last = now;
++}
++
+ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* segments, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code,
+                                  bool vector)
+ {
+@@ -11833,6 +11843,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+     // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
+     frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
+     const uint32_t unsupported = error == TIER0_OK ? (BUSTER_VECTOR_PATH(vector) ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
++    row_pass_lap(5);
+     if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
+     {
+         error = tier0_select_deep(function, entries, &frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
+@@ -11889,6 +11900,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+         entries->snapshot_depths = error == TIER0_OK ? frame.snapshot_depths : 0;
+         entries->snapshot = error == TIER0_OK && frame.snapshot_bytes != 0;
+     }
++    row_pass_lap(6);
+     if (error == TIER0_OK)
+     {
+         Tier0Counts counts;
+@@ -11935,11 +11947,13 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+             error = tier0_push_asm_labels(function, asm_labels, output, code) ? error : TIER0_ERROR_MEMORY;
+         }
+     }
++    row_pass_lap(7);
+     if (error == TIER0_OK)
+     {
+         if (BUSTER_VECTOR_PATH(vector))
+         {
+             tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
++            row_pass_lap(8);
+             error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
+             x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
+         }
+@@ -11952,6 +11966,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+         if (BUSTER_VECTOR_PATH(vector))
+         {
+             tier0_apply_choices_vector(code->records, &choices);
++            row_pass_lap(9);
+         }
+         else
+         {
+@@ -11996,6 +12011,7 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
+         code->frame_preserve_mask_bytes = frame.preserve_bytes != 0 ? function->preserve_mask_bytes : 0;
+         code->frame_interrupt = frame.interrupt;
+     }
++    row_pass_lap(10);
+     return error;
+ }
+ 
+@@ -14846,17 +14862,22 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
+     }
+     bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
+     Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
++    row_pass_lap(0);
+     if (error == TIER0_OK)
+     {
+         tier0_vector_labels(function, bits.labels);
+         entries.labels = bits.labels;
++        row_pass_lap(1);
+         tier0_vector_values(function, &bits);
++        row_pass_lap(2);
+         tier0_vector_fuse(function, &bits, &entries);
++        row_pass_lap(3);
+         if (function->vectors)
+         {
+             tier0_operation_effects(function, &entries);
+         }
+         tier0_vector_depths(function, &bits, &entries);
++        row_pass_lap(4);
+         if (function->masks)
+         {
+             entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
+@@ -14872,6 +14893,7 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
+     }
+     code = tier0_conclude(code, error, output, output_length);
+     scratch_end(scratch);
++    row_pass_lap(11);
+     return code;
+ }
+ 
