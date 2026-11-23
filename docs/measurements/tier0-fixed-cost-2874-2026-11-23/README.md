@@ -123,6 +123,45 @@ an entry: main 50.93, 51.31, 51.00; the piece 50.76, 50.88, 50.70.
 - **Against the gate** (`tier0` 0.03 ms lower or more, refuted under 0.015; the benchmark 0.4 cycles an entry lower):
   **missed, not refuted**: 0.019 ms and 0.3 cycles an entry, every run of the benchmark below every run of main's.
 
+## Piece D: the five loads without their stores (`results/ab-d`, `ab-cd`, `ab3-cd`)
+
+`scripts/piece-d.patch` on piece C (buster#3486's second commit): the references' counts zeroed by whole vectors,
+P3a's distances carried in a register, the free registers' lists compressed in registers, measuring's counts in
+registers of their own, and a job's code copied once with the C driver reading a batch's code in place. Exact: 2,951
+compiles of the corpora and 4,492 at the AVX targets the same as main `d4a6eb540`'s, `test-tier0 --cross-check`
+21,796,335 checks, 0 failed.
+
+Two A/Bs in one hold, medians of 21 in turn (`ab.sh`: the first executable, then the second, every round), ms:
+
+| | the first | the second | change |
+| --- | ---: | ---: | ---: |
+| piece C, then C and D (`ab-d`): `tier0` | 3.604 | 3.588 | -0.016 |
+| main, then C and D (`ab-cd`): `tier0` | 3.665 | 3.591 | -0.074 |
+| main, then C and D: the row | 6.382 | 6.301 | -0.081 |
+
+`benchmark-backend-source`'s vector row, a function at a time, three runs each in turn, cycles an entry: piece C
+50.83, 50.78, 50.84; C and D 50.23, 50.16, 50.05.
+
+**The two A/Bs disagree about piece C's executable**: it read 3.644 as the second of its pair an hour before
+(`ab-ahead`) and 3.604 as the first here. So the three executables in one hold, 30 rounds, the order rotated a place
+every round (`scripts/ab3.sh`, `results/ab3-cd`), medians, ms:
+
+| stage | main `d4a6eb540` | piece C | C and D |
+| --- | ---: | ---: | ---: |
+| `tier0` | 3.660 | 3.616 | 3.582 |
+| `branch-sizing` | 0.393 | 0.392 | 0.380 |
+| the row, `tier0` to `object-write` | 6.327 | 6.268 | 6.234 |
+
+- Every object is the same (`objects.txt`).
+- **An A/B in a fixed order reads its second executable 0.01 to 0.03 ms high on `tier0`**: piece C read 0.028 above
+  its rotated reading as a second, 0.012 below it as a first; C and D 0.009 above as a second. The A/Bs of this
+  issue's earlier pieces all had the piece second.
+- **Piece C: `tier0` 0.044 ms lower** rotated (0.019 as the second of a pair): its gate was 0.03.
+- **Piece D: `tier0` 0.034 ms lower** rotated (0.016 as the second of a pair), and branch sizing 0.012 lower in all
+  three runs, behind the driver's copies. **Against its gate** (0.10 ms, refuted under 0.04; the small functions 250
+  cycles each faster): missed, at the refutation line, and its premise refuted by the knobs above. What its fixes
+  are worth is this 0.03 ms.
+
 ## Files
 
 - `scripts/bins.sh`, `run-bins.sh`: the passes by size; `scripts/perf-small.sh`, `run-small.sh`: the small functions'
@@ -134,5 +173,7 @@ an entry: main 50.93, 51.31, 51.00; the piece 50.76, 50.88, 50.70.
   event's sampled addresses and counts, for the tuning executable `tune4` of the batches' record).
 - `scripts/tune5.patch`, `knobs2.sh`, `run-stalls.sh`: the stalls' knobs (the whole tuning tree against main
   `b7d0b5ed`) and their scan. Not for main.
-- `results/ab-ahead`: the tables, the objects' hashes, `stages.tar.zst`; `results/stalls1`: the scan's tables and
-  `stages.tar.zst`.
+- `scripts/piece-d.patch`, `run-d.sh`: piece D and its two A/Bs; `scripts/ab3.sh`, `run-ab3.sh`: the three
+  executables with the order rotated.
+- `results/ab-ahead`, `ab-d`, `ab-cd`, `ab3-cd`: the tables, the objects' hashes, `stages.tar.zst` (and `order.txt`,
+  each round's order); `results/stalls1`: the scan's tables and `stages.tar.zst`.
