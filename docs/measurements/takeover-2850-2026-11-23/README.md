@@ -227,3 +227,36 @@ resident by fresh pushes (the process's peak is 180.2 MB), the 15 sites hold 20.
 diagnostic with `-Wall -Wextra` (241 bytes of stderr, the object the same) and another object with `-g`; `-fPIC` is
 the same object. So other options and other inputs have sites of their own, and a list for a change of the arenas'
 promise needs the whole inventory run this way, not `sqlite3.c`.
+
+### The same over the tests' sources and the options (`fresh-zeros/wide/`)
+
+`scripts/fresh-campaign.py` on the experiment's build at the session's branch with main `ef400844` merged in (the
+sites' lines are that tree's), with garbage as the default: every fresh push is filled but `lane.c`'s own and the
+sites a list keeps zero (`BUSTER_EXPERIMENT_FRESH_DEFAULT=G`). 4,714 cases (`wide/cases.txt`): each of the 1,567
+`.c` files under `tests/` by `-fsyntax-only -Wall -Wextra`, by `-c -g` and by `-c -O1`; `sqlite3.c` in ten option
+sets (`-c` plain, with `-Wall -Wextra`, `-Weverything`, `-g`, `-fPIC`, `-O1`, `-g -O1`, `-fPIC -g -Wall`,
+`-fsyntax-only`, `-S`); `shell.c`; and the compiler's own `main.c` checked and compiled. A case differs when its
+status, its stderr and stdout, or its output file do against the run with nothing filled. For the first case that
+differs, its own sites are bisected and the ones it needs are added to the list; then every differing case runs again.
+
+- With `sqlite3.c`'s 15 sites alone, 593 of the cases differ (`wide/first-pass-differ.txt`, from
+  `scripts/fresh-campaign-first.py`, which fills only the sites `sqlite3.c` has).
+- **With 28 sites kept zero no case differs** (`wide/zero-sites.txt`, `wide/progress.txt`: ten rounds). Six of the 28
+  are the first list's lines in the tree before the merge, which name nothing in this one, so 22 are sites of this
+  tree: the reader's sparse columns and token columns (`c_check_input.c:17757` to `:17774`, `:17833`, `:17986`,
+  `:17987`, `:18002`), the stream's (`c_checker.c:4218` to `:4233`), the sparse pool's directories, the binding
+  table's heads and the intern table's.
+- **In `sqlite3.c`'s compile** (`wide/resident-by-site.log`): of 188.4 MB resident by fresh pushes, those sites hold
+  32.3 MB, `lane.c`'s own 18.7 MB, and the 336 other sites **137.4 MB, 73%**.
+
+What the cases do not reach: commands of several units on lanes, `--node-bodies`, `-E`, the links, lazily read
+headers and deferred bodies, and the tests' and benchmarks' own commands.
+
+## Where the kernel's cycles of musl's command are (`musl-profile/`)
+
+`scripts/prof-musl.sh fix1 fix1`: musl's 1,336 units as one command, one lane on CPU 2, three `perf record` runs
+(`cycles`, user and kernel) and a counters run, at the fix. 3,721.7 M cycles a run, **27.1% in the kernel**
+(`musl-profile/by-function.txt`): `unmap_page_range` 121.0 M, `lock_vma_under_rcu` 106.3, `_raw_spin_lock` 77.3,
+`clear_page_erms` 74.9, `asm_exc_page_fault` 63.5, `_raw_spin_trylock` 47.9, `mas_walk` 42.0, `folio_add_lru` 29.1.
+The command takes 266,235 faults (`stat.csv`), 199 a unit: its arenas' pages go back to the kernel after each unit and
+are faulted in again, a base page at a time, so what it pays is the faults themselves more than the clearing.
