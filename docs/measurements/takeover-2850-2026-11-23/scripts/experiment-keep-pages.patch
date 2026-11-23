@@ -1,0 +1,89 @@
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 19ff4f6f..ef8cf9fd 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -165,6 +165,9 @@ struct Arena
+     // For an arena of arena_reserve_tables, its tables' layout (arena_tables_layout), never 0; 0 for any other. The pool
+     // gives an arena only to a reservation of the same layout.
+     uint64_t layout;
++    // EXPERIMENT (not for merge, #2850): the bytes from the mapping's start that may hold an earlier user's data, for an
++    // arena the pool kept the pages of (BUSTER_EXPERIMENT_KEEP_PAGES=1); a push clears what it takes of them.
++    uint64_t dirty;
+ };
+ 
+ // Reserves up to `capacity` bytes (less under address-space constraints), zero-filled. A fresh mapping is initially
+@@ -1355,6 +1358,19 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+     return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+ }
+ 
++static int arena_experiment_keep_state;
++static bool arena_experiment_keep(void)
++{
++    int state = __atomic_load_n(&arena_experiment_keep_state, __ATOMIC_RELAXED);
++    if (state == 0)
++    {
++        const char* value = getenv("BUSTER_EXPERIMENT_KEEP_PAGES");
++        state = value != NULL && value[0] == '1' ? 2 : 1;
++        __atomic_store_n(&arena_experiment_keep_state, state, __ATOMIC_RELAXED);
++    }
++    return state == 2;
++}
++
+ static void arena_release(Arena* arena)
+ {
+     if (arena->base != 0 && arena->grows)
+@@ -1384,7 +1400,8 @@ static void arena_release(Arena* arena)
+                                (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
+         // Where the prefix stays writable, its pages alone (#3070), and elsewhere the whole mapping's.
+         const uint64_t extent = protected && pool->keeps_commits ? arena_pool_writable(pool, mapping, bytes, arena->committed) : bytes;
+-        const bool pooled = protected && (extent == 0 || madvise(mapping, extent, MADV_DONTNEED) == 0);
++        const bool kept_pages = protected && pool->keeps_commits && arena->layout == 0 && extent != bytes && arena_experiment_keep();
++        const bool pooled = protected && (extent == 0 || kept_pages || madvise(mapping, extent, MADV_DONTNEED) == 0);
+         if (pooled)
+         {
+             // A free slot, or else the one whose arena was released longest ago, which is unmapped.
+@@ -1416,6 +1433,7 @@ static void arena_release(Arena* arena)
+                 .requested_capacity = arena->requested_capacity,
+                 .reserved = arena->reserved,
+                 .layout = arena->layout,
++                .dirty = kept_pages ? (extent > arena->dirty ? extent : arena->dirty) : 0,
+             };
+         }
+         else if (!arena_release_keeps(arena, mapping))
+@@ -1574,6 +1592,7 @@ static bool arena_commit(Arena* arena, uint64_t end)
+ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+     void* result = 0;
++    const uint64_t experiment_peak = arena->peak;
+     const uintptr_t base = (uintptr_t)arena->base;
+     const uintptr_t position = base + arena->length;
+     const uintptr_t aligned = (position + alignment - 1) & ~(alignment - 1);
+@@ -1587,6 +1606,18 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            if (__builtin_expect(arena->dirty != 0, 0))
++            {
++                // What the push takes that nothing pushed before in this life of the arena and an earlier one may have
++                // written: cleared, as a fresh arena's bytes are.
++                const uint64_t dirty_end = arena->dirty > arena->mapping_offset ? arena->dirty - arena->mapping_offset : 0;
++                const uint64_t from = begin > experiment_peak ? begin : experiment_peak;
++                const uint64_t to = end < dirty_end ? end : dirty_end;
++                if (from < to)
++                {
++                    memset(arena->base + from, 0, to - from);
++                }
++            }
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+@@ -1615,7 +1646,8 @@ static void arena_pop_to(Arena* arena, uint64_t length)
+ 
+ static bool arena_untouched(const Arena* arena)
+ {
+-    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
++    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length &&
++           arena->dirty <= arena->mapping_offset + arena->length;
+ }
+ 
+ // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or

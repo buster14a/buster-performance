@@ -260,3 +260,27 @@ headers and deferred bodies, and the tests' and benchmarks' own commands.
 `clear_page_erms` 74.9, `asm_exc_page_fault` 63.5, `_raw_spin_trylock` 47.9, `mas_walk` 42.0, `folio_add_lru` 29.1.
 The command takes 266,235 faults (`stat.csv`), 199 a unit: its arenas' pages go back to the kernel after each unit and
 are faulted in again, a base page at a time, so what it pays is the faults themselves more than the clearing.
+
+## A pool that keeps its arenas' pages and clears what each push takes: refuted (`keep-pages/`)
+
+A prototype, paired before any specification (`scripts/experiment-keep-pages.patch`, on the fix's branch with main
+`ef400844` merged in, `b7e3552c`; the tree is `keep1`). With `BUSTER_EXPERIMENT_KEEP_PAGES=1` a thread's pool no longer
+gives a released arena's pages back to the kernel (but an arena of tables'); the arena carries how far it may hold an
+earlier user's bytes, and each push clears what it takes of them past the arena's own peak, so that every push still
+gets the zeros a fresh arena promises. Nothing is annotated: it is the form that changes no promise.
+
+One executable, the switch off and on (`scripts/pair-env.sh`, five rounds each, the objects and diagnostics one set):
+
+| | off, ms | on, ms | paired, ms | lower | user cycles, M | kernel cycles, M | faults |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| musl, 1,336 units | 662.908 | 643.262 | -19.810 | 5/5 | +77.042 | -191.045 | 266,487 to 148,865 |
+| Lua, 34 units | 65.345 | 72.075 | +6.741 | 0/5 | +23.947 | +9.798 | 15,464 to 17,407 |
+| `sqlite3.c`, `shell.c` and two of Lua's | 172.196 | 176.776 | +4.580 | 0/5 | +13.197 | +9.040 | 9,805 to 9,860 |
+
+Predicted for musl's command about 15% and to be dropped under 8%: it gives 3.0%, and Lua's and the mixed command
+lose. A push takes its column's whole capacity and a unit writes part of it; clearing the capacity in user space
+touches pages the kernel would never have mapped, where the kernel's own clearing is of the pages written. So this
+form pays only where units are small enough that capacity and use are the same pages, and even there it leaves 149
+thousand of musl's faults (the scratch's discards inside a unit and the tables' arenas are as they were). What the
+count above offers is the other form: the sites that never read their zeros take kept pages with no clearing at all,
+which needs those sites named.
