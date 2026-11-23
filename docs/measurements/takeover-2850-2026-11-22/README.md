@@ -1350,3 +1350,69 @@ comparison not asking); the twin's and the kept tapes' twenty (`before-faults.py
 own file. Two of the eight did not build as first written (a tautology the compiler refuses) and are in
 `reach-faults-two.txt` reworded. The first two suites ran on this session's machine and the rest on the 9700X
 (`scripts/job-faults1.sh`), Develop builds.
+
+## The producer, deciding before the walk (`bodies-produced/`, buster branch `claude/2850-node-bodies`)
+
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7085227363), half 1: the producer
+decides each function body before the reader's walk, in the shadow (`measure-node-machine --shadow --produce`, and as a
+compile would run it with `--produce-lean`). Nothing here is a compile's time; no compile runs it.
+
+**Against the comparisons' set** (`develop-23d6ab895/reduced.txt`, `scripts/produce-run.sh`: Develop, this session's
+machine, the head with main merged in at `89362fd0f`; five runs a corpus: every body read with the default warnings,
+read as `-c` reads a unit, as a compile would run it both ways, and with `-Wall -Wextra`). Twenty runs, each status 0:
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| lowered bodies | 2,668 | 1,096 | 1,516 | 2,756 |
+| the set the comparisons give: bodies; of the body tokens | 1,760; 30.89% | 547; 21.48% | 179; 2.32% | 1,176; 17.67% |
+| the producer takes: bodies; of the body tokens | 1,747; 30.65% | 545; 21.42% | 0 | 1,096; 16.09% |
+| of them outside the set; whose kept controls differ from the program's | 0; 0 | 0; 0 | 0; 0 | 0; 0 |
+| bodies it does not read, as a compile would run it, of every body of the units | 610 of 2,674 | 354 of 1,096 | all 8,739 | 13,693 of 18,584 |
+
+What it leaves of `sqlite3.c`'s 2,668, by its first reason: the scan 513 (278,079 tokens), a token's kind 91, the
+gates 5, its function 1, a root the machine does not take 280 (77,372), controls the twin does not make 20, a root not
+kept 1, a constant condition 5, the return flow 1, a root that may be warned of 4.
+
+**Against the diagnostics** (`BUSTER_TEST_NODE_BODIES_LOG`: the producer beside every unit's ordinary read, nothing
+masked, each diagnostic at a token of a taken body a line). `develop-23d6ab895/tests-gate.txt` (`scripts/p1b.sh`, the
+34 blocks of the correctness inventory that compile a unit and read its diagnostics or its object): 111,723 units, the
+producer ran in 74,314, 36,386 of 1,954,846 bodies taken, 1,184,166 diagnostics looked at, **0 at a token of a taken
+body**. `develop-23d6ab895/corpus-gate.txt` (`scripts/corpus-gate.sh`): `sqlite3.c` 1,753 of 2,674 bodies taken, Lua
+545 of 1,096, the compiler's own source 0 of 8,739, musl 4,442 of 18,584; 1,007 diagnostics looked at, 0 in a taken
+body.
+
+**What neither gate could see,** found by the compile built on it (below) and by main's merge, each with a rule and a
+fixture in this branch: a target that fuses a product and a sum (the lowering contracts `a * b + c` with FMA or
+AVX-512F, the machine did not: `--shadow` counted the entries as differences under `-mfma`, on main too); a naked
+function (a pass after the walk reports in its body); an `always_inline` wrapper (the lowering expands its direct
+calls from the wrapper's own body, #2983); and a volatile access (main's #3310 marks each one and leaves it to the
+lowering's tasks: with main merged in and no rule for it, the oracle read 0 of 20 runs with status 0, up to 43 bodies
+whose kept tapes differ and up to 38 taken outside the set, on this branch at `723f300cb`).
+
+**Its ticks on the 9700X** (`9700x-00ef81d5f/sqlite-produce-lean-{1,2,3}.txt`: Release, CPU 2, the frozen `sqlite3.c`,
+three rounds, 3,792.9 MHz; at `00ef81d5f`, before main's merge and the rules above, with 1,753 lowered bodies taken):
+
+| ticks, three rounds | 1 | 2 | 3 | median | ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the bodies' reading | 45,560,700 | 45,464,700 | 45,282,673 | 45,464,700 | 11.99 |
+| … of it, the producer before any reading | 7,553,944 | 7,602,093 | 7,555,979 | 7,555,979 | 1.99 |
+| … the producer after the reading | 7,416,949 | 7,456,020 | 7,432,101 | 7,432,101 | 1.96 |
+| the reference machine's one run | 65,289,138 | 65,077,334 | 64,904,400 | 65,077,334 | 17.16 |
+| both | 110,849,838 | 110,542,034 | 110,187,073 | 110,542,034 | 29.14 |
+
+258,955 positions, 251 ticks of the machine's run each. The whole bodies (1,784, 182,404 tokens) cost 334 ticks a
+token to read and sweep, 88 ns, against the 74.2 ns a taken token saves; the 175,797 tokens of the 1,753 bodies are
+worth 13.04 ms. **So the compile that takes these bodies is predicted about 16 ms slower than without them** (the
+specification's provisional figure, from the oracle's sets, was 8 to 10).
+
+**Not read: nothing else moves, paired.** The pair was queued on the 9700X with the next piece's and never ran: this
+session's forty-one build trees (47 GB) had filled that machine's `/home`, the build of the commit to time failed with
+"No space left on device", and the job took the lock twelve times for runs that stopped at once, having no compiler.
+The trees are removed and the job now stops where a build leaves no compiler.
+
+**Single faults** (`faults/`, `scripts/producer-faults*.py`: each built, Develop, and run against the fixtures,
+`test-checker --part 45/64`): 56 distinct single changes to the producer's refusals and to the machine's rules above;
+55 fail a fixture. Of the first 32, 16 failed one as written, 15 did not build (an unused variable) and are among the
+17 reworded, and one was not caught (a floating arm converted to a smaller floating type: the fixture has a body for it
+since). The one not caught at the end is the compound shift's width in the tests' form on the window
+(`node_tests_constants`), which no path of this piece runs.
