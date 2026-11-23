@@ -1,0 +1,577 @@
+diff --git a/src/buster/compiler/c_parser.c b/src/buster/compiler/c_parser.c
+index 46790251..fb846e12 100644
+--- a/src/buster/compiler/c_parser.c
++++ b/src/buster/compiler/c_parser.c
+@@ -1923,6 +1923,9 @@ struct ParseFallback
+     // identifier, or met a name only earlier file-scope declarations decide (ParseScalarResult.undecided): the whole unit
+     // goes to the scalar parser.
+     bool errors;
++    // The typedef declarations whose names the items saw as file-scope type names, which the fallback then made ordinary
++    // names again: those before the last item's first token.
++    uint32_t visible;
+ };
+ 
+ 
+@@ -1935,6 +1938,9 @@ struct ParseKernelResult
+     ParseFallback fallback;
+     uint64_t flagged_tokens;
+     bool everything;
++    // parse_vector_tiles: the tiles it parsed, and whether one of them sent the unit to parse_vector as one.
++    uint32_t tiles;
++    bool tiles_refused;
+ };
+ 
+ 
+@@ -2794,6 +2800,8 @@ struct ParseOptions
+     bool sizes;
+     // Retain bounded GNU attribute and asm-label records for a semantic consumer; syntax-only callers leave it off.
+     bool extension_metadata;
++    // The vector path by tiles of about this many tokens (#2536, parse_vector_tiles): 0 for the unit as one, the twin.
++    uint32_t tile_tokens;
+     // Where a parse's temporaries go (the vector path's arrays, the scalar parser's stacks and the postorder's passes),
+     // which it pops at its end: the caller's arena, whose pages its next stage then takes again (the C driver's checker
+     // reads its scratch from where the parse's were), or null for the parser's own.
+@@ -2812,6 +2820,10 @@ struct ParseStatistics
+     // The whole unit went to the scalar parser: unbalanced brackets, a typedef the pass can't read, a do without its
+     // while, or an error the fallback found (which the scalar parser then reports as it would alone).
+     bool whole;
++    // The tiles the vector path parsed the unit by (ParseOptions.tile_tokens), 0 where it parsed it as one, and whether
++    // a tile it couldn't take sent the unit to be parsed as one after them.
++    uint32_t tiles;
++    bool tiles_refused;
+ };
+ 
+ // Why a specifier in a private diagnostic view can be read after its original parse failed.
+diff --git a/src/buster/compiler/c_parser_benchmark.c b/src/buster/compiler/c_parser_benchmark.c
+index 353e1ab2..3dff69fa 100644
+--- a/src/buster/compiler/c_parser_benchmark.c
++++ b/src/buster/compiler/c_parser_benchmark.c
+@@ -587,7 +587,7 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
+         case PARSE_TIMED_VECTOR_FALLBACK:
+         {
+             const bool everything = k->unbalanced || k->unsupported || !bench->statements_ok;
+-            parse_fallback(k, &input, everything);
++            parse_fallback(k, &input, everything, false);
+             break;
+         }
+         // The tree's columns as the parser derives them, then with the subtree sizes, then the links from that postorder, as
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index 92f2c17a..ec2ca4b2 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -7799,7 +7799,7 @@ static void parse_check_body(ParseKernels* kernels, uint32_t body, uint8_t* reas
+ }
+ 
+ // The scalar parser on tokens [begin, end] in place, with the file-scope typedef names declared before begin visible.
+-static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end, uint32_t* visible, ParseFallback* result)
++static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end, bool earlier, uint32_t* visible, ParseFallback* result)
+ {
+     ParseMeanings* meanings = input->meanings;
+     while (*visible < kernels->typedef_count && kernels->typedef_tokens[*visible] < begin)
+@@ -7815,7 +7815,7 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input,
+     // A declaration that made a file-scope typedef name an ordinary one changes how the rest of the unit parses, which
+     // the kernels' type names don't know, and a name only the earlier file-scope declarations can decide
+     // (parse_scalar_attribute_name), which the scalar parser doesn't have here: the whole unit goes to the scalar parser.
+-    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped || (parse.undecided && begin != 0);
++    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped || (parse.undecided && (begin != 0 || earlier));
+     for (uint32_t j = begin; j <= end; j += 1)
+     {
+         kernels->parents[j] = kernels->parents[j] == BUSTER_PARSE_ROOT ? BUSTER_PARSE_ROOT : kernels->parents[j] + begin;
+@@ -7829,14 +7829,14 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input,
+ // `everything`, the whole unit is one range (unbalanced brackets, a typedef the pass can't read, or what K5 can't
+ // settle). The declarations end where a terminator or a function body's closer is at node depth 0, found 64 tokens at a
+ // time.
+-static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* input, bool everything)
++static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* input, bool everything, bool earlier)
+ {
+     ParseFallback result = { .items = 0, .tokens = 0, .errors = false };
+     const uint32_t count = input->count;
+     uint32_t visible = 0;
+     if (everything && count != 0)
+     {
+-        parse_fallback_item(kernels, input, 0, count - 1, &visible, &result);
++        parse_fallback_item(kernels, input, 0, count - 1, earlier, &visible, &result);
+     }
+     else
+     {
+@@ -7869,7 +7869,7 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
+                     flags &= ~through;
+                     if (flagged)
+                     {
+-                        parse_fallback_item(kernels, input, begin, block + lane, &visible, &result);
++                        parse_fallback_item(kernels, input, begin, block + lane, earlier, &visible, &result);
+                     }
+                     begin = block + lane + 1;
+                     flagged = false;
+@@ -7880,13 +7880,14 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
+         // A flagged declaration the input ends in.
+         if (flagged && begin < count)
+         {
+-            parse_fallback_item(kernels, input, begin, count - 1, &visible, &result);
++            parse_fallback_item(kernels, input, begin, count - 1, earlier, &visible, &result);
+         }
+     }
+     for (uint32_t i = 0; i < visible; i += 1)
+     {
+         input->meanings->meanings[kernels->typedef_log[i]] = PARSE_MEANING_ORDINARY;
+     }
++    result.visible = visible;
+     return result;
+ }
+ 
+@@ -11209,8 +11210,10 @@ static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput
+     }
+ }
+ 
+-// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
+-static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
++// The kernels over `input`, a unit or a tile of one (parse_vector_tiles), whose type names from before its first token
++// are marked already: every kernel in turn, then the fallback unless `tile` and the kernels can't take the input, which
++// its caller then parses with the unit. `earlier` is whether declarations precede the input's first token.
++static ParseKernelResult parse_vector_run(ParseKernels* kernels, const ParseInput* input, ParseVectorBuffers* buffers, bool earlier, bool tile)
+ {
+     ParseKernelResult result = { .flagged_tokens = 0, .everything = false };
+     const uint8_t* kinds = input->kinds;
+@@ -11218,7 +11221,6 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+     const uint32_t count = input->count;
+     kernels->unbalanced = false;
+     kernels->unsupported = false;
+-    parse_kernels_predeclared(kernels, predeclared, true);
+     // K1, on ( [ {.
+     kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
+     // K3.
+@@ -11251,12 +11253,323 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
+             parse_function_roles_block_avx512(kernels, block, live);
+         }
+     }
+-    result.fallback = parse_fallback(kernels, input, result.everything);
++    if (!(tile && result.everything))
++    {
++        result.fallback = parse_fallback(kernels, input, result.everything, earlier);
++    }
++    return result;
++}
++
++// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
++static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
++{
++    parse_kernels_predeclared(kernels, predeclared, true);
++    const ParseKernelResult result = parse_vector_run(kernels, input, buffers, false, false);
+     parse_typedefs_clear(kernels);
+     parse_kernels_predeclared(kernels, predeclared, false);
+     return result;
+ }
+ 
++// Whether a token of `kind` can start a top-level declaration: what follows a function's body.
++BUSTER_INLINE bool parse_tile_starts_declaration(uint8_t kind)
++{
++    return kind == PARSE_KIND_END || kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
++           kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_STORAGE ||
++           kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ASM || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_TYPEOF ||
++           kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_EXTENSION;
++}
++
++// Whether a token of `kind` after a declarator's parameters starts an old-style definition's parameter declarations.
++BUSTER_INLINE bool parse_tile_starts_parameters(uint8_t kind)
++{
++    return kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_QUALIFIER ||
++           kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_EXTENSION;
++}
++
++// The parenthesized groups outside every other bracket that parse_tile_end keeps of the declaration it is in: those
++// before a body's brace that an attribute's can hide a declarator's parameters behind.
++#define BUSTER_PARSE_TILE_GROUPS 8
++
++// Whether the `{` at `brace`, outside every bracket, opens a function's body, by the kinds before it: after a
++// declarator's parameters, past any attributes' groups between them (`void f(void) __attribute__((cold)) {`), or after
++// an old-style definition's parameter declarations. `opens` and `closes` are the last `groups` groups' brackets, of which
++// the scan keeps BUSTER_PARSE_TILE_GROUPS. A compound literal's brace at file scope reads as a body's too; what follows
++// its closer tells them apart (parse_tile_end). A tag's body after its attributes (`struct __attribute__((packed)) {`)
++// doesn't, nor does what the kept groups don't reach.
++static bool parse_tile_body(const uint8_t* kinds, uint32_t begin, uint32_t brace, const uint32_t* opens, const uint32_t* closes, uint32_t groups, bool old_style)
++{
++    bool result = false;
++    bool searching = brace > begin;
++    uint32_t at = brace - 1;
++    uint32_t group = groups;
++    while (searching)
++    {
++        const uint8_t kind = kinds[at];
++        const uint32_t slot = (group - 1) % BUSTER_PARSE_TILE_GROUPS;
++        const bool kept = kind == PARSE_KIND_R_PAREN && group != 0 && groups - group < BUSTER_PARSE_TILE_GROUPS && closes[slot] == at;
++        const uint32_t open = kept ? opens[slot] : begin;
++        const uint8_t before = open > begin ? kinds[open - 1] : PARSE_KIND_END;
++        const bool attribute = kept && (before == PARSE_KIND_ATTRIBUTE || before == PARSE_KIND_ALIGNAS);
++        // An attribute's group: what is before its keyword decides.
++        searching = attribute && open >= begin + 2;
++        result = (kept && !attribute) || (kind == PARSE_KIND_SEMI && old_style);
++        at = searching ? open - 2 : at;
++        group -= searching ? 1 : 0;
++    }
++    return result;
++}
++
++// Where a tile that starts at `begin`, a top-level declaration's first token, ends: after the first top-level declaration
++// that ends `tile_tokens` tokens or more past `begin`, or `count`. A declaration ends at a `;` outside every bracket, but
++// between an old-style definition's parameters and its body, or at the `}` of a function's body where a declaration can
++// start after it. The test is of the kinds alone, before any kernel has run, so it may take for a declaration's end
++// what isn't one: such a tile's last declaration is cut short, which the kernels' checks or the scalar parser refuse,
++// and parse_vector_tiles then parses the unit as one. So what it takes decides how often tiles serve, never the tree.
++//
++// 64 tokens a step: the brackets' depth after each token is a prefix sum in byte lanes (parse_prefix_sum8), and the
++// tokens that can end a declaration or say what kind it is are those at depth 0, a mask: a `;`, an opener before which
++// the depth is 0, a closer after which it is. Those alone are then read, a token at a time: a declaration has a few,
++// and a function's body, most of a unit's tokens, none between its braces. A block wholly inside brackets deeper
++// than 64 has none, and takes the two counts of its brackets alone.
++static uint32_t parse_tile_end(const uint8_t* kinds, uint32_t begin, uint32_t count, uint32_t tile_tokens)
++{
++    uint32_t result = count;
++    uint32_t opens[BUSTER_PARSE_TILE_GROUPS] = { 0 };
++    uint32_t closes[BUSTER_PARSE_TILE_GROUPS] = { 0 };
++    uint32_t groups = 0;
++    // Between an old-style definition's parameters and its body; and inside a function's body.
++    bool old_style = false;
++    bool body = false;
++    bool searching = true;
++    uint64_t base = 0;
++    for (uint32_t block = begin; searching && block < count; block += 64)
++    {
++        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
++        const __m512i kind = _mm512_loadu_si512(kinds + block);
++        const __mmask64 openers = live & (parse_equal8(kind, PARSE_KIND_L_PAREN) | parse_equal8(kind, PARSE_KIND_L_SQUARE) | parse_equal8(kind, PARSE_KIND_L_BRACE));
++        const __mmask64 closers = live & (parse_equal8(kind, PARSE_KIND_R_PAREN) | parse_equal8(kind, PARSE_KIND_R_SQUARE) | parse_equal8(kind, PARSE_KIND_R_BRACE));
++        uint64_t events = 0;
++        uint64_t under = 0;
++        if (base <= 64)
++        {
++            const __m512i delta = _mm512_sub_epi8(_mm512_maskz_set1_epi8(openers, 1), _mm512_maskz_set1_epi8(closers, 1));
++            const __m512i after = parse_prefix_sum8(delta);
++            // Depth 0 is the prefix sum at minus the depth before the block, which a byte holds.
++            const __m512i ground = _mm512_set1_epi8((char)-(int64_t)base);
++            const __mmask64 after_ground = _mm512_cmpeq_epi8_mask(after, ground);
++            const __mmask64 before_ground = _mm512_cmpeq_epi8_mask(_mm512_sub_epi8(after, delta), ground);
++            // A closer without its opener: the unit's brackets don't balance, and it is one tile.
++            under = live & _mm512_cmplt_epi8_mask(after, ground);
++            events = (live & parse_equal8(kind, PARSE_KIND_SEMI) & before_ground) | (openers & before_ground) | (closers & after_ground) | under;
++        }
++        for (; searching && events != 0; events &= events - 1)
++        {
++            const uint32_t lane = (uint32_t)__builtin_ctzll(events);
++            const uint32_t i = block + lane;
++            const uint8_t at = kinds[i];
++            const bool fits = i + 1 - begin >= tile_tokens;
++            bool cut = false;
++            if (((under >> lane) & 1) != 0)
++            {
++                searching = false;
++            }
++            else if (at == PARSE_KIND_L_PAREN)
++            {
++                opens[groups % BUSTER_PARSE_TILE_GROUPS] = i;
++                closes[groups % BUSTER_PARSE_TILE_GROUPS] = BUSTER_PARSE_NONE;
++                groups += 1;
++            }
++            else if (at == PARSE_KIND_L_BRACE)
++            {
++                body = parse_tile_body(kinds, begin, i, opens, closes, groups, old_style);
++            }
++            else if (at == PARSE_KIND_R_PAREN && groups != 0)
++            {
++                // After a declarator's parameters (`f(a, b)`, `(*f)(a)`), a declaration's specifiers start an old-style
++                // definition's parameter declarations, whose `;` end no top-level declaration.
++                const uint32_t open = opens[(groups - 1) % BUSTER_PARSE_TILE_GROUPS];
++                const uint8_t before = open > begin ? kinds[open - 1] : PARSE_KIND_END;
++                closes[(groups - 1) % BUSTER_PARSE_TILE_GROUPS] = i;
++                old_style |= (before == PARSE_KIND_IDENTIFIER || before == PARSE_KIND_R_PAREN) && parse_tile_starts_parameters(kinds[i + 1]);
++            }
++            else if (at == PARSE_KIND_R_BRACE)
++            {
++                cut = body && fits && parse_tile_starts_declaration(kinds[i + 1]);
++                old_style = body ? false : old_style;
++                groups = body ? 0 : groups;
++                body = false;
++            }
++            else if (at == PARSE_KIND_SEMI)
++            {
++                cut = !old_style && fits;
++                groups = old_style ? groups : 0;
++            }
++            if (cut)
++            {
++                result = i + 1;
++                searching = false;
++            }
++        }
++        base += (uint64_t)__builtin_popcountll(openers) - (uint64_t)__builtin_popcountll(closers);
++    }
++    return result;
++}
++
++// The kernels' state as parse_kernels_reserve_tree left it, for a unit's parse after its tiles' gave up.
++static void parse_kernels_again(ParseKernels* kernels, uint32_t count, uint32_t name_capacity)
++{
++    const uint64_t slots = (uint64_t)count + 2 * BUSTER_PARSE_TOKEN_PADDING;
++    memset(kernels->typedef_names, 0, name_capacity);
++    memset(kernels->typedef_first, 0, (uint64_t)name_capacity * sizeof(uint32_t));
++    memset(kernels->typedef_heads, 0, (uint64_t)name_capacity * sizeof(uint32_t));
++    memset(kernels->vkinds - BUSTER_PARSE_TOKEN_PADDING, PARSE_KIND_END, slots);
++    memset(kernels->roles - BUSTER_PARSE_TOKEN_PADDING, PARSE_ROLE_NONE, slots);
++    memset(kernels->flags - BUSTER_PARSE_TOKEN_PADDING, 0, slots);
++    memset(kernels->node_depths - BUSTER_PARSE_TOKEN_PADDING, 0, slots * sizeof(uint32_t));
++    kernels->typedef_count = 0;
++}
++
++// parse_vector by tiles (#2536): the kernels and the fallback over one run of top-level declarations of about
++// `tile_tokens` tokens at a time (parse_tile_end), each as a unit of its own whose type names from the tiles before it are
++// marked as clang's predeclared ones are, so that the kernels' temporaries are a tile's, which stays in the cache, and
++// the tree's columns are written a tile at a time. A tile's tokens are a unit's to every kernel: the columns' entries
++// around it hold what a unit's padding holds while its kernels run, and its parents are counted from its first token
++// until they are done. A top-level declaration parses alone as it does in its unit, given the type names before it
++// (the fallback's rule, parse_fallback_item), so the tree is the unit's. A tile the kernels or the fallback can't take
++// (as a unit they can't, or a tile cut short) sends the unit to parse_vector as one.
++static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers, uint32_t tile_tokens)
++{
++    ParseKernelResult result = { .flagged_tokens = 0, .everything = false };
++    const uint32_t count = input->count;
++    ParseMeanings* meanings = input->meanings;
++    uint32_t tiles = 0;
++    // The names every tile so far declared a type's, in order: what the unit's parse would clear at its end.
++    uint32_t* logged = BUSTER_ARENA_PUSH_ARRAY(input->scratch, uint32_t, (uint64_t)count + 1);
++    uint32_t logged_count = 0;
++    // How many of them were declared before the last top-level declaration the fallback took (ParseFallback.visible).
++    uint32_t covered = 0;
++    bool served = logged != NULL;
++    parse_kernels_predeclared(kernels, predeclared, true);
++    uint32_t begin = 0;
++    while (served && begin < count)
++    {
++        const uint32_t end = parse_tile_end(input->kinds, begin, count, tile_tokens);
++        const uint32_t length = end - begin;
++        // The columns' entries before the tile and the tokens' after it, as a unit's padding has them.
++        uint8_t saved_kinds[2][BUSTER_PARSE_TOKEN_PADDING];
++        uint32_t saved_names[2][BUSTER_PARSE_TOKEN_PADDING];
++        uint8_t saved_flags[2][BUSTER_PARSE_TOKEN_PADDING];
++        uint8_t saved_roles[BUSTER_PARSE_TOKEN_PADDING];
++        uint32_t saved_depths[BUSTER_PARSE_TOKEN_PADDING];
++        uint8_t* kinds = (uint8_t*)(uintptr_t)input->kinds;
++        uint32_t* names = (uint32_t*)(uintptr_t)input->names;
++        uint8_t* flags = (uint8_t*)(uintptr_t)input->flags;
++        const uint32_t before = begin - BUSTER_PARSE_TOKEN_PADDING;
++        memcpy(saved_kinds[0], kinds + (int64_t)(int32_t)before, BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(saved_names[0], names + (int64_t)(int32_t)before, sizeof(saved_names[0]));
++        memcpy(saved_flags[0], flags + (int64_t)(int32_t)before, BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(saved_kinds[1], kinds + end, BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(saved_names[1], names + end, sizeof(saved_names[1]));
++        memcpy(saved_flags[1], flags + end, BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(saved_roles, kernels->roles + (int64_t)(int32_t)before, BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(saved_depths, kernels->node_depths + (int64_t)(int32_t)before, sizeof(saved_depths));
++        memset(kinds + (int64_t)(int32_t)before, PARSE_KIND_END, BUSTER_PARSE_TOKEN_PADDING);
++        memset(names + (int64_t)(int32_t)before, 0, sizeof(saved_names[0]));
++        memset(flags + (int64_t)(int32_t)before, 0, BUSTER_PARSE_TOKEN_PADDING);
++        memset(kinds + end, PARSE_KIND_END, BUSTER_PARSE_TOKEN_PADDING);
++        memset(names + end, 0, sizeof(saved_names[1]));
++        memset(flags + end, 0, BUSTER_PARSE_TOKEN_PADDING);
++        memset(kernels->roles + (int64_t)(int32_t)before, PARSE_ROLE_NONE, BUSTER_PARSE_TOKEN_PADDING);
++        memset(kernels->node_depths + (int64_t)(int32_t)before, 0, sizeof(saved_depths));
++        // The temporaries' entries past the tile, which a longer tile before it wrote.
++        memset(kernels->vkinds + length, PARSE_KIND_END, BUSTER_PARSE_TOKEN_PADDING);
++        memset(kernels->flags + length, 0, BUSTER_PARSE_TOKEN_PADDING);
++        ParseKernels tile = *kernels;
++        tile.roles = kernels->roles + begin;
++        tile.node_depths = kernels->node_depths + begin;
++        tile.parents = kernels->parents + begin;
++        ParseInput tile_input = *input;
++        tile_input.kinds = input->kinds + begin;
++        tile_input.names = input->names + begin;
++        tile_input.flags = input->flags + begin;
++        tile_input.count = length;
++        const ParseKernelResult ran = parse_vector_run(&tile, &tile_input, buffers, begin != 0, true);
++        memcpy(kinds + (int64_t)(int32_t)before, saved_kinds[0], BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(names + (int64_t)(int32_t)before, saved_names[0], sizeof(saved_names[0]));
++        memcpy(flags + (int64_t)(int32_t)before, saved_flags[0], BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(kinds + end, saved_kinds[1], BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(names + end, saved_names[1], sizeof(saved_names[1]));
++        memcpy(flags + end, saved_flags[1], BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(kernels->roles + (int64_t)(int32_t)before, saved_roles, BUSTER_PARSE_TOKEN_PADDING);
++        memcpy(kernels->node_depths + (int64_t)(int32_t)before, saved_depths, sizeof(saved_depths));
++        served = !ran.everything && !ran.fallback.errors;
++        if (served)
++        {
++            // The parents, counted from the unit's first token.
++            const __m512i base = _mm512_set1_epi32((int32_t)begin);
++            for (uint32_t block = 0; begin != 0 && block < length; block += 16)
++            {
++                const __mmask16 live = length - block < 16 ? (__mmask16)((1u << (length - block)) - 1) : (__mmask16)0xffff;
++                const __m512i parents = _mm512_maskz_loadu_epi32(live, tile.parents + block);
++                const __mmask16 rooted = _mm512_mask_cmpneq_epi32_mask(live, parents, _mm512_set1_epi32((int32_t)BUSTER_PARSE_ROOT));
++                _mm512_mask_storeu_epi32(tile.parents + block, rooted, _mm512_add_epi32(parents, base));
++            }
++            covered = ran.fallback.items != 0 ? logged_count + ran.fallback.visible : covered;
++            // The tile's type names, for the tiles after it: a file-scope one is a type's from their first token, as a
++            // predeclared one is; a block's is none again, but one that the typedef pass has seen (its first declarator is
++            // kept, as any but 0).
++            for (uint32_t record = 0; record < tile.typedef_count; record += 1)
++            {
++                const uint32_t id = tile.typedef_log[record];
++                const bool file = (tile.typedef_names[id] & BUSTER_PARSE_TYPEDEF_FILE) != 0;
++                tile.typedef_first[id] = file ? 0 : BUSTER_PARSE_NONE;
++                tile.typedef_heads[id] = 0;
++                meanings->meanings[id] = file ? PARSE_MEANING_TYPEDEF : PARSE_MEANING_ORDINARY;
++                logged[logged_count] = id;
++                logged_count += 1;
++            }
++            result.flagged_tokens += ran.flagged_tokens;
++            result.fallback.items += ran.fallback.items;
++            result.fallback.tokens += ran.fallback.tokens;
++            kernels->deep_node_depths = tile.deep_node_depths;
++        }
++        tiles += 1;
++        begin = end;
++    }
++    // The names' meanings as the unit's parse leaves them: ordinary for those declared before the last declaration the
++    // fallback took, and as they were for the others.
++    for (uint32_t i = 0; i < logged_count; i += 1)
++    {
++        const uint32_t id = logged[i];
++        bool given = false;
++        for (uint32_t p = 0; p < BUSTER_PARSE_PREDECLARED_TYPEDEFS; p += 1)
++        {
++            given |= predeclared[p] == id;
++        }
++        meanings->meanings[id] = given && (!served || i >= covered) ? PARSE_MEANING_TYPEDEF : PARSE_MEANING_ORDINARY;
++        kernels->typedef_names[id] = 0;
++        kernels->typedef_heads[id] = 0;
++        kernels->typedef_first[id] = 0;
++    }
++    kernels->typedef_count = 0;
++    parse_kernels_predeclared(kernels, predeclared, false);
++    if (!served)
++    {
++        parse_kernels_again(kernels, count, meanings->capacity);
++        for (int32_t i = -BUSTER_PARSE_DEPTH_PADDING; i < 0; i += 1)
++        {
++            buffers->open_stack[i] = BUSTER_PARSE_NONE;
++            buffers->groups.roles[i] = PARSE_ROLE_NONE;
++            buffers->groups.typed[i] = 0;
++            buffers->groups.keywords[i] = PARSE_KIND_END;
++        }
++        result = parse_vector(kernels, input, predeclared, buffers);
++    }
++    result.tiles = tiles;
++    result.tiles_refused = !served;
++    return result;
++}
++
+ static BUSTER_BAKED_FRONTEND bool parse_tables_ready;
+ 
+ // The tables every parse reads, built once, and baked into the executable (baked.h): a compile of the C driver's starts
+@@ -11556,7 +11869,17 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+                 .diagnostics = parser->diagnostics,
+                 .diagnostic_capacity = parser->diagnostic_capacity,
+             };
+-            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
++            const char* tile_setting = getenv("BUSTER_PARSE_TILE");
++            const uint32_t tile_tokens = tile_setting != NULL ? (uint32_t)strtoul(tile_setting, NULL, 10) : parser->options.tile_tokens;
++            const ParseKernelResult vector = tile_tokens != 0 ? parse_vector_tiles(&parser->kernels, &input, parser->predeclared, &parser->buffers, tile_tokens) :
++                                                                 parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
++            parser->statistics.tiles = vector.tiles;
++            parser->statistics.tiles_refused = vector.tiles_refused;
++            if (getenv("BUSTER_PARSE_TILE_REPORT") != NULL)
++            {
++                fprintf(stderr, "parse-tiles\ttokens\t%u\ttile\t%u\ttiles\t%u\trefused\t%d\tfallback-items\t%u\tflagged\t%llu\n", count, tile_tokens, vector.tiles,
++                        (int)vector.tiles_refused, vector.fallback.items, (unsigned long long)vector.flagged_tokens);
++            }
+             parser->statistics.fallback_items = vector.fallback.items;
+             parser->statistics.fallback_tokens = vector.fallback.tokens;
+             parser->statistics.flagged_tokens = vector.flagged_tokens;
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 19ff4f6f..d1aae973 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -274,6 +274,19 @@ bool arena_pages_busy;
+ #else
+ static bool arena_pages_busy;
+ #endif
++// Whether the arenas take the kernel's medium pages (#2536): transparent huge pages of a size between a base page and
++// 2 MB (64 KB, where the host enables it: /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled), where they would
++// take huge pages. Their huge pages are then advised as on an idle host, and the first page of each 2 MB of them is
++// advised a base page as its commit reaches it (arena_medium_split), so that no mapping covers a whole 2 MB and the
++// kernel's largest page there is the next size it has. arena_page_policy sets it once, before the process starts any
++// thread; main.c's units share it.
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern bool arena_pages_medium;
++#elif defined(BUSTER_UNIT)
++bool arena_pages_medium;
++#else
++static bool arena_pages_medium;
++#endif
+ // Whether the exit helper may ask the kernel for huge pages of the executable's own pages (#2873, lane_exit_probe):
+ // transparent huge pages are on for the whole process (not PR_SET_THP_DISABLE: a virtual machine, BUSTER_HUGE_PAGES=0,
+ // or the process that started this one), and the kernel says how a process mapped a range in one call (PAGEMAP_SCAN,
+@@ -867,6 +880,21 @@ static Arena arena_reserve_growing(uint64_t capacity, uint64_t requested, uint64
+     return result;
+ }
+ 
++// Keeps the huge-advised bytes [from, to) of `mapping` out of 2 MB pages (arena_pages_medium): the first page of each
++// 2 MB that starts in them, from a huge-page boundary, is advised a base page. The kernel takes a 2 MB page only where
++// one mapping covers all of it, and the advice splits the mapping there, so the largest page it gives the rest is the
++// next size the host has enabled.
++static void arena_medium_split(uint8_t* mapping, uint64_t from, uint64_t to)
++{
++    uintptr_t at = ((uintptr_t)mapping + from + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++    const uintptr_t end = (uintptr_t)mapping + to;
++    while (at < end)
++    {
++        madvise((void*)at, BUSTER_ARENA_PAGE_BYTES, MADV_NOHUGEPAGE);
++        at += BUSTER_ARENA_HUGE_PAGE_BYTES;
++    }
++}
++
+ // Maps [from, to) of a growing arena's mapping, writable, in place, with the page advice its reservation would give
+ // those bytes (arena_reserve_policy, arena_commit): huge past its base pages, unless the host is busy, and base pages
+ // below them where those are 2 MB or more.
+@@ -899,6 +927,10 @@ static bool arena_extend(Arena* arena, uint8_t* mapping, uint64_t from, uint64_t
+             const uint64_t begin = from > small_end ? from : small_end;
+             madvise(mapping + begin, to - begin, MADV_HUGEPAGE);
+             arena->huge = true;
++            if (arena_pages_medium)
++            {
++                arena_medium_split(mapping, begin, to);
++            }
+         }
+         __atomic_store_n(&arena_slots.bytes[arena_slot_of(mapping)], to, __ATOMIC_RELEASE);
+     }
+@@ -1174,7 +1206,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+             {
+                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
+             }
+-            for (uint32_t i = 0; !arena_pages_busy && i < count; i += 1)
++            for (uint32_t i = 0; !arena_pages_busy && !arena_pages_medium && i < count; i += 1)
+             {
+                 if (ends[i] > smalls[i])
+                 {
+@@ -1321,10 +1353,12 @@ static void arena_page_policy(const char* setting)
+     uint32_t edx = 0;
+     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
+     const bool off = setting != 0 && strcmp(setting, "0") == 0;
+-    const bool on = setting != 0 && strcmp(setting, "1") == 0;
++    const bool medium = setting != 0 && strcmp(setting, "medium") == 0;
++    const bool on = (setting != 0 && strcmp(setting, "1") == 0) || medium;
+     // Asked only where neither the setting nor the machine decides: off as the process was started.
+     const bool inherited = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) != 0;
+     arena_pages_busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
++    arena_pages_medium = medium;
+     arena_executable_huge_pages = recent && !off && !(virtual_machine && !on) && !inherited;
+     if (off || (virtual_machine && !on))
+     {
+@@ -1554,6 +1588,10 @@ static bool arena_commit(Arena* arena, uint64_t end)
+                 madvise(mapping + small_end, arena->mapping_bytes - small_end, MADV_HUGEPAGE);
+                 arena->huge = true;
+             }
++            if (arena_pages_medium && arena->capacity > arena->small && target > small_end)
++            {
++                arena_medium_split(mapping, committed > small_end ? committed : small_end, target);
++            }
+         }
+         else
+         {

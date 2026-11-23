@@ -1,0 +1,91 @@
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 19ff4f6f..d1aae973 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -274,6 +274,19 @@ bool arena_pages_busy;
+ #else
+ static bool arena_pages_busy;
+ #endif
++// Whether the arenas take the kernel's medium pages (#2536): transparent huge pages of a size between a base page and
++// 2 MB (64 KB, where the host enables it: /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled), where they would
++// take huge pages. Their huge pages are then advised as on an idle host, and the first page of each 2 MB of them is
++// advised a base page as its commit reaches it (arena_medium_split), so that no mapping covers a whole 2 MB and the
++// kernel's largest page there is the next size it has. arena_page_policy sets it once, before the process starts any
++// thread; main.c's units share it.
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern bool arena_pages_medium;
++#elif defined(BUSTER_UNIT)
++bool arena_pages_medium;
++#else
++static bool arena_pages_medium;
++#endif
+ // Whether the exit helper may ask the kernel for huge pages of the executable's own pages (#2873, lane_exit_probe):
+ // transparent huge pages are on for the whole process (not PR_SET_THP_DISABLE: a virtual machine, BUSTER_HUGE_PAGES=0,
+ // or the process that started this one), and the kernel says how a process mapped a range in one call (PAGEMAP_SCAN,
+@@ -867,6 +880,21 @@ static Arena arena_reserve_growing(uint64_t capacity, uint64_t requested, uint64
+     return result;
+ }
+ 
++// Keeps the huge-advised bytes [from, to) of `mapping` out of 2 MB pages (arena_pages_medium): the first page of each
++// 2 MB that starts in them, from a huge-page boundary, is advised a base page. The kernel takes a 2 MB page only where
++// one mapping covers all of it, and the advice splits the mapping there, so the largest page it gives the rest is the
++// next size the host has enabled.
++static void arena_medium_split(uint8_t* mapping, uint64_t from, uint64_t to)
++{
++    uintptr_t at = ((uintptr_t)mapping + from + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++    const uintptr_t end = (uintptr_t)mapping + to;
++    while (at < end)
++    {
++        madvise((void*)at, BUSTER_ARENA_PAGE_BYTES, MADV_NOHUGEPAGE);
++        at += BUSTER_ARENA_HUGE_PAGE_BYTES;
++    }
++}
++
+ // Maps [from, to) of a growing arena's mapping, writable, in place, with the page advice its reservation would give
+ // those bytes (arena_reserve_policy, arena_commit): huge past its base pages, unless the host is busy, and base pages
+ // below them where those are 2 MB or more.
+@@ -899,6 +927,10 @@ static bool arena_extend(Arena* arena, uint8_t* mapping, uint64_t from, uint64_t
+             const uint64_t begin = from > small_end ? from : small_end;
+             madvise(mapping + begin, to - begin, MADV_HUGEPAGE);
+             arena->huge = true;
++            if (arena_pages_medium)
++            {
++                arena_medium_split(mapping, begin, to);
++            }
+         }
+         __atomic_store_n(&arena_slots.bytes[arena_slot_of(mapping)], to, __ATOMIC_RELEASE);
+     }
+@@ -1174,7 +1206,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+             {
+                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
+             }
+-            for (uint32_t i = 0; !arena_pages_busy && i < count; i += 1)
++            for (uint32_t i = 0; !arena_pages_busy && !arena_pages_medium && i < count; i += 1)
+             {
+                 if (ends[i] > smalls[i])
+                 {
+@@ -1321,10 +1353,12 @@ static void arena_page_policy(const char* setting)
+     uint32_t edx = 0;
+     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
+     const bool off = setting != 0 && strcmp(setting, "0") == 0;
+-    const bool on = setting != 0 && strcmp(setting, "1") == 0;
++    const bool medium = setting != 0 && strcmp(setting, "medium") == 0;
++    const bool on = (setting != 0 && strcmp(setting, "1") == 0) || medium;
+     // Asked only where neither the setting nor the machine decides: off as the process was started.
+     const bool inherited = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) != 0;
+     arena_pages_busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
++    arena_pages_medium = medium;
+     arena_executable_huge_pages = recent && !off && !(virtual_machine && !on) && !inherited;
+     if (off || (virtual_machine && !on))
+     {
+@@ -1554,6 +1588,10 @@ static bool arena_commit(Arena* arena, uint64_t end)
+                 madvise(mapping + small_end, arena->mapping_bytes - small_end, MADV_HUGEPAGE);
+                 arena->huge = true;
+             }
++            if (arena_pages_medium && arena->capacity > arena->small && target > small_end)
++            {
++                arena_medium_split(mapping, committed > small_end ? committed : small_end, target);
++            }
+         }
+         else
+         {
