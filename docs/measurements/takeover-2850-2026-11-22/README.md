@@ -1381,6 +1381,11 @@ body**. `develop-23d6ab895/corpus-gate.txt` (`scripts/corpus-gate.sh`): `sqlite3
 545 of 1,096, the compiler's own source 0 of 8,739, musl 4,442 of 18,584; 1,007 diagnostics looked at, 0 in a taken
 body.
 
+**At the head the PR has** (`develop-f07b80e2b/`: main merged in again, at `389118a6c`; buster14a/buster#3365): the
+same sets and twenty runs with status 0; the gate over the tests' units reads 111,906 units, the producer ran in
+74,783, 36,393 of 1,956,140 bodies taken, 1,191,188 diagnostics looked at, 0 at a token of a taken body; the corpora
+the same.
+
 **What neither gate could see,** found by the compile built on it (below) and by main's merge, each with a rule and a
 fixture in this branch: a target that fuses a product and a sum (the lowering contracts `a * b + c` with FMA or
 AVX-512F, the machine did not: `--shadow` counted the entries as differences under `-mfma`, on main too); a naked
