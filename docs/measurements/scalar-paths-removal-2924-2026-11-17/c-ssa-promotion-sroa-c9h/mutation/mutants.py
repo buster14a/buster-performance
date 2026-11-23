@@ -1,0 +1,22 @@
+M = [
+ ("m00", "static SsaError ssa_construct_vector(SsaWork* work)", "static SsaError ssa_construct_vector(SsaWork* work)"),
+ ("m01", "listed += open;", "listed += 1;"),
+ ("m02", "use[dense / 64] |= open ? bit : 0;", "use[dense / 64] |= 0;"),
+ ("m03", "if (end - begin > 1)\n            {\n                const uint32_t stop", "if (end - begin > 2)\n            {\n                const uint32_t stop"),
+ ("m04", "const uint32_t stop = work->dominators.idom[b];", "const uint32_t stop = b;"),
+
+ ("m07", "if (grew != 0 && queued[join] == 0)", "if (grew != 0 && queued[join] == 0 && join == UINT32_MAX)"),
+ ("m08", "const bool entry = block == 0;", "const bool entry = false;"),
+ ("m09", "_mm512_mask_storeu_epi32(exit + slot, unwritten, value);", "_mm512_mask_storeu_epi32(exit + slot, (__mmask16)(unwritten | active), value);"),
+ ("m10", "work->phi_operands[first + phi * edges + edge] = row[phi];", "work->phi_operands[first + phi + edge * count] = row[phi];"),
+ ("m11", "_mm512_mullo_epi32(positions, _mm512_set1_epi32((int)edges))", "_mm512_mullo_epi32(positions, _mm512_set1_epi32((int)edges - 1))"),
+ ("m12", "        dataflow_liveness(&work->flow);\n", ""),
+ ("m13", "            for (uint32_t first = begin; first < end; first += 64)\n            {\n                const uint32_t count = end - first < 64 ? end - first : 64;\n                const __mmask64 active = count == 64 ? UINT64_MAX : (1ull << count) - 1;", "            for (uint32_t first = begin; first < end; first += 64)\n            {\n                const uint32_t count = end - first < 64 ? end - first : 64;\n                const __mmask64 active = count == 64 ? UINT64_MAX >> 1 : (1ull << count) - 1;"),
+ ("m14", "return (__mmask16)(row[slot / 64] >> (slot % 64));", "return (__mmask16)(row[slot / 64] >> (slot % 32));"),
+ ("m15", "            const uint32_t count = slots - slot < 16 ? slots - slot : 16;\n            const __mmask16 active = (__mmask16)((1u << count) - 1);\n            const __mmask16 phis = entry", "            const uint32_t count = slots - slot < 16 ? slots - slot : 15;\n            const __mmask16 active = (__mmask16)((1u << count) - 1);\n            const __mmask16 phis = entry"),
+ ("m16", "work->aliases[i] = row[work->dense[input->locals[i]]];", "work->aliases[i] = row[0];"),
+ ("m17", "while (x != stop && seen[x] != b + 1)", "while (x != stop)"),
+ ("m19", "            next += (uint32_t)__builtin_popcount(phis);\n", ""),
+ ("m21", "                    values[i] = ssa_undefined(work, input->locals[i]);\n", ""),
+ ("m22", "const uint64_t bit = 1ull << (dense % 64);\n                        if (((writes >> lane) & 1) != 0)", "const uint64_t bit = 1ull << (dense % 64);\n                        if (((writes >> lane) & 1) != 0 && lane != 63)"),
+]
