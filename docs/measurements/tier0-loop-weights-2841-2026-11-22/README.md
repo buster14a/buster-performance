@@ -61,3 +61,32 @@ runs on every call. `luaD_precall`'s loop that fills missing fixed parameters wi
 `luaF_closeupval` keep their loop's locals in registers now (frame accesses 4 → 0, 3 → 1) but push two and one more
 callee-saved registers on every call (4 → 6, 5 → 6), as the callee-saved threshold admits a local referenced once in a
 loop. Loop depth alone doesn't tell a hot loop from a cold one in a function whose straight-line path is what runs.
+
+## Variants (2026-11-23)
+
+Two bounded rounds to find a rule without the loss (`variants/`). `x2841.patch` is an experiment on the PR's merged
+head `c9d66c22`, never part of a PR: `X2841_SHIFT` picks the loop factor (0 gives main's unweighted homes exactly, 3
+the PR's 8x, 1 a factor of 2) and `X2841_CALLEE=1` makes a local referenced once count 1 wherever it is (so a loop
+alone doesn't admit it to a callee-saved register). One compiler built every variant's programs.
+
+- Static first (`variants/static.txt`, `lua-static.sh`): at a factor of 2 `luaD_precall` and `luaD_pretailcall` are
+  back within one frame access of base; the once-counts-1 rule undoes `luaF_close`'s extra pushes. No variant changes
+  the spliced lexer's `tokenize_c` (22,098 accesses by s1 and once1 against base's 22,093).
+- Round 1 (`run-variants.sh`, `variants/round1`), against base, 5 runs, two rounds:
+
+  | program | head (8x) | s1 (2x) | once1 (2x, once counts 1) |
+  | --- | ---: | ---: | ---: |
+  | speedtest1 | −1.49, −1.68 | −2.09, −2.20 | −2.61, −2.72 |
+  | Lua calls | +2.40, +2.92 | +0.30, +0.87 | +0.30, +1.50 |
+  | closures | −0.28, +0.87 | −0.34, −1.06 | −0.35, −1.77 |
+  | strings | −0.36, −0.90 | +1.09, +0.46 | +2.85, +2.49 |
+  | tables | −0.58, +0.31 | −0.12, +0.66 | −1.46, −1.13 |
+  | arithmetic | +0.25, −1.59 | −0.11, −1.74 | −0.02, −1.64 |
+
+- Round 2 (`run-variants2.sh`, `variants/round2`), s1 only, Lua at 9 runs: the self-built lexer's `c_tokenize`
+  48.59/48.59 cycles/B by s1 against 48.73/48.69 by base (−0.25%), `refine_tokens_fused` and `benchmark-files` within
+  noise; speedtest1 −1.11/−0.89%; Lua calls +1.24/+1.15%, strings +1.16/+1.45%, tables +0.96/+1.42%, closures
+  −0.75/−0.71%, arithmetic −0.22/−0.30%; head again calls +3.18/+3.18%.
+
+**Outcome:** no variant gains without a loss. s1 wins speedtest1 by 1 to 2% and the lexer by 0.25%, but runs Lua's
+calls (+0.3 to +1.2% in four measurements) and strings (+0.5 to +1.5%) slower; once1 loses strings by 2.5 to 2.9%.
