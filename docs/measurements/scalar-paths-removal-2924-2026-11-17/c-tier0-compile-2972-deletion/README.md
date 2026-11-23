@@ -103,13 +103,54 @@ gives cycles a typed entry, and instructions:
 **Cut 2, the clears.** The bit columns and the references' counts are a few cache lines for a small function. A call of
 the C library's `memset` cost more than clearing them with 64-byte stores.
 
-**The gate with cut 1** ([`results/gate-cut/`](results/gate-cut/)): *pending; the 9700X queue.*
+**The gate with cut 1** ([`results/gate-cut/`](results/gate-cut/), [`gate2.txt`](results/gate-cut/gate2.txt)) runs main
+plus commit 1 with the knob, otherwise the same as main's gate. The table gives the twin's ticks over the vector path's:
 
-**The head, warm** ([`scripts/head.sh`](scripts/head.sh), [`results/head/`](results/head/)): *pending; the 9700X queue.*
+| Entries | Calls | Main | Cut 1 |
+| --- | ---: | ---: | ---: |
+| 0 to 1 | 41 | 0.890 | 0.886 |
+| 2 to 3 | 192 | 1.057 | 1.057 |
+| 4 to 7 | 866 | 1.151 | 1.149 |
+| 8 to 15 | 1,147 | 1.373 | 1.378 |
+| 16 to 63 | 2,587 | 2.097 | 2.056 |
+| 64 to 255 | 2,322 | 2.821 | 2.753 |
+| 256 to 1,023 | 768 | 3.373 | 3.322 |
+| 1,024 and up | 121 | 2.327 | 2.389 |
+| **the corpora**, first calls set aside | 8,044 | **2.448** | **2.438** |
+| `tiny.c`, 1 entry | 1,000 | 0.620 | **0.668** |
+| `tiny.c`, 6 entries | 1,000 | 0.911 | **1.012** |
+
+- **`tiny.c`:** the cut moves it. Its 6-entry functions are now even with the twin in the gate, though still 7% behind
+  warm (below).
+- **The corpora:** the ratios do not move beyond what two builds differ by. Summed over the bins, the twin's ticks (code
+  the cut doesn't touch) read 0.5% more in cut 1's build than in main's, and the vector path's 0.9% more.
+- **The corpora's 41 calls of 0 and 1 entries:** about 3,600 ticks each, ten times `tiny.c`'s, and the passes the cut
+  skips are not where that goes.
+- **Objects:** the masks' objects are the same, 1,373 of 1,373 ([`objects.txt`](results/gate-cut/objects.txt)).
+
+**The head, warm** ([`scripts/head.sh`](scripts/head.sh), [`results/head/`](results/head/)): the vector path alone, since
+the twin is gone. The twin's column is main's, whose twin is the same code. The table gives cycles a typed entry, the
+three rounds, and instructions a typed entry:
+
+| Input | Head | Main, vector | Twin (main) | Instructions, head / main |
+| --- | --- | --- | --- | --- |
+| `tiny.c` | 262.5, 263.1, 268.7 | 308.9, 309.0, 309.6 | 208.2, 210.1, 210.4 | 1,059.9 / 1,176.5 |
+| `tiny1.c` | 748.6, 749.5, 766.1 | 900.7, 905.0, 919.3 | 393.6, 394.3, 394.6 | 3,140.2 / 3,596.2 |
+| `tiny6.c` | 183.1, 184.3, 188.1 | 209.8, 210.9, 211.4 | 170.1, 172.0, 177.3 | 713.2 / 773.2 |
+
+The vector path's cycles over the twin's, by the medians:
+
+| Input | Main | Head |
+| --- | ---: | ---: |
+| `tiny.c` | 1.47 | 1.25 |
+| `tiny1.c` | 2.30 | 1.90 |
+| `tiny6.c` | 1.23 | 1.07 |
+
+Cut 2 adds little to cut 1 on top: 50 instructions fewer on `tiny1.c`, and within a round's spread in cycles.
 
 ## What is left
 
-The vector compile still loses on functions of 1 entry: after the cuts, about 1.9× the twin's cycles warm on
+The vector compile still loses on functions of 1 entry: after the cuts, 1.90 times the twin's cycles warm on
 `tiny1.c`. It is a chain of about a dozen passes, each a block's work ending in a store that the next reads
 ([`../c-tier0-compile-2972/`](../c-tier0-compile-2972/)'s "What is left"). The corpora have 41 such calls in 8,044, and
 the vector path wins everything from 2 entries on. Closing the gap needs several small functions in one block of the
@@ -118,7 +159,11 @@ passes. #2972's comments record that as the follow-up, not started here.
 ## The head against main
 
 - **Objects:** *pending.*
-- **Tests**, on the PR's head in a cloud container (Develop; the 9700X has no spare lock time for them):
+- **Main's #2874 merged in:** after these runs, main gained #2874's batched passes (`1f43095f`): five passes over a
+  batch of up to 32 functions. The pull request merges it, keeping its passes' vector arms alone. `test-tier0`'s frozen
+  digest, recorded before either change, still matches on the merge, so the code is the same.
+- **Tests**, on the PR's head and again on the merge, in a cloud container (Develop; the 9700X has no spare lock time
+  for them):
   - `test-tier0` and `test-tier0 --cross-check`;
   - `test-tier0-inline`, `test-unwind`, `test-emitted-code`, `test-ir-lowering`, `test-x86-target-selection`;
   - the builtins' lowering and helper tests, `test-tier1-pipeline`, `test-check-lanes`,
