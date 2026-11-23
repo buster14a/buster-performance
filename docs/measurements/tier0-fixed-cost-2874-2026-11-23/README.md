@@ -67,6 +67,43 @@ store-to-load conflicts a body. The whole compile has 3.85 M such conflicts (the
 them in the checker's passes (`check_input_expressions_coded_range` 563 K, `check_graph_run` 389 K,
 `parse_tree_columns` 242 K), which this record doesn't look into.
 
+## Each of those loads without its wait, a knob each: the samples overstated them (`results/stalls1`)
+
+[Piece D's specification](https://github.com/buster14a/buster/issues/2874#issuecomment-7116827073) took the
+samples above as costs. Before the piece's own A/B, each fix went behind a bit of `BUSTER_TIER0_CHAIN` in one tuning
+executable (`tune5`: `scripts/tune5.patch` on main `b7d0b5ed`), each exact: every value of the knob gives main's
+object for `sqlite3.c`, and with all on, 2,951 compiles and 4,492 at the AVX targets are the same as main's.
+
+`-c sqlite3.c`, medians of 9 in turn (`table.txt`); and the benchmark in batches of 32 (`benchmark.txt`), over every
+function and over the 1,437 functions under 64 entries (27.0 entries each), with the store-to-load conflicts (raw
+event `224`):
+
+| the bit | what | `tier0`, ms | cycles an entry | under 64 entries: cycles a function | instructions a function | conflicts a function |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | none | 3.711 | 46.42 | 2,401 | 8,208 | 44.0 |
+| 32 | the front's sub-passes each over the batch | 3.803 | 47.70 | 2,462 | 8,333 | 37.7 |
+| 64 | P3a's distances carried in a register | 3.729 | 46.37 | 2,373 | 8,179 | 43.2 |
+| 128 | the references' counts zeroed by whole vectors | 3.727 | 46.49 | 2,392 | 8,192 | 45.0 |
+| 256 | P0's predicates' words stored whole | 3.802 | 47.32 | 2,429 | 8,324 | 45.2 |
+| 512 | the front's whole-block stores unmasked | 3.704 | 47.05 | 2,397 | 8,208 | 42.3 |
+| 1024 | the homes' register bits as a mask | 3.719 | 46.45 | 2,384 | 8,200 | 43.1 |
+| 2048 | a job's code copied once | 3.736 | 46.47 | 2,385 | 8,180 | 44.4 |
+| 4096 | the driver reads a batch's code in place | 3.736 | 46.83 | 2,394 | 8,208 | 44.7 |
+| 8192 | the free registers' lists compressed in registers | 3.735 | 46.46 | 2,382 | 8,105 | 44.5 |
+| 16384 | measuring's counts in registers | 3.719 | 46.53 | 2,413 | 8,212 | 46.2 |
+| 32736 | all of them | 3.818 | 48.31 | 2,475 | 8,270 | 34.2 |
+| 32740 | all, and selection's gather ahead | 3.779 | 47.55 | 2,457 | 8,351 | 32.3 |
+
+- **No fix moves `tier0` in a compile:** every single bit reads within 0.03 ms of none, on either side.
+- **In the benchmark a fix gains 9 to 28 cycles a small function** where its load was sampled at 58 to 95: the
+  processor keeps working past a load that waits, retirement stops at it, and the samples pile up there. A function
+  under 64 entries has 44 such conflicts; removing one is worth what little of its wait nothing else overlapped.
+- **Two are slower by 0.09 ms:** the front's sub-passes each over the batch (six conflicts fewer a function, and the
+  columns touched again from further away), and P0's words put together in registers (an inner loop of shifts
+  where eight byte stores were cheaper). They make "all of them" slower.
+- So a function's fixed cost is its instructions (5,119 for a function of five entries, at 3.9 a cycle), not a few
+  waits.
+
 ## Piece C: selection's words gathered a block ahead (`results/ab-ahead`)
 
 [Specified here](https://github.com/buster14a/buster/issues/2874#issuecomment-7116319725), after a knob of the tuning
@@ -95,4 +132,7 @@ an entry: main 50.93, 51.31, 51.00; the piece 50.76, 50.88, 50.70.
   objects' comparison.
 - `results/bins1/bins.txt`: a line a run; `results/small1`: `events.txt`, the benchmark's line, `ips.tar.zst` (each
   event's sampled addresses and counts, for the tuning executable `tune4` of the batches' record).
-- `results/ab-ahead`: the tables, the objects' hashes, `stages.tar.zst`.
+- `scripts/tune5.patch`, `knobs2.sh`, `run-stalls.sh`: the stalls' knobs (the whole tuning tree against main
+  `b7d0b5ed`) and their scan. Not for main.
+- `results/ab-ahead`: the tables, the objects' hashes, `stages.tar.zst`; `results/stalls1`: the scan's tables and
+  `stages.tar.zst`.
