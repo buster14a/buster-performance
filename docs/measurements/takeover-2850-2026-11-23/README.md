@@ -358,3 +358,50 @@ The same sweep (`scripts/sweep.sh`) over every tenth first-parent merge from `4b
 They do not. User instructions of `-c sqlite3.c` go from 1,362.108 M to 1,262.185 M and only fall, but for one step
 of +3.854 M (`e31c90375` to `875c08e9d`); the total goes from 121.05 ms to 112.71. So what the compile gained by
 features in this window is the day of 22 to 23 November, whose five steps the section above places.
+
+## The producer at main `da652ae8d`, and its setup as scans (`producer/`)
+
+**Where `--node-bodies`' cost is** (`producer/where-da652ae8d/`: `scripts/job-nb2.sh`; `prof2.sh` without the option,
+`plain/`, and with it, `bodies/`; `scripts/lines2.sh` for the cycles by source line within the symbols the option adds
+most to, `lines-bodies.txt`). The stages' medians, ms: the total 114.199 without and 133.518 with (+19.319);
+check-input 40.988 to 69.760, check-expressions 10.946 to 7.842, check-program 23.341 to 18.187, lower 11.635 to
+10.642. By symbol the option adds 197.5 M cycles a run and removes 88.5 M:
+
+| what it adds, M cycles a run | |
+| --- | ---: |
+| the census's tests (`node_census_node` 19.7, `_walk` 4.4, `_expression` 2.9, `_unsequenced` 2.5, `_reader_expression` 2.0, the constants' 2.9, others) | 36 |
+| `node_alone_bodies`, the loop with a body's reading and writing inlined | 16.4 |
+| T (`node_machine_type_in_context` 8.3, `node_machine_rule` 6.1, `node_machine_call_rule` 1.3) | 15.7 |
+| `node_front_chunk` | 14.5 |
+| `node_machine_reader_chunk` 6.0 and `node_machine_reader_side` 6.0 | 12.0 |
+| the twin (`node_twin_build` 6.9, `node_twin_gates` 3.0, `node_twin_unreached` 1.6) | 11.5 |
+| `clear_page_erms` | 11.0 |
+| what is asked before a reading (`node_producer_before` 4.6, `node_front_started` 2.8, `node_alone_scan` 2.5) | 9.9 |
+| `node_alone_begin` | 9.85 |
+| C, `node_machine_contexts` | 6.7 |
+| `check_lower_taken_body` | 6.6 |
+| the tokens prepared a second time (`check_input_expression_literals` +3.25, `_identifiers` +2.8) | 6.0 |
+| X, `node_machine_expand` | 5.45 |
+
+What it removes: `check_graph_run` 7.6, `check_lower_drain` 6.7, `check_program_references` 6.55,
+`check_input_expressions_coded_range` 4.7, `check_input_warning_graph` 3.2, `check_control_drain` 2.8 and seventy
+smaller. So it pays once what it adds is under 88.5 M: 45% of today's.
+
+By source line only `node_alone_begin` has a shape: five passes over every token of the unit, a token at a time
+(`c_check_node_machine_alone.c`'s count of the bodies and its test of each body's run of the postorder,
+`c_check_node_bodies.c`'s largest body, defined functions and the enumerations' two passes). The others are flat.
+
+**Its setup as scans** (`producer/setup/`; `scripts/setup1.patch` on `da652ae8d`, `scripts/job-setup1.sh`): the
+bodies' opening braces and the `enum` keywords listed by 64 tokens a compare, the passes reading those lists, and a
+body's run tested 16 positions a step. The option in both arms (`pair2-*/summary.txt`; each workload's objects and
+diagnostics one set):
+
+| | rounds | main, ms | the scans, ms | paired, ms | lower | user cycles, M | user instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | 133.656 | 133.113 | -0.977 | 5/7 | -6.376 (7/7) | -23.395 |
+| Lua, 34 units | 5 | 73.443 | 72.884 | -0.595 | 5/5 | -2.791 | -9.733 |
+| musl, 1,336 units | 5 | 749.126 | 746.624 | -2.118 | 5/5 | -19.787 | -66.781 |
+| the compiler's own source (takes no body) | 5 | 607.436 | 605.855 | -1.999 | 4/5 | -10.726 (3/5) | +0.002 |
+
+`sqlite3.c`'s two rounds that are not lower held base pages for a run (one read +16.4 ms); its cycles are lower in
+seven of seven.
