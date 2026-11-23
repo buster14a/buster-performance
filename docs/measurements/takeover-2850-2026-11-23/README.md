@@ -323,8 +323,9 @@ The instructions are exact to a thousandth and place each step:
 | `2a613c7b6` and `9730190c3` | +18.214 | check-expressions 10.53 to 12.15 | buster14a/buster#2937, constant logical operands (buster14a/buster#3398 takes 11.5 M back: 10.87 at `f26d9c012`) |
 | `ff9bad73b` and `94ec1ca8c` | +139.591 | check-program 23.53 to 34.61 | buster14a/buster#3381, the expansion history asked of every discarded statement (buster14a/buster#3405 takes it back) |
 
-So the day cost the compile 18 ms (110.84 to 128.81), of which the two fixes return 12.3; the 5.2 ms that stay are
-three features' own work (115.8 ordinary at `f26d9c012` against 110.8). No check of a pull request reads this number.
+So the day cost the compile 18 ms (110.84 to 128.81), of which the two fixes return 12.3; the 5.0 ms that stay
+(115.8 ordinary at `f26d9c012` against 110.8) are three features' own work, less 0.7 that Tier 0 gained since. No
+check of a pull request reads this number.
 
 ## The statements' reach, two cuts: under the line (`reach/`)
 
