@@ -1,0 +1,2 @@
+#!/bin/bash
+for s in lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject lopcodes lparser lstate lstring ltable ltm lundump lvm lzio lauxlib lbaselib lcorolib ldblib liolib lmathlib loadlib loslib lstrlib ltablib lutf8lib linit lua; do /tmp/3346-claude/tree/build/compiler --tier1 "$@" --lanes 1 -std=gnu99 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX -c -o /tmp/3346-claude/scratch/lua-t-$s.o /home/david/buster-fast-bench/139-claude/inputs/lua-5.4.8/src/$s.c || exit 1; done
