@@ -71,6 +71,42 @@ objects the same.
 Each on a quiet host, medians of 11 in turn, both objects the same; each exact on the corpora (2,928 compiles) and at
 the AVX targets (4,446) against the commit before it, `test-tier0 --cross-check` passing.
 
+## Then the calls' memo keys and hashes eight at a time (piece 5e), refuted (`results/ab-hash2`)
+
+`scripts/memo-hashes.patch`, on buster#3408's head `5a122ed6` (main `3431ed34` with 5c and 5d): measuring's loop over
+the deferred entries built eight listed calls' keys, hashed them in one vector (the same SplitMix64 hash: each key's
+sum the neighbouring quadwords', the 128-bit lanes' and the halves' pairs, every one of 1.6 million random keys' hashes
+the scalar one's), fetched their slots' lines and then probed each in order; and a call's entry in the table went to its
+place in the deferred list, which emission's loop read in order. In the profile of `5a122ed6` the memo's lookup was 4.8%
+of Tier 0's samples, a third of them on the hash's chain.
+
+| | `5a122ed6` (`bin/base5e`) | the piece (`bin/hash`) | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 4.034 | 4.072 | +0.038 |
+
+Every round: the base 4.026 to 4.112, the piece 4.041 to 4.145. Both objects the same. The keys' and hashes' arrays
+of eight and the loops over them cost more than the hash's latency they took out of the probes' chain; dropped.
+
+## Main's `check-program` between `e5c975f1` and `3431ed34` (`results/ab-mainmove`)
+
+The same Tier 0 code (5c and 5d) on main `e5c975f1`'s base (`bin/access`) and on `3431ed34` (`bin/base5e`), medians
+of 11 in turn, both objects the same:
+
+| stage | `e5c975f1`'s base | `3431ed34` | change |
+| --- | ---: | ---: | ---: |
+| `check-program` | 23.046 | 34.138 | +11.092 |
+| `lower` | 11.407 | 11.633 | +0.226 |
+| `tier0` | 4.047 | 4.060 | +0.013 |
+| the compile | 114.688 | 125.795 | +11.107 |
+
+Every round: `check-program` 22.83 to 24.80 on the first, 33.96 to 34.25 on the second. A first A/B of the piece
+against `bin/access` (`results/ab-hash`, not kept) read this move as the piece's; main's own merges made it. A build
+of merge `061effd6c`, the eighth of the sixteen, read 34 already (`check-program` 33.85 to 34.22 in 5 rounds against
+22.92 to 25.66). The cause is buster14a/buster#3381 (`94ec1ca8c`, the third), which had every discarded statement
+ask for the unit's expansion history, and so preprocess the unit a second time; buster14a/buster#3405 (merged at
+15:25Z, after `3431ed34`) takes it back ([`takeover-2850-2026-11-23`](../takeover-2850-2026-11-23/README.md)). Main
+from `a5e760845` on has the fix.
+
 ## The pull request's head against main (`results/ab-main2-emit`, medians of 11 in turn, ms)
 
 Main `e5c975f1` (`bin/main2`) against buster#3403's head `b3e3ba79` (`bin/emit`: the calls' memo, the VEX scan, and
@@ -106,6 +142,7 @@ the gate's 10.
 
 ## Files
 
-- `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`, `columns-pushes.patch`, `lists.patch`; `ab.sh`,
+- `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`, `columns-pushes.patch`, `lists.patch`,
+  `memo-hashes.patch` (refuted); `ab.sh`,
   `abtable.sh`; `exact.sh`, `exact-avx.sh`.
 - `results/`: the A/Bs' stage clocks, tables (`table.txt`), objects' hashes and the host's processes before and after.
