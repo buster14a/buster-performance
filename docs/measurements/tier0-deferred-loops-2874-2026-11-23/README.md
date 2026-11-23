@@ -87,6 +87,31 @@ of Tier 0's samples, a third of them on the hash's chain.
 Every round: the base 4.026 to 4.112, the piece 4.041 to 4.145. Both objects the same. The keys' and hashes' arrays
 of eight and the loops over them cost more than the hash's latency they took out of the probes' chain; dropped.
 
+## Then emission's branch targets after its blocks (piece 4b on main, `results/ab-targets2`)
+
+[`tier0-vex-scan-2874-2026-11-23`](../tier0-vex-scan-2874-2026-11-23/README.md)'s piece 4b, on main `8d3002eb2`
+(`scripts/branch-targets.patch`, the pull request's commit): emission's blocks store a template branch's target as its
+entry, with a bit no record index has, and `tier0_branch_targets` puts the entries' positions in their place once every
+block, deferred entry and the epilogue are written, 16 targets a gather, where each block gathered the positions
+(about 46 thousand gathers on `sqlite3.c`, about 1,700 now). Main (`bin/main3`) against it (`bin/targets2`), on a quiet
+host:
+
+| stage | main `8d3002eb2` | the piece | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 4.085 | 4.015 | -0.070 |
+| `emit-setup` | 1.056 | 1.046 | -0.010 |
+| `encode` | 0.350 | 0.328 | -0.022 |
+| the compile | 114.285 | 113.909 | -0.376 |
+
+Every round: main's `tier0` 4.050 to 4.190, the piece's 3.985 to 4.072. Both objects the same. On the memo's branch,
+before pieces 5a to 5d, it read -0.040 (the first record). `check-program` reads 23.4 in both: main has
+buster14a/buster#3405.
+
+Exact against main `8d3002eb2` (both built `native`): 2,944 compiles the same (1,937 built) on the corpora, and 4,478
+(2,476 built) at the AVX targets. `test-tier0 --cross-check`: 21,675,803 checks, 0 failed; its branch chain takes 271
+entries as well as 13 (270 targets: a count whose low byte, 14, is under a vector's 16, where `_bzhi_u32`'s mask once
+wrapped).
+
 ## Main's `check-program` between `e5c975f1` and `3431ed34` (`results/ab-mainmove`)
 
 The same Tier 0 code (5c and 5d) on main `e5c975f1`'s base (`bin/access`) and on `3431ed34` (`bin/base5e`), medians
@@ -143,6 +168,6 @@ the gate's 10.
 ## Files
 
 - `scripts/`: `deferred-loops.patch`, `deferred-emission.patch`, `columns-pushes.patch`, `lists.patch`,
-  `memo-hashes.patch` (refuted); `ab.sh`,
+  `memo-hashes.patch` (refuted), `branch-targets.patch`; `ab.sh`,
   `abtable.sh`; `exact.sh`, `exact-avx.sh`.
 - `results/`: the A/Bs' stage clocks, tables (`table.txt`), objects' hashes and the host's processes before and after.
