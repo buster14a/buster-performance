@@ -405,3 +405,51 @@ diagnostics one set):
 
 `sqlite3.c`'s two rounds that are not lower held base pages for a run (one read +16.4 ms); its cycles are lower in
 seven of seven.
+
+## Pages kept between a command's units, three ways (`kept-pages/`), and the instructions' baseline (`baseline/`)
+
+After David's decisions of 23 November (the check; the arenas' contract and `shmem_enabled=advise`; the rebuild after).
+None of the patches is for merge. The 9700X's lock was about twenty jobs deep, so each experiment is one executable
+with a switch and every workload's rounds in ONE hold (`scripts/keep-hold.sh`, `keep4-hold.sh`, `keep5-hold.sh`: a
+warm-up a workload, then a counted run a position; reduced by `scripts/keep-reduce.py` and its two siblings; their
+"wall ms" column is not filled, `perf stat` gives the cycles). Every run's status, objects and diagnostics are one
+set but where said.
+
+**The list of sites that need zeros, again** (`zero-sites-f5d89b84.list`, `zero-sites-campaign-progress.txt`): on the
+tree of 23 November the list is 26 sites, not the 28 of the morning's: three of the reader's sites were rewritten by
+the day's merges and one of Tier 0's is new (`tier0.c:14799`). With garbage in every other fresh push none of the
+4,714 cases differs.
+
+**The pool keeping its arenas' pages** (`scripts/experiment-kept-pool-pages.patch` on `f5d89b84`;
+`pool-pages-summary.txt`; `off`, `sites` = only the 26 sites' pushes cleared, `all` = every push cleared), cycles, M:
+
+| | off: user, kernel | sites: user, kernel | all: user, kernel | faults: off, sites, all |
+| --- | --- | --- | --- | --- |
+| musl, 1,336 units | 2,792.8, 939.6 | -24.9 (4/4), -196.5 (4/4) | +80.6, -191.2 | 266,778, 146,638, 148,670 |
+| two units of `sqlite3.c` | 1,160.3, 153.9 | +0.4, -7.4 (5/5) | +59.1, +158.9 | 10,390, 10,259, 56,985 |
+| `sqlite3.c`, `shell.c`, two of Lua's | 800.7, 145.4 | +1.6, -4.6 (5/5) | +13.3, +7.8 | 10,192, 10,226, 10,247 |
+| Lua, 34 units | 305.3, 64.4 | +3.5 (0/5), +0.9 (0/5) | +23.8, +10.2 | 15,810, 14,596, 17,680 |
+| `sqlite3.c` alone | 562.7, 83.8 | nothing | nothing | 5,678 |
+
+So with only the sites cleared musl's command takes 221 M fewer cycles of 3,732 M (5.9%), and Lua's loses 4 M: its
+callers that ask whether an arena is untouched clear again what the site's push cleared.
+
+**The units' lane's three discards skipped** (`scripts/experiment-kept-lane-discards.patch` on `90bb2d83`;
+`lane-discards-summary.txt`): nothing moves, on any workload; faults the same to a page. That path
+(`check_units_memory_give`) is not taken on one lane.
+
+**Every stage-end discard skipped** (`scripts/experiment-kept-stage-discards.patch` on `3f4ff4c7`, with the pool's
+keeping beside it; `stage-discards-summary.txt`): musl's kernel -12.6 M cycles (5/5), two units of `sqlite3.c` -7.5 M
+(5/5), faults 17 fewer of 10,390. With a fill of 0xA5 in the discards' place every workload's objects are the same:
+nothing reads those pages as zeros. (Its third setting, the pool's keeping with the list of `f5d89b84`, is void on
+musl and Lua: the list's lines are stale on `3f4ff4c7` and those compiles fail, two sets of objects.)
+
+**Why two units of `sqlite3.c` gain nothing** (`two-units-memory-calls.strace`, `second-unit-kernel-*.txt`,
+`two-units-stages-main.txt`): the command's peak is 463,440 KB for two units and 231 MB for one, so the second
+unit's arenas are new while the first's are held; with everything kept the kernel still clears 93% of what it
+cleared (`clear_page_erms` 105.97 against 98.11, the reports' units). The two units make 42 `MADV_DONTNEED` calls;
+musl's six units 103.
+
+**The baseline** (`baseline/measure-compile-90bb2d83.txt`, `scripts/job-base.sh`): main `90bb2d83` built as the 9700X
+job builds it (`BUSTER_HOST_ARCH=znver5`, `BUSTER_DEBUG_INFO=0`), the job's own arguments, three runs:
+1,279,713,311, 1,279,713,338 and 1,279,713,340 user instructions. buster14a/buster#3471's file states the median.
