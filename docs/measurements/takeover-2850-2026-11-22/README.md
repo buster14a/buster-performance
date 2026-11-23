@@ -1696,3 +1696,49 @@ what is called and how often, and less well what it costs):
 | `check_cfg_logic` | 6,038 | 3,035 | 0 | |
 | `check_cfg_fold` | 31,841 | 16,669 | 118 | |
 | an operand of `*` or `&` that is a constant 0 | 785 | 538 | 0 | |
+
+### Three cuts, each against its parent, and the one that stays (`default-path/9700x/`, buster branch `claude/2850-default-path`)
+
+[Its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7095888094): R1, the warning's pass
+does not replay a right operand whose own operator can only give 0 or 1; R2, the CFG's equality and relational checks
+ask of the operands before they work out the common type; R3, `check_program_const_integer`'s no kept by node.
+`summaries-three-cuts.txt` (`scripts/job-dp1.sh`: four Release trees, `pair2.sh`, the 9700X, CPU 2), on `sqlite3.c`,
+seven rounds each:
+
+| | predicted, ms | refuted under | paired; its least and most | lower | user cycles, M | instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| R1, `96fac43e0` to `0e446262f` | -1.3 | -0.7 | -1.742; -1.869, -0.928 | 7/7 | -10.704 | -11.477 |
+| R2, to `c24e2a52d` | -0.6 | -0.3 | **-0.122; -0.501, +0.160** | 5/7 | -0.862 | -1.700 |
+| R3, to `e61c039fc` | -0.5 | -0.25 | **+0.415; -0.023, +1.411** | 1/7 | +1.643 | -3.234 |
+| the three, `96fac43e0` to `e61c039fc` | -2.4 | -1.3 | -1.460; -1.819, -1.085 | 7/7 | -6.568 | -16.411 |
+
+R2 and R3 are refuted and were reverted on the branch. The three against main on the others, five rounds: Lua -0.053
+ms, musl +0.160, the compiler's own source -8.321, `sqlite3.c -Wall -Wextra` -1.926.
+
+`summaries-head-0db36d75e.txt` (`scripts/job-dp2.sh`): R1 alone at the branch's `0db36d75e` against main `96fac43e0`:
+
+| | rounds | paired, ms; its least and most | lower | instructions, M |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | -1.500; -17.143, -1.204 | 7/7 | -11.478 of 1,287.8 |
+| `sqlite3.c -Wall -Wextra` | 5 | -1.738; -2.117, -1.025 | 5/5 | -11.478 of 1,427.4 |
+| the compiler's own source | 5 | -10.050; -89.676, -7.411 | 5/5 | -50.347 of 9,152.2 |
+| Lua | 5 | -0.061; -0.274, +0.004 | 3/5 | -1.270 of 744.2 |
+| musl | 5 | -0.432; -0.915, +0.691 | 3/5 | -4.668 of 6,707.2 |
+
+(`sqlite3.c`'s least and the own source's are each one round whose parent ran slow.) The commits after `0db36d75e` add
+a line to a test's list and merge main and the driver test's sections' fold in; none touches the pass.
+
+**Exact** (`default-path/develop/`, Develop, this session's machine): `job-dp2-nets.txt` (`scripts/corpus-compare.sh`:
+each unit of the four corpora by main's compiler, by the branch's, and by the branch's with
+`BUSTER_TEST_DEFAULT_PATH_LOG`), at `0db36d75e`: 1,372 units plain and 1,372 with `-Wall -Wextra`, every object,
+diagnostic and status the same; the check's line summed: 14,891 operands not replayed, 0 an event, 0 a type made, both
+ways. `job-dp3-nets.txt`, the same at the head with main `c78091122` merged in, against that main: the same, 14,869
+operands. `job-dp2-inventory.txt`: the whole inventory at `0db36d75e`, 129 blocks passed and 27 failed where main's own
+build (`96fac43e0`) has 132 and 24: two for a file this tree lacked (`build/predefines.h`) and one the branch's, the test
+that every field of the reader's state has a class; the inventory again with the switch set, 111,863 commands, 243,095
+operands not replayed, 0 an event, 0 a type made; then the memory and the address rows on the 34 blocks
+(`sanitizer-rows.txt`), 34 passed each and no report. `job-dp3.txt`, at `9ce6a9c54` (the field classed, the file
+present): the whole inventory 132 passed and 24 failed, none failing that passes on main; the driver's eight parts;
+main.c compiled by itself; the no-recursion rule on a Release build, no cycle and no split variable. `faults.txt`
+(`scripts/dp-faults.py`): the rule inverted, asked of the left operand's operator, and widened by a sum, each built and
+run against the driver's test: each fails it.
