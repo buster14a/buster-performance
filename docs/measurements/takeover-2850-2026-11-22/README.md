@@ -1527,3 +1527,74 @@ the whole inventory on main's own build (`959da3b69`: 132 passed, 24 failed) and
 (`52c907e6e`: 131 passed, 25 failed). The one block that fails on the branch alone refuses a report file an earlier
 run had left in that tree, and fails the same way on main's build when run twice. Before this baseline two blocks that
 failed for the branch's sake (the no-recursion rule, and main.c compiled by itself) had been read as the machine's.
+
+## Where `--node-bodies`' cost is, and what main gained since `e9cbc3d72` (`node-bodies/where-*/`, `sizes-27b78da4d/`, `regress-e9cbc3d72-89362fd0f/`)
+
+**By stage and by symbol** (`node-bodies/where-b0ee1afaa/`: the 9700X, Release, CPU 2; the cut's binary with and without
+the option in turn, seven rounds, each position one hold of the lock: a warm-up, a `--time-stages` run, a `perf record`
+run (`cycles`, one sample each 100,003) and a counters run; `scripts/job-where1.sh`, reduced by `scripts/where-reduce.py`
+into `reduced.txt`; one object). Medians, ms:
+
+| `sqlite3.c` | without | with | |
+| --- | ---: | ---: | ---: |
+| check-input | 40.652 | 74.178 | +33.526 |
+| check-expressions | 12.052 | 8.739 | -3.313 |
+| check-declarations | 2.186 | 1.746 | -0.440 |
+| check-program | 23.409 | 18.345 | -5.064 |
+| lower | 11.624 | 10.643 | -0.981 |
+| total | 116.759 | 140.136 | +23.377 |
+
+The reader's peak grows by 145.6 MB and the process's by 134.7 (248.8 to 383.5 MB). The profiles' difference is +135.8 M
+cycles a run (+24.7 ms at 5.49 GHz). What grows, by the symbols' families, ms: the machine with no node of the walk's
+7.0 (its loop with what is inlined in it 4.4, `node_alone_begin` 2.1, the scan 0.5), the census's tests 6.9, the
+machine's sweeps and its keeping 8.1 (T 1.6, C 1.3, `node_machine_reader_chunk` 1.1, `node_machine_rule` 1.1, the
+sides' keeping 1.1, X 0.9), the kernel 5.7 (`clear_page_erms` 5.25), the front 3.2, the twin's controls 2.0, the splice
+1.2, `memset` and `memmove` 0.9: 34.5 in all. What shrinks is 10 to 12: the graph run 1.6, the lowering's drain 1.1, the
+program's references 0.9, the walk 0.9, the warnings' graph 0.75 and the rest of the program's and the controls'. **So
+the producer costs about 133 ns a position it sweeps (258,955), and a taken token saves about 63 ns (174,451).**
+
+**By what its setup makes** (`node-bodies/sizes-27b78da4d/`: `scripts/experiment-node-sizes.patch` on the cut's head, not
+for merge, names each range the option's setup pushes on the reader's two arenas and reads what of it is resident
+(`mincore`) before the producer's run and after it; a Release build on this session's machine, the arenas in huge pages
+as on the 9700X; sizes, not times; `sqlite-huge-reduced.txt`). MB:
+
+| `sqlite3.c`: 716,136 tokens, a graph's capacity of 780,125 | reserved | resident before the run | after it | sized by | a compile reads it |
+| --- | ---: | ---: | ---: | --- | --- |
+| the walk's front, its report's bits and contexts | 1.5 | 1.5 | 1.5 | the front's own, the capacity | its state |
+| the walk's machine's results by node, the objects' three columns | 66.3 | 16.3 | 16.3 | the capacity, the tokens | the objects' 6.5 |
+| the machine's own state | 2.1 | 2.1 | 2.1 | fixed | yes |
+| the walk's side's tests' state | 15.8 | 13.8 | 13.8 | the capacity, the tokens | no |
+| the machine with no node: its front, bits, the bodies' lists | 0.8 | 0.8 | 0.8 | the front's own, the bodies | yes |
+| its roots by token and their chains, the roots' tokens, the controls' roots | 11.5 | 11.5 | 11.5 | the tokens, the capacity | the controls' roots, 2.9 |
+| its graph | 146.2 | 4.2 | 30.2 | the capacity | the swept bodies' records |
+| its results by node, the tapes' store, the sides | 98.1 | 14.1 | 64.1 | the capacity | the swept bodies', but the digests' 12.4 |
+| its tests' state | 15.8 | 5.8 | 11.8 | the capacity, the tokens | yes |
+| the producer's | 9.1 | 4.3 | 5.1 | the bodies, their tokens | yes |
+| **all** | **367.3** | **74.5** | **157.4** | | |
+
+74.5 MB are resident before the producer reads a body: the setup's own `memset`s of whole-unit columns. In base pages
+the same run has 51 MB resident before and 71.5 after (`sqlite-base-pages.txt` is not kept; the figures are this
+paragraph's): the rest of the 157 is the huge pages' slack around columns written at their starts.
+
+**musl** (`node-bodies/where-musl-b0ee1afaa/`, `scripts/job-where2.sh`: the 1,336 units in one process, three rounds, a
+profile and a counters run each; `reduced.txt`): +523.7 M cycles a run (+95.4 ms). The kernel 39.3 ms
+(`clear_page_erms` 28.6), the tests 15.2 (`node_census_reader_begin` 3.8 of it), the machine with no node 11.7
+(`node_alone_begin` 5.8), the machine's sweeps 11.2, `memset` and `memmove` 5.5, the front 5.4 (`node_front_started` 2.7
+of it), the twin 2.8. 1,137 of the 1,336 units take a body, 21 have none, and in 227 the producer reads none
+(`sizes-27b78da4d/musl-units.txt`).
+
+**Main since `e9cbc3d72`** (`node-bodies/regress-e9cbc3d72-89362fd0f/summaries.txt`, `scripts/job-regress1.sh`: six
+Release trees along main's first parents, five pairs of `pair2.sh`, seven rounds each, the frozen `sqlite3.c`):
+
+| | paired, ms | its least and most | lower | user cycles, M | instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `e9cbc3d72` to `0367a836e`, five merges | +0.037 | -0.361, +0.584 | 3/7 | -0.786 | +0.821 |
+| buster14a/buster#3296, `0367a836e` to `c8234d2e8` | +0.868 | +0.034, +1.460 | 0/7 | +3.808 | +8.185 |
+| `c8234d2e8` to `0a08c8dd5`, seven merges | -0.080 | -0.867, +0.699 | 4/7 | -0.318 | -0.387 |
+| buster14a/buster#3324, `0a08c8dd5` to `8e25d3b8d` | +1.785 | +0.823, +1.945 | 0/7 | +7.686 | +15.655 |
+| `8e25d3b8d` to `89362fd0f`, ten merges | +2.415 | +2.022, +2.739 | 0/7 | +12.131 | +18.721 |
+
+`e9cbc3d72` reads 113.148 ms here and `89362fd0f` 117.564. `where-b0ee1afaa/main-since-d541430bf.txt`
+(`scripts/profile-diff.py`) is the plain arm's profile against `profile-d541430bf/`'s, by symbol: +25.7 M cycles a run;
+the symbols' names differ between the two trees where a function was split or moved, so its lines are where to look,
+not a measure of one change.
