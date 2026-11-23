@@ -1,0 +1,251 @@
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 19ff4f6f..731d1681 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -165,6 +165,9 @@ struct Arena
+     // For an arena of arena_reserve_tables, its tables' layout (arena_tables_layout), never 0; 0 for any other. The pool
+     // gives an arena only to a reservation of the same layout.
+     uint64_t layout;
++    // EXPERIMENT (not for merge, #2850): the bytes from the mapping's start that may hold an earlier user's data, for an
++    // arena the pool kept the pages of (BUSTER_EXPERIMENT_KEEP_PAGES=1); a push clears what it takes of them.
++    uint64_t dirty;
+ };
+ 
+ // Reserves up to `capacity` bytes (less under address-space constraints), zero-filled. A fresh mapping is initially
+@@ -730,6 +733,9 @@ static int arena_reservation_flags(uint64_t capacity, uint64_t small, uint64_t m
+ // is the reserving thread's, or null: its limits are read here if they haven't been, as its releases read them. *huge
+ // is whether the bytes are advised huge pages already, as the upper half's are: an arena's base pages stay base pages
+ // there as anywhere, by where they are (the 2 MB that hold them start in bytes that are never writable).
++#include <fcntl.h>
++static int arena_experiment_pool_file;
++
+ static uint8_t* arena_reservation_map(uint64_t bytes, int flags, ArenaPool* pool, bool* huge)
+ {
+     uint8_t* result = MAP_FAILED;
+@@ -751,6 +757,22 @@ static uint8_t* arena_reservation_map(uint64_t bytes, int flags, ArenaPool* pool
+             const int plain = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE;
+             uint8_t* mapped = mmap(0, 2 * BUSTER_ARENA_REGION_BYTES, PROT_NONE, plain, -1, 0);
+             const bool halved = mapped != MAP_FAILED && mmap(mapped, BUSTER_ARENA_REGION_BYTES, PROT_NONE, plain | MAP_STACK | MAP_FIXED, -1, 0) == mapped;
++            // EXPERIMENT (not for merge, #2850): BUSTER_EXPERIMENT_POOL_FILE names a file (on a tmpfs) that the stretch's
++            // upper half maps shared in place of anonymous memory: what an earlier process wrote there this one finds, and
++            // no page of it is cleared again. Its arenas are dirty from their start (arena_reserve_policy).
++            const char* pool_file = halved ? getenv("BUSTER_EXPERIMENT_POOL_FILE") : NULL;
++            if (pool_file != NULL)
++            {
++                const int fd = open(pool_file, O_RDWR | O_CREAT, 0600);
++                const bool sized = fd >= 0 && ftruncate(fd, (off_t)BUSTER_ARENA_REGION_BYTES) == 0;
++                uint8_t* upper = mapped + BUSTER_ARENA_REGION_BYTES;
++                const bool shared = sized && mmap(upper, BUSTER_ARENA_REGION_BYTES, PROT_NONE, MAP_SHARED | MAP_NORESERVE | MAP_FIXED, fd, 0) == upper;
++                __atomic_store_n(&arena_experiment_pool_file, shared ? 1 : 0, __ATOMIC_RELEASE);
++                if (fd >= 0)
++                {
++                    close(fd);
++                }
++            }
+             if (halved)
+             {
+                 madvise(mapped + BUSTER_ARENA_REGION_BYTES, BUSTER_ARENA_REGION_BYTES, MADV_HUGEPAGE);
+@@ -1047,6 +1069,7 @@ static Arena arena_reserve_policy(uint64_t capacity, uint64_t small, bool bounde
+             result.committed = offset & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+             result.requested_capacity = requested;
+             result.reserved = capacity;
++            result.dirty = advised_huge && __atomic_load_n(&arena_experiment_pool_file, __ATOMIC_ACQUIRE) != 0 ? UINT64_MAX : 0;
+         }
+         else
+         {
+@@ -1164,6 +1187,16 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
+         const int flags = MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | (advised && arena_stack_base_pages ? MAP_STACK : 0);
+         bool advised_huge = false;
+         uint8_t* mapping = allowed ? arena_reservation_map(mapping_bytes, flags, pool, &advised_huge) : MAP_FAILED;
++        if (mapping != MAP_FAILED && advised_huge && __atomic_load_n(&arena_experiment_pool_file, __ATOMIC_ACQUIRE) != 0)
++        {
++            // EXPERIMENT: a tables' arena reads its never-written entries as zeros: anonymous memory over its place in the
++            // pool file's half, advised as the half was.
++            mapping = mmap(mapping, mapping_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0);
++            if (mapping != MAP_FAILED)
++            {
++                madvise(mapping, mapping_bytes, MADV_HUGEPAGE);
++            }
++        }
+         if (mapping != MAP_FAILED)
+         {
+             // The base, `phase` past a huge-page boundary, a page or more past the mapping's start (and so at most a huge
+@@ -1355,6 +1388,75 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+     return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+ }
+ 
++static int arena_experiment_keep_state;
++static bool arena_experiment_keep(void)
++{
++    int state = __atomic_load_n(&arena_experiment_keep_state, __ATOMIC_RELAXED);
++    if (state == 0)
++    {
++        const char* value = getenv("BUSTER_EXPERIMENT_KEEP_PAGES");
++        state = value != NULL && value[0] == '1' ? 2 : value != NULL && value[0] == '2' ? 3 : 1;
++        __atomic_store_n(&arena_experiment_keep_state, state, __ATOMIC_RELAXED);
++    }
++    return state >= 2;
++}
++
++// EXPERIMENT: a push's site (the macros at the file's end set it; lane.c's own pushes have none), and whether a kept
++// page's bytes are cleared for it: always with BUSTER_EXPERIMENT_KEEP_PAGES=1; with 2, only at the sites
++// BUSTER_EXPERIMENT_FRESH_LIST's file names ("basename:line Z" a line) and at lane.c's own.
++typedef struct ArenaExperimentSite ArenaExperimentSite;
++struct ArenaExperimentSite
++{
++    const char* file;
++    uint32_t line;
++    bool zero;
++};
++static _Thread_local const char* arena_experiment_site_file;
++static _Thread_local uint32_t arena_experiment_site_line;
++static ArenaExperimentSite arena_experiment_sites[4096];
++static char arena_experiment_list[1u << 16];
++static int arena_experiment_list_state;
++
++static bool arena_experiment_clears(void)
++{
++    bool clears = true;
++    const char* file = arena_experiment_site_file;
++    if (arena_experiment_keep_state == 3 && file != NULL)
++    {
++        const uint32_t line = arena_experiment_site_line;
++        uint32_t slot = (uint32_t)(((uintptr_t)file >> 3) * 2654435761u + line * 40503u) & 4095;
++        while (arena_experiment_sites[slot].file != NULL && (arena_experiment_sites[slot].file != file || arena_experiment_sites[slot].line != line))
++        {
++            slot = (slot + 1) & 4095;
++        }
++        ArenaExperimentSite* site = arena_experiment_sites + slot;
++        if (site->file == NULL)
++        {
++            if (arena_experiment_list_state == 0)
++            {
++                const char* path = getenv("BUSTER_EXPERIMENT_FRESH_LIST");
++                const int fd = path != NULL ? open(path, O_RDONLY) : -1;
++                arena_experiment_list[0] = '\n';
++                const ssize_t length = fd >= 0 ? read(fd, arena_experiment_list + 1, sizeof(arena_experiment_list) - 2) : 0;
++                arena_experiment_list[length > 0 ? length + 1 : 1] = 0;
++                if (fd >= 0)
++                {
++                    close(fd);
++                }
++                arena_experiment_list_state = 1;
++            }
++            const char* slash = strrchr(file, '/');
++            char key[512];
++            snprintf(key, sizeof(key), "\n%s:%u Z", slash != NULL ? slash + 1 : file, line);
++            site->line = line;
++            site->zero = strstr(arena_experiment_list, key) != NULL;
++            site->file = file;
++        }
++        clears = site->zero;
++    }
++    return clears;
++}
++
+ static void arena_release(Arena* arena)
+ {
+     if (arena->base != 0 && arena->grows)
+@@ -1384,7 +1486,8 @@ static void arena_release(Arena* arena)
+                                (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
+         // Where the prefix stays writable, its pages alone (#3070), and elsewhere the whole mapping's.
+         const uint64_t extent = protected && pool->keeps_commits ? arena_pool_writable(pool, mapping, bytes, arena->committed) : bytes;
+-        const bool pooled = protected && (extent == 0 || madvise(mapping, extent, MADV_DONTNEED) == 0);
++        const bool kept_pages = protected && pool->keeps_commits && arena->layout == 0 && extent != bytes && arena_experiment_keep();
++        const bool pooled = protected && (extent == 0 || kept_pages || madvise(mapping, extent, MADV_DONTNEED) == 0);
+         if (pooled)
+         {
+             // A free slot, or else the one whose arena was released longest ago, which is unmapped.
+@@ -1416,6 +1519,7 @@ static void arena_release(Arena* arena)
+                 .requested_capacity = arena->requested_capacity,
+                 .reserved = arena->reserved,
+                 .layout = arena->layout,
++                .dirty = arena->dirty == UINT64_MAX ? UINT64_MAX : kept_pages ? (extent > arena->dirty ? extent : arena->dirty) : 0,
+             };
+         }
+         else if (!arena_release_keeps(arena, mapping))
+@@ -1574,6 +1678,7 @@ static bool arena_commit(Arena* arena, uint64_t end)
+ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+     void* result = 0;
++    const uint64_t experiment_peak = arena->peak;
+     const uintptr_t base = (uintptr_t)arena->base;
+     const uintptr_t position = base + arena->length;
+     const uintptr_t aligned = (position + alignment - 1) & ~(alignment - 1);
+@@ -1587,12 +1692,46 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            if (__builtin_expect(arena->dirty != 0, 0))
++            {
++                // What the push takes that nothing pushed before in this life of the arena and an earlier one may have
++                // written: cleared, as a fresh arena's bytes are.
++                const uint64_t dirty_end = arena->dirty > arena->mapping_offset ? arena->dirty - arena->mapping_offset : 0;
++                const uint64_t from = begin > experiment_peak ? begin : experiment_peak;
++                const uint64_t to = end < dirty_end ? end : dirty_end;
++                if (from < to && arena_experiment_clears())
++                {
++                    // A pool file's arena gives a push that needs zeros fresh anonymous pages in its pages' place, which
++                    // only what the push's user then writes takes from the kernel: clearing the push's whole room would
++                    // touch every page of it. The pages of the arena's base-page part stay base pages.
++                    uint8_t* const first = arena->base + from;
++                    uint8_t* const last = arena->base + to;
++                    uint8_t* const page_first = (uint8_t*)(((uintptr_t)first + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
++                    uint8_t* const page_last = (uint8_t*)((uintptr_t)last & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
++                    const bool fresh = arena->dirty == UINT64_MAX && page_last > page_first && (uint64_t)(page_last - page_first) >= (UINT64_C(64) << 10) &&
++                                       mmap(page_first, (size_t)(page_last - page_first), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == page_first;
++                    if (fresh)
++                    {
++                        if (from < arena->small)
++                        {
++                            madvise(page_first, (size_t)(page_last - page_first), MADV_NOHUGEPAGE);
++                        }
++                        memset(first, 0, (size_t)(page_first - first));
++                        memset(page_last, 0, (size_t)(last - page_last));
++                    }
++                    else
++                    {
++                        memset(first, 0, to - from);
++                    }
++                }
++            }
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+     {
+         arena_failure = (ArenaFailure){ .bytes = size, .error = ENOMEM };
+     }
++    arena_experiment_site_file = NULL;
+     return result;
+ }
+ 
+@@ -1613,9 +1752,28 @@ static void arena_pop_to(Arena* arena, uint64_t length)
+     arena->length = length;
+ }
+ 
++// EXPERIMENT: every call after this point names its site.
++static __attribute__((unused)) void* arena_push_site(Arena* arena, uint64_t size, uint64_t alignment, const char* file, uint32_t line)
++{
++    arena_experiment_site_file = file;
++    arena_experiment_site_line = line;
++    return (arena_push)(arena, size, alignment);
++}
++
++static __attribute__((unused)) void* arena_push_array_site(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment, const char* file, uint32_t line)
++{
++    arena_experiment_site_file = file;
++    arena_experiment_site_line = line;
++    return (arena_push_array)(arena, count, element_bytes, alignment);
++}
++
++#define arena_push(arena, size, alignment) arena_push_site((arena), (size), (alignment), __FILE__, __LINE__)
++#define arena_push_array(arena, count, element_bytes, alignment) arena_push_array_site((arena), (count), (element_bytes), (alignment), __FILE__, __LINE__)
++
+ static bool arena_untouched(const Arena* arena)
+ {
+-    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
++    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length &&
++           arena->dirty <= arena->mapping_offset + arena->length;
+ }
+ 
+ // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or

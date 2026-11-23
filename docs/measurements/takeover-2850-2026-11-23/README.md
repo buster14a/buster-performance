@@ -453,3 +453,36 @@ musl's six units 103.
 **The baseline** (`baseline/measure-compile-90bb2d83.txt`, `scripts/job-base.sh`): main `90bb2d83` built as the 9700X
 job builds it (`BUSTER_HOST_ARCH=znver5`, `BUSTER_DEBUG_INFO=0`), the job's own arguments, three runs:
 1,279,713,311, 1,279,713,338 and 1,279,713,340 user instructions. buster14a/buster#3471's file states the median.
+
+## A pool file for the arenas: the premise measured, the first prototype not (`pool-file/`)
+
+**What first touches cost by where the pages come from** (`scripts/shm-bench.c`, `shm-hold.sh`, `shm2-hold.sh`; the
+9700X, CPU 2, 256 MB, a byte written a 4 KB page):
+
+| the pages | ms | faults |
+| --- | ---: | ---: |
+| fresh anonymous memory, huge pages (what a compile's arenas take today) | 11.2 to 11.6 | 258 |
+| a `/dev/shm` file a process left, base pages (`first-touches-dev-shm.txt`) | 9.5 | 4,098 |
+| a file a process left on a tmpfs mounted `huge=always` (`first-touches-huge-tmpfs.txt`) | 0.67 to 0.69 | 130 |
+
+So left huge pages cost a seventeenth of fresh ones, 10.7 ms less a 256 MB touched, and left base pages are no
+gain. A tmpfs file's huge pages are its MOUNT's option (`huge=`): `shmem_enabled=advise` alone, which the first hold
+set and put back, changed nothing for a `/dev/shm` file (`ShmemHugePages` did not grow; the file still took 65,538
+faults to make). `shmem_enabled` governs memfd and System V segments. The second hold mounted a tmpfs for itself and
+unmounted it.
+
+**The first prototype does not measure the gain** (`scripts/experiment-pool-file.patch` on `3f4ff4c7`, not for
+merge; `scripts/pool-hold.sh`, `job-pool1.sh`; `prototype-sqlite-summary.txt`; the list `zero-sites-3f4ff4c7.list`,
+35 entries, none of 4,714 cases differing with garbage elsewhere). The stretch's upper half maps the file, its arenas
+are dirty from their start, and a push at a site that needs zeros takes fresh anonymous pages in its place. Every
+object is the same, also after another compile's leftovers. But only 20.6 MB of the compile's memory lands in the
+file: the arenas with a base-page part of 2 MB or more are carved from the stretch's lower half, others are mapped on
+their own, and the pushes remapped anonymous lose their huge pages (39,550 faults against 5,680; user +44 M cycles,
+kernel +52 M). A first version that cleared the zero sites' pushes in place touched 790 MB and took 212 thousand
+faults on this session's machine: a sparse site's room must come fresh, never cleared.
+
+**The count a hosted runner can take** (`baseline/instrumented-counts.txt`, `scripts/count-rev.sh`; this session's
+machine): the sum of the raw profile's counters of the instrumented compiler after one `-c sqlite3.c` is
+316,076,643, 316,077,895 and 316,078,023 at `ff9bad73b`, and 338,233,072 three times at `94ec1ca8c`, which has
+buster14a/buster#3381's second preprocessing: +7.0% where the instructions rose 10.8%, and a spread of 0.0004% at
+most.
