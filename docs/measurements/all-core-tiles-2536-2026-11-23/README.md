@@ -308,6 +308,42 @@ of c-testsuite's 220 programs and the repository's 1,578 test programs, with `-W
 declaration and of 16 tokens with every piece on, are the unit's as one; `sqlite3.c`'s object by tiles of 1, 64 and
 4,096 too. The clears were also run in their check reading (no entry written ahead) and their poison reading.
 
+## The pieces together
+
+One tree with every piece (`scripts/all1.patch` over main with the tiles' fix, `be47869a`: the reader by the parse's
+tiles as its pull request has it, with `--reader-tiles=on|off`, and the page policy; executable `c8837e141f846517`),
+each configuration the one before it with one piece more, three passes in turn in one hold
+(`scripts/queue18.sh`, `results/all-pair/`):
+
+| `-c sqlite3.c` | the unit as one (`--parse-tile=0`) | the parser's tiles (`--reader-tiles=off`) | the reader's too (the default) | with the host's 64 KB knob on |
+| --- | ---: | ---: | ---: | ---: |
+| eight workers, MB/s | 323.68 | 344.33 | 354.75 | 371.59 |
+| against the unit as one | | +6.4% | +9.6% | +14.8% |
+| their wall ms | 231.61 | 218.00 | 210.98 | 202.79 |
+| their user cycles | 963.4 M | 902.7 M | 868.0 M | 863.5 M |
+| their kernel cycles | 236.5 M | 220.7 M | 214.1 M | 181.0 M |
+| their faults | 56,087 | 55,322 | 54,346 | 17,115 |
+| their peak resident set | 188.0 MB | 184.2 MB | 184.2 MB | 190.2 MB |
+| one worker, MB/s | 83.25 | 83.49 | 83.52 | 84.18 |
+| its wall ms | 114.13 | 113.73 | 113.63 | 112.84 |
+| user instructions | 1,278.8 M | 1,281.1 M | 1,284.0 M | 1,284.0 M |
+| eight workers' throughput in one worker's | 3.89 | 4.12 | 4.25 | 4.41 |
+
+| stage, ms alone → at eight | the unit as one | the parser's tiles | the reader's too | with the knob |
+| --- | --- | --- | --- | --- |
+| `preprocess` | 9.32 → 14.98 | 9.31 → 14.94 | 9.30 → 15.02 | 9.21 → 14.21 |
+| `parse` | 6.82 → 22.29 | 4.83 → 8.74 | 7.42 → 15.71 | 7.10 → 14.43 |
+| `check-input` | 40.57 → 93.62 | 42.10 → 93.44 | 39.40 → 80.29 | 39.17 → 78.16 |
+| `check-expressions` | 11.07 → 19.03 | 11.09 → 19.11 | 11.06 → 18.81 | 11.04 → 17.09 |
+| `check-program` | 23.28 → 43.35 | 23.23 → 42.93 | 23.25 → 43.45 | 23.22 → 41.59 |
+| `lower` | 11.44 → 17.84 | 11.49 → 17.72 | 11.38 → 17.72 | 11.40 → 17.20 |
+
+- **Eight workers: 323.7 → 371.6 MB/s, +14.8%**, 100 M user cycles and 55 M kernel cycles a compile fewer; one worker
+  1.1% faster. Every configuration's objects are the same bytes.
+- **The reader's pull request by itself** is the third column against the second: +3.0% (354.8 against 344.3), 34.7 M
+  user cycles fewer, a compile alone the same.
+- With the knob on, a compile alone takes the 64 KB pages only where no 2 MB page fits (4,624 faults against 5,674).
+
 ## What disturbed the runs
 
 - **`results/tiles3-pair-invalid-option-not-passed/` measures nothing about tiles.** `scripts/pair7.sh` passed each
