@@ -43,11 +43,34 @@ Rule 2 applies: the vector route had to be at least as fast at every size on the
 | 3 | uncommitted | `asm_lex_rare` inlined | strings ≤1.035, comments 1.05–1.10 |
 | 4 | a8eba42f0 | Inlined, with the scans taking the lexer's own block register as their first | comments 0.89–0.95, 1-byte strings and escapes 1.028 |
 | 5 | 75d6d6063 | A string's close from its masks, not a load | all ≤ 0.998 |
+| 6 | 391c2f6ad | Review fix: every block's low mask from the token's start | all ≤ 0.992 |
 
 Round 3's slowdown came from the call. Every ZMM register is caller-saved, so the block loop spilled and reloaded its
 vector constants around the out-of-line call. The base had inlined its walk.
 
-## Final round (75d6d6063)
+## The review's bug (391c2f6ad)
+
+The coordinator's review of #3509 found wrong code at 75d6d6063. The block-comment scan cleared the bytes below the
+comment's start in the lexer's block only. When the `/` of a `/*/` was that block's last byte, the `*` was the next
+block's bit 0, and with the `/` after it read as the close:
+
+- `.text` + 57 spaces + `/*/ nop */ ret` assembled `nop`, where main assembles only `ret`;
+- `.text` + 63 spaces + `/*/` failed with no error, where main reports an unterminated comment.
+
+The review also showed that the string fixtures no longer crossed a block edge after e54e8d62d moved the scans' start
+to the lexer's block, so a `carried` forced to 0 survived them.
+
+391c2f6ad masks from the token's start in every block a scan reads. It replaces the fixtures with sweeps over every
+offset of a block:
+- strings with backslash runs of 1–4 and 63–66 before a quote;
+- `/*/`, closed and unterminated.
+
+On 75d6d6063 the comment sweep fails, and with `carried` forced to 0 the string sweep fails. Round 6 re-gated the fix.
+Its 3,000 random sources, the corpora and the review's two inputs give main's objects and errors. 26/26 mutants
+were killed at 75d6d6063, but none of them dropped the second block's mask, so the round missed this case.
+`mutants-round3.txt` is the full round on the fixed head.
+
+## Final round before the review (75d6d6063)
 
 Medians of 7, in ms of base and as ratios to base (`rounds/5-summary.txt`):
 
@@ -87,5 +110,4 @@ comment-4's 1.009, whose control reads 1.027.
   - Two single mutants are killed by 1 and 2 failures: the rerun of `escaped-start-kept` against the new fixture, and
     `quotes | ~quotes` in the close test.
 - **Sanitizers** (`sanitizers.txt`): `test-assembler`, `test-assembly-output` and `test-checker-asm` pass under UBSan,
-  ASan and MSan at b79a1fbf9. The later rounds changed only control flow and inlining; they get a rerun before the
-  queue.
+  ASan and MSan at b79a1fbf9, and again at 75d6d6063 in a clean worktree (`sanitizers-75d6d6063.txt`).
