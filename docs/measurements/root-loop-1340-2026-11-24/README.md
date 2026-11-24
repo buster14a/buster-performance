@@ -87,3 +87,19 @@ them); the lines are not.
   that the test's units had no statement root without a discard wrapper (the reader elides it only in units of 8,192
   tokens or more), and the filler units were added. Of 27 mutants 23 fail the section; `comma`, `expression-reach`,
   `wrapper-modification` and `repeats-body` pass, each redundant with another term (the pull request says how).
+
+## Against main as merged into the branch (`9700x/merged/`, `9700x/merged-5/`)
+
+Main moved while the change was made (buster14a/buster#3553, #3564, #3560 and others). The branch merged main
+`85a032f88`; base `85a032f88`, head `36b225e7b`, built and run as above.
+
+| | base | head | saved |
+| --- | ---: | ---: | ---: |
+| five rounds: ms | 114.80 | 114.11 | 0.69 (0.55, 0.84, 0.97, 0.39, 0.69) |
+| five rounds: M user cycles | 560.75 | 556.94 | 3.80 |
+| three rounds: ms | 114.83 | 114.98 | −0.14 (0.39, −1.49, 0.67; the head's middle round read 116.51) |
+| M instructions | 1,265.38 | 1,248.83 | 16.55 |
+
+The merged main's own compile is 2.8 ms slower than `188cef807`'s (114.8 against 112.0 ms; `-w` is 100.8 in
+both), which is not this change's. The compile's count (tools/ci/compile-count.sh, a cloud container): 312,364,833
+to 306,853,284, −1.76%.
