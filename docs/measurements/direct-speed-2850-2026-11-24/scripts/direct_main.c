@@ -36,6 +36,7 @@ int main(int argc, char** argv)
     const char* predefines = NULL;
     uint32_t repeat = 1;
     bool stages = false;
+    bool summary = false;
     bool pic = true;
     uint32_t quote_count = 0;
     // -I directories first (quote and angled), then -isystem, as the driver's search order has them.
@@ -50,6 +51,7 @@ int main(int argc, char** argv)
             else if (strcmp(argv[i], "-o") == 0) { output = argv[i + 1]; i += 1; }
             else if (strcmp(argv[i], "--repeat") == 0) { if (pass == 0) { repeat = (uint32_t)atoi(argv[i + 1]); } i += 1; }
             else if (strcmp(argv[i], "--stages") == 0) { stages = true; }
+            else if (strcmp(argv[i], "--summary") == 0) { summary = true; }
             else if (strcmp(argv[i], "--no-pic") == 0) { pic = false; }
             else if (pass == 0 && argv[i][0] != '-') { input = argv[i]; }
         }
@@ -57,6 +59,8 @@ int main(int argc, char** argv)
     (void)quote_count;
     int status = 1;
     double best = 1e30;
+    static double totals[4096], pre[4096], gen[4096], wr[4096];
+    uint32_t kept = 0;
     for (uint32_t r = 0; r < repeat; r += 1)
     {
         memset(stage_ms, 0, sizeof(stage_ms));
@@ -90,6 +94,7 @@ int main(int argc, char** argv)
         status = c_direct_try_compile(&req);
         const double t1 = now_ms();
         if (t1 - t0 < best) { best = t1 - t0; }
+        if (kept < 4096u) { totals[kept] = t1 - t0; pre[kept] = stage_ms[1]; gen[kept] = stage_ms[2]; wr[kept] = stage_ms[3]; kept += 1; }
         if (stages)
         {
             fprintf(stderr, "run %u: status %d, %u tokens, %.3f ms: setup %.3f, preprocess %.3f, codegen %.3f, write %.3f, release %.3f\n", r, status, tokens, t1 - t0,
@@ -97,5 +102,17 @@ int main(int argc, char** argv)
         }
     }
     fprintf(stderr, "status %d, best %.3f ms\n", status, best);
+    if (summary && kept != 0)
+    {
+        double* arrays[4] = { totals, pre, gen, wr };
+        double medians[4];
+        for (uint32_t a = 0; a < 4; a += 1)
+        {
+            double* v = arrays[a];
+            for (uint32_t i = 1; i < kept; i += 1) { const double x = v[i]; uint32_t j = i; while (j > 0 && v[j - 1] > x) { v[j] = v[j - 1]; j -= 1; } v[j] = x; }
+            medians[a] = v[kept / 2];
+        }
+        printf("median-ms total %.3f preprocess %.3f codegen %.3f write %.3f runs %u\n", medians[0], medians[1], medians[2], medians[3], kept);
+    }
     return status;
 }
