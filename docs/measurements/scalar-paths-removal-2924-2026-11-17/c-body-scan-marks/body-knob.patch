@@ -1,0 +1,248 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 7f1933ad..b9885417 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -684,6 +684,9 @@ struct PPFileData
+     uint32_t* starts;
+     uint32_t* values;
+     uint64_t* space;
++    // A bit per token that is '#', '##' or __VA_OPT__ (pp_mark_tokens), made with the directive table: what a definition's
++    // replacement list is checked for (pp_define), a word or two of bits for most.
++    uint64_t* marks;
+     // The directive table: per directive, its '#' token, the token past its line, its kind, and for a conditional the
+     // index of the next directive of its group (#elif, #else or #endif), or BUSTER_PP_NONE if the group is unterminated.
+     uint32_t directive_count;
+@@ -3143,16 +3146,67 @@ static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
+     return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
+ }
+ 
++
++// EXPERIMENT ONLY (#2924, pp_define's body scan): which scan this executable takes, by the number after "-areas" in its
++// file's name: 0 the vector arm, 1 the scalar arm, 2 the marks (which preparation then makes), 4 a control no site reads.
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++static unsigned buster_body_arm = 0;
++__attribute__((constructor)) static void buster_body_arm_read(void)
++{
++    char path[4096];
++    const ssize_t length = readlink("/proc/self/exe", path, sizeof(path) - 1);
++    if (length > 0)
++    {
++        path[length] = 0;
++        const char* at = strstr(path, "-areas");
++        buster_body_arm = at != 0 ? (unsigned)strtoul(at + 6, 0, 0) : 0;
++    }
++}
++
++// The marks (PPFileData.marks) of tokens [begin, end), a word per 64 from `begin`, a multiple of 64: '#' and '##' by
++// their kinds, __VA_OPT__ by an identifier's id, its value (another token's value is its end, which may equal the id).
++static void pp_mark_tokens(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, uint64_t* marks)
++{
++    for (uint32_t i = begin; i < end; i += 64)
++    {
++        const __mmask64 valid = end - i >= 64 ? ~0ull : _bzhi_u64(~0ull, end - i);
++        const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + i), _mm512_set1_epi8(0x7F));
++        uint64_t word = _mm512_mask_cmpeq_epi8_mask(valid, kind, _mm512_set1_epi8(C_TOKEN_HASH)) | _mm512_mask_cmpeq_epi8_mask(valid, kind, _mm512_set1_epi8(C_TOKEN_HASHHASH));
++        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(valid, kind, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++        for (uint32_t quarter = 0; quarter < 4; quarter += 1)
++        {
++            const __mmask16 named = (__mmask16)(identifiers >> (16 * quarter));
++            const __m512i ids = _mm512_maskz_loadu_epi32(named, values + i + 16 * quarter);
++            word |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(named, ids, _mm512_set1_epi32(C_NAME_VA_OPT)) << (16 * quarter);
++        }
++        marks[i / 64] = word;
++    }
++}
++
++// The words a file's marks take: one per 64 tokens and one past them, which a range's last word may be.
++static uint64_t pp_mark_words(uint32_t token_count)
++{
++    return (uint64_t)token_count / 64 + 1;
++}
++
+ // A file's directive table (#118) from its refined tokens, in `arena`: the directives (pp_scan_directives_vector), their
+-// kinds, line ends, pairing and notes (pp_finish_directives), and the include guard. Returns false if memory runs out.
+-// benchmark-preprocessor --tables times it alone.
++// kinds, line ends, pairing and notes (pp_finish_directives), the include guard, and the tokens' marks (pp_mark_tokens).
++// Returns false if memory runs out. benchmark-preprocessor --tables times it alone.
+ static bool pp_directive_table(Arena* arena, PPFileData* data)
+ {
+     Scratch scratch = scratch_begin(0);
+     uint64_t* lines = arena_push_array(scratch.arena, data->token_count / 64 + 1, sizeof(uint64_t), 64);
+-    bool result = lines != 0;
++    data->marks = arena_push_array(arena, pp_mark_words(data->token_count), sizeof(uint64_t), 64);
++    bool result = lines != 0 && data->marks != 0;
+     if (result)
+     {
++        data->marks[data->token_count / 64] = 0;
++        if (buster_body_arm == 2)
++        {
++            pp_mark_tokens(data->kinds, data->values, 0, data->token_count, data->marks);
++        }
+         const uint32_t directive_count = pp_scan_directives_vector(data->kinds, data->token_count, 0, lines);
+         result = pp_directive_arrays(arena, data, directive_count);
+     }
+@@ -3243,11 +3297,18 @@ static uint32_t pp_directive_places(const uint64_t* words, uint32_t word_count,
+ }
+ 
+ // pp_directive_table for a file prepared a window at a time, whose `count` directives pp_scan_directives_window found
+-// in the words of `directives`, and its lines in those of `lines`: the directives' '#' tokens out of their words into
+-// the table (pp_directive_places).
+-static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, uint32_t count)
++// in the words of `directives`, its lines in those of `lines` and its marks in `marks`: the directives' '#' tokens out
++// of their words into the table (pp_directive_places), and the marks copied.
++static bool pp_directive_table_windowed(Arena* arena, PPFileData* data, const uint64_t* lines, const uint64_t* directives, const uint64_t* marks, uint32_t count)
+ {
+-    bool result = pp_directive_arrays(arena, data, count);
++    const uint64_t words = pp_mark_words(data->token_count);
++    data->marks = arena_push_array(arena, words, sizeof(uint64_t), 64);
++    bool result = data->marks != 0 && pp_directive_arrays(arena, data, count);
++    if (result)
++    {
++        memcpy(data->marks, marks, (words - 1) * sizeof(uint64_t));
++        data->marks[words - 1] = data->token_count % 64 != 0 ? marks[words - 1] : 0;
++    }
+     if (result)
+     {
+         pp_directive_places(directives, (data->token_count + 63) / 64, data->directive_hash);
+@@ -3866,6 +3927,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     const uint64_t word_room = capacity / 64 + 2;
+     uint64_t* space = arena_push_array(scratch.arena, word_room, sizeof(uint64_t), 64);
+     uint64_t* directive_words = arena_push_array(scratch.arena, 2 * word_room, sizeof(uint64_t), 64);
++    uint64_t* marks = arena_push_array(scratch.arena, word_room, sizeof(uint64_t), 64);
+     RefineProgress progress;
+     refine_progress_begin(&progress, backslash_chunks);
+     // The line ends before each page; those before `lined` are counted (`lines`).
+@@ -3878,7 +3940,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     }
+     const bool pushed = data->kinds != 0 && data->starts != 0 && data->values != 0;
+     PPPrepareStatus result = !pushed                                                           ? PP_PREPARE_NO_COLUMNS
+-                             : backslash_chunks == 0 || space == 0 || directive_words == 0 ? PP_PREPARE_NO_MEMORY
++                             : backslash_chunks == 0 || space == 0 || directive_words == 0 || marks == 0 ? PP_PREPARE_NO_MEMORY
+                                                                                                : PP_PREPARE_DONE;
+     // The next window starts at `at`, the start of the file or of a token that starts a logical line, and takes `size`
+     // bytes; the tokens before it are kept (`count`), those before `refined` are refined, and those before `counted`
+@@ -3961,6 +4023,10 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+         // The directive table's scan of the blocks just refined, while their kinds are in the caches, and the line ends of
+         // the window's kept bytes, while they are.
+         directives += result == PP_PREPARE_DONE ? pp_scan_directives_window(data->kinds, (uint32_t)begin, (uint32_t)refined, directive_words, directive_words + word_room) : 0;
++        if (result == PP_PREPARE_DONE && buster_body_arm == 2)
++        {
++            pp_mark_tokens(data->kinds, data->values, (uint32_t)begin, (uint32_t)refined, marks);
++        }
+         if (result == PP_PREPARE_DONE && pages != 0 && at > lined)
+         {
+             pp_count_page_lines(data, lined, at, pages, &lines);
+@@ -4001,7 +4067,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     }
+     if (result == PP_PREPARE_DONE)
+     {
+-        data->prepared = pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, directives);
++        data->prepared = pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, marks, directives);
+         result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+         data->line_pages = pages;
+     }
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index a3835dbb..3a62fbee 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -11,7 +11,6 @@ static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve);
+ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments);
+ static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
+ static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
+-static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt);
+ static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs);
+ static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
+ static void pp_directive(Preprocessor* pp, PPContext* context);
+@@ -716,6 +715,7 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+     data->starts = record->starts;
+     data->values = record->values;
+     data->space = record->space;
++    data->marks = record->marks;
+     data->raw_errors = record->raw_errors;
+     data->raw_error_count = record->raw_error_count;
+     data->directive_count = record->directive_count;
+@@ -1412,6 +1412,31 @@ static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, ui
+     }
+ }
+ 
++// Whether tokens [begin, end) of a definition's replacement list, begin < end, have a '##', a '#' and a __VA_OPT__: the
++// file's marks of those tokens (PPFileData.marks), a word or two for most lists, and the kind of each marked one, which
++// few lists have. Each of the scans it replaced lost somewhere (#2924, 7006161887): 64 tokens' kinds and their
++// identifiers' ids for every definition, to a token at a time on musl's short constants, which lost on long lists.
++static void pp_scan_body(const PPFileData* data, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
++{
++    const uint32_t first = begin / 64;
++    const uint32_t last = (end - 1) / 64;
++    uint32_t found = 0;
++    for (uint32_t w = first; w <= last; w += 1)
++    {
++        uint64_t bits = data->marks[w];
++        bits &= w == first ? ~0ull << (begin % 64) : ~0ull;
++        bits &= w == last ? _bzhi_u64(~0ull, (end - 1) % 64 + 1) : ~0ull;
++        for (; bits != 0; bits &= bits - 1)
++        {
++            const uint8_t kind = data->kinds[64 * w + (uint32_t)__builtin_ctzll(bits)] & 0x7F;
++            found |= kind == C_TOKEN_HASHHASH ? 1u : kind == C_TOKEN_HASH ? 2u : 4u;
++        }
++    }
++    *pastes = (found & 1u) != 0;
++    *hashes = (found & 2u) != 0;
++    *va_opt = (found & 4u) != 0;
++}
++
+ // Where clang reports token t of a definition's line, [.., end): the token, or the line's end if t is past its last.
+ static uint32_t pp_define_location(const Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t t, uint32_t end)
+ {
+@@ -2289,14 +2314,18 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
+             bool pastes;
+             bool hashes;
+             bool va_opt;
+-            if (BUSTER_VECTOR_PATH(pp->vectorized))
++            if (buster_body_arm == 2)
+             {
+-                pp_scan_body_vector(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
++                pp_scan_body(data, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
+             }
+-            else
++            else if (buster_body_arm == 1)
+             {
+                 pp_scan_body_scalar(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
+             }
++            else
++            {
++                pp_scan_body_vector(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
++            }
+             macro.flags |= pastes ? BUSTER_PP_MACRO_PASTES : 0;
+             const bool variadic = (macro.flags & BUSTER_PP_MACRO_VARIADIC) != 0;
+             for (uint32_t t = macro.body_begin; va_opt && !variadic && t < macro.body_end; t += 1)
+@@ -14922,6 +14951,7 @@ static void pp_forget_prepared(PPFileData* data, bool whole)
+     data->starts = NULL;
+     data->values = NULL;
+     data->space = NULL;
++    data->marks = NULL;
+     data->prepared = false;
+     if (whole)
+     {
+diff --git a/src/buster/compiler/c_preprocessor_windows_test.c b/src/buster/compiler/c_preprocessor_windows_test.c
+index dadf8c85..e80c4eaa 100644
+--- a/src/buster/compiler/c_preprocessor_windows_test.c
++++ b/src/buster/compiler/c_preprocessor_windows_test.c
+@@ -319,7 +319,7 @@ static uint32_t pp_window_test_first_difference(const PPFileData* a, const PPFil
+     return i;
+ }
+ 
+-// Are two preparations' records the same: their outcome, tokens, values, leading-space words, raw errors, unterminated
++// Are two preparations' records the same: their outcome, tokens, values, leading-space words, marks, raw errors, unterminated
+ // comment and directive tables? `what` names the second for a difference's report.
+ static bool pp_window_test_same(PPPrepareStatus a_status, const PPFileData* a, PPPrepareStatus b_status, const PPFileData* b, const char* what, uint64_t source,
+                                 uint32_t window)
+@@ -333,6 +333,7 @@ static bool pp_window_test_same(PPPrepareStatus a_status, const PPFileData* a, P
+                  a->unterminated_comment_starts_line == b->unterminated_comment_starts_line;
+         difference = result ? pp_window_test_first_difference(a, b) : 0;
+         result = result && difference == count && memcmp(a->space, b->space, (count + 63) / 64 * sizeof(uint64_t)) == 0;
++        result = result && memcmp(a->marks, b->marks, pp_mark_words(count) * sizeof(uint64_t)) == 0;
+         result = result && a->raw_error_count == b->raw_error_count && a->directive_count == b->directive_count && a->note_count == b->note_count &&
+                  a->guard == b->guard && a->guard_opener == b->guard_opener;
+         for (uint32_t e = 0; result && e < a->raw_error_count; e += 1)
