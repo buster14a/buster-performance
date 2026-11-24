@@ -1,0 +1,1 @@
+M=[('m9-batch-values', '_mm256_mask_storeu_epi64(writer->values + writer->count, prefix, _mm256_setr_epi64x((int64_t)left, (int64_t)right, 0, 0));', '_mm256_mask_storeu_epi64(writer->values + writer->count, prefix, _mm256_setr_epi64x((int64_t)left, (int64_t)left, 0, 0));')]
