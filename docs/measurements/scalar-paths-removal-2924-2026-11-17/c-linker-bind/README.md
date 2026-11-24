@@ -95,7 +95,10 @@ cycles a global symbol, because its time at a few workers is below the log's 0.0
 
 Over all 42 rows (7 sizes, 6 runtimes), head over main's exact path: match 1.010 to 10.16, `bind_begin` 1.52 to 9.99,
 `bind_end` 1.006 to 2.25, the closure 1.65 to 2.18. Head is at least as fast as the twin at every size and runtime.
-The earlier experiments' logs are [`logs/ab-bind1-small.log`](logs/ab-bind1-small.log) and
+The gate's two other sizes, 8 and 256 workers, were timed afterwards on head's build at the branch's head
+([`logs/ab-hbind-mid.log`](logs/ab-hbind-mid.log), [`scripts/ab-hbind.sh`](scripts/ab-hbind.sh), 3 rounds; head's
+rows carry no path label): match 1.08 to 2.52, `bind_begin` 1.61 to 2.24, `bind_end` 1.07 to 1.80, the closure 1.73
+or more. The earlier experiments' logs are [`logs/ab-bind1-small.log`](logs/ab-bind1-small.log) and
 [`logs/ab-bind2-small.log`](logs/ab-bind2-small.log).
 
 ## Same output
@@ -107,8 +110,29 @@ files, [`scripts/exes.sh`](scripts/exes.sh)).
 
 ## Tests and mutation
 
-In progress: the mutation round, and an A/B at 8 and 256 workers (gate sizes the A/B above skipped), are
-running. This section is completed when they finish.
+The deletion removed the tests' comparisons of the two paths' links and bindings; nothing was left comparing the
+vector path with itself. `bind_test.c`'s own checks (each rule's expected symbols, sources and members, the static
+programs' members against an archive-scan oracle of the test's own, the libraries' imports, and the room checks) and
+the executables the other tests write and run carry the semantics. The branch adds one rule, a strong absolute
+definition of a name nothing else defines, which must keep its source and value.
+
+20 mutants of the vector code ([`mutation/mutants.txt`](mutation/mutants.txt), [`mutation/run.sh`](mutation/run.sh)),
+each built in Release and run against `test-bind`, `test-dynamic`, `test-static`, `test-snapshot` and
+`test-executable` ([`mutation/results.txt`](mutation/results.txt)). 4 did not build (an unused variable), and each has a
+replacement that keeps the variable in use: 3 → 17, 7 → 18, 8 → 19, 13 → 20. Of the 16 that built:
+
+- 13 are killed. Mutant 14 (the closure's next members not excluding those already needed) hangs past the 900 s
+  timeout: killed by the timeout.
+- 16 (the match's batch keeps a binding without a name) is equivalent: a symbol with a binding has a name, and an
+  unnamed lookup would find no runtime name anyway.
+- 18 (a joined atom's empty fixup range moved too) is equivalent: every reader of `fixup_begin` reads `fixup_count`
+  fixups from it, none for an empty range.
+- 19 (a joined piece's wide addends' indices not moved) survives because no runtime reaches it: no member of this
+  system's `libc.a`, `libm.a`, `libgcc.a` or `libgcc_eh.a`, nor `crt1.o`, has an addend outside int32 (`readelf -rW`).
+  The exact path's comparison could not see it either. A test needs a synthetic runtime with a wide addend.
+
+16, 18 and 19 were rebuilt and rerun one at a time on the branch's head ([`mutation/rerun.sh`](mutation/rerun.sh),
+[`mutation/rerun-results.txt`](mutation/rerun-results.txt)), with the same results.
 
 ## Checks
 
