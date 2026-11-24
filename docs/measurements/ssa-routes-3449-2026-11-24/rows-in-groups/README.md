@@ -50,3 +50,13 @@ r7, by bin of cells (whole promotion, ratio to the base; the control is the base
 | total | 0.9954 | 0.9992 | 0.9936 | 0.9991 |
 
 `logs/` has every gate's comparison and status; `ticks.tar.xz` the raw per-function ticks of r1 to r7.
+
+## Mutation (cloud container)
+
+`mutation/mutants.py`: 16 mutants of the grouped rows and the scan's split (r6's code), each built and run against
+test-ssa (which builds every generated CFG with its rows in groups of one chunk, 128 bytes and 1 KiB, and compares them
+with the one group's phis and replacements), test-ssa-ir, test-ssa-source over c-testsuite's subset and
+`test-ssa-source --generate 48` (`mutation/run.py`). test-ssa kills 13 of 15 (g01 to g08, g10 to g13, g15); g00 is the
+unchanged control. Two survive as equivalent: g09 lets an exposed read take a lane one past its group, which the next
+group (that read's own) always overwrites, and no slot sits past the last group; g14 makes a group one chunk wider,
+with the buffer sized from the same group, so only the 256 KiB budget is passed. `mutation/results.txt` has the round.

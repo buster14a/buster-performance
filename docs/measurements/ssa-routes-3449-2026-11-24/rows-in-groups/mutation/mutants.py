@@ -1,0 +1,18 @@
+M = [
+ ("g00", "static void ssa_vector_rows(", "static void ssa_vector_rows("),
+ ("g01", "                        uint32_t* last = dense < near ? row + dense : written + dense;", "                        uint32_t* last = dense <= near ? row + dense : written + dense;"),
+ ("g02", "                            far |= dense >= near;", "                            far |= dense > near;"),
+ ("g03", "                const uint64_t below = near / 64 == word ? (1ull << (near % 64)) - 1 : 0;", "                const uint64_t below = 0;"),
+ ("g04", "                    _mm512_store_si512(written + (uint64_t)chunk * 16, _mm512_set1_epi32(-1));", "                    (void)written;"),
+ ("g05", "                const __m512i written = later ? none : _mm512_load_si512(row + (uint64_t)chunk * 16);", "                const __m512i written = _mm512_load_si512(row + (uint64_t)chunk * 16);"),
+ ("g06", "            uint32_t next = later ? next_phi[block] : work->result.phi_base + phi_first[block];", "            uint32_t next = work->result.phi_base + phi_first[block];"),
+ ("g07", "                uint32_t def = later ? next_def[block] : def_offsets[block];", "                uint32_t def = def_offsets[block];"),
+ ("g08", "                uint32_t done = later ? gathered[block] : 0;", "                uint32_t done = 0 * (later ? gathered[block] : 0);"),
+ ("g09", "                if (slot >= low && slot < high)", "                if (slot >= low && slot <= high)"),
+ ("g10", "_mm512_mask_blend_epi32((__mmask16)def_masks[def], _mm512_load_si512(exit), _mm512_load_si512(def_rows + (uint64_t)def * 16))", "_mm512_load_si512(def_rows + (uint64_t)def * 16)"),
+ ("g11", "                for (; def != def_offsets[block + 1] && def_chunks[def] < first + count; def += 1)", "                for (; def != def_offsets[block + 1] && def_chunks[def] < first + count && def == UINT32_MAX; def += 1)"),
+ ("g12", "_mm512_store_si512(row + (uint64_t)chunk * 16, _mm512_mask_blend_epi32(_mm512_cmpeq_epi32_mask(written, none), written, value));", "_mm512_store_si512(row + (uint64_t)chunk * 16, _mm512_mask_blend_epi32(_mm512_cmpeq_epi32_mask(written, none), value, written));"),
+ ("g13", "            const uint32_t* dominator = rows + (entry ? 0 : (uint64_t)rpo_index[work->dominators.idom[block]] * stride);", "            const uint32_t* dominator = rows + (entry ? 0 : (uint64_t)(rpo_index[work->dominators.idom[block]] + (order == 2)) * stride);"),
+ ("g14", "    const uint32_t group = fit == 0 ? 1 : fit < chunks ? (uint32_t)fit : chunks == 0 ? 1 : chunks;", "    const uint32_t group = fit == 0 ? 1 : fit < chunks ? (uint32_t)fit + (fit > 1) : chunks == 0 ? 1 : chunks;"),
+ ("g15", "                    def_masks[defined] = (uint32_t)(bits >> (quarter * 16)) & 0xffff;", "                    def_masks[defined] = (uint32_t)(bits >> (quarter * 16)) & 0x7fff;"),
+]
