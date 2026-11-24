@@ -261,3 +261,25 @@ plan asked for: a tenth of the visits cost four times as much each, because the 
 conversions' rows, which the filter has to read too. That record also corrects this one: leaving the reach scan out
 (the 2.92 ms above) left the roots without reach as well, so it counted some of the root walks' work; by profile the
 scan itself was 2.0 to 2.5% of the compile's user cycles.
+
+## The day along main (`9700x/day-profile/`, `9700x/ab-day-14e364653/`, `9700x/ab-pr3557/`)
+
+`scripts/day-profile.sh`: eight revisions of main from 24 November, each with the executable an earlier hold here had
+built on the 9700X, the default compile and `-w` of each interleaved in three rounds of 11 runs in one hold
+(`day-profile/reduced.txt`). Every run exited 0.
+
+| main at | what had just merged | `-w` ms | default ms | the warnings, ms |
+| --- | --- | ---: | ---: | ---: |
+| `e347ec526` | the morning's main | 100.33 | 111.99 | 11.66 |
+| `188cef807` | | 100.16 | 111.87 | 11.70 |
+| `dc8efaacd` | #3557, #3562, #3561 | 100.82 | 112.83 | 12.01 |
+| `b4fda31b9` | #3553's expression warnings | 100.74 | **123.00** | 22.26 |
+| `64e88df4d` | #3546 | 100.68 | 123.06 | 22.39 |
+| `31fd25ce8` | #3560, the count's check | 100.82 | 123.13 | 22.31 |
+| `5cd20effd` | #3564, the searches where a message stands | 100.65 | 114.83 | 14.17 |
+| `14e364653` | #3567, #3569, #3573, #3574 | 100.58 | 113.63 | 13.05 |
+
+At 18:50Z main's default compile is 1.64 ms slower than the morning's: the warnings 1.39 ms more (what is left of
+#3553's pass, less what #3569 took out) and the rest 0.25 ms. `ab-day-14e364653` is the same pair alone (111.95 to
+113.62 ms). `ab-pr3557` is #3557 against its base: 25.19 M instructions and 295 K L1 misses fewer, and 0.10 to 0.25 ms
+more (1.3 M cycles), within the rounds' spread: no gain on this host.
