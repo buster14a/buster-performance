@@ -139,3 +139,68 @@ parents 0.6), the root walk 3.0 and the token passes 1.5.
 **Counts don't measure this code.** buster14a/buster#3543 took 11.9 M instructions out of the reach's edge test and
 saved 0.13 ms: the test's row of conversions is still loaded, and the load is what costs. By the counters above about
 seven tenths of the warnings' cycles are cache misses. A step here is judged by its 9700X reading alone.
+
+## The parts of the facts and the root walk (`9700x/warn-facts-e347ec526/`, `count/facts-counts-e347ec526.txt`)
+
+Main `e347ec526` again, with `scripts/experiment-facts.patch` (switches that leave one part out, not for merge),
+built on the 9700X as its job builds it (`scripts/warn-facts.sh`: 17 variants, three rounds of 11 runs each, forward,
+reverse, forward, in one hold; `scripts/warn-facts-reduce.py` gives `reduced.txt`). Every variant's object is the
+default compile's and none prints a diagnostic. Nothing left out: 111.85 ms; `-w`: 100.19 ms (11.66 less).
+
+| left out | ms saved | M cycles | M instructions | k L1 misses |
+| --- | ---: | ---: | ---: | ---: |
+| the reach scan (`check_common_own_reach` over its candidates, and the climbs) | 2.92 | 15.7 | 40.2 | 358 |
+| the edges' family alone, inside it | 0.14 | 0.8 | 15.9 | 111 |
+| the batched range candidates | 0.33 | 1.4 | 0.8 | 47 |
+| reachability (`check_common_unreachable`) | 1.72 | 9.2 | 17.6 | 199 |
+| the operand masks' candidates | 0.46 | 2.3 | 7.2 | 72 |
+| the unselected roots | 0.25 | 1.5 | 1.6 | 23 |
+| the root loop | 2.34 | 12.9 | 26.8 | 267 |
+| `check_common_root_frames` alone, inside it | 1.51 | 8.5 | 14.3 | 103 |
+| the ignored statements alone, inside that | 0.25 | 1.2 | 1.5 | 33 |
+| `-Wunsequenced`'s marks | 0.69 | 3.7 | 5.9 | 106 |
+| the unevaluated scan before the roots | none (+0.13) | | | |
+| all of the above together | 8.31 | 45.6 | 92.6 | 1012 |
+
+The rounds agree to 0.2 ms or better for each row but the two smallest. The parts add up (8.58 one at a time, 8.31
+together), so little of a part's cost is a cache miss the next part would take in its place; the edges' family is the
+exception, 15.9 M instructions for 0.14 ms.
+
+**What the scalar tests find** (`scripts/experiment-facts-counts.patch`, counters printed at exit; an instrumented
+build in a cloud container, whose object is the same):
+
+| the test | items visited | items it finds |
+| --- | ---: | ---: |
+| a reach candidate's own bits | 78,304 nodes | 2,292 with a bit (2.9%), which climb 5,640 parents |
+| a root's frames | 58,732 roots | 1,458 with reach (2.5%), 8,696 work entries |
+| a branch condition's truth | 16,964 conditions | 61 decided (0.4%) |
+| a body's reachability | 2,674 bodies, 63,542 controls | 2,031 controls unreached, in 1,746 bodies |
+| a root's unsequenced modification | 19,478 roots whose marks say modifies | |
+
+The reach candidates by operator, visited and with a bit: `ASSIGN` 16,601 and 274, `CALL` 13,690 and 113, `CONDITION`
+12,540 and 5, `SUBSCRIPT` 7,130 and 0, the six comparisons 11,258 and 9, `INITIALIZE` 3,982 and 109, `CONVERT` 3,888
+and 87, `LOGICAL_AND` and `LOGICAL_OR` 3,414 and 1, `DEREFERENCE` 1,243 and 0, `NOT` 824 and 0, `CONDITIONAL` 672 and
+548, the shifts 873 and 764, `COMMA` 362 and 362, `DIVIDE` and `REMAINDER` 475 and 0. Each of the three tests visits
+tens of thousands of items to find a few percent of them; at 176 cycles a reach candidate, 219 a root and 430 a
+condition, the visits are the cost.
+
+## The token passes' scans against their candidates (`9700x/warn-scans-e347ec526/`)
+
+`scripts/warn-scans.sh` with `scripts/experiment-scans.patch` (not for merge), same build and host, three rounds of 15:
+ten more full scans of the tokens' roles and kinds cost 0.30 ms and twenty 0.67 ms, so one scan is 0.03 ms. Leaving
+out what the three largest passes do at their candidates saves 0.15 ms (`sizeof`'s decay), 0.02 ms (empty bodies) and
+0.29 ms (parentheses), 0.38 ms together. The token passes' 1.5 ms is ten passes of 0.1 to 0.3 ms each, not their
+scans: fusing the scans would save about 0.3 ms.
+
+## The count's hosted runs, and the fault round's last state
+
+buster14a/buster#3560's two runs of "Count the compile against its base's":
+
+| run | runner | the base's three runs | the change's | builds | the step |
+| --- | --- | --- | --- | --- | --- |
+| [first](https://github.com/buster14a/buster/actions/runs/45403050541/job/138477312336), head `bcbe4c5ce` | AMD EPYC 9V45 | 309,155,349 to 309,156,454 | 309,156,142 to 309,156,454 | 21 s, 20 s | 46 s |
+| [second](https://github.com/buster14a/buster/actions/runs/45405015104/job/138484476111), head `29864d459` | AMD EPYC 9V74 | 309,156,490 three times | 309,156,490 three times | 31 s, 28 s | 66 s |
+
+The two runners' counts are 0.00005% apart; a cloud container's was 0.01% from them. `mutants/run.py` is the fault
+round as it ended: 83 mutants of the reader, the verdict and the script, each killed by a test (`mutants/result-83.txt`;
+`mutants/result.txt` is the first round's, which left the survivors that the added tests now kill).
