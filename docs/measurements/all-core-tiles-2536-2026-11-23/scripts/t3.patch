@@ -1,0 +1,728 @@
+diff --git a/src/buster/compiler/c_check_input.c b/src/buster/compiler/c_check_input.c
+index 4a0ec733..3dc62712 100644
+--- a/src/buster/compiler/c_check_input.c
++++ b/src/buster/compiler/c_check_input.c
+@@ -5940,53 +5940,85 @@ static void check_input_parameter_typo(CheckInputReader* reader, uint32_t token)
+     }
+ }
+ 
++// The masks check_input_named_prefixes reads of the 64 tokens from `first`: the specifiers, the stars, the names and
++// the delimiters among those before `count`.
++typedef struct CheckInputPrefixBits CheckInputPrefixBits;
++struct CheckInputPrefixBits
++{
++    uint64_t specifiers;
++    uint64_t stars;
++    uint64_t names;
++    uint64_t delimiters;
++};
++
++static CheckInputPrefixBits check_input_prefix_bits(const uint8_t* token_kinds, const uint8_t* token_roles, uint32_t first, uint32_t count)
++{
++    CheckInputPrefixBits result = { 0 };
++    if (first < count)
++    {
++        const __mmask64 lanes = check_input_scan_all(first, count);
++        const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, token_kinds + first);
++        const __m512i roles = _mm512_maskz_loadu_epi8(lanes, token_roles + first);
++        result.specifiers = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8(PARSE_ROLE_SPECIFIER));
++        result.stars = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(PARSE_KIND_STAR));
++        result.names = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPERAND)) & _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER));
++        result.delimiters = lanes & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_SEMI)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_COMMA)) |
++                                     _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_EQUAL)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_R_PAREN)) |
++                                     _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_FUNCTION)));
++    }
++    return result;
++}
++
++// How far past a token its prefix's byte reads: four specifiers, two stars, a name and its delimiter.
++#define BUSTER_CHECK_PREFIX_REACH 8u
++
++// check_input_named_prefixes for the tokens [begin, end) of a unit of `count`: the same blocks of 64 from the unit's
++// first token, from the range's last down, each given the block after it, so each token's byte is the unit's pass's.
++// It reads the kinds and roles of the tokens up to BUSTER_CHECK_PREFIX_REACH - 1 past the range's last.
++static void check_input_named_prefixes_range(const uint8_t* token_kinds, const uint8_t* token_roles, uint32_t count, uint8_t* prefixes, uint32_t begin, uint32_t end)
++{
++    if (begin < end)
++    {
++        uint32_t block = (end - 1) >> 6;
++        CheckInputPrefixBits following = (uint64_t)(block + 1) << 6 < count ? check_input_prefix_bits(token_kinds, token_roles, (block + 1) << 6, count) : (CheckInputPrefixBits){ 0 };
++        bool more = true;
++        while (more)
++        {
++            const uint32_t first = block << 6;
++            const CheckInputPrefixBits bits = check_input_prefix_bits(token_kinds, token_roles, first, count);
++            const unsigned __int128 specifier = bits.specifiers | ((unsigned __int128)following.specifiers << 64);
++            const unsigned __int128 star = bits.stars | ((unsigned __int128)following.stars << 64);
++            const unsigned __int128 name = (bits.names | ((unsigned __int128)following.names << 64)) & ((bits.delimiters | ((unsigned __int128)following.delimiters << 64)) >> 1);
++            const unsigned __int128 single_pointer = star & (name >> 1);
++            const unsigned __int128 double_pointer = star & (single_pointer >> 1);
++            uint64_t prefix = bits.specifiers;
++            __m512i result = _mm512_setzero_si512();
++            #pragma clang loop unroll(full)
++            for (uint32_t length = 1; length <= 4; length += 1)
++            {
++                result = _mm512_mask_set1_epi8(result, prefix & (uint64_t)(name >> length), (char)length);
++                result = _mm512_mask_set1_epi8(result, prefix & (uint64_t)(single_pointer >> length), (char)(8 + length));
++                result = _mm512_mask_set1_epi8(result, prefix & (uint64_t)(double_pointer >> length), (char)(16 + length));
++                prefix &= (uint64_t)(specifier >> length);
++            }
++            // The block's lanes in the range: from `begin` where the block starts before it, to `end` where it ends past it.
++            const uint32_t from = begin > first ? begin - first : 0;
++            const uint32_t to = end - first < 64 ? end - first : 64;
++            const __mmask64 stored = _bzhi_u64(UINT64_MAX, to) & ~_bzhi_u64(UINT64_MAX, from);
++            _mm512_mask_storeu_epi8(prefixes + first, stored, result);
++            following = bits;
++            more = first > begin;
++            block -= 1;
++        }
++    }
++}
++
+ // Emit a syntactic recipe from the completed parser tree, by declaration prefix. Each nonzero byte gives
+ // the run of specifier tokens and the following stars through a simple name. A recipe carries no type or
+ // binding. The checker interprets those in declaration order. Two consecutive masks cover block-crossing names.
+ static void check_input_named_prefixes(const Parser* parser, uint8_t* prefixes)
+ {
+-    const uint32_t count = parser->tokens.count;
+-    uint64_t following_specifiers = 0;
+-    uint64_t following_stars = 0;
+-    uint64_t following_names = 0;
+-    uint64_t following_delimiters = 0;
+-    for (uint32_t blocks = (count + 63) >> 6; blocks != 0; blocks -= 1)
+-    {
+-        const uint32_t first = (blocks - 1) << 6;
+-        const __mmask64 lanes = check_input_scan_all(first, count);
+-        const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, parser->tokens.kinds + first);
+-        const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + first);
+-        const uint64_t specifiers = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8(PARSE_ROLE_SPECIFIER));
+-        const uint64_t stars = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(PARSE_KIND_STAR));
+-        const uint64_t names = _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPERAND)) &
+-                               _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(PARSE_KIND_IDENTIFIER));
+-        const uint64_t delimiters = lanes & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_SEMI)) |
+-                                             _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_COMMA)) |
+-                                             _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_EQUAL)) |
+-                                             _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(PARSE_KIND_R_PAREN)) |
+-                                             _mm512_cmpeq_epi8_mask(roles, _mm512_set1_epi8(PARSE_ROLE_OPEN_FUNCTION)));
+-        const unsigned __int128 specifier = specifiers | ((unsigned __int128)following_specifiers << 64);
+-        const unsigned __int128 star = stars | ((unsigned __int128)following_stars << 64);
+-        const unsigned __int128 name = (names | ((unsigned __int128)following_names << 64)) &
+-                                       ((delimiters | ((unsigned __int128)following_delimiters << 64)) >> 1);
+-        const unsigned __int128 single_pointer = star & (name >> 1);
+-        const unsigned __int128 double_pointer = star & (single_pointer >> 1);
+-        uint64_t prefix = specifiers;
+-        __m512i result = _mm512_setzero_si512();
+-        #pragma clang loop unroll(full)
+-        for (uint32_t length = 1; length <= 4; length += 1)
+-        {
+-            result = _mm512_mask_set1_epi8(result, prefix & (uint64_t)(name >> length), (char)length);
+-            result = _mm512_mask_set1_epi8(result, prefix & (uint64_t)(single_pointer >> length), (char)(8 + length));
+-            result = _mm512_mask_set1_epi8(result, prefix & (uint64_t)(double_pointer >> length), (char)(16 + length));
+-            prefix &= (uint64_t)(specifier >> length);
+-        }
+-        _mm512_mask_storeu_epi8(prefixes + first, lanes, result);
+-        following_specifiers = specifiers;
+-        following_stars = stars;
+-        following_names = names;
+-        following_delimiters = delimiters;
+-    }
++    check_input_named_prefixes_range(parser->tokens.kinds, parser->tree.roles, parser->tokens.count, prefixes, 0, parser->tokens.count);
+ }
+ 
+ // Read a complete scalar or alias prefix through its name. Declaration registration, prototype scope, initializers,
+@@ -17291,47 +17323,58 @@ struct CheckInputTokenCounts
+ // (CheckInputFilter) before it compares the 16 that pass with each, and looks up 64 roles' and kinds' tests in tables
+ // (check_input_role_tests). A name of 0 counts no token: tokens without a name have 0. Without roles, every token is
+ // marked.
+-static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
+-                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits)
++// The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
++// The last name also gates the declaration-specifier column. Keep it in the filter of possible names.
++static const uint32_t check_input_syntax_names[] =
++{
++    C_NAME_BUILTIN_VA_ARG,
++    C_NAME_BUILTIN_CONVERTVECTOR,
++    C_NAME_BUILTIN_BIT_CAST,
++    C_NAME_GENERIC,
++    C_NAME_BUILTIN_CHOOSE_EXPR,
++    C_NAME_BUILTIN_TYPES_COMPATIBLE_P,
++    C_NAME_BUILTIN_OFFSETOF,
++    C_NAME_NORETURN,
++    C_NAME_NONNULL,
++    C_NAME_NULLABLE,
++    C_NAME_NULLABLE_RESULT,
++    C_NAME_NULL_UNSPECIFIED,
++    C_NAME_FUNC,
++    C_NAME_FUNCTION,
++    C_NAME_PRETTY_FUNCTION,
++};
++
++// What check_input_count_tokens carries from a token to the next: its counts so far and the attribute lists open.
++typedef struct CheckInputCountState CheckInputCountState;
++struct CheckInputCountState
+ {
+-    // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
+-    // The last name also gates the declaration-specifier column. Keep it in the filter of possible names.
+-    static const uint32_t syntax_names[] =
+-    {
+-        C_NAME_BUILTIN_VA_ARG,
+-        C_NAME_BUILTIN_CONVERTVECTOR,
+-        C_NAME_BUILTIN_BIT_CAST,
+-        C_NAME_GENERIC,
+-        C_NAME_BUILTIN_CHOOSE_EXPR,
+-        C_NAME_BUILTIN_TYPES_COMPATIBLE_P,
+-        C_NAME_BUILTIN_OFFSETOF,
+-        C_NAME_NORETURN,
+-        C_NAME_NONNULL,
+-        C_NAME_NULLABLE,
+-        C_NAME_NULLABLE_RESULT,
+-        C_NAME_NULL_UNSPECIFIED,
+-        C_NAME_FUNC,
+-        C_NAME_FUNCTION,
+-        C_NAME_PRETTY_FUNCTION,
+-    };
+-    CheckInputTokenCounts result = { 0 };
+-    const uint32_t count = parser->tokens.count;
+-    const uint8_t* kinds = parser->tokens.kinds;
+-    const uint8_t* roles = parser->tree.roles;
+-    const uint32_t* token_names = parser->tokens.names;
++    CheckInputTokenCounts counts;
++    int64_t attribute_depth;
++};
++
++// check_input_count_tokens for the tokens [begin, end) of a unit of `count`, after those before `begin` (`state`):
++// each token's bytes and counts are the unit's pass's wherever the blocks of 64 start. It reads the kind and the role of
++// the token after the range's last, where the unit has one.
++static __attribute__((noinline)) void check_input_count_range(const uint8_t* kinds, const uint8_t* roles, const uint32_t* token_names, uint32_t count, const uint32_t* names,
++                                                              const uint8_t* groups, uint32_t name_count, uint8_t* syntax, uint8_t* visits, CheckInputCountState* state,
++                                                              uint32_t begin, uint32_t end)
++{
++    const uint32_t* const syntax_names = check_input_syntax_names;
++    const uint32_t syntax_name_count = (uint32_t)BUSTER_ARRAY_LENGTH(check_input_syntax_names);
+     const __m512i role_tests_low = _mm512_load_si512(check_input_role_tests);
+     const __m512i role_tests_high = _mm512_load_si512(check_input_role_tests + 64);
+     const __m512i kind_tests_low = _mm512_load_si512(check_input_kind_tests);
+     const __m512i kind_tests_high = _mm512_load_si512(check_input_kind_tests + 64);
+     // The filter of every name the vector path compares with (CheckInputFilter): the counted names' and the syntax names'.
+     const CheckInputFilter counted = check_input_filter_values(names, name_count);
+-    const CheckInputFilter spelled = check_input_filter_values(syntax_names, (uint32_t)BUSTER_ARRAY_LENGTH(syntax_names));
++    const CheckInputFilter spelled = check_input_filter_values(syntax_names, syntax_name_count);
+     const CheckInputFilter name_filter = { .low = _mm512_or_si512(counted.low, spelled.low), .high = _mm512_or_si512(counted.high, spelled.high) };
+     // The attribute lists open at the token, signed: a unit whose roles don't pair can't go below zero unseen.
+-    int64_t attribute_depth = 0;
+-    for (uint32_t token = 0; token < count; token += 64)
++    int64_t attribute_depth = state->attribute_depth;
++    CheckInputTokenCounts result = state->counts;
++    for (uint32_t token = begin; token < end; token += 64)
+     {
+-        const uint32_t length = count - token < 64 ? count - token : 64;
++        const uint32_t length = end - token < 64 ? end - token : 64;
+         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
+         const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + token);
+         const __m512i role = roles != 0 ? _mm512_maskz_loadu_epi8(lanes, roles + token) : _mm512_setzero_si512();
+@@ -17377,7 +17420,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
+                 {
+                     matched[groups[i]] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)names[i]));
+                 }
+-                for (uint32_t i = 0; i + 1 < BUSTER_ARRAY_LENGTH(syntax_names); i += 1)
++                for (uint32_t i = 0; i + 1 < syntax_name_count; i += 1)
+                 {
+                     syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
+                 }
+@@ -17441,6 +17484,16 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
+         }
+         attribute_depth += __builtin_popcountll(list_opens) - __builtin_popcountll(list_closes);
+     }
++    state->attribute_depth = attribute_depth;
++    state->counts = result;
++}
++
++static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
++                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits)
++{
++    CheckInputCountState state = { 0 };
++    const uint32_t count = parser->tokens.count;
++    check_input_count_range(parser->tokens.kinds, parser->tree.roles, parser->tokens.names, count, names, groups, name_count, syntax, visits, &state, 0, count);
+     if (syntax != 0)
+     {
+         syntax[count] = 0;
+@@ -17449,7 +17502,158 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
+     {
+         visits[count] = 0;
+     }
+-    return result;
++    return state.counts;
++}
++
++// The names check_input_count_tokens counts for a reading of `pp`'s unit, each with its group: returns how many.
++static uint32_t check_input_count_names(Preprocessor* pp, uint32_t* names, uint8_t* groups)
++{
++    const char* const vararg_spellings[] =
++    {
++        "__builtin_va_start",
++        "__builtin_stdarg_start",
++        "__builtin_c23_va_start",
++        "__builtin_va_arg",
++        "__builtin_va_copy",
++        "__builtin_va_end",
++        "__builtin_ms_va_start",
++        "__builtin_ms_va_end",
++        "__builtin_ms_va_copy",
++        "__builtin_zos_va_start",
++        "__builtin_zos_va_end",
++        "__builtin_zos_va_copy",
++    };
++    const char* const spellings[] =
++    {
++        "transparent_union",
++        "__transparent_union__",
++        "overloadable",
++        "__overloadable__",
++    };
++    // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them: the
++    // type queries' names here, and the place's and the type queries' keywords by their span, which the count tests itself
++    // (BUSTER_CHECK_SOURCE_BUILTIN_SPAN).
++    names[0] = C_NAME_BUILTIN_TYPES_COMPATIBLE_P;
++    names[1] = C_NAME_BUILTIN_OFFSETOF;
++    names[2] = C_NAME_GENERIC;
++    names[3] = C_NAME_BUILTIN_CHOOSE_EXPR;
++    groups[0] = CHECK_INPUT_COUNT_BUILTIN_CONSTANTS;
++    groups[1] = CHECK_INPUT_COUNT_BUILTIN_CONSTANTS;
++    groups[2] = CHECK_INPUT_COUNT_SELECTIONS;
++    groups[3] = CHECK_INPUT_COUNT_SELECTIONS;
++    // A spelling the unit never interned counts no token, so it takes no comparison: most units name few of these.
++    uint32_t name_count = 4;
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(vararg_spellings); i += 1)
++    {
++        names[name_count] = intern_find(pp->table, (const uint8_t*)vararg_spellings[i], (uint32_t)strlen(vararg_spellings[i]));
++        groups[name_count] = CHECK_INPUT_COUNT_VARARGS;
++        name_count += names[name_count] != 0;
++    }
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
++    {
++        names[name_count] = intern_find(pp->table, (const uint8_t*)spellings[i], (uint32_t)strlen(spellings[i]));
++        groups[name_count] = i < 2 ? CHECK_INPUT_COUNT_TRANSPARENT_UNIONS : CHECK_INPUT_COUNT_OVERLOADABLE;
++        name_count += names[name_count] != 0;
++    }
++    return name_count;
++}
++
++// The reader's passes before its walk whose inputs are the parse's alone, made a tile of the parse at a time (#2536): the
++// parse's sink (ParseTileSink) for check_input_count_tokens' counts and columns and check_input_named_prefixes' column.
++// Each tile's kinds, names and roles are read while the parse's writes of them are in the cache, where a pass over the
++// unit after the parse took them from memory again. check_input_run takes the columns for its own
++// (check_input_prepass_take) where the parse it reads is the one they followed; the unit as one makes them in one
++// call, and a reading without them makes its own, the twin.
++typedef struct CheckInputPrepass CheckInputPrepass;
++struct CheckInputPrepass
++{
++    // Whose names are counted, and where the columns go, the parse's scratch: set by who starts the parse.
++    Preprocessor* pp;
++    Arena* scratch;
++    // The parse followed, and its tokens.
++    const Parser* parser;
++    uint32_t count;
++    // check_input_count_tokens' columns, count + 1 bytes each (the marks' with their padding), and
++    // check_input_named_prefixes', count + 1.
++    uint8_t* syntax;
++    uint8_t* visits;
++    uint8_t* prefixes;
++    // The names counted (check_input_count_names).
++    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES];
++    uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES];
++    uint32_t name_count;
++    // The counts of the tokens before `counted`, and the tokens the prefixes' pass has done: the first stays a token behind
++    // a tile's end, whose successor's role the next tile writes, and the second BUSTER_CHECK_PREFIX_REACH behind.
++    CheckInputCountState state;
++    uint32_t counted;
++    uint32_t prefixed;
++    // Whether the unit's last tokens were given, so the columns are the unit's; and whether a reading took them, whose
++    // walk then writes its marks in them.
++    bool complete;
++    bool taken;
++};
++
++static bool check_input_prepass_begin(void* context, const Parser* parser)
++{
++    CheckInputPrepass* const prepass = context;
++    const uint64_t slots = (uint64_t)parser->tokens.count + 1;
++    prepass->parser = parser;
++    prepass->count = parser->tokens.count;
++    prepass->name_count = check_input_count_names(prepass->pp, prepass->names, prepass->groups);
++    prepass->syntax = arena_push_array(prepass->scratch, slots, sizeof(uint8_t), 64);
++    prepass->visits = prepass->syntax != NULL ? arena_push_array(prepass->scratch, slots + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : NULL;
++    prepass->prefixes = prepass->visits != NULL ? arena_push_array(prepass->scratch, slots, sizeof(uint8_t), 64) : NULL;
++    prepass->state = (CheckInputCountState){ 0 };
++    prepass->counted = 0;
++    prepass->prefixed = 0;
++    prepass->complete = false;
++    prepass->taken = false;
++    return prepass->prefixes != NULL;
++}
++
++static void check_input_prepass_tile(void* context, const ParseTree* tree, uint32_t begin, uint32_t end)
++{
++    CheckInputPrepass* const prepass = context;
++    const ParseTokens* const tokens = &prepass->parser->tokens;
++    const uint32_t count = prepass->count;
++    if (begin == 0)
++    {
++        // The unit's first tokens, or the unit over again after one of its tiles was refused.
++        prepass->state = (CheckInputCountState){ 0 };
++        prepass->counted = 0;
++        prepass->prefixed = 0;
++        prepass->complete = false;
++    }
++    // A tile that isn't the unit's last has tokens after it whose roles the parse hasn't written: each pass stops as far
++    // before the tile's end as it reads ahead, and the next tile's call takes it from there.
++    const bool last = end == count;
++    const uint32_t counted = last ? count : end - 1 > prepass->counted ? end - 1 : prepass->counted;
++    check_input_count_range(tokens->kinds, tree->roles, tokens->names, count, prepass->names, prepass->groups, prepass->name_count, prepass->syntax, prepass->visits,
++                            &prepass->state, prepass->counted, counted);
++    prepass->counted = counted;
++    const uint32_t prefixed = last ? count : end > prepass->prefixed + BUSTER_CHECK_PREFIX_REACH ? end - BUSTER_CHECK_PREFIX_REACH : prepass->prefixed;
++    check_input_named_prefixes_range(tokens->kinds, tree->roles, count, prepass->prefixes, prepass->prefixed, prefixed);
++    prepass->prefixed = prefixed;
++    if (last)
++    {
++        prepass->syntax[count] = 0;
++        prepass->visits[count] = 0;
++        prepass->complete = true;
++    }
++}
++
++// The sink's columns for a reading of `parser` on `scratch`, or null: they followed that parse to its end, are on that
++// scratch, and no reading has taken them yet.
++static CheckInputPrepass* check_input_prepass_take(const Parser* parser, const Arena* scratch)
++{
++    CheckInputPrepass* const prepass = parser->options.sink.done == check_input_prepass_tile ? parser->options.sink.context : NULL;
++    const bool usable = prepass != NULL && prepass->parser == parser && prepass->count == parser->tokens.count && prepass->scratch == scratch && prepass->complete &&
++                        !prepass->taken && parser->tree.roles != NULL;
++    if (usable)
++    {
++        prepass->taken = true;
++    }
++    return usable ? prepass : NULL;
+ }
+ 
+ // The columns of a value a token whose empty value is NONE (UINT32_MAX), filled one at a time so that libc's vector stores
+@@ -17685,58 +17889,17 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+     check_input_target_table(types, pp);
+     const uint32_t count = parser->tokens.count;
+     input->token_count = count;
+-    const char* const vararg_spellings[] =
+-    {
+-        "__builtin_va_start",
+-        "__builtin_stdarg_start",
+-        "__builtin_c23_va_start",
+-        "__builtin_va_arg",
+-        "__builtin_va_copy",
+-        "__builtin_va_end",
+-        "__builtin_ms_va_start",
+-        "__builtin_ms_va_end",
+-        "__builtin_ms_va_copy",
+-        "__builtin_zos_va_start",
+-        "__builtin_zos_va_end",
+-        "__builtin_zos_va_copy",
+-    };
+-    const char* const spellings[] =
+-    {
+-        "transparent_union",
+-        "__transparent_union__",
+-        "overloadable",
+-        "__overloadable__",
+-    };
+-    // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them: the
+-    // type queries' names here, and the place's and the type queries' keywords by their span, which the count tests itself
+-    // (BUSTER_CHECK_SOURCE_BUILTIN_SPAN).
+-    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR };
+-    uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES] =
+-    {
+-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+-        CHECK_INPUT_COUNT_BUILTIN_CONSTANTS,
+-        CHECK_INPUT_COUNT_SELECTIONS,
+-        CHECK_INPUT_COUNT_SELECTIONS,
+-    };
+-    // A spelling the unit never interned counts no token, so it takes no comparison: most units name few of these.
+-    uint32_t name_count = 4;
+-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(vararg_spellings); i += 1)
+-    {
+-        names[name_count] = intern_find(pp->table, (const uint8_t*)vararg_spellings[i], (uint32_t)strlen(vararg_spellings[i]));
+-        groups[name_count] = CHECK_INPUT_COUNT_VARARGS;
+-        name_count += names[name_count] != 0;
+-    }
+-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(spellings); i += 1)
+-    {
+-        names[name_count] = intern_find(pp->table, (const uint8_t*)spellings[i], (uint32_t)strlen(spellings[i]));
+-        groups[name_count] = i < 2 ? CHECK_INPUT_COUNT_TRANSPARENT_UNIONS : CHECK_INPUT_COUNT_OVERLOADABLE;
+-        name_count += names[name_count] != 0;
+-    }
++    // The counts and the walk's columns: the parse's sink's, made as the parse's tiles were done (check_input_prepass_take,
++    // #2536), or this reading's own, in one pass over the unit.
++    CheckInputPrepass* const prepass = check_input_prepass_take(parser, scratch);
++    uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES];
++    uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES];
++    const uint32_t name_count = prepass == NULL ? check_input_count_names(pp, names, groups) : 0;
+     const uint64_t mark = scratch->length;
+-    uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
++    uint8_t* syntax = prepass != NULL ? prepass->syntax : arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
+     // With BUSTER_CHECK_VISITS_PADDING bytes past its count + 1, which the coded walk's gathers of four bytes may read.
+-    uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
+-    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits);
++    uint8_t* visits = prepass != NULL ? prepass->visits : syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
++    const CheckInputTokenCounts counts = prepass != NULL ? prepass->state.counts : check_input_count_tokens(parser, names, groups, name_count, syntax, visits);
+     input->vla_capacity = counts.subscripts;
+     input->asm_capacity = counts.asms;
+     const uint32_t vector_members = counts.vector_members;
+@@ -17793,9 +17956,9 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
+                  count < UINT32_MAX / 4 && graph_capacity <= UINT32_MAX && original_end <= count;
+     if (valid && reader.plain_declarations)
+     {
+-        reader.plain_prefixes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
++        reader.plain_prefixes = prepass != NULL ? prepass->prefixes : BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count);
+         reader.plain_declarations = reader.plain_prefixes != NULL;
+-        if (reader.plain_declarations)
++        if (reader.plain_declarations && prepass == NULL)
+         {
+             check_input_named_prefixes(parser, reader.plain_prefixes);
+         }
+diff --git a/src/buster/compiler/c_check_input_scan_test.c b/src/buster/compiler/c_check_input_scan_test.c
+index 3fceac32..6bb18ff3 100644
+--- a/src/buster/compiler/c_check_input_scan_test.c
++++ b/src/buster/compiler/c_check_input_scan_test.c
+@@ -820,6 +820,73 @@ static uint8_t check_test_named_prefix(const uint8_t* kinds, const uint8_t* role
+     return delimited ? (uint8_t)(specifiers | ((name - token - specifiers) << 3)) : 0;
+ }
+ 
++// The reader's passes before its walk a tile of the parse at a time (#2536, check_input_prepass_tile): how many bytes
++// and counts differ from the unit's passes' over the same tokens, in three readings: every token a tile, tiles of
++// random lengths, and tiles until one past the unit's middle is refused and the unit is given as one. While a tile's
++// call runs, the roles past its end hold a byte that isn't theirs (`poison`), as the parse hasn't written them.
++static uint32_t check_test_scan_tiles(CheckTest* test, const uint8_t* kinds, uint8_t* roles, const uint32_t* names, uint32_t count, const uint32_t* sought,
++                                      const uint8_t* groups, uint32_t sought_count, uint8_t poison)
++{
++    uint32_t differences = 0;
++    Parser parser = { 0 };
++    parser.tokens.count = count;
++    parser.tokens.kinds = (uint8_t*)kinds;
++    parser.tokens.names = (uint32_t*)names;
++    parser.tree.roles = roles;
++    const uint64_t slots = (uint64_t)count + 1;
++    uint8_t* const columns = malloc(7 * slots + BUSTER_CHECK_VISITS_PADDING);
++    uint8_t* const unit_syntax = columns;
++    uint8_t* const unit_visits = columns + slots;
++    uint8_t* const unit_prefixes = columns + 2 * slots;
++    uint8_t* const tile_syntax = columns + 3 * slots;
++    uint8_t* const tile_prefixes = columns + 4 * slots;
++    uint8_t* const saved = columns + 5 * slots;
++    uint8_t* const tile_visits = columns + 6 * slots;
++    if (columns != NULL)
++    {
++        const CheckInputTokenCounts unit = check_input_count_tokens(&parser, sought, groups, sought_count, unit_syntax, unit_visits);
++        check_input_named_prefixes(&parser, unit_prefixes);
++        for (uint32_t reading = 0; reading < 3; reading += 1)
++        {
++            CheckInputPrepass prepass = { .parser = &parser, .count = count, .syntax = tile_syntax, .visits = tile_visits, .prefixes = tile_prefixes, .name_count = sought_count };
++            memcpy(prepass.names, sought, sought_count * sizeof(uint32_t));
++            memcpy(prepass.groups, groups, sought_count);
++            memset(tile_syntax, 0xa5, slots);
++            memset(tile_visits, 0xa5, slots);
++            memset(tile_prefixes, 0xa5, slots);
++            bool refuse = reading == 2;
++            uint32_t begin = 0;
++            while (!prepass.complete)
++            {
++                const uint32_t length = reading == 0 ? 1 : 1 + check_test_random(test) % 70;
++                uint32_t end = count - begin < length ? count : begin + length;
++                if (refuse && begin > count / 2)
++                {
++                    // The unit over again, as one.
++                    refuse = false;
++                    begin = 0;
++                    end = count;
++                }
++                memcpy(saved, roles + end, count - end);
++                memset(roles + end, poison, count - end);
++                check_input_prepass_tile(&prepass, &parser.tree, begin, end);
++                memcpy(roles + end, saved, count - end);
++                begin = end;
++            }
++            differences += memcmp(tile_syntax, unit_syntax, slots) != 0;
++            differences += memcmp(tile_visits, unit_visits, slots) != 0;
++            differences += count != 0 && memcmp(tile_prefixes, unit_prefixes, count) != 0;
++            const CheckInputTokenCounts* const tiles = &prepass.state.counts;
++            differences += tiles->subscripts != unit.subscripts || tiles->asms != unit.asms || tiles->asm_groups != unit.asm_groups || tiles->size_queries != unit.size_queries ||
++                           tiles->vector_members != unit.vector_members || tiles->pretty_function_name != unit.pretty_function_name || tiles->operands != unit.operands ||
++                           tiles->calls != unit.calls || memcmp(tiles->groups, unit.groups, sizeof(unit.groups)) != 0;
++            differences += prepass.counted != count || prepass.prefixed != count;
++        }
++        free(columns);
++    }
++    return differences + (columns == NULL);
++}
++
+ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+ {
+     check_test_output_none(test);
+@@ -902,6 +969,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+     uint32_t mismatches = 0;
+     uint32_t mark_differences = 0;
+     uint32_t class_differences = 0;
++    uint32_t tile_differences = 0;
+     for (uint32_t count = 0; ready && count <= 200; count += 1)
+     {
+         uint8_t* kinds = check_test_scan_column(mappings[KINDS] + page, count, 1);
+@@ -947,6 +1015,10 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+         {
+             mismatches += prefixes[i] != check_test_named_prefix(kinds, roles, i, count);
+         }
++        // The declarations' pattern by tiles, the roles past each tile a specifier's and then no role's.
++        memset(names, 0, (uint64_t)count * sizeof(uint32_t));
++        tile_differences += check_test_scan_tiles(test, kinds, roles, names, count, sought, groups, BUSTER_ARRAY_LENGTH(sought), PARSE_ROLE_SPECIFIER);
++        tile_differences += check_test_scan_tiles(test, kinds, roles, names, count, sought, groups, BUSTER_ARRAY_LENGTH(sought), PARSE_ROLE_NONE);
+         for (uint32_t i = 0; i < count; i += 1)
+         {
+             const uint32_t draw = check_test_random(test);
+@@ -1115,6 +1187,11 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+         syntax_differences += syntax[count] != 0;
+         mark_differences += visits[count] != 0;
+         mismatches += syntax_differences;
++        // The random tokens by tiles, the roles past each tile a role every test reads (a block's opening, an attribute
++        // list's) and then a byte no role has.
++        tile_differences += check_test_scan_tiles(test, kinds, roles, names, count, sought, groups, BUSTER_ARRAY_LENGTH(sought), PARSE_ROLE_OPEN_BLOCK);
++        tile_differences += check_test_scan_tiles(test, kinds, roles, names, count, sought, groups, BUSTER_ARRAY_LENGTH(sought), PARSE_ROLE_OPEN_ATTRIBUTE_LIST);
++        tile_differences += check_test_scan_tiles(test, kinds, roles, names, count, sought, groups, BUSTER_ARRAY_LENGTH(sought), 0x7f);
+         // The expressions' classes of a reader of these columns and sparse ones: each token's classes must
+         // be the test's own reading, and its first value NONE where the walk doesn't act at it and as it was elsewhere.
+         CheckInput input = { 0 };
+@@ -1271,6 +1348,8 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
+     snprintf(description, sizeof(description), "the reader's token scans: %u masks differ from the test's (%u marks, %u classes)", mismatches, mark_differences,
+              class_differences);
+     check_test_expect(test, ready && mismatches == 0, description);
++    snprintf(description, sizeof(description), "the reader's passes before its walk by tiles: %u readings differ from the unit's passes'", tile_differences);
++    check_test_expect(test, ready && tile_differences == 0, description);
+     for (uint32_t i = 0; i < COLUMNS; i += 1)
+     {
+         if (mappings[i] != MAP_FAILED)
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index b2660242..c4ae9bb7 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -13126,7 +13126,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+     const char* output = command->output;
+     // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
+     // alone: the reader derives the traversal it reads into those pages (check_input_run).
+-    const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .tile_tokens = command->parse_tile_tokens, .scratch = scratch };
++    const char* const experiment_columns = getenv("BUSTER_EXPERIMENT_TILE_COLUMNS");
++    const bool tile_columns = command->parse_tile_tokens != 0 && experiment_columns != NULL && strcmp(experiment_columns, "1") == 0;
++    const char* const experiment_sink = getenv("BUSTER_EXPERIMENT_TILE_SINK");
++    const bool tile_sink = command->parse_tile_tokens != 0 && experiment_sink != NULL && strcmp(experiment_sink, "1") == 0;
++    CheckInputPrepass prepass = { .pp = pp, .scratch = scratch };
++    const ParseOptions parser_options = { .scalar = scalar, .tree_only = !tile_columns, .sizes = tile_columns, .tile_tokens = command->parse_tile_tokens,
++                                          .sink = { .begin = tile_sink ? check_input_prepass_begin : NULL, .done = tile_sink ? check_input_prepass_tile : NULL, .context = &prepass },
++                                          .scratch = scratch };
+     bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order));
+     // A preprocessor that refused to start on its own fatal error (an invalid SOURCE_DATE_EPOCH, #2996) has printed it;
+     // the unit ends with that error alone, not with a memory failure that didn't happen.
+diff --git a/src/buster/compiler/c_parser.c b/src/buster/compiler/c_parser.c
+index 38f1f229..d9ab09fd 100644
+--- a/src/buster/compiler/c_parser.c
++++ b/src/buster/compiler/c_parser.c
+@@ -1945,6 +1945,23 @@ struct ParseTileColumns
+     uint32_t* sizes;
+ };
+ 
++// A consumer of the parse as its tiles are done (#2536, ParseOptions.sink): the stage after the parse, whose passes
++// then read a tile's tokens and tree while the parse's writes of them are still in the cache.
++// `begin` is called once the unit's tokens are converted, before the parse pushes its temporaries, so that what it
++// pushes on the parse's scratch stays there after the parse; it returns whether it has its memory.
++// `done` is called with the tree's columns of tokens [begin, end) final: after each tile, in order, and with the whole
++// unit, (0, count), where the unit was parsed as one. A call whose begin is 0 starts over: a tile that is refused sends
++// the unit to be parsed as one after earlier tiles were given. The entries past `end` are not the tree's yet, but in
++// the unit's last call. A parse with an error makes no last call.
++struct Parser;
++typedef struct ParseTileSink ParseTileSink;
++struct ParseTileSink
++{
++    bool (*begin)(void* context, const struct Parser* parser);
++    void (*done)(void* context, const struct ParseTree* tree, uint32_t begin, uint32_t end);
++    void* context;
++};
++
+ typedef struct ParseKernelResult ParseKernelResult;
+ struct ParseKernelResult
+ {
+@@ -2844,6 +2861,8 @@ struct ParseOptions
+     // The vector path by tiles of about this many tokens (#2536, parse_vector_tiles): 0 for the unit as one, the twin.
+     // The C driver's is --parse-tile=N, BUSTER_PARSE_TILE_TOKENS by default.
+     uint32_t tile_tokens;
++    // Who reads the parse a tile at a time (ParseTileSink), or all null for no one.
++    ParseTileSink sink;
+     // Where a parse's temporaries go (the vector path's arrays, the scalar parser's stacks and the postorder's passes),
+     // which it pops at its end: the caller's arena, whose pages its next stage then takes again (the C driver's checker
+     // reads its scratch from where the parse's were), or null for the parser's own.
+diff --git a/src/buster/compiler/c_parser_impl.c b/src/buster/compiler/c_parser_impl.c
+index c6a4d0e7..b834d16f 100644
+--- a/src/buster/compiler/c_parser_impl.c
++++ b/src/buster/compiler/c_parser_impl.c
+@@ -11447,7 +11447,7 @@ static uint32_t parse_tile_end(const uint8_t* kinds, uint32_t begin, uint32_t co
+ // written: the passes' temporaries are a tile's, in the workspace, and the unit's sentinel follows the last tile. A unit
+ // that goes to parse_vector as one has none of them derived.
+ static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers, uint32_t tile_tokens,
+-                                            Arena* arena, const ParseTree* tree, uint32_t name_capacity, const ParseTileColumns* columns)
++                                            Arena* arena, const ParseTree* tree, uint32_t name_capacity, const ParseTileColumns* columns, const ParseTileSink* sink)
+ {
+     ParseKernelResult result = { .flagged_tokens = 0, .everything = false };
+     const uint32_t count = input->count;
+@@ -11599,6 +11599,11 @@ static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseIn
+                     parse_tree_columns_range(tree->parents, begin, end, last_children, before_counts, columns->postorder, columns->positions, columns->ends,
+                                              columns->first_children, columns->next_siblings, starts, columns->sizes);
+                 }
++                // The tile's tree is the unit's now: to the stage after the parse, while it is in the cache.
++                if (sink->done != NULL)
++                {
++                    sink->done(sink->context, tree, begin, end);
++                }
+             }
+             // What the buffers count, which the workspace's next reservation clears.
+             for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(rounds); r += 1)
+@@ -11952,7 +11957,16 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+     }
+     // The parse's temporaries, each step's popped after it (ParseOptions.scratch).
+     Arena* temporary = parser->options.scratch != 0 ? parser->options.scratch : &parser->scratch;
++    const ParseTileSink* const sink = &parser->options.sink;
++    if (result && sink->begin != NULL && !sink->begin(sink->context, parser))
++    {
++        parser->errors += 1;
++        parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
++        result = false;
++    }
+     const uint64_t temporary_mark = temporary->length;
++    // Whether the sink has had the unit's tiles (parse_vector_tiles); otherwise it is given the unit as one below.
++    bool sunk = false;
+     bool scalar = false;
+     // The tiles derived the tree's columns (parse_vector_tiles).
+     bool traversed = false;
+@@ -11990,9 +12004,10 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+                 .diagnostic_capacity = parser->diagnostic_capacity,
+             };
+             const ParseKernelResult vector = tile_tokens != 0 ? parse_vector_tiles(&parser->kernels, &input, parser->predeclared, &parser->buffers, tile_tokens, temporary,
+-                                                                                    &tree, parser->meanings.capacity, &tile_columns) :
++                                                                                    &tree, parser->meanings.capacity, &tile_columns, sink) :
+                                                                  parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
+             out_of_memory = vector.out_of_memory;
++            sunk = vector.tiles != 0 && !vector.tiles_refused && !vector.out_of_memory;
+             traversed = tile_columns.postorder != NULL && vector.tiles != 0 && !vector.tiles_refused && !vector.out_of_memory;
+             parser->statistics.tiles = vector.tiles;
+             parser->statistics.tiles_refused = vector.tiles_refused;
+@@ -12031,6 +12046,10 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
+     {
+         parser->diagnostic_count = 0;
+     }
++    if (result && !sunk && sink->done != NULL)
++    {
++        sink->done(sink->context, &parser->tree, 0, parser->tokens.count);
++    }
+     if (result && parser->options.extension_metadata)
+     {
+         // Reserve an upper bound virtually; only the exact measured arrays are committed. Each record requires

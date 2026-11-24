@@ -212,6 +212,102 @@ In the session's cloud container (a 4-CPU virtual machine, Linux 6.18, where the
 `scripts/runs.py`, medians of 7 compiles): base pages 279.3 ms a compile with 85.6 ms in the kernel and 55,807 faults;
 the `medium` experiment 230.8 ms with 45.8 ms and 17,142.
 
+## The page policy as built
+
+The policy as its pull request has it (`scripts/pages1.patch` over main `3f4ff4c7`, the `pages` tree, executable
+`233bfec3badefd1a`): a busy host's arenas take the medium pages where the host's `hugepages-64kB/enabled` knob says
+`madvise` or `always`, and base pages otherwise; the compiler reads the knob and turns nothing on.
+
+**Its checks on the 9700X**, which is no virtual machine (`scripts/smoke12.sh`, one hold, `results/pages-smoke/`):
+`test-lanes`, `test-checker-deferred` and `test-checker-driver --part 2/16` (the part with the policy's cases) pass;
+`sqlite3.c` compiled with the busy test and the knob's reading forced each way (`BUSTER_TEST_HOST_BUSY`,
+`BUSTER_TEST_MEDIUM_PAGES`) reports `system`, `busy` and `medium` and gives one object.
+
+**The pair** (`scripts/run9.sh pages pages-final 3 ...`, three passes in turn, one hold, `results/pages-final/`): the
+same executable with the knob `never` and with it `madvise`, set for the configuration's rounds and put back.
+
+| | knob `never` | knob `madvise` |
+| --- | ---: | ---: |
+| eight workers, MB/s | 325.88 | 337.10 |
+| their wall ms | 231.55 | 224.88 |
+| their user cycles | 965.4 M | 968.6 M |
+| their kernel cycles | 234.0 M | 196.8 M |
+| their faults | 56,060 | 17,137 |
+| their reports | 96 `busy` | 96 `medium` |
+| their peak resident set | 188.0 MB | 193.9 MB |
+| one worker, wall ms | 114.97 | 114.19 |
+| its faults | 5,636 | 4,586 |
+
+- **+3.4% at eight workers**, the kernel's cycles 16% fewer, the objects the same bytes (9 a pass of each configuration).
+- **One worker is as before**: it is not busy and keeps its 2 MB pages. The knob gives its few advised mappings that no
+  2 MB page fits 64 KB pages too, which is its 1,050 fewer faults. One of the 36 one-worker compiles with the knob on
+  found the host busy and took the medium pages.
+- The third configuration, `--deferred-bodies`, is the first again: on one lane the driver reads the bodies in source
+  order (`time-process` says so), so it measured nothing of its own.
+
+**A fault round** in the session's container (`scripts/pages-faults.py` with `pages-harness.c`, which builds
+`lane.c` and its tests alone): 21 faults in the policy's code (the split's page, stride, rounding and end, the budget,
+the two commit paths' hooks and their first byte, the tables, the knob's text, the choice of policy), each killed by
+`test-lanes`' new checks.
+
+## The reader by the parse's tiles
+
+Four trees over the parser's pull request (`06321630`), each with switches in the environment so that one executable
+is its own twin; `scripts/t2a.patch`, `t3.patch`, `t5.patch` and `t6.patch` are what each was built from. Every pair is
+one hold, three passes in turn; the figures are medians of the passes.
+
+| tree, hold | configuration | eight workers, MB/s | user cycles | kernel cycles | one worker, wall ms | peak alone |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| `t2`, `t2a-pair` | tiles alone (the pull request) | 341.68 | 907.7 M | 220.3 M | 114.11 | 238.2 MB |
+| | the tree's columns derived in the parser's tile, in the parser's arena | 347.16 | 889.4 M | 210.1 M | 115.81 | 253.1 MB |
+| `t3`, `t3-pair` | tiles alone | 340.68 | 909.0 M | 223.4 M | 114.59 | 240.0 MB |
+| | the reader's sink: its counts and prefixes as each tile is parsed | 335.86 | 906.5 M | 231.8 M | 114.39 | 241.9 MB |
+| | the columns in the parser's arena | 347.58 | 891.6 M | 206.8 M | 116.18 | 254.8 MB |
+| | both | 350.49 | 883.9 M | 210.0 M | 116.35 | 256.8 MB |
+| `t5`, `t5-pair` | tiles alone | 338.06 | 910.6 M | 228.0 M | 114.36 | 238.1 MB |
+| | the sink (counts and prefixes) | 337.79 | 908.6 M | 231.7 M | 114.35 | 238.1 MB |
+| | the sink with the traversal, on the scratch | 351.41 | 882.8 M | 216.4 M | 114.43 | 238.1 MB |
+| | the expressions' walk by tiles (ends from the tree's roots) | 341.91 | 899.1 M | 225.6 M | 114.00 | 238.1 MB |
+| | the traversal and the expressions | 350.15 | 874.4 M | 222.9 M | 114.38 | 238.1 MB |
+| `t6`, `t6-pair` | tiles alone | 342.64 | 909.9 M | 220.9 M | 114.31 | 238.2 MB |
+| | the sink with the traversal | 350.39 | 881.2 M | 211.6 M | 114.52 | 238.1 MB |
+| | the sink and the walk's columns cleared a tile ahead | 339.74 | 913.4 M | 220.2 M | 114.77 | 238.2 MB |
+| | the traversal and the expressions (ends from the parse's tiles) | 354.02 | 870.2 M | 211.3 M | 114.06 | 238.2 MB |
+| | the traversal, the expressions and the clears | 356.29 | 876.3 M | 203.3 M | 114.40 | 238.2 MB |
+
+Every configuration's 9 objects a pass are the same bytes (`objects.txt`).
+
+| stage, ms alone → at eight (`t6-pair`) | tiles alone | the traversal and the expressions |
+| --- | --- | --- |
+| `parse` | 4.79 → 8.84 | 7.40 → 15.72 |
+| `check-input` | 42.49 → 95.51 | 39.70 → 80.11 |
+| `check-expressions` | 10.80 → 18.78 | 10.81 → 18.54 |
+
+- **The tree's traversal derived as each tile is parsed** is the gain: +2.3% and +3.9% at eight workers in two holds,
+  28 M user cycles a compile, the reader 14 ms shorter there for 7 ms more in the parse. In the parser's own arena it
+  cost a compile alone 1.4% (15 MB more at its peak, 1,270 faults more); on the scratch, where the reader had it, a
+  compile alone takes the same time and memory.
+- **The expressions' walk by tiles** (each tile's classes, then its coded walk) takes 11 M user cycles off at eight
+  workers, and with the traversal the pair is **+3.3%** (354.0 against 342.6 MB/s, 39.7 M user cycles fewer), a compile
+  alone 0.2% shorter.
+- **The counts and the prefixes in the sink** alone are within the passes' spread (2 to 3 M user cycles fewer, the
+  kernel's a few M more in both holds); they come with the sink.
+- **The walk's columns cleared a tile ahead** are within the spread too (356.3 against 354.0 MB/s at eight workers
+  with 6 M more user cycles and 8 M fewer kernel cycles; 114.40 against 114.06 ms alone): built, checked and not kept.
+  `scripts/t6.patch` has it, with its check and poison readings.
+
+**What the clears' check found first.** By tiles whose ends were the tree's roots' (`t5`'s way, used for the clears
+before `t6`), two of the repository's programs with old-style definitions (`tests/checker/musttail/0017.c`,
+`tests/checker/non-prototype/merge.c`) had columns written ahead of their tile: an old-style definition's parameter
+declarations are roots of their own, and the walk at the declarator writes at the body's brace. The parse's own tiles
+end at declarations (or refuse the unit), and by them no program writes ahead; so the reader takes its tiles' ends from
+the parse (`t6`).
+
+**The same bytes** (the session's container, `scripts/twin_env2.sh` and `twin_opt.sh`): objects, stderr and statuses
+of c-testsuite's 220 programs and the repository's 1,578 test programs, with `-Wall -Wextra`, by tiles of a
+declaration and of 16 tokens with every piece on, are the unit's as one; `sqlite3.c`'s object by tiles of 1, 64 and
+4,096 too. The clears were also run in their check reading (no entry written ahead) and their poison reading.
+
 ## What disturbed the runs
 
 - **`results/tiles3-pair-invalid-option-not-passed/` measures nothing about tiles.** `scripts/pair7.sh` passed each
@@ -226,7 +322,9 @@ the `medium` experiment 230.8 ms with 45.8 ms and 17,142.
 
 ## The files
 
-- `scripts/`: every script as run on the host, the three patches, and the container's `runs.py` and `twin.sh`.
+- `scripts/`: every script as run on the host, the patches each tree was built from, and the container's `runs.py`,
+  `twin.sh`, `twin_env2.sh`, `twin_opt.sh` and the page policy's fault round. `t6-with-clears-local.patch` is the
+  container's tree when the clears were taken out, with `--reader-tiles=` in place of the environment's switches.
 - `results/<name>/`: a gauge's `whole.tsv` and `table.tsv` (or, for a pair, one directory a configuration and pass,
   `<configuration>.<pass>/whole.tsv`), the rows, the strays' files, `switch.txt` and `busy.txt`, and the per-run stage
   reports packed in `reports.tar.xz`.
