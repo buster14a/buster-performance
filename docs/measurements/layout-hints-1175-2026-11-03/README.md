@@ -4,9 +4,8 @@ This record holds exact taken-branch counts of the layouts of buster main and of
 rare tests (`__builtin_expect`) and computes some without branches. It was made on 2026-11-03 in a cloud VM, not on the
 Ryzen 7 9700X. The VM has no hardware PMU, so the counts are BOLT's instrumented edge counts, not hardware counters.
 
-**Not covered: cycles.** buster#1175 keeps a change only when its taken branches and cycles fall over placements
-(`time-runs --copies`, buster#509) on the 9700X. That measurement is still to be made, and nothing here stands in for
-it. `scripts/campaign-9700x.sh` makes it in one command on the 9700X ("The 9700X measurement", below).
+The November 5 hardware run compared the integrated change with its first parent. On SQLite syntax checking,
+taken branches fell 9.56% and user cycles fell 1.01% over four placements. [9700X results and raw evidence](9700x/README.md)
 
 ## Sources, host and inputs
 
@@ -262,10 +261,9 @@ Every stage ran. Its counts and times mean nothing; only these checks of the scr
 
 On this VM, a placement after the first rebuilt the checker's unit in about 90 seconds.
 
-## Limitations
+## Limitations of the November 3 instrumentation
 
-- **No cycles, no 9700X.** These are counts of the layout's taken branches and of instructions. Nothing here measures
-  time, mispredictions or the front end's stalls, and nothing here comes from the 9700X.
+- BOLT counted the instrumented executable's taken branches and instructions on the VM.
 - **`-fno-pie` code.** The counts are of `-fno-pie` code, which matched the PIE build's per function on main, as above,
   but isn't the code buster ships.
 - **One input.** The input is `sqlite3.c` alone, and `-c` ran on one lane.
@@ -294,7 +292,7 @@ sha256 sums are in `logs/receipts.txt`.
   - `taken.c`, `measure.sh`, `attribute.sh`, `site.sh` and `branches.sh` (the coverage counts' extraction);
   - `build.sh` and the three clang wrappers;
   - `probe-expect.c`;
-  - `campaign-9700x.sh` and `counters.c`, the 9700X measurement still to make.
+  - `campaign-9700x.sh` and `counters.c` collected and reduced the hardware counts.
 - **`patches/`:** the variants' diffs against main.
 - **`logs/`:**
   - `receipts.txt` and `sites.txt`;

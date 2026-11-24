@@ -1,7 +1,7 @@
 # Acceptance handoff for buster#1175
 
 The compiler changes landed in [buster#1225](https://github.com/buster14a/buster/pull/1225).
-The remaining acceptance is the **paired 9700X measurement**, not another copy of those changes.
+The November 5 run completed the paired comparison described below. [9700X results and raw evidence](9700x/README.md)
 
 The integrated pair, verified against the merge commit's first parent on 2026-11-04, is:
 
@@ -11,7 +11,6 @@ The integrated pair, verified against the merge commit's first parent on 2026-11
 | Candidate | `c79fd0076fc8ee3ba0a43d02f94dca417a7557ea` |
 
 The earlier BOLT results in `README.md` are historical evidence for their own revisions.
-They are not hardware-cycle results for this integrated pair. This handoff adds no hardware measurements.
 
 ## Running the campaign
 
@@ -85,7 +84,7 @@ Validation performed in the editing container:
 - `bash -n` passed for the updated campaign. These tests did **not** build either compiler revision, check its
   objects, run `time-runs`, or execute on the 9700X.
 
-## Completion remains open
+## Reviewing the hardware results
 
 Publish the real campaign receipts, manifest, raw perf logs, reduced counts, summary and timing output in this
 performance repository, together with the exact source/harness/tool/input identities. Evaluate taken branches
