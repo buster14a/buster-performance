@@ -1,0 +1,2277 @@
+From 1100bf6a3bf4956541ee9c5966b78cb40f9dd14c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 23 Nov 2026 20:21:40 +0000
+Subject: [PATCH 2/6] Value numbering: the available-expression walk alone
+ (#2924)
+
+The owner kept value numbering's scalar walk as its one implementation
+(#2924, 7112387760): over Tier 1's pipeline on sqlite3.c, Lua and musl,
+it took 0.87 to 0.93 times the congruence solver's ticks in every size
+bin, with every object byte-identical (6987893038). #3433 is the
+vectorized form that would have to win, and recover the solver's phi
+congruences.
+
+The solver goes: #866's acyclic numbering, the refinement rounds, their
+eight-lane key hashing, bounded grouping and sorted completion, and
+IrGvnOptions' scalar, complete, sweep_limit and probes with the result's
+counters. The walk keeps the sixteen-lane classification and the
+`vectors` filter's kernel, and its keys lose the parent-class word that
+only the rounds set.
+
+Under `pressure`, a refused value now keeps the class of the expression
+it matched, as the solver's "computed as without it" did: test-ir-optimize's
+gvn-pressure pair, frozen from the solver, needs it (two sums of a value
+and equal constants merge). The walk passes the optimizer's internals
+their scalar twins, as it did when measured, until #2924's next piece.
+
+test-ir-gvn checks each fixture once, against the interpreter and the
+digest the previous commit froze. Callers drop the flag: Tier 1's three
+calls (c_check_tier1.c), the tests, ir_metamorphic.c,
+benchmark-ir-optimize-passes, and benchmark-ir-source, whose gvn variant
+has no twin now; test-ir-source --passes checks that the result promotes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EgbxngY8HBj6wFPMjAjgYD
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ docs/commands/ir-optimization.md              |   4 +-
+ docs/commands/ir.md                           |   9 +-
+ docs/ir-value-numbering.md                    | 225 ++----
+ src/buster/compiler/c_check_tier1.c           |   3 -
+ src/buster/compiler/ir_metamorphic.c          |   4 +-
+ src/buster/compiler/ir_optimize_gvn.c         | 640 ++----------------
+ src/buster/compiler/ir_optimize_gvn_test.c    | 394 +++--------
+ src/buster/compiler/ir_optimize_licm_test.c   |   1 -
+ .../compiler/ir_optimize_passes_benchmark.c   |   4 +-
+ src/buster/compiler/ir_optimize_text_test.c   |  15 +-
+ src/buster/compiler/ir_simd_consumer_test.c   |   2 -
+ src/buster/compiler/ir_source_benchmark.c     |  67 +-
+ src/buster/compiler/ir_source_passes.c        |  41 +-
+ src/buster/compiler/ir_stack_test.c           |   2 -
+ 14 files changed, 264 insertions(+), 1147 deletions(-)
+
+diff --git a/docs/commands/ir-optimization.md b/docs/commands/ir-optimization.md
+index 7a25ca4b..90b95f89 100644
+--- a/docs/commands/ir-optimization.md
++++ b/docs/commands/ir-optimization.md
+@@ -130,8 +130,8 @@ values, it runs value numbering before promotion and LICM after if-conversion,
+ restricted to those values; `+gvn` and `+licm` still request the unrestricted
+ passes, and `-vectors` disables both restricted forms. The LICM implementation
+ walks each eligible loop's own blocks and skips loops with no safe vector or
+-mask value. `test-ir-gvn` and `test-ir-licm` cover both host paths, the
+-per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
++mask value. `test-ir-gvn` covers value numbering's restricted form and
++`test-ir-licm` both of LICM's host paths, the per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
+ `test-checker-driver` checks the default and `-vectors` reports and native
+ output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
+ 
+diff --git a/docs/commands/ir.md b/docs/commands/ir.md
+index 25258ce2..8768eb03 100644
+--- a/docs/commands/ir.md
++++ b/docs/commands/ir.md
+@@ -112,8 +112,8 @@ function and the first error. `--print NAME` prints that function's IR as lowere
+ and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
+ `sqlite3.c` and the frozen musl's units.
+ 
+-`./build/compiler benchmark-ir-source [--only promote|promote-scalar|gvn|
+-gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify]
++`./build/compiler benchmark-ir-source [--only promote|promote-scalar|optimize|
++optimize-scalar|gvn|optimize-vector|lower|verify]
+ [--after-scalar MS] [preprocessor options]
+ file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
+ does, lowers and promotes each once outside the time, and reports the IR's bytes
+@@ -139,9 +139,8 @@ and remove BMI, LZCNT and POPCNT through their target attributes (#1374).
+ promotes every function as `test-ir-source` does, then runs each of #139's
+ passes by its vector and its scalar version:
+ - SROA with Tier 1's options, on the lowered form;
+-- #866's solver on the lowered form: its acyclic numbering must give its
+-  complete-refinement oracle's function, and its scalar available-expression
+-  twin must accept the function and remove no more instructions;
++- value numbering on the lowered form, one path since #2924, whose result
++  must promote;
+ - the optimizer on the promoted form, with SCCP alone, dead-code removal
+   alone, CFG cleanup alone and with its merges, the three together, Tier 1's
+   set (the three with the merges, layout and identities), value numbering
+diff --git a/docs/ir-value-numbering.md b/docs/ir-value-numbering.md
+index 6b7c8649..664d0ae9 100644
+--- a/docs/ir-value-numbering.md
++++ b/docs/ir-value-numbering.md
+@@ -10,125 +10,39 @@ transactional rollback and explicit entry-phi refusal follow the
+ after rewriting; no stale CFG or use list is published.
+ 
+ `IrGvnOptions.vectors` (#2781) keeps every scalar alias as its own value after
+-congruence analysis, so only vector- and mask-typed values are substituted.
+-Scalar congruence may still prove their vector users congruent. Tier 1 enables
+-this restricted form by default in functions with vector or mask values;
+-`--tier1-gvn` and `+gvn` continue to select the unrestricted solver. The filter
+-has a 16-value SIMD path and an exact scalar twin. `test-ir-gvn` checks that
+-vector duplicates merge while their duplicate scalar instructions remain.
+-The vector path computes the coarsest congruence partition: two values are
+-congruent when their opcode, type, flags and semantic metadata match and their
+-operands are congruent position by position. Phis compare their incoming
+-values in CFG predecessor order, regardless of the side-table order, and may
+-establish equivalent cyclic recurrences. Values that reach no cycle of operand
+-dependences are numbered once each in dependency order ("Acyclic numbering"
+-below). The values that reach a cycle start from opcode, type, flags and
+-metadata classes and are repeatedly partitioned by the classes of their
+-operands. An old class is part of the next key, so refinement only splits.
+-Refinement ends when no class splits. After `sweep_limit` rounds (64 by default), scalar hashing and comparison sorting
+-complete the same fixed point; a limit never authorizes an unfinished
+-optimistic substitution. `IrGvnOptions.complete` refines every instruction in
+-those rounds instead, as the pass did before the acyclic numbering: it is that
+-numbering's exact oracle.
+-
+-## Acyclic numbering (#866)
+-
+-Refinement needs as many rounds as the longest dependency chain whose links
+-the static keys can't tell apart, and each round rekeyed, hashed and grouped
+-every instruction. Two identical chains of `L` additions take `L + 1` rounds
+-over their `2L + 4` instructions (one link splits off per round), and the frozen
+-`sqlite3.c`'s lowered IR took 15,002 rounds over its 2,602 functions. A value from which no cycle of operand dependences is
+-reachable is congruent to exactly the values with its static key and congruent
+-operands, by induction on its depth. It is never congruent to a value that
+-reaches a cycle: matching operands position by position from both would have
+-to follow that cycle forever, and the acyclic side ends at leaves.
+-
+-So `ir_gvn_acyclic` numbers those values once each, in dependency order, by
+-hashing the static key and the operand classes into a table of
+-representatives. It is Kahn's algorithm. Instructions are visited in reverse
+-postorder (unreachable blocks last), and an instruction whose operands all
+-have classes is numbered at once; otherwise it waits, counting its unnumbered
+-operands. When a value that something waits for is numbered, the use lists
+-wake its users, and the users of every copy that resolves to it. The
+-instructions still waiting at the end are exactly those that reach a cycle.
+-Only they are refined in rounds, their numbered operands' classes held fixed,
+-and their classes are numbered after the acyclic ones so the two never
+-collide. In reachable SSA code every operand except a phi's input along a back
+-edge dominates its use, so it is numbered first. The use lists are walked only
+-from the few values such a phi waits for. Impure and undef-tainted
+-instructions are unique leaves and never wait.
+-
+-Numbering one value is a dependent chain: its key needs its operands' classes,
+-which the instructions just before it usually publish. So this numbering is
+-scalar, one hash, a chain walk and at most one four-word key comparison per
+-instruction. The refinement rounds keep the eight-lane key hashing. A
+-representative's key (payload, meta word and operand classes) occupies four of
+-the eight field words of its own index; the existing hash, link and bucket
+-columns hold the rest, so the table needs no scratch of its own. The waiting
+-counts, the awaited flags and the list of members to refine add nine bytes per
+-instruction, allocated on every path so that `scratch_bytes` doesn't depend on
+-which one ran. Its probes share
+-the grouping's budget, `IrGvnOptions.probes` key comparisons per instruction
+-(8). If the budget runs out, the numbering is abandoned and every instruction
+-is refined in rounds instead, which counts as a collision-budget completion.
+-The partition is the same either way; only class labels differ.
+-
+-Eight contiguous `uint64_t` key columns feed two eight-lane hash groups per
+-16-instruction batch. Every column has its exact logical length, partial
+-loads/stores are masked, and zero length performs no column access. Phi tails
+-and the upper six words of vector constants are hashed separately.
+-`ir_gvn_partition_group` interns those already materialized
+-keys in a bounded scratch hash table. A folded hash selects a bucket; the
+-original full-key and predecessor-ordered phi comparison establishes equality.
+-The analysis owns these columns in scratch. They are not persistent IR fields.
+-
+-## Bounded partition grouping (#866)
+-
+-Previously every round comparison-sorted every instruction, even when almost
+-all keys were distinct. Grouping now reuses the two existing `n`-element `u32`
+-sort columns as bucket heads and representative links. The bucket count is the
+-largest power of two not exceeding `n`; there is no new scratch allocation,
+-padding or signed-gather bound. Empty input accesses neither column. Only the
+-first member of a key class is inserted, so a large duplicate class does not
+-create a long chain. The existing eight-lane key hashing is retained; table
+-probes are scalar indexed loads rather than AVX-512 gathers. No host-specific
+-crossover threshold is introduced.
+-
+-Each round permits at most `8 * n` representative comparisons over its `n`
+-members. If another probe
+-would be needed, it abandons the partial grouping and runs the original stable
+-comparison sort on the same keys. The sort initializes its own index order and
+-overwrites every tentative class. This bounds hostile collisions by a linear
+-probe prefix plus the original `O(n log n)` key-comparison bound. The budget is
+-a worst-case work guard, not a measured performance crossover. Explicit scalar
+-completion bypasses hashing and takes that sorted oracle directly.
+-
+-Neither grouping path changes the old class column before the new partition
+-is complete. Numbering classes in first-occurrence order instead of sorted-key
+-order only renames the equivalence classes: their members, predecessor-ordered
+-phi relations and parent-class splits remain the same. By induction the entire
+-refinement sequence is unchanged up to renaming, including cyclic recurrences
+-and the number of rounds. The subsequent dominance walk chooses representatives
+-by instruction traversal and class equality, not by the numeric class order.
+-Neither the grouping nor the acyclic numbering dispatches anything to the weaker
+-available-expression oracle: both compute the same congruence classes.
+-
+-`IrGvnResult.acyclic` counts the instructions the acyclic numbering classed and
+-`rounds` the refinement rounds of the rest, their static round included (zero
+-when nothing reaches a cycle). `partition_probes` counts the bounded lookup
+-comparisons of both. `partition_sort_fallbacks` counts collision-budget
+-completions, separately from the existing sweep-limit `fallback` flag. A forced
+-sorted round is not a collision fallback. These counters describe work, not
+-elapsed time or generated program performance.
+-
+-A dominator-tree walk chooses a previously executed representative from each
+-class. Bucket insertions are undone when leaving a dominator subtree. Equal
+-expressions in sibling blocks therefore remain separate. The scalar oracle
+-instead hashes available expressions by their already canonical operand IDs
+-while walking that tree. It does not share partition refinement, and does not
+-recognize cyclic phi congruences. Its output is semantically equivalent but
+-need not have the same instruction count. The vector fixed-point solver with
+-forced scalar hashing does produce the exact same output.
++the analysis, so only vector- and mask-typed values are substituted. Scalar
++equality may still prove their vector users equal. Tier 1 enables this
++restricted form by default in functions with vector or mask values;
++`--tier1-gvn` and `+gvn` continue to select the unrestricted pass. The filter
++runs sixteen values at a time. `test-ir-gvn` checks that vector duplicates
++merge while their duplicate scalar instructions remain.
++
++## Available expressions
++
++The pass walks the dominator tree from the entry, a block at a time, with the
++expressions available there in a hash table. An instruction's key is its
++opcode, type, flags and alignment, its static payload (a constant's value, a
++parameter's or symbol's index, a comparison's predicate, an intrinsic's kind,
++an address's offset and scale), and its operands' classes; an impure
++instruction's key also holds its own number, so it matches nothing. A value's
++class is its own number, or that of the dominating equal expression it joins:
++an instruction whose key equals an available one becomes that one's alias.
++Hashes select a bucket only; full keys, and all 64 bytes of a vector constant,
++are compared on every collision. The entries a block inserted leave the table
++when its dominator subtree is done, so equal expressions in sibling blocks
++stay separate. A phi is its own value, and so is every value in a block no
++walk reaches.
++
++Until #2924 this walk was the scalar twin of a congruence solver: the coarsest
++partition stable under operand classes (#866's acyclic numbering, then
++refinement rounds for the values that reach a cycle), which also merged equal
++phis and equivalent cyclic recurrences. On Tier 1's pipeline over `sqlite3.c`,
++Lua and musl (#2924's [6987893038](https://github.com/buster14a/buster/issues/2924#issuecomment-6987893038)),
++the walk took 0.87 to 0.93 times the solver's ticks in every size bin, and every
++object was byte-identical either way, so the owner kept the walk alone. A
++vectorized value numbering that wins at every size, and recovers the phi
++congruences, is #3433. The measurements below that compare the two are the
++solver's record.
+ 
+ The whitelist includes integer operations, exact bit conversions, floating
+ sign negation, address calculations, parameters, constants and phis. Replacing
+@@ -148,7 +62,7 @@ Integer lane operations, masks, `vselect` and exact-bit scalar splats are pure.
+ Floating lane arithmetic/comparisons retain the environment-sensitive exclusion.
+ Tests exercise duplicate payloads, differences confined to the last word,
+ forced hash collisions, different lane widths and retained floating effects,
+-with shared-interpreter execution on both transformation paths.
++with shared-interpreter execution of the result.
+ 
+ Substitution rebuilds private operand columns and each variable side-table
+ slice before compaction. This matters because valid input slices can overlap
+@@ -160,65 +74,41 @@ are not part of this implementation.
+ 
+ `test-ir-gvn [--seed N]` is `run_ir_gvn_tests(argc, argv)`, with the command in
+ `argv[0]`. Include its file after `ir_optimize_gvn.c` and
+-`ir_optimize_test.c`. Tests compare the independent bounded interpreter on
+-the input, partition output and scalar available-expression output. They
+-cover cyclic congruences and deliberate recurrence splits, reordered phi
+-inputs, sibling dominance, undef taint, repeated faulting operations,
+-effects, unreachable copy cycles, random DAGs with planted duplicates,
+-forced completion, guarded tails, forced hash collisions and partial
+-allocation rollback. Direct grouping tests check both initial and refined
+-partitions against the independent full-key relation and the sorted oracle at
+-empty, tiny, vector and power-of-two boundaries through 257 instructions.
+-The table, links, output classes and hashes end at protected pages. Distinct
+-full-hash collisions exercise the exact probe-budget boundary and sort restart;
+-a single duplicate class must not trigger it. Odd sizes group the members in
+-reverse order after a nonzero class base. A 4,100-instruction DAG keeps 1,024
+-planted eliminations, verifies interpreted behavior, is numbered in no round
+-within one linear probe budget, and needs no sort fallback either way.
+-
+-Every fixture runs the vector path three more times. Complete refinement must
+-give the same class count, rewritten function and scratch usage as the acyclic
+-numbering. Forced sorted completion of complete refinement must preserve its
+-rewritten function, class count, round count and scratch usage. A zero probe
+-budget, which abandons the numbering at its first occupied bucket and sorts
+-every grouping, must give the same classes and function. Acyclic fixtures must
+-take no refinement round; recurrent ones must refine something. The acyclic
+-numbering's own fixtures are:
+-
+-- a header phi whose back-edge input is computed in the latch, through a copy,
+-  from loop-invariant values. It must be woken through the copy's users and
+-  merged with the phi whose matching input is computed before the loop, leaving
+-  only the counter's three values to refinement;
+-- two identical chains of 1 to 256 additions, all of whose links merge, where
+-  complete refinement takes more rounds than links;
+-- two congruent cycles of additions across two unreachable blocks, which only
+-  refinement can number and must merge;
+-- 160 random chains of loops, of 1 to 4 headers with 2 to 5 phis and bodies of
+-  0 to 9 random operations. Phi back-edge inputs come from anything the body
+-  sees (recurrences, loop-invariant values computed before or inside the loop,
+-  copies), and operations and phis repeat on purpose.
++`ir_optimize_test.c`. Every fixture's result must verify independently and keep
++the independent bounded interpreter's returns, faults and effects on the input.
++The fixtures cover recurrences, reordered phi inputs, sibling dominance, undef
++taint, repeated faulting operations, effects, unreachable copy cycles, random
++DAGs with planted duplicates, a 4,100-instruction DAG with 1,024 planted
++eliminations, chains of 1 to 256 equal additions, a header phi whose back-edge
++input comes through a copy, 160 random chains of loops, forced hash collisions
++and partial allocation rollback. With the default seed, which generates the
++random fixtures, every result folds into a digest
++(`BUSTER_IR_OPTIMIZE_TEST_GVN_DIGEST`), frozen in #2924 while the congruence
++solver was still beside the walk.
+ 
+ This is focused local correctness evidence.
+ 
+-The implementation is original. The algorithmic reference is Alpern, Wegman
+-and Zadeck, [Detecting Equality of Variables in Programs (1988)](
+-https://doi.org/10.1145/73560.73561), whose partition-refinement idea motivated
+-the monotone congruence solver. No source implementation was imported.
++The implementation is original. The removed congruence solver's algorithmic
++reference was Alpern, Wegman and Zadeck, [Detecting Equality of Variables in
++Programs (1988)](https://doi.org/10.1145/73560.73561). No source implementation
++was imported.
+ 
+ 
+ ## Performance acceptance
+ 
++This section and the next record the congruence solver #2924 removed, against
++the walk that is now the pass; the commands they name ran both.
++
+ #946's grouping change targeted #866's repeated full comparison sorts. It did
+ not claim that the partition solver beat the weaker scalar algorithm or that
+ acyclic work was eliminated; the acyclic numbering ("The acyclic numbering on
+ the 9700X" below) does both on these inputs. Neither claims that the default C
+ compilation path gets faster. Use `benchmark-ir-optimize-passes --pass gvn --instructions 4096
+ --samples 21` for the existing whole-public-stage fixture, including preparation
+-and rewriting, and `benchmark-ir-source --only gvn` (or `gvn-scalar`) for
+-source-derived IR. `benchmark-ir-source` runs both GVN paths once on every
+-function it prepared, requires both to accept it, and reports their removed
+-instructions, refinement rounds, key comparisons and collision-budget
+-completions before timing them in the same 21-pass medians as lowering and
++and rewriting, and `benchmark-ir-source --only gvn` for
++source-derived IR. `benchmark-ir-source` runs the pass once on every
++function it prepared, requires it to accept it, and reports its removed
++instructions before timing it in the same 21-pass medians as lowering and
+ promotion.
+ 
+ On the 9700X, built with `BUSTER_DEBUG_INFO=0` and Clang 23.1.1, pinned to CPU
+@@ -390,7 +280,8 @@ copy then held a register across blocks.
+ 
+ A value the policy refuses becomes the representative of what it dominates.
+ A function where nothing merges is returned as it was given, unwritten, which
+-keeps the pass's cost to its analysis there. `test-ir-optimize`'s
++keeps the pass's cost to its analysis there. The refused value keeps its class,
++so its users still match the representative's users. `test-ir-optimize`'s
+ `gvn-pressure` pair has each rule.
+ 
+ Measured before the clean implementation by an experiment's switches, in
+diff --git a/src/buster/compiler/c_check_tier1.c b/src/buster/compiler/c_check_tier1.c
+index 95993e90..f18e563e 100644
+--- a/src/buster/compiler/c_check_tier1.c
++++ b/src/buster/compiler/c_check_tier1.c
+@@ -480,7 +480,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
+     if (vectors && !input->numbered)
+     {
+         IrGvnOptions options = ir_gvn_options();
+-        options.scalar = scalar;
+         options.vectors = true;
+         if (!check_tier1_lane_reserve(lane, 0))
+         {
+@@ -701,7 +700,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
+         else
+         {
+             IrGvnOptions options = ir_gvn_options();
+-            options.scalar = scalar;
+             options.pressure = true;
+             IrGvnResult numbered_ssa = { 0 };
+             const IrCheck check = ir_optimize_gvn(&wide.function, &lane->steps[13], scratch, options, &numbered_ssa);
+@@ -1026,7 +1024,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
+     if (stage == CHECK_TIER1_COMPILED && gvn)
+     {
+         IrGvnOptions options = ir_gvn_options();
+-        options.scalar = scalar;
+         const IrCheck check = ir_optimize_gvn(&lowered, &lane->steps[7], scratch, options, &gvn_result);
+         outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
+         outcome.dominance_checked = check.dominance_checked;
+diff --git a/src/buster/compiler/ir_metamorphic.c b/src/buster/compiler/ir_metamorphic.c
+index 8618c695..98eee1b1 100644
+--- a/src/buster/compiler/ir_metamorphic.c
++++ b/src/buster/compiler/ir_metamorphic.c
+@@ -712,10 +712,8 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
+     }
+     else if (pass == 5)
+     {
+-        IrGvnOptions options = ir_gvn_options();
+-        options.scalar = scalar;
+         IrGvnResult optimized = { 0 };
+-        check = ir_optimize_gvn(function, output, scratch, options, &optimized);
++        check = ir_optimize_gvn(function, output, scratch, ir_gvn_options(), &optimized);
+         if (check.error == IR_OK)
+         {
+             *result = optimized.function;
+diff --git a/src/buster/compiler/ir_optimize_gvn.c b/src/buster/compiler/ir_optimize_gvn.c
+index 77d36dd0..6003907d 100644
+--- a/src/buster/compiler/ir_optimize_gvn.c
++++ b/src/buster/compiler/ir_optimize_gvn.c
+@@ -1,30 +1,23 @@
+ // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+ // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+ //
+-// Original SSA value numbering (#139), included after ir_optimize.c. The vector path computes the coarsest congruence
+-// partition: values no cycle is reachable from are numbered once each in dependency order (#866), and only the values
+-// that reach a cycle are refined in rounds. The independent scalar path hashes available expressions while walking
+-// the dominator tree with scope rollback. Hashes never establish equality: full keys and predecessor-ordered phi
+-// operands are compared on every collision. Loads, calls, environment-sensitive floating operations and all
+-// undef-tainted values are excluded.
++// Original SSA value numbering (#139), included after ir_optimize.c: available expressions, hashed while walking the
++// dominator tree with scope rollback. An instruction joins the value its dominating equal expression computes. Hashes
++// never establish equality: full keys are compared on every collision. Loads, calls, environment-sensitive floating
++// operations, phis and all undef-tainted values are excluded.
++//
++// #2924 made this walk the one implementation: the congruence partition beside it (#866's acyclic numbering and
++// refinement rounds) took 1.07 to 1.15 times its ticks in every size bin of Tier 1's pipeline (#2924's 6987893038). A
++// vectorized value numbering that wins at every size, and recovers the partition's phi congruences, is #3433.
+ 
+-#define BUSTER_IR_GVN_FIELDS 8
++// A key's words: the meta word, the payload's two, the three operands' classes, and an impure instruction's own number.
++#define BUSTER_IR_GVN_FIELDS 7
+ #define BUSTER_IR_GVN_HASH_BASIS UINT64_C(1469598103934665603)
+ #define BUSTER_IR_GVN_HASH_MULTIPLIER UINT64_C(1099511628211)
+-#define BUSTER_IR_GVN_PROBES_PER_INSTRUCTION 8
+-// The acyclic numbering keeps a representative's key in four of an instruction's eight field words.
+-#define BUSTER_IR_GVN_ENTRY_WORDS 4
+ 
+ typedef struct IrGvnOptions IrGvnOptions;
+ struct IrGvnOptions
+ {
+-    uint32_t sweep_limit;
+-    // Key comparisons a grouping may make per instruction before it completes another way. Tests lower it.
+-    uint32_t probes;
+-    bool scalar;
+-    // Refine every instruction in synchronous rounds instead of numbering the acyclic ones first: the exact oracle
+-    // of the acyclic numbering.
+-    bool complete;
+     // Apply a congruence only to a value of vector or mask type (#2781, Tier 1's default policy): the constants and
+     // tables vector code shares, without the general registers' longer live ranges (#2719). The congruences are
+     // computed as without it; every other value stays its own, a forwarded copy included.
+@@ -58,14 +51,7 @@ struct IrGvnResult
+ {
+     IrFunction function;
+     uint32_t removed;
+-    uint32_t classes;
+-    // Instructions the acyclic numbering gave their final class; the rest were refined in rounds.
+-    uint32_t acyclic;
+-    uint64_t rounds;
+-    uint64_t partition_probes;
+-    uint64_t partition_sort_fallbacks;
+     uint64_t scratch_bytes;
+-    bool fallback;
+ };
+ 
+ typedef struct IrGvnFrame IrGvnFrame;
+@@ -89,20 +75,13 @@ struct IrGvnWork
+ {
+     IrOptimizeWork ir;
+     uint32_t* alias;
++    // A value's class: its own number, or its dominating equal expression's.
+     uint32_t* classes;
+-    // Indexed by position in members: the partition a round is computing.
+-    uint32_t* next_classes;
+-    uint32_t* order;
+-    uint32_t* temporary_order;
+-    // The instructions a refinement round partitions, by position; their keys and hashes are stored by position.
+-    uint32_t* members;
+-    uint32_t* waiting;
++    // The keys' words, a column a word, and their hashes, by instruction.
+     uint64_t* fields;
+     uint64_t* hashes;
+     uint8_t* pure;
+     uint8_t* tainted;
+-    uint8_t* awaited;
+-    uint32_t probes;
+     IrGvnResult statistics;
+     // IrGvnOptions.pressure, which ir_gvn_available applies, and the congruences it applied.
+     bool pressure;
+@@ -111,10 +90,7 @@ struct IrGvnWork
+ 
+ static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
+ {
+-    const IrGvnOptions options = {
+-        .sweep_limit = 64,
+-        .probes = BUSTER_IR_GVN_PROBES_PER_INSTRUCTION,
+-    };
++    const IrGvnOptions options = { 0 };
+     return options;
+ }
+ 
+@@ -239,23 +215,7 @@ static void ir_gvn_classify(IrGvnWork* work)
+     }
+ }
+ 
+-static uint32_t ir_gvn_phi_class(const IrGvnWork* work, uint32_t instruction, uint32_t predecessor)
+-{
+-    const IrFunction* f = work->ir.function;
+-    uint32_t result = 0;
+-    for (uint32_t incoming = 0; incoming < f->b[instruction]; incoming += 1)
+-    {
+-        const uint32_t at = f->a[instruction] + incoming * 2;
+-        if (f->extra[at] == predecessor)
+-        {
+-            result = work->classes[work->alias[f->extra[at + 1]]];
+-        }
+-    }
+-    return result;
+-}
+-
+-// The static key words beside the opcode, type, flags and alignment. The acyclic numbering and the refinement rounds
+-// both read them here, so the two cannot disagree on which instructions are alike.
++// The static key words beside the opcode, type, flags and alignment.
+ static IrGvnPayload ir_gvn_payload(const IrGvnWork* work, uint32_t i)
+ {
+     const IrFunction* f = work->ir.function;
+@@ -268,9 +228,9 @@ static IrGvnPayload ir_gvn_payload(const IrGvnWork* work, uint32_t i)
+     }
+     else if (op == IR_VCONST)
+     {
+-        // The remaining six words take part in hashing and in collision equality, in the acyclic numbering
+-        // (ir_gvn_number) and in the refinement (ir_gvn_hash_one, ir_gvn_compare): table indices alone would miss
+-        // identical payloads at distinct indices, and two-word keys would merge different upper lanes.
++        // The remaining six words take part in hashing and in collision equality (ir_gvn_hash_one, ir_gvn_compare):
++        // table indices alone would miss identical payloads at distinct indices, and two-word keys would merge
++        // different upper lanes (#1450).
+         payload.low = f->vector_constants[f->a[i]].words[0];
+         payload.high = f->vector_constants[f->a[i]].words[1];
+     }
+@@ -292,11 +252,6 @@ static IrGvnPayload ir_gvn_payload(const IrGvnWork* work, uint32_t i)
+         payload.low = (uint64_t)f->addresses[f->c[i]].offset;
+         payload.high = f->addresses[f->c[i]].scale | ((uint64_t)(f->b[i] == BUSTER_IR_NONE) << 8);
+     }
+-    else if (op == IR_PHI)
+-    {
+-        payload.low = work->ir.cfg.instruction_blocks[i];
+-        payload.high = f->b[i];
+-    }
+     return payload;
+ }
+ 
+@@ -310,92 +265,43 @@ static uint64_t ir_gvn_mix(uint64_t hash, uint64_t value)
+     return (hash ^ value) * BUSTER_IR_GVN_HASH_MULTIPLIER;
+ }
+ 
+-// Writes instruction i's key at position in the field columns.
+-static void ir_gvn_key(IrGvnWork* work, uint32_t position, uint32_t i, bool initial, bool parent)
++// Writes instruction i's key in the field columns: its operands' classes are those of the values they resolve to.
++static void ir_gvn_key(IrGvnWork* work, uint32_t i)
+ {
+     const IrFunction* f = work->ir.function;
+     const uint64_t n = f->instruction_count;
+     const uint32_t mask = ir_value_mask3(f, i);
+     const IrGvnPayload payload = ir_gvn_payload(work, i);
+-    work->fields[position] = ir_gvn_meta(f, i);
+-    work->fields[n + position] = parent && !initial ? work->classes[i] : 0;
+-    work->fields[n * 2 + position] = payload.low;
+-    work->fields[n * 3 + position] = payload.high;
+-    work->fields[n * 4 + position] = !initial && (mask & 1) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->a[i])] : 0;
+-    work->fields[n * 5 + position] = !initial && (mask & 2) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->b[i])] : 0;
+-    work->fields[n * 6 + position] = !initial && (mask & 4) != 0 ? work->classes[ir_gvn_resolve(work->alias, ir_value_third(f, i))] : 0;
+-    work->fields[n * 7 + position] = work->pure[i] == 0 ? (uint64_t)i + 1 : 0;
++    work->fields[i] = ir_gvn_meta(f, i);
++    work->fields[n + i] = payload.low;
++    work->fields[n * 2 + i] = payload.high;
++    work->fields[n * 3 + i] = (mask & 1) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->a[i])] : 0;
++    work->fields[n * 4 + i] = (mask & 2) != 0 ? work->classes[ir_gvn_resolve(work->alias, f->b[i])] : 0;
++    work->fields[n * 5 + i] = (mask & 4) != 0 ? work->classes[ir_gvn_resolve(work->alias, ir_value_third(f, i))] : 0;
++    work->fields[n * 6 + i] = work->pure[i] == 0 ? (uint64_t)i + 1 : 0;
+ }
+ 
+-static uint64_t ir_gvn_hash_one(const IrGvnWork* work, uint32_t position, uint32_t i, bool initial)
++static uint64_t ir_gvn_hash_one(const IrGvnWork* work, uint32_t i)
+ {
+     const IrFunction* f = work->ir.function;
+     uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
+     for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
+     {
+-        hash = ir_gvn_mix(hash, work->fields[(uint64_t)field * f->instruction_count + position]);
++        hash = ir_gvn_mix(hash, work->fields[(uint64_t)field * f->instruction_count + i]);
+     }
+     if (f->op[i] == IR_VCONST)
+     {
+         const uint64_t* const words = f->vector_constants[f->a[i]].words;
+         for (uint32_t word = 2; word < 8; word += 1)
+         {
+-            hash = (hash ^ words[word]) * BUSTER_IR_GVN_HASH_MULTIPLIER;
+-        }
+-    }
+-    if (!initial && f->op[i] == IR_PHI && work->pure[i] != 0)
+-    {
+-        const uint32_t block = work->ir.cfg.instruction_blocks[i];
+-        for (uint32_t edge = work->ir.cfg.predecessor_offsets[block]; edge < work->ir.cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+-        {
+-            hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge]));
++            hash = ir_gvn_mix(hash, words[word]);
+         }
+     }
+     return hash;
+ }
+ 
+-// Keys and hashes of the first count members, by position.
+-static void ir_gvn_keys(IrGvnWork* work, uint32_t count, bool initial, bool scalar)
+-{
+-    (void)scalar;
+-
+-    const uint64_t n = work->ir.function->instruction_count;
+-    for (uint32_t position = 0; position < count; position += 1)
+-    {
+-        ir_gvn_key(work, position, work->members[position], initial, true);
+-    }
+-    for (uint64_t first = 0; first < count; first += BUSTER_IR_OPTIMIZE_BATCH)
+-    {
+-        const uint32_t batch = count - first < BUSTER_IR_OPTIMIZE_BATCH ? count - first : BUSTER_IR_OPTIMIZE_BATCH;
+-        if (!BUSTER_SCALAR_PATH(scalar))
+-        {
+-            for (uint32_t half = 0; half < batch; half += 8)
+-            {
+-                const uint32_t amount = batch - half < 8 ? batch - half : 8;
+-                const __mmask8 valid = (UINT32_C(1) << amount) - 1;
+-                __m512i hash = _mm512_set1_epi64(BUSTER_IR_GVN_HASH_BASIS);
+-                for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
+-                {
+-                    const __m512i key = _mm512_maskz_loadu_epi64(valid, work->fields + (uint64_t)field * n + first + half);
+-                    hash = _mm512_mullo_epi64(_mm512_xor_si512(hash, key), _mm512_set1_epi64(BUSTER_IR_GVN_HASH_MULTIPLIER));
+-                }
+-                _mm512_mask_storeu_epi64(work->hashes + first + half, valid, hash);
+-            }
+-        }
+-        for (uint32_t lane = 0; lane < batch; lane += 1)
+-        {
+-            const uint32_t position = first + lane;
+-            const uint32_t i = work->members[position];
+-            if (BUSTER_SCALAR_PATH(scalar) || work->ir.function->op[i] == IR_VCONST || (!initial && work->ir.function->op[i] == IR_PHI && work->pure[i] != 0))
+-            {
+-                work->hashes[position] = ir_gvn_hash_one(work, position, i, initial);
+-            }
+-        }
+-    }
+-}
+-
+-// Compares the keys at positions a and b, of instructions ia and ib.
+-static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, uint32_t ia, uint32_t ib, bool initial)
++// Compares the keys of instructions a and b.
++static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b)
+ {
+     int result = work->hashes[a] < work->hashes[b] ? -1 : work->hashes[a] != work->hashes[b];
+     const IrFunction* f = work->ir.function;
+@@ -405,399 +311,23 @@ static int ir_gvn_compare(const IrGvnWork* work, uint32_t a, uint32_t b, uint32_
+         const uint64_t right = work->fields[(uint64_t)field * f->instruction_count + b];
+         result = left < right ? -1 : left != right;
+     }
+-    if (result == 0 && f->op[ia] == IR_VCONST)
++    if (result == 0 && f->op[a] == IR_VCONST)
+     {
+-        const uint64_t* const left = f->vector_constants[f->a[ia]].words;
+-        const uint64_t* const right = f->vector_constants[f->a[ib]].words;
++        const uint64_t* const left = f->vector_constants[f->a[a]].words;
++        const uint64_t* const right = f->vector_constants[f->a[b]].words;
+         for (uint32_t word = 2; result == 0 && word < 8; word += 1)
+         {
+             result = left[word] < right[word] ? -1 : left[word] != right[word];
+         }
+     }
+-    if (result == 0 && !initial && f->op[ia] == IR_PHI && work->pure[ia] != 0)
+-    {
+-        const uint32_t block = work->ir.cfg.instruction_blocks[ia];
+-        for (uint32_t edge = work->ir.cfg.predecessor_offsets[block]; result == 0 && edge < work->ir.cfg.predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+-        {
+-            const uint32_t predecessor = work->ir.cfg.predecessors[edge];
+-            const uint32_t left = ir_gvn_phi_class(work, ia, predecessor);
+-            const uint32_t right = ir_gvn_phi_class(work, ib, predecessor);
+-            result = left < right ? -1 : left != right;
+-        }
+-    }
+     return result;
+ }
+ 
+-// The independent comparison-sort completion also bounds adversarial hash-table work. Neither grouping path
+-// mutates the old classes: parent-class keys remain immutable until the complete partition is published.
+-static uint32_t ir_gvn_partition_sorted(IrGvnWork* work, uint32_t count, bool initial, uint32_t base)
+-{
+-    const uint32_t* members = work->members;
+-    for (uint32_t position = 0; position < count; position += 1)
+-    {
+-        work->order[position] = position;
+-    }
+-    for (uint64_t width = 1; width < count; width *= 2)
+-    {
+-        for (uint64_t first = 0; first < count; first += width * 2)
+-        {
+-            const uint64_t middle = first + width < count ? first + width : count;
+-            const uint64_t end = middle + width < count ? middle + width : count;
+-            uint64_t left = first;
+-            uint64_t right = middle;
+-            for (uint64_t out = first; out < end; out += 1)
+-            {
+-                const bool take_left = left < middle && (right == end || ir_gvn_compare(work, work->order[left], work->order[right], members[work->order[left]], members[work->order[right]], initial) <= 0);
+-                work->temporary_order[out] = take_left ? work->order[left++] : work->order[right++];
+-            }
+-        }
+-        uint32_t* swap = work->order;
+-        work->order = work->temporary_order;
+-        work->temporary_order = swap;
+-    }
+-    uint32_t classes = 0;
+-    for (uint32_t position = 0; position < count; position += 1)
+-    {
+-        const uint32_t current = work->order[position];
+-        if (position == 0 || ir_gvn_compare(work, work->order[position - 1], current, members[work->order[position - 1]], members[current], initial) != 0)
+-        {
+-            classes += 1;
+-        }
+-        work->next_classes[current] = base + classes;
+-    }
+-    return classes;
+-}
+-
+-// Reuse the sort's two n-element u32 columns as bucket heads and representative links. The largest power of two
+-// not exceeding count needs no extra allocation or padding. Only representatives enter a chain, so a wide duplicate
+-// class costs one comparison per member, not a growing chain. Full keys (including ordered phi inputs) decide
+-// equality; the folded hash selects a bucket only. Class IDs need not follow key order, only the same equivalence.
+-// They run from base + 1, so they never collide with the classes the acyclic numbering already published.
+-//
+-// Stop after a linear probe budget and restart the unchanged comparison sort on the already materialized keys.
+-// This bounds a hostile all-collision round by O(n log n) key comparisons instead of quadratic probing. The table
+-// probes use scalar indexed loads, not gathers; the preceding eight-lane SIMD key hashing stays unchanged.
+-static uint32_t ir_gvn_partition_group(IrGvnWork* work, uint32_t count, bool initial, bool sorted, uint32_t base)
+-{
+-    const uint32_t* members = work->members;
+-    uint32_t classes = 0;
+-    if (!sorted && count != 0)
+-    {
+-        uint32_t buckets = 1;
+-        while (buckets <= count / 2)
+-        {
+-            buckets *= 2;
+-        }
+-        memset(work->temporary_order, 0xff, (uint64_t)buckets * sizeof(uint32_t));
+-        const uint64_t budget = (uint64_t)count * work->probes;
+-        uint64_t probes = 0;
+-        for (uint32_t position = 0; position < count && !sorted; position += 1)
+-        {
+-            const uint64_t hash = work->hashes[position];
+-            const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
+-            uint32_t match = work->temporary_order[bucket];
+-            bool equal = false;
+-            while (match != BUSTER_IR_NONE && !equal && probes < budget)
+-            {
+-                probes += 1;
+-                equal = ir_gvn_compare(work, position, match, members[position], members[match], initial) == 0;
+-                if (!equal)
+-                {
+-                    match = work->order[match];
+-                }
+-            }
+-            sorted = match != BUSTER_IR_NONE && !equal;
+-            if (!sorted)
+-            {
+-                if (match == BUSTER_IR_NONE)
+-                {
+-                    work->order[position] = work->temporary_order[bucket];
+-                    work->temporary_order[bucket] = position;
+-                    classes += 1;
+-                }
+-                work->next_classes[position] = match == BUSTER_IR_NONE ? base + classes : work->next_classes[match];
+-            }
+-        }
+-        work->statistics.partition_probes += probes;
+-        work->statistics.partition_sort_fallbacks += sorted;
+-    }
+-    if (sorted)
+-    {
+-        classes = ir_gvn_partition_sorted(work, count, initial, base);
+-    }
+-    return classes;
+-}
+-
+-static uint32_t ir_gvn_partition(IrGvnWork* work, uint32_t count, bool initial, bool scalar, uint32_t base)
+-{
+-    ir_gvn_keys(work, count, initial, BUSTER_SCALAR_PATH(scalar));
+-    const uint32_t classes = ir_gvn_partition_group(work, count, initial, scalar, base);
+-    for (uint32_t position = 0; position < count; position += 1)
+-    {
+-        work->classes[work->members[position]] = work->next_classes[position];
+-    }
+-    work->statistics.rounds += 1;
+-    return classes;
+-}
+-
+-// Refine the first count members from their static keys to the coarsest partition stable under operand classes. An
+-// operand outside the members keeps its published class throughout. After sweep_limit rounds, scalar hashing and
+-// comparison sorting complete the same fixed point.
+-static uint32_t ir_gvn_refine(IrGvnWork* work, uint32_t count, uint32_t base, uint32_t sweep_limit)
+-{
+-    uint32_t classes = ir_gvn_partition(work, count, true, false, base);
+-    bool changed = true;
+-    while (changed)
+-    {
+-        const bool fallback = work->statistics.rounds > sweep_limit;
+-        const uint32_t refined = ir_gvn_partition(work, count, false, fallback, base);
+-        changed = refined != classes;
+-        classes = refined;
+-        work->statistics.fallback = work->statistics.fallback || fallback;
+-    }
+-    return classes;
+-}
+-
+-// #866: the acyclic numbering. Partition refinement needs as many rounds as the longest dependency chain, each over
+-// every instruction. But a value no cycle of operand dependences is reachable from is congruent exactly to the values
+-// with its static key and congruent operands, by induction on its depth, and never to a value that reaches a cycle:
+-// matching operands position by position would follow that cycle forever. So these values are numbered once each,
+-// in dependency order, by hashing (static key, operand classes) into a table of representatives: Kahn's algorithm,
+-// with use lists to wake an instruction whose operand was numbered after it was visited. Whatever is left reaches a
+-// cycle, and only those values are refined in rounds, with the numbered operands' classes fixed. The partition is the
+-// coarsest congruence either way; only class labels may differ from the synchronous refinement's.
+-//
+-// The visits follow reverse postorder, so in reachable SSA code every operand but a phi's input along a back edge is
+-// numbered first and the use lists are walked only from the few values such a phi waits for. Numbering a value is a
+-// dependent chain (its key needs its operands' classes, published by the instructions just before it), so it is
+-// scalar; the refinement rounds keep the eight-lane key hashing.
+-//
+-// A representative's key is four words at four times its index in the field columns: payload low and high, the meta
+-// word with operand class c above it, and operand classes a and b. Its hash is in hashes, its chain link in order and
+-// the bucket heads in temporary_order.
+-static uint32_t ir_gvn_waiting(IrGvnWork* work, uint32_t i)
+-{
+-    const IrFunction* f = work->ir.function;
+-    uint32_t waiting = 0;
+-    if (work->pure[i] != 0 && f->op[i] == IR_PHI)
+-    {
+-        // A verified phi has exactly one input per predecessor edge, so every input is part of its key.
+-        for (uint32_t incoming = 0; incoming < f->b[i]; incoming += 1)
+-        {
+-            const uint32_t value = work->alias[f->extra[f->a[i] + incoming * 2 + 1]];
+-            const bool unnumbered = work->classes[value] == 0;
+-            waiting += unnumbered;
+-            work->awaited[value] |= unnumbered;
+-        }
+-    }
+-    else if (work->pure[i] != 0)
+-    {
+-        const uint32_t mask = ir_value_mask3(f, i);
+-        const uint32_t operands[3] = { f->a[i], f->b[i], ir_value_third(f, i) };
+-        for (uint32_t operand = 0; operand < 3; operand += 1)
+-        {
+-            if ((mask >> operand & 1) != 0)
+-            {
+-                const uint32_t value = work->alias[operands[operand]];
+-                const bool unnumbered = work->classes[value] == 0;
+-                waiting += unnumbered;
+-                work->awaited[value] |= unnumbered;
+-            }
+-        }
+-    }
+-    return waiting;
+-}
+-
+-// Number instruction i, whose operands all have classes. Returns false, publishing nothing for i, when the probe
+-// budget runs out with candidates left in its chain.
+-static bool ir_gvn_number(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t budget, uint32_t* count)
+-{
+-    const IrFunction* f = work->ir.function;
+-    bool ok = true;
+-    if (work->pure[i] == 0)
+-    {
+-        *count += 1;
+-        work->classes[i] = *count;
+-    }
+-    else
+-    {
+-        const uint32_t mask = ir_value_mask3(f, i);
+-        const IrGvnPayload payload = ir_gvn_payload(work, i);
+-        const uint64_t a = (mask & 1) != 0 ? work->classes[work->alias[f->a[i]]] : 0;
+-        const uint64_t b = (mask & 2) != 0 ? work->classes[work->alias[f->b[i]]] : 0;
+-        const uint64_t c = (mask & 4) != 0 ? work->classes[work->alias[ir_value_third(f, i)]] : 0;
+-        const uint64_t key[BUSTER_IR_GVN_ENTRY_WORDS] = { payload.low, payload.high, ir_gvn_meta(f, i) | c << 32, a | b << 32 };
+-        uint64_t hash = BUSTER_IR_GVN_HASH_BASIS;
+-        for (uint32_t word = 0; word < BUSTER_IR_GVN_ENTRY_WORDS; word += 1)
+-        {
+-            hash = ir_gvn_mix(hash, key[word]);
+-        }
+-        // A vector constant's key holds its first two words (ir_gvn_payload): its other six are hashed and compared
+-        // here, as the refinement does, so that constants differing only in upper lanes stay apart (#1450).
+-        const bool vector = f->op[i] == IR_VCONST;
+-        const uint64_t* const words = vector ? f->vector_constants[f->a[i]].words : NULL;
+-        for (uint32_t word = 2; vector && word < 8; word += 1)
+-        {
+-            hash = ir_gvn_mix(hash, words[word]);
+-        }
+-        const bool phi = f->op[i] == IR_PHI;
+-        const uint32_t block = work->ir.cfg.instruction_blocks[i];
+-        const uint32_t first_edge = work->ir.cfg.predecessor_offsets[block];
+-        const uint32_t end_edge = work->ir.cfg.predecessor_offsets[(uint64_t)block + 1];
+-        for (uint32_t edge = first_edge; phi && edge < end_edge; edge += 1)
+-        {
+-            hash = ir_gvn_mix(hash, ir_gvn_phi_class(work, i, work->ir.cfg.predecessors[edge]));
+-        }
+-        const uint32_t bucket = (hash ^ (hash >> 32)) & (buckets - 1);
+-        uint32_t match = work->temporary_order[bucket];
+-        bool equal = false;
+-        while (match != BUSTER_IR_NONE && !equal && work->statistics.partition_probes < budget)
+-        {
+-            work->statistics.partition_probes += 1;
+-            const uint64_t* entry = work->fields + (uint64_t)match * BUSTER_IR_GVN_ENTRY_WORDS;
+-            equal = work->hashes[match] == hash && entry[0] == key[0] && entry[1] == key[1] && entry[2] == key[2] && entry[3] == key[3];
+-            // Equal keys make both vector constants: compare their whole payloads.
+-            equal = equal && (!vector || memcmp(words, f->vector_constants[f->a[match]].words, sizeof(IrSimdValue)) == 0);
+-            // Equal keys put both phis in one block: compare their inputs in that block's predecessor order.
+-            for (uint32_t edge = first_edge; phi && equal && edge < end_edge; edge += 1)
+-            {
+-                const uint32_t predecessor = work->ir.cfg.predecessors[edge];
+-                equal = ir_gvn_phi_class(work, i, predecessor) == ir_gvn_phi_class(work, match, predecessor);
+-            }
+-            if (!equal)
+-            {
+-                match = work->order[match];
+-            }
+-        }
+-        ok = equal || match == BUSTER_IR_NONE;
+-        if (ok && equal)
+-        {
+-            work->classes[i] = work->classes[match];
+-        }
+-        else if (ok)
+-        {
+-            *count += 1;
+-            work->classes[i] = *count;
+-            work->hashes[i] = hash;
+-            work->order[i] = work->temporary_order[bucket];
+-            work->temporary_order[bucket] = i;
+-            memcpy(work->fields + (uint64_t)i * BUSTER_IR_GVN_ENTRY_WORDS, key, sizeof(key));
+-        }
+-    }
+-    return ok;
+-}
+-
+-// Value was just numbered and something waits for it: wake its users, and the users of every copy that resolves to
+-// it, which read its class through the copy. Number every instruction that releases, and wake whatever waits for
+-// those in turn. next_classes is the stack of released instructions and members the stack of values whose users to
+-// wake; each instruction is released once and each copy is walked once per walk, so neither stack outgrows n.
+-static bool ir_gvn_wake(IrGvnWork* work, uint32_t value, uint32_t buckets, uint64_t budget, uint32_t* count)
+-{
+-    uint32_t* ready = work->next_classes;
+-    uint32_t* values = work->members;
+-    uint32_t depth = 0;
+-    uint32_t woken = value;
+-    bool ok = true;
+-    bool walk = true;
+-    while (ok && walk)
+-    {
+-        uint32_t pending = 1;
+-        values[0] = woken;
+-        while (pending != 0)
+-        {
+-            pending -= 1;
+-            const uint32_t used = values[pending];
+-            for (uint32_t use = work->ir.uses.offsets[used]; use < work->ir.uses.offsets[(uint64_t)used + 1]; use += 1)
+-            {
+-                const uint32_t user = work->ir.uses.uses[use].instruction;
+-                if (work->alias[user] != user)
+-                {
+-                    values[pending] = user;
+-                    pending += 1;
+-                }
+-                else if (work->classes[user] == 0 && work->waiting[user] != 0)
+-                {
+-                    work->waiting[user] -= 1;
+-                    if (work->waiting[user] == 0)
+-                    {
+-                        ready[depth] = user;
+-                        depth += 1;
+-                    }
+-                }
+-            }
+-        }
+-        walk = false;
+-        while (ok && !walk && depth != 0)
+-        {
+-            depth -= 1;
+-            woken = ready[depth];
+-            ok = ir_gvn_number(work, woken, buckets, budget, count);
+-            walk = ok && work->awaited[woken] != 0;
+-        }
+-    }
+-    return ok;
+-}
+-
+-static bool ir_gvn_visit(IrGvnWork* work, uint32_t i, uint32_t buckets, uint64_t budget, uint32_t* count)
+-{
+-    const uint32_t waiting = ir_gvn_waiting(work, i);
+-    bool ok = true;
+-    if (waiting != 0)
+-    {
+-        work->waiting[i] = waiting;
+-    }
+-    else
+-    {
+-        ok = ir_gvn_number(work, i, buckets, budget, count);
+-        // A user visited earlier (a phi, along its back edge) may already wait for i.
+-        if (ok && work->awaited[i] != 0)
+-        {
+-            ok = ir_gvn_wake(work, i, buckets, budget, count);
+-        }
+-    }
+-    return ok;
+-}
+-
+-// Returns false when the probe budget runs out; the caller then refines every instruction from its static key.
+-static bool ir_gvn_acyclic(IrGvnWork* work, uint32_t* count)
++// Walks the dominator tree from the entry, a frame a block, with the equal expressions available in a block in the hash
++// table: an instruction's equal dominating expression becomes its alias, and the entries a block inserted leave the table
++// when its subtree is done. A phi is its own value, and so is every value no walk reaches.
++static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch)
+ {
+-    const IrFunction* f = work->ir.function;
+-    const uint32_t n = f->instruction_count;
+-    const Dominators* dominators = &work->ir.dominators;
+-    uint32_t buckets = 1;
+-    while (buckets <= n / 2)
+-    {
+-        buckets *= 2;
+-    }
+-    if (n != 0)
+-    {
+-        memset(work->temporary_order, 0xff, (uint64_t)buckets * sizeof(uint32_t));
+-    }
+-    const uint64_t budget = work->statistics.partition_probes + (uint64_t)n * work->probes;
+-    bool ok = true;
+-    for (uint32_t position = 0; ok && position < dominators->reachable_count; position += 1)
+-    {
+-        const uint32_t block = dominators->rpo[position];
+-        for (uint32_t i = f->block_offsets[block]; ok && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+-        {
+-            ok = ir_gvn_visit(work, i, buckets, budget, count);
+-        }
+-    }
+-    for (uint32_t block = 0; ok && block < f->block_count; block += 1)
+-    {
+-        for (uint32_t i = f->block_offsets[block]; ok && dominators->rpo_index[block] == BUSTER_DOMINATOR_NONE && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+-        {
+-            ok = ir_gvn_visit(work, i, buckets, budget, count);
+-        }
+-    }
+-    work->statistics.partition_sort_fallbacks += !ok;
+-    return ok;
+-}
+-
+-static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+-{
+-    (void)scalar;
+-
+     const IrFunction* f = work->ir.function;
+     uint64_t buckets = 1;
+     while (buckets < (uint64_t)f->instruction_count * 2 + 1)
+@@ -813,15 +343,12 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+     if (ok)
+     {
+         memset(heads, 0xff, buckets * sizeof(uint32_t));
+-        if (scalar)
++        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+         {
+-            for (uint32_t i = 0; i < f->instruction_count; i += 1)
++            work->classes[i] = i + 1;
++            if (f->op[i] == IR_PHI)
+             {
+-                work->classes[i] = i + 1;
+-                if (f->op[i] == IR_PHI)
+-                {
+-                    work->pure[i] = 0;
+-                }
++                work->pure[i] = 0;
+             }
+         }
+         uint32_t depth = f->block_count != 0;
+@@ -842,34 +369,25 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
+                 {
+                     if (work->pure[i] != 0 && work->alias[i] == i)
+                     {
+-                        if (scalar)
+-                        {
+-                            ir_gvn_key(work, i, i, false, false);
+-                            work->hashes[i] = ir_gvn_hash_one(work, i, i, false);
+-                        }
+-                        else
+-                        {
+-                            work->hashes[i] = work->classes[i];
+-                        }
++                        ir_gvn_key(work, i);
++                        work->hashes[i] = ir_gvn_hash_one(work, i);
+                         const uint64_t bucket = work->hashes[i] & (buckets - 1);
+                         uint32_t match = heads[bucket];
+-                        while (match != BUSTER_IR_NONE && (scalar ? ir_gvn_compare(work, i, match, i, match, false) != 0 : work->classes[i] != work->classes[match]))
++                        while (match != BUSTER_IR_NONE && ir_gvn_compare(work, i, match) != 0)
+                         {
+                             match = previous[match];
+                         }
+                         // IrGvnOptions.pressure: a free value stays its own, and a truth value too where its class's
+-                        // representative is another block's. It is the representative of what it dominates instead.
++                        // representative is another block's. It is the representative of what it dominates instead,
++                        // in its class still, so that its users' keys match those of the representative's users.
+                         const bool refused = work->pressure && match != BUSTER_IR_NONE &&
+                                              (ir_gvn_free[f->op[i]] != 0 || (f->type[i] == IR_I1 && work->ir.cfg.instruction_blocks[match] != frame->block));
++                        work->classes[i] = match != BUSTER_IR_NONE ? work->classes[match] : work->classes[i];
+                         match = refused ? BUSTER_IR_NONE : match;
+                         work->merged += match != BUSTER_IR_NONE;
+                         if (match != BUSTER_IR_NONE)
+                         {
+                             work->alias[i] = match;
+-                            if (scalar)
+-                            {
+-                                work->classes[i] = work->classes[match];
+-                            }
+                         }
+                         else
+                         {
+@@ -1026,29 +544,19 @@ static IrError ir_gvn_alias_view(IrGvnWork* work, Arena* scratch, IrFunction* re
+     return error;
+ }
+ 
+-// IrGvnOptions.vectors (#2781): every value that is no vector and no mask is its own again, sixteen at a time or, on the
+-// scalar twin, one at a time. A vector's or a mask's alias is a value of its own type, so the chains that stay are whole.
+-static void ir_gvn_keep_vectors(IrGvnWork* work, bool scalar)
++// IrGvnOptions.vectors (#2781): every value that is no vector and no mask is its own again, sixteen at a time. A
++// vector's or a mask's alias is a value of its own type, so the chains that stay are whole.
++static void ir_gvn_keep_vectors(IrGvnWork* work)
+ {
+     const IrFunction* f = work->ir.function;
+-    if (BUSTER_SCALAR_PATH(scalar))
++    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++    for (uint64_t first = 0; first < f->instruction_count; first += 16)
+     {
+-        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+-        {
+-            work->alias[i] = f->type[i] >= IR_V4I32 ? work->alias[i] : i;
+-        }
+-    }
+-    else
+-    {
+-        const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+-        for (uint64_t first = 0; first < f->instruction_count; first += 16)
+-        {
+-            const uint32_t count = f->instruction_count - first < 16 ? (uint32_t)(f->instruction_count - first) : 16;
+-            const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+-            const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
+-            const __mmask16 own = valid & _mm_cmplt_epu8_mask(types, _mm_set1_epi8(IR_V4I32));
+-            _mm512_mask_storeu_epi32(work->alias + first, own, _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), lanes));
+-        }
++        const uint32_t count = f->instruction_count - first < 16 ? (uint32_t)(f->instruction_count - first) : 16;
++        const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
++        const __m128i types = _mm_maskz_loadu_epi8(valid, f->type + first);
++        const __mmask16 own = valid & _mm_cmplt_epu8_mask(types, _mm_set1_epi8(IR_V4I32));
++        _mm512_mask_storeu_epi32(work->alias + first, own, _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), lanes));
+     }
+ }
+ 
+@@ -1060,7 +568,8 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+     if (output != scratch)
+     {
+-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
++        // The optimizer's internals' scalar twins, which the measured walk ran with, until #2924 removes their vector ones.
++        check = ir_optimize_prepare(&work.ir, function, output, scratch, true, true);
+     }
+     if (check.error == IR_OK)
+     {
+@@ -1068,43 +577,20 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+         const uint64_t n = function->instruction_count;
+         work.alias = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+         work.classes = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+-        work.next_classes = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+-        work.order = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+-        work.temporary_order = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+-        work.members = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+-        work.waiting = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+         work.fields = ir_allocate(scratch, n * BUSTER_IR_GVN_FIELDS, sizeof(uint64_t), &ok);
+         work.hashes = ir_allocate(scratch, n, sizeof(uint64_t), &ok);
+         work.pure = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
+         work.tainted = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
+-        work.awaited = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
+-        work.probes = options.probes;
+         work.pressure = options.pressure;
+         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+     }
+     if (check.error == IR_OK)
+     {
+         ir_gvn_classify(&work);
+-        if (!options.scalar)
+-        {
+-            // Classes 1..numbered are the acyclic numbering's; the refinement numbers the rest after them.
+-            const uint32_t n = function->instruction_count;
+-            uint32_t numbered = 0;
+-            const bool acyclic = !options.complete && ir_gvn_acyclic(&work, &numbered);
+-            uint32_t count = 0;
+-            for (uint32_t i = 0; i < n; i += 1)
+-            {
+-                work.members[count] = i;
+-                count += !acyclic || work.classes[i] == 0;
+-            }
+-            numbered = acyclic ? numbered : 0;
+-            work.statistics.acyclic = n - count;
+-            work.statistics.classes = numbered + (count != 0 ? ir_gvn_refine(&work, count, numbered, options.sweep_limit) : 0);
+-        }
+-        check.error = ir_gvn_available(&work, scratch, options.scalar);
++        check.error = ir_gvn_available(&work, scratch);
+         if (check.error == IR_OK && options.vectors)
+         {
+-            ir_gvn_keep_vectors(&work, options.scalar);
++            ir_gvn_keep_vectors(&work);
+         }
+     }
+     // IrGvnOptions.pressure: a function where nothing merges stays the caller's, unwritten.
+@@ -1132,7 +618,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
+         }
+         IrOptimizeOptions rewrite = ir_optimize_options();
+         rewrite.passes = 0;
+-        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
++        rewrite.scalar = true;
+         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
+     }
+     if (rewritten && check.error == IR_OK)
+diff --git a/src/buster/compiler/ir_optimize_gvn_test.c b/src/buster/compiler/ir_optimize_gvn_test.c
+index 98a2fdba..4bc676a0 100644
+--- a/src/buster/compiler/ir_optimize_gvn_test.c
++++ b/src/buster/compiler/ir_optimize_gvn_test.c
+@@ -2,32 +2,25 @@
+ // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+ //
+ // Original GVN fixtures. Include after ir_optimize_gvn.c and ir_optimize_test.c. The independent bounded fixture
+-// interpreter reads opcodes directly; neither it nor the scalar available-expression oracle uses congruence classes.
++// interpreter reads opcodes directly, and every result's digest is frozen (IrOptimizeTest.gvn_digest, #2924).
+ 
+-static void ir_gvn_test_guards(IrOptimizeTest* test)
++// Equality compares full keys even if every hash collides.
++static void ir_gvn_test_collisions(IrOptimizeTest* test)
+ {
+-    const long page = sysconf(_SC_PAGESIZE);
+-    void* mapping = page > 0 ? mmap(0, (uint64_t)page * 10, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+-    bool ready = mapping != MAP_FAILED;
+-    for (uint32_t p = 1; ready && p < 10; p += 2)
+-    {
+-        ready = mprotect((char*)mapping + p * page, page, PROT_NONE) == 0;
+-    }
+-    ir_optimize_test_expect(test, ready, "GVN guarded columns setup");
++    uint8_t operations[33] = { 0 };
+     uint8_t types[33] = { 0 };
+     uint8_t flags[33] = { 0 };
+     uint32_t operands[33] = { 0 };
+     uint32_t classes[33] = { 0 };
+     uint32_t aliases[33] = { 0 };
+-    uint32_t order[33] = { 0 };
+-    uint32_t members[33] = { 0 };
+-    uint64_t expected[33] = { 0 };
++    uint8_t pure[33] = { 0 };
++    uint64_t hashes[33] = { 0 };
+     uint64_t fields[33 * BUSTER_IR_GVN_FIELDS] = { 0 };
+-    for (uint32_t count = 0; ready && count <= 33; count += 1)
++    for (uint32_t count = 2; count <= 33; count += 1)
+     {
+         IrFunction f = {
+             .instruction_count = count,
+-            .op = (uint8_t*)((char*)mapping + page - count),
++            .op = operations,
+             .type = types,
+             .flags = flags,
+             .alignment_log2 = flags,
+@@ -37,44 +30,28 @@ static void ir_gvn_test_guards(IrOptimizeTest* test)
+         };
+         IrGvnWork work = {
+             .ir = { .function = &f },
+-            .pure = (uint8_t*)((char*)mapping + 3 * page - count),
+-            .tainted = (uint8_t*)((char*)mapping + 5 * page - count),
+-            .hashes = (uint64_t*)((char*)mapping + 7 * page - count * sizeof(uint64_t)),
++            .pure = pure,
++            .hashes = hashes,
+             .fields = fields,
+             .classes = classes,
+             .alias = aliases,
+-            .order = order,
+-            .members = members,
+         };
+         for (uint32_t i = 0; i < count; i += 1)
+         {
+             f.op[i] = IR_PARAM;
+             f.type[i] = IR_I64;
+             operands[i] = i;
+-            work.pure[i] = 1;
+-            work.tainted[i] = 0;
++            pure[i] = 1;
+             aliases[i] = i;
+             classes[i] = i + 1;
+-            members[i] = i;
+-        }
+-        ir_gvn_keys(&work, count, false, true);
+-        memcpy(expected, work.hashes, count * sizeof(uint64_t));
+-        ir_gvn_keys(&work, count, false, false);
+-        ir_optimize_test_expect(test, memcmp(expected, work.hashes, count * sizeof(uint64_t)) == 0, "GVN exact scalar/vector hashes at every guarded tail");
+-        // Equality must compare full keys even if every hash collides.
+-        for (uint32_t i = 0; i < count; i += 1)
+-        {
+-            work.hashes[i] = 0;
++            ir_gvn_key(&work, i);
++            hashes[i] = 0;
+         }
+         for (uint32_t i = 1; i < count; i += 1)
+         {
+-            ir_optimize_test_expect(test, ir_gvn_compare(&work, i - 1, i, i - 1, i, false) != 0, "GVN hash collisions cannot merge distinct parameter keys");
++            ir_optimize_test_expect(test, ir_gvn_compare(&work, i - 1, i) != 0 && ir_gvn_compare(&work, i, i) == 0, "GVN hash collisions cannot merge distinct parameter keys");
+         }
+     }
+-    if (mapping != MAP_FAILED)
+-    {
+-        munmap(mapping, (uint64_t)page * 10);
+-    }
+ }
+ 
+ static bool ir_gvn_test_cycle(Arena* arena, IrFunction* f)
+@@ -154,10 +131,9 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
+     {
+         f.debug->origins[i] = i;
+     }
+-    for (uint32_t path = 0; created && path < 2; path += 1)
++    if (created)
+     {
+-        IrGvnOptions options = ir_gvn_options();
+-        options.scalar = path != 0;
++        const IrGvnOptions options = ir_gvn_options();
+         IrGvnResult a = { 0 };
+         IrGvnResult b = { 0 };
+         const IrCheck ac = ir_optimize_gvn(&f, output, scratch, options, &a);
+@@ -183,67 +159,31 @@ static void ir_gvn_test_debug_bindings(IrOptimizeTest* test, const IrFunction* s
+     arena_pop_to(input, im);
+ }
+ 
+-// cyclic: the congruence result must remove more than available expressions do; recurrent: some values reach a cycle.
+-static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t minimum_removed, bool cyclic, bool recurrent)
++// The walk's result verifies independently, keeps the interpreted returns, faults and effects, and restores scratch.
++static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch)
+ {
+-    const uint64_t vm = vector->length;
+-    const uint64_t sm = scalar->length;
++    const uint64_t om = output->length;
+     const uint64_t tm = scratch->length;
+-    IrGvnOptions options = ir_gvn_options();
+-    IrGvnResult a = { 0 };
+     IrGvnResult b = { 0 };
+-    const IrCheck ac = ir_optimize_gvn(f, vector, scratch, options, &a);
+-    options.scalar = true;
+-    const IrCheck bc = ir_optimize_gvn(f, scalar, scratch, options, &b);
+-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm, "GVN paths accept verified fixture and restore scratch");
+-    if (ac.error == IR_OK && bc.error == IR_OK)
++    const IrCheck bc = ir_optimize_gvn(f, output, scratch, ir_gvn_options(), &b);
++    ir_optimize_test_expect(test, bc.error == IR_OK && scratch->length == tm, "GVN accepts verified fixture and restores scratch");
++    if (bc.error == IR_OK)
+     {
+-        ir_optimize_test_expect(test, a.removed >= minimum_removed && a.removed >= b.removed, "GVN congruence result removes at least scalar available expressions");
+-        if (cyclic)
+-        {
+-            ir_optimize_test_expect(test, a.removed > b.removed, "GVN refines cyclic congruences missed by scalar available expressions");
+-        }
+-        ir_optimize_test_expect(test, ir_verify(&a.function, scratch, 0).error == IR_OK && ir_verify(&b.function, scratch, 0).error == IR_OK, "GVN rewritten functions independently verified");
++        ir_optimize_test_expect(test, b.removed == f->instruction_count - b.function.instruction_count && ir_verify(&b.function, scratch, 0).error == IR_OK, "GVN rewritten function independently verified");
+         for (uint32_t trial = 0; trial < 18; trial += 1)
+         {
+             const uint64_t input = trial == 17 ? UINT64_MAX : trial;
+             const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, input, trial & 1);
+-            const IrOptimizeExecution after = ir_optimize_test_execute(&a.function, scratch, input, trial & 1);
+             const IrOptimizeExecution reference = ir_optimize_test_execute(&b.function, scratch, input, trial & 1);
+-            ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.value == after.value && before.effects == after.effects, "GVN vector preserves independently interpreted returns, faults and effects");
+-            ir_optimize_test_expect(test, before.status == reference.status && before.value == reference.value && before.effects == reference.effects, "GVN scalar preserves independently interpreted returns, faults and effects");
++            ir_optimize_test_expect(test, before.status != 4 && before.status == reference.status && before.value == reference.value && before.effects == reference.effects, "GVN preserves independently interpreted returns, faults and effects");
+         }
+         ir_optimize_test_fold_function(&test->gvn_digest, &b.function);
+         ir_optimize_test_fold(&test->gvn_digest, b.removed);
+-        // Values that reach no cycle are numbered without refinement rounds; only the rest are refined.
+-        ir_optimize_test_expect(test, recurrent ? a.acyclic < f->instruction_count && a.rounds != 0 : a.acyclic == f->instruction_count && a.rounds == 0, "GVN refines exactly the values that reach a cycle");
+-        // Refining every instruction in synchronous rounds is the acyclic numbering's exact oracle: the same
+-        // partition, so the same class count and rewritten function, from the same scratch.
+-        arena_pop_to(scalar, sm);
+-        options.scalar = false;
+-        options.complete = true;
+-        IrGvnResult complete = { 0 };
+-        const IrCheck cc = ir_optimize_gvn(f, scalar, scratch, options, &complete);
+-        ir_optimize_test_expect(test, cc.error == IR_OK && complete.acyclic == 0 && complete.classes == a.classes && complete.scratch_bytes == a.scratch_bytes && ir_optimize_test_equal(&a.function, &complete.function), "GVN acyclic numbering matches complete refinement");
+-        arena_pop_to(scalar, sm);
+-        options.sweep_limit = 0;
+-        IrGvnResult fallback = { 0 };
+-        const IrCheck fc = ir_optimize_gvn(f, scalar, scratch, options, &fallback);
+-        ir_optimize_test_expect(test, fc.error == IR_OK && fallback.fallback && fallback.classes == complete.classes && fallback.rounds == complete.rounds && fallback.scratch_bytes == complete.scratch_bytes && ir_optimize_test_equal(&complete.function, &fallback.function), "GVN forced scalar refinement completion is exact");
+-        // With no probe budget the acyclic numbering gives up at its first occupied bucket and every grouping at its
+-        // first comparison; complete refinement with sorted grouping still reaches the same partition.
+-        arena_pop_to(scalar, sm);
+-        options = ir_gvn_options();
+-        options.probes = 0;
+-        IrGvnResult starved = { 0 };
+-        const IrCheck sc = ir_optimize_gvn(f, scalar, scratch, options, &starved);
+-        ir_optimize_test_expect(test, sc.error == IR_OK && starved.partition_probes == 0 && starved.classes == a.classes && starved.scratch_bytes == a.scratch_bytes && ir_optimize_test_equal(&a.function, &starved.function), "GVN probe-budget completions are exact");
+     }
+-    arena_pop_to(scalar, sm);
+-    arena_pop_to(vector, vm);
++    arena_pop_to(output, om);
+ }
+ 
+-static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
++static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+ {
+     const IrSizes sizes = { .instruction_count = 6, .block_count = 3, .constant_count = 1 };
+     IrFunction f = { 0 };
+@@ -262,7 +202,7 @@ static void ir_gvn_test_dead_cycle(IrOptimizeTest* test, Arena* input, Arena* ve
+         ir_optimize_test_instruction(&f, 3, IR_BR, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+         ir_optimize_test_instruction(&f, 4, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+         ir_optimize_test_instruction(&f, 5, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+-        ir_gvn_test_compare(test, &f, vector, scalar, scratch, 4, false, false);
++        ir_gvn_test_compare(test, &f, output, scratch);
+     }
+     arena_pop_to(input, 0);
+ }
+@@ -297,88 +237,7 @@ static void ir_gvn_test_limits(IrOptimizeTest* test, Arena* input, Arena* output
+     arena_pop_to(input, 0);
+ }
+ 
+-// Direct producer/consumer checks for partition grouping. Class labels may differ from the sorted oracle, but the
+-// complete equivalence relation must not. Every mutable grouping column and the hashes end at a protected page.
+-static void ir_gvn_test_partitions(IrOptimizeTest* test)
+-{
+-    const long page = sysconf(_SC_PAGESIZE);
+-    void* mapping = page >= 257 * (long)sizeof(uint64_t) ? mmap(0, (uint64_t)page * 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+-    bool ready = mapping != MAP_FAILED;
+-    for (uint32_t p = 1; ready && p < 8; p += 2)
+-    {
+-        ready = mprotect((char*)mapping + p * page, page, PROT_NONE) == 0;
+-    }
+-    ir_optimize_test_expect(test, ready, "GVN partition guarded columns setup");
+-    uint8_t operations[257] = { 0 };
+-    uint64_t fields[257 * BUSTER_IR_GVN_FIELDS] = { 0 };
+-    uint32_t grouped[257] = { 0 };
+-    uint32_t members[257] = { 0 };
+-    const uint32_t tails[] = { 63, 64, 65, 127, 128, 129, 255, 256, 257 };
+-    for (uint32_t size = 0; ready && size < 34 + BUSTER_ARRAY_LENGTH(tails); size += 1)
+-    {
+-        const uint32_t n = size < 34 ? size : tails[size - 34];
+-        for (uint32_t kind = 0; kind < 4; kind += 1)
+-        {
+-            for (uint32_t initial = 0; initial < 2; initial += 1)
+-            {
+-                IrFunction f = { .instruction_count = n, .op = operations };
+-                // Odd sizes partition the members in reverse order, after a nonzero class base.
+-                const uint32_t base = n & 1 ? 1000 : 0;
+-                IrGvnWork work = {
+-                    .ir = { .function = &f },
+-                    .members = members,
+-                    .probes = BUSTER_IR_GVN_PROBES_PER_INSTRUCTION,
+-                    .order = (uint32_t*)((char*)mapping + page - (uint64_t)n * sizeof(uint32_t)),
+-                    .temporary_order = (uint32_t*)((char*)mapping + 3 * page - (uint64_t)n * sizeof(uint32_t)),
+-                    .next_classes = (uint32_t*)((char*)mapping + 5 * page - (uint64_t)n * sizeof(uint32_t)),
+-                    .hashes = (uint64_t*)((char*)mapping + 7 * page - (uint64_t)n * sizeof(uint64_t)),
+-                    .fields = fields,
+-                };
+-                for (uint32_t i = 0; i < n; i += 1)
+-                {
+-                    members[i] = base != 0 ? n - 1 - i : i;
+-                    operations[i] = IR_ADD;
+-                    const uint32_t key = kind == 1 ? i % 7 : kind == 3 ? 0 : i;
+-                    for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
+-                    {
+-                        // In collision mode each field independently distinguishes some keys.
+-                        fields[(uint64_t)field * n + i] = kind == 2 ? (field == i % BUSTER_IR_GVN_FIELDS ? (uint64_t)i / BUSTER_IR_GVN_FIELDS + 1 : 0) : ((uint64_t)key << (field * 7)) ^ (UINT64_C(0x9e3779b97f4a7c15) * (field + 1));
+-                    }
+-                    work.hashes[i] = kind >= 2 ? 0 : ir_gvn_hash_one(&work, i, members[i], initial != 0);
+-                }
+-                const uint32_t classes = ir_gvn_partition_group(&work, n, initial != 0, false, base);
+-                if (n != 0)
+-                {
+-                    memcpy(grouped, work.next_classes, (uint64_t)n * sizeof(uint32_t));
+-                }
+-                ir_optimize_test_expect(test, work.statistics.partition_probes <= (uint64_t)n * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION, "GVN partition probing obeys its linear budget");
+-                const bool crowded = kind == 2 && n > 2 * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION + 1;
+-                ir_optimize_test_expect(test, work.statistics.partition_sort_fallbacks == crowded, "GVN distinct full-hash collisions take bounded sort completion; duplicate classes do not");
+-                const uint32_t sorted = ir_gvn_partition_group(&work, n, initial != 0, true, base);
+-                ir_optimize_test_expect(test, classes == sorted, "GVN grouped and sorted partition counts agree");
+-                for (uint32_t i = 0; i < n; i += 1)
+-                {
+-                    ir_optimize_test_expect(test, grouped[i] > base && grouped[i] <= base + classes && work.next_classes[i] > base && work.next_classes[i] <= base + classes, "GVN partition publishes every class within its range");
+-                    for (uint32_t j = 0; j < n; j += 1)
+-                    {
+-                        bool equal = true;
+-                        for (uint32_t field = 0; field < BUSTER_IR_GVN_FIELDS; field += 1)
+-                        {
+-                            equal = equal && fields[(uint64_t)field * n + i] == fields[(uint64_t)field * n + j];
+-                        }
+-                        ir_optimize_test_expect(test, (grouped[i] == grouped[j]) == equal && (work.next_classes[i] == work.next_classes[j]) == equal, "GVN grouped and sorted partitions match the independent full-key relation");
+-                    }
+-                }
+-            }
+-        }
+-    }
+-    if (mapping != MAP_FAILED)
+-    {
+-        munmap(mapping, (uint64_t)page * 8);
+-    }
+-}
+-
+-static void ir_gvn_test_large_partition(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
++static void ir_gvn_test_large(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+ {
+     IrFunction f = { 0 };
+     const bool created = ir_optimize_test_random_dag(input, &f, test, 4096);
+@@ -389,24 +248,17 @@ static void ir_gvn_test_large_partition(IrOptimizeTest* test, Arena* input, Aren
+         {
+             ir_optimize_test_instruction(&f, i, f.op[i - 1], f.type[i - 1], f.a[i - 1], f.b[i - 1], f.c[i - 1]);
+         }
+-        ir_gvn_test_compare(test, &f, vector, scalar, scratch, 1024, false, false);
++        ir_gvn_test_compare(test, &f, output, scratch);
+         IrGvnResult result = { 0 };
+-        const IrCheck check = ir_optimize_gvn(&f, vector, scratch, ir_gvn_options(), &result);
+-        ir_optimize_test_expect(test, check.error == IR_OK && result.partition_sort_fallbacks == 0 && !result.fallback, "GVN ordinary large DAG needs no comparison-sort completion");
+-        ir_optimize_test_expect(test, check.error == IR_OK && result.acyclic == f.instruction_count && result.rounds == 0 && result.partition_probes <= (uint64_t)f.instruction_count * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION, "GVN numbers a large DAG once, within one linear probe budget");
+-        IrGvnOptions options = ir_gvn_options();
+-        options.complete = true;
+-        IrGvnResult complete = { 0 };
+-        const IrCheck complete_check = ir_optimize_gvn(&f, vector, scratch, options, &complete);
+-        ir_optimize_test_expect(test, complete_check.error == IR_OK && complete.rounds > 2 && complete.partition_sort_fallbacks == 0 && complete.partition_probes <= (uint64_t)f.instruction_count * BUSTER_IR_GVN_PROBES_PER_INSTRUCTION * complete.rounds, "GVN complete refinement of a large DAG stays within its per-round budget");
++        const IrCheck check = ir_optimize_gvn(&f, output, scratch, ir_gvn_options(), &result);
++        ir_optimize_test_expect(test, check.error == IR_OK && result.removed >= 1024, "GVN merges a large DAG's repeated expressions");
+     }
+-    arena_pop_to(vector, 0);
++    arena_pop_to(output, 0);
+     arena_pop_to(input, 0);
+ }
+ 
+-// #866: a header phi whose back-edge input is computed in the latch, through a copy, from loop-invariant values. It
+-// reaches no cycle, so the acyclic numbering must number it once its input is, from the copy's users, and find it
+-// congruent to the phi whose matching input is computed before the loop. The counter is a true recurrence.
++// #866: a header phi whose back-edge input is computed in the latch, through a copy, from loop-invariant values, beside
++// a phi whose matching input is computed before the loop. The counter is a true recurrence.
+ static bool ir_gvn_test_late_phi(Arena* arena, IrFunction* f)
+ {
+     const IrSizes sizes = { .instruction_count = 17, .block_count = 4, .constant_count = 3, .parameter_count = 1, .extra_count = 12 };
+@@ -445,8 +297,7 @@ static bool ir_gvn_test_late_phi(Arena* arena, IrFunction* f)
+     return created;
+ }
+ 
+-// Two identical chains of additions. Synchronous refinement splits one link per round, so it needs a round per link
+-// over the whole function; the acyclic numbering visits each link once.
++// Two identical chains of additions: each link of the second joins the first's.
+ static bool ir_gvn_test_chains(Arena* arena, IrFunction* f, uint32_t length)
+ {
+     const IrSizes sizes = { .instruction_count = length * 2 + 4, .block_count = 1, .constant_count = 1, .parameter_count = 1 };
+@@ -472,8 +323,7 @@ static bool ir_gvn_test_chains(Arena* arena, IrFunction* f, uint32_t length)
+ }
+ 
+ // Unreachable code may use values defined in later blocks, here in two cycles of additions with no phi across two
+-// blocks. Only refinement can number them; optimistically all four additions are congruent, as complete refinement
+-// finds them.
++// blocks. No walk reaches them, so they stay as they are.
+ static bool ir_gvn_test_dead_arithmetic(Arena* arena, IrFunction* f)
+ {
+     const IrSizes sizes = { .instruction_count = 8, .block_count = 3, .constant_count = 1 };
+@@ -603,19 +453,14 @@ static bool ir_gvn_test_random_loops(Arena* arena, IrFunction* f, IrOptimizeTest
+     return created;
+ }
+ 
+-static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
++static void ir_gvn_test_loops(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+ {
+     IrFunction late = { 0 };
+     const bool late_created = ir_gvn_test_late_phi(input, &late);
+     ir_optimize_test_expect(test, late_created, "GVN late phi fixture allocation");
+     if (late_created)
+     {
+-        ir_gvn_test_compare(test, &late, vector, scalar, scratch, 2, true, true);
+-        IrGvnResult result = { 0 };
+-        const IrCheck check = ir_optimize_gvn(&late, vector, scratch, ir_gvn_options(), &result);
+-        // Only the counter, its increment and its comparison reach the recurrence.
+-        ir_optimize_test_expect(test, check.error == IR_OK && result.acyclic == late.instruction_count - 3, "GVN wakes a phi through its back-edge input's copy");
+-        arena_pop_to(vector, 0);
++        ir_gvn_test_compare(test, &late, output, scratch);
+     }
+     arena_pop_to(input, 0);
+     for (uint32_t length = 1; length <= 256; length *= 4)
+@@ -625,13 +470,11 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
+         ir_optimize_test_expect(test, created, "GVN chain fixture allocation");
+         if (created)
+         {
+-            ir_gvn_test_compare(test, &chains, vector, scalar, scratch, length, false, false);
+-            IrGvnOptions options = ir_gvn_options();
+-            options.complete = true;
+-            IrGvnResult complete = { 0 };
+-            const IrCheck check = ir_optimize_gvn(&chains, vector, scratch, options, &complete);
+-            ir_optimize_test_expect(test, check.error == IR_OK && complete.rounds > length, "GVN complete refinement splits a chain one link per round");
+-            arena_pop_to(vector, 0);
++            ir_gvn_test_compare(test, &chains, output, scratch);
++            IrGvnResult result = { 0 };
++            const IrCheck check = ir_optimize_gvn(&chains, output, scratch, ir_gvn_options(), &result);
++            ir_optimize_test_expect(test, check.error == IR_OK && result.removed >= length, "GVN joins every link of an equal chain");
++            arena_pop_to(output, 0);
+         }
+         arena_pop_to(input, 0);
+     }
+@@ -640,11 +483,7 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
+     ir_optimize_test_expect(test, dead_created, "GVN dead arithmetic fixture allocation");
+     if (dead_created)
+     {
+-        ir_gvn_test_compare(test, &dead, vector, scalar, scratch, 4, false, true);
+-        IrGvnResult result = { 0 };
+-        const IrCheck check = ir_optimize_gvn(&dead, vector, scratch, ir_gvn_options(), &result);
+-        ir_optimize_test_expect(test, check.error == IR_OK && result.acyclic == 4 && result.classes == 5, "GVN refines congruent unreachable cycles together");
+-        arena_pop_to(vector, 0);
++        ir_gvn_test_compare(test, &dead, output, scratch);
+     }
+     arena_pop_to(input, 0);
+     for (uint32_t trial = 0; trial < 160; trial += 1)
+@@ -657,7 +496,7 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
+         ir_optimize_test_expect(test, created, "GVN random loop fixture allocation");
+         if (created)
+         {
+-            ir_gvn_test_compare(test, &f, vector, scalar, scratch, 0, false, true);
++            ir_gvn_test_compare(test, &f, output, scratch);
+         }
+         arena_pop_to(input, 0);
+     }
+@@ -666,10 +505,10 @@ static void ir_gvn_test_acyclic(IrOptimizeTest* test, Arena* input, Arena* vecto
+ static void ir_gvn_test_ir(IrOptimizeTest* test)
+ {
+     Arena input = arena_reserve(16ull << 20);
+-    Arena vector = arena_reserve(16ull << 20);
+-    Arena scalar = arena_reserve(16ull << 20);
++    Arena output = arena_reserve(16ull << 20);
++    Arena reference = arena_reserve(16ull << 20);
+     Arena scratch = arena_reserve(32ull << 20);
+-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0;
++    const bool ready = input.base != 0 && output.base != 0 && reference.base != 0 && scratch.base != 0;
+     ir_optimize_test_expect(test, ready, "GVN fixture arenas");
+     if (ready)
+     {
+@@ -680,18 +519,15 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
+             ir_optimize_test_expect(test, created, "GVN straight fixture allocation");
+             if (created)
+             {
+-                ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, kind == 1 ? 0 : 2, false, false);
++                ir_gvn_test_compare(test, &f, &output, &scratch);
+                 if (kind == 0)
+                 {
+-                    ir_gvn_test_debug_bindings(test, &f, &input, &vector, &scalar, &scratch);
+-                }
+-                if (kind == 1)
+-                {
+-                    IrGvnResult result = { 0 };
+-                    const IrCheck check = ir_optimize_gvn(&f, &vector, &scratch, ir_gvn_options(), &result);
+-                    ir_optimize_test_expect(test, check.error == IR_OK && result.removed == 0, "GVN excludes undef and transitively tainted values and copies");
+-                    arena_pop_to(&vector, 0);
++                    ir_gvn_test_debug_bindings(test, &f, &input, &output, &reference, &scratch);
+                 }
++                IrGvnResult result = { 0 };
++                const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, ir_gvn_options(), &result);
++                ir_optimize_test_expect(test, check.error == IR_OK && (kind == 1 ? result.removed == 0 : result.removed >= 2), kind == 1 ? "GVN excludes undef and transitively tainted values and copies" : "GVN merges a straight function's equal expressions");
++                arena_pop_to(&output, 0);
+             }
+             arena_pop_to(&input, 0);
+         }
+@@ -700,10 +536,10 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
+         ir_optimize_test_expect(test, cycle_created, "GVN cyclic fixture allocation");
+         if (cycle_created)
+         {
+-            ir_gvn_test_compare(test, &cycle, &vector, &scalar, &scratch, 4, true, true);
+-            // Different initial values force the optimistic class to split through the entire recurrence.
++            ir_gvn_test_compare(test, &cycle, &output, &scratch);
++            // Different initial values.
+             cycle.extra[11] = 1;
+-            ir_gvn_test_compare(test, &cycle, &vector, &scalar, &scratch, 2, true, true);
++            ir_gvn_test_compare(test, &cycle, &output, &scratch);
+         }
+         arena_pop_to(&input, 0);
+         IrFunction diamond = { 0 };
+@@ -714,11 +550,11 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
+             diamond.op[6] = IR_ADD;
+             diamond.a[6] = 1;
+             diamond.b[6] = 1;
+-            ir_gvn_test_compare(test, &diamond, &vector, &scalar, &scratch, 0, false, false);
++            ir_gvn_test_compare(test, &diamond, &output, &scratch);
+             IrGvnResult result = { 0 };
+-            const IrCheck check = ir_optimize_gvn(&diamond, &vector, &scratch, ir_gvn_options(), &result);
++            const IrCheck check = ir_optimize_gvn(&diamond, &output, &scratch, ir_gvn_options(), &result);
+             ir_optimize_test_expect(test, check.error == IR_OK && result.removed == 0, "GVN never substitutes an equal expression from a sibling block");
+-            arena_pop_to(&vector, 0);
++            arena_pop_to(&output, 0);
+         }
+         arena_pop_to(&input, 0);
+         for (uint32_t kind = 0; kind < 2; kind += 1)
+@@ -728,14 +564,14 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
+             ir_optimize_test_expect(test, created, "GVN effects fixture allocation");
+             if (created)
+             {
+-                ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, 0, false, false);
++                ir_gvn_test_compare(test, &f, &output, &scratch);
+             }
+             arena_pop_to(&input, 0);
+         }
+-        ir_gvn_test_dead_cycle(test, &input, &vector, &scalar, &scratch);
+-        ir_gvn_test_limits(test, &input, &vector, &scratch);
+-        ir_gvn_test_large_partition(test, &input, &vector, &scalar, &scratch);
+-        ir_gvn_test_acyclic(test, &input, &vector, &scalar, &scratch);
++        ir_gvn_test_dead_cycle(test, &input, &output, &scratch);
++        ir_gvn_test_limits(test, &input, &output, &scratch);
++        ir_gvn_test_large(test, &input, &output, &scratch);
++        ir_gvn_test_loops(test, &input, &output, &scratch);
+         for (uint32_t length = 0; length < 130; length += 1)
+         {
+             IrFunction f = { 0 };
+@@ -747,22 +583,21 @@ static void ir_gvn_test_ir(IrOptimizeTest* test)
+                 {
+                     ir_optimize_test_instruction(&f, i, f.op[i - 1], f.type[i - 1], f.a[i - 1], f.b[i - 1], f.c[i - 1]);
+                 }
+-                ir_gvn_test_compare(test, &f, &vector, &scalar, &scratch, 0, false, false);
++                ir_gvn_test_compare(test, &f, &output, &scratch);
+             }
+             arena_pop_to(&input, 0);
+         }
+     }
+     arena_release(&scratch);
+-    arena_release(&scalar);
+-    arena_release(&vector);
++    arena_release(&reference);
++    arena_release(&output);
+     arena_release(&input);
+ }
+ 
+ static void ir_gvn_test_simd(IrOptimizeTest* test)
+ {
+     Arena input = arena_reserve(UINT64_C(16) << 20);
+-    Arena vector = arena_reserve(UINT64_C(16) << 20);
+-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
++    Arena output = arena_reserve(UINT64_C(16) << 20);
+     Arena scratch = arena_reserve(UINT64_C(16) << 20);
+     const IrSizes sizes = {
+         .instruction_count = 14,
+@@ -770,7 +605,7 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
+         .vector_constant_count = 3,
+     };
+     IrFunction f = { 0 };
+-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
++    const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
+     ir_optimize_test_expect(test, ready, "GVN SIMD fixture allocation");
+     if (ready)
+     {
+@@ -800,13 +635,9 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
+             f.flags[i] = IR_SIMD_LANE_F32;
+         }
+         ir_optimize_test_instruction(&f, 13, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+-        for (uint32_t path = 0; path < 2; path += 1)
+         {
+-            IrGvnOptions options = ir_gvn_options();
+-            options.scalar = path != 0;
+             IrGvnResult result = { 0 };
+-            Arena* output = path != 0 ? &scalar : &vector;
+-            const IrCheck check = ir_optimize_gvn(&f, output, &scratch, options, &result);
++            const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, ir_gvn_options(), &result);
+             ir_optimize_test_expect(test, check.error == IR_OK, "GVN takes vector constants, lane operations and masks");
+             if (check.error == IR_OK)
+             {
+@@ -824,10 +655,7 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
+                 ir_optimize_test_expect(test, constants == 2 && byte_adds == 1 && short_adds == 1 && floating == 4 && result.removed == 2,
+                                         "GVN merges identical payloads and lanes, keeps high-word differences, lane widths and floating effects");
+                 ir_optimize_test_simd_semantics(test, &f, &result.function, &scratch);
+-                if (path != 0)
+-                {
+-                    ir_optimize_test_fold_function(&test->gvn_digest, &result.function);
+-                }
++                ir_optimize_test_fold_function(&test->gvn_digest, &result.function);
+             }
+         }
+         // Full equality is mandatory even if an adversarial hash collides on constants differing only in word 7.
+@@ -846,18 +674,17 @@ static void ir_gvn_test_simd(IrOptimizeTest* test)
+         };
+         pure[0] = 1;
+         pure[1] = 1;
+-        ir_gvn_key(&work, 0, 0, true, false);
+-        ir_gvn_key(&work, 1, 1, true, false);
+-        ir_optimize_test_expect(test, ir_gvn_compare(&work, 0, 1, 0, 1, true) != 0, "a forced GVN hash collision still compares the complete vector payload");
++        ir_gvn_key(&work, 0);
++        ir_gvn_key(&work, 1);
++        ir_optimize_test_expect(test, ir_gvn_compare(&work, 0, 1) != 0, "a forced GVN hash collision still compares the complete vector payload");
+     }
+     arena_release(&input);
+-    arena_release(&vector);
+-    arena_release(&scalar);
++    arena_release(&output);
+     arena_release(&scratch);
+ }
+ 
+ // IrGvnOptions.vectors (#2781): equal vector operations merge, but the equal scalar operations that feed their splats
+-// stay distinct, although their congruence can still prove the vector users congruent. Both host paths agree.
++// stay distinct, although their congruence can still prove the vector users congruent.
+ static void ir_gvn_test_vectors(IrOptimizeTest* test)
+ {
+     static const char text[] = "function (i32) -> m16 {\n"
+@@ -873,55 +700,44 @@ static void ir_gvn_test_vectors(IrOptimizeTest* test)
+                                "  %8 = ret.void %7\n"
+                                "}\n";
+     Arena input = arena_reserve(UINT64_C(16) << 20);
+-    Arena vector = arena_reserve(UINT64_C(16) << 20);
+-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
++    Arena output = arena_reserve(UINT64_C(16) << 20);
+     Arena scratch = arena_reserve(UINT64_C(16) << 20);
+     IrFunction f = { 0 };
+-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
++    const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL;
+     const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+     const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+     ir_optimize_test_expect(test, fixture, "GVN's vector-only policy fixture parses");
+-    IrGvnResult results[2][2] = { 0 };
+     for (uint32_t policy = 0; fixture && policy < 2; policy += 1)
+     {
+-        for (uint32_t path = 0; path < 2; path += 1)
++        IrGvnOptions options = ir_gvn_options();
++        options.vectors = policy != 0;
++        IrGvnResult result = { 0 };
++        const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, options, &result);
++        const uint32_t expected = policy != 0 ? 2 : 3;
++        ir_optimize_test_expect(test, check.error == IR_OK && result.removed == expected,
++                                policy != 0 ? "GVN's vector-only policy merges the equal splat and vector addition" : "GVN unrestricted merges the scalar, splat and vector duplicates");
++        if (check.error == IR_OK)
+         {
+-            IrGvnOptions options = ir_gvn_options();
+-            options.scalar = path != 0;
+-            options.vectors = policy != 0;
+-            Arena* output = path != 0 ? &scalar : &vector;
+-            const IrCheck check = ir_optimize_gvn(&f, output, &scratch, options, &results[policy][path]);
+-            const uint32_t expected = policy != 0 ? 2 : 3;
+-            ir_optimize_test_expect(test, check.error == IR_OK && results[policy][path].removed == expected,
+-                                    policy != 0 ? "GVN's vector-only policy merges the equal splat and vector addition" : "GVN unrestricted merges the scalar, splat and vector duplicates");
+-            if (check.error == IR_OK)
++            uint32_t scalar_adds = 0;
++            uint32_t vector_adds = 0;
++            for (uint32_t i = 0; i < result.function.instruction_count; i += 1)
+             {
+-                uint32_t scalar_adds = 0;
+-                uint32_t vector_adds = 0;
+-                for (uint32_t i = 0; i < results[policy][path].function.instruction_count; i += 1)
+-                {
+-                    scalar_adds += results[policy][path].function.op[i] == IR_ADD && results[policy][path].function.type[i] == IR_I32;
+-                    vector_adds += results[policy][path].function.op[i] == IR_ADD && results[policy][path].function.type[i] == IR_V4I32;
+-                }
+-                ir_optimize_test_expect(test, policy == 0 || (scalar_adds == 2 && vector_adds == 1), "GVN's vector-only policy keeps both scalar additions");
+-                ir_optimize_test_simd_semantics(test, &f, &results[policy][path].function, &scratch);
+-                if (path != 0)
+-                {
+-                    ir_optimize_test_fold_function(&test->gvn_digest, &results[policy][path].function);
+-                }
++                scalar_adds += result.function.op[i] == IR_ADD && result.function.type[i] == IR_I32;
++                vector_adds += result.function.op[i] == IR_ADD && result.function.type[i] == IR_V4I32;
+             }
++            ir_optimize_test_expect(test, policy == 0 || (scalar_adds == 2 && vector_adds == 1), "GVN's vector-only policy keeps both scalar additions");
++            ir_optimize_test_simd_semantics(test, &f, &result.function, &scratch);
++            ir_optimize_test_fold_function(&test->gvn_digest, &result.function);
+         }
+-        ir_optimize_test_expect(test, results[policy][0].function.instruction_count != 0 && results[policy][1].function.instruction_count != 0 &&
+-                                    ir_optimize_test_equal(&results[policy][0].function, &results[policy][1].function), "GVN's vector-only policy's host paths agree");
++        arena_pop_to(&output, 0);
+     }
+     arena_release(&input);
+-    arena_release(&vector);
+-    arena_release(&scalar);
++    arena_release(&output);
+     arena_release(&scratch);
+ }
+ 
+ // The width changes (#1840) on values SCCP can't fold, a parameter's splat: GVN merges an insert, an extract and a widen
+-// equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart, by both paths, and the
++// equal to another, keeps the insert and the extract of another part (the intrinsic's flags) apart, and the
+ // interpreter's mask is unchanged.
+ static void ir_gvn_test_widths(IrOptimizeTest* test)
+ {
+@@ -954,12 +770,10 @@ static void ir_gvn_test_widths(IrOptimizeTest* test)
+     const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL;
+     const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+     ir_optimize_test_expect(test, parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK, "GVN's width change fixture parses");
+-    for (uint32_t path = 0; parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK && path < 2; path += 1)
++    if (parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK)
+     {
+-        IrGvnOptions options = ir_gvn_options();
+-        options.scalar = path != 0;
+         IrGvnResult result = { 0 };
+-        const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, options, &result);
++        const IrCheck check = ir_optimize_gvn(&f, &output, &scratch, ir_gvn_options(), &result);
+         ir_optimize_test_expect(test, check.error == IR_OK, "GVN takes the width changes");
+         if (check.error == IR_OK)
+         {
+@@ -979,10 +793,7 @@ static void ir_gvn_test_widths(IrOptimizeTest* test)
+             ir_optimize_test_expect(test, result.removed == 3 && counts[0] == 1 && counts[1] == 1 && counts[2] == 2 && counts[3] == 2 && counts[4] == 1,
+                                     "GVN merges equal width changes and keeps those of another part apart");
+             ir_optimize_test_simd_semantics(test, &f, &result.function, &scratch);
+-            if (path != 0)
+-            {
+-                ir_optimize_test_fold_function(&test->gvn_digest, &result.function);
+-            }
++            ir_optimize_test_fold_function(&test->gvn_digest, &result.function);
+         }
+         arena_pop_to(&output, 0);
+     }
+@@ -1017,8 +828,7 @@ static __attribute__((unused)) int run_ir_gvn_tests(int argc, char** argv)
+     const bool frozen = test.random == BUSTER_IR_OPTIMIZE_TEST_SEED;
+     if (valid)
+     {
+-        ir_gvn_test_guards(&test);
+-        ir_gvn_test_partitions(&test);
++        ir_gvn_test_collisions(&test);
+         ir_gvn_test_ir(&test);
+         ir_gvn_test_simd(&test);
+         ir_gvn_test_vectors(&test);
+diff --git a/src/buster/compiler/ir_optimize_licm_test.c b/src/buster/compiler/ir_optimize_licm_test.c
+index 4c27fa0b..0638999b 100644
+--- a/src/buster/compiler/ir_optimize_licm_test.c
++++ b/src/buster/compiler/ir_optimize_licm_test.c
+@@ -714,7 +714,6 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
+     {
+         Arena* output = path != 0 ? &scalar : &vector;
+         IrGvnOptions numbering = ir_gvn_options();
+-        numbering.scalar = path != 0;
+         IrGvnResult numbered = { 0 };
+         const IrCheck gvn = ir_optimize_gvn(&f, output, &scratch, numbering, &numbered);
+         ir_optimize_test_expect(test, gvn.error == IR_OK && numbered.removed == 1, "GVN gives the two equal permute2s one value");
+diff --git a/src/buster/compiler/ir_optimize_passes_benchmark.c b/src/buster/compiler/ir_optimize_passes_benchmark.c
+index 233a32ab..39b61449 100644
+--- a/src/buster/compiler/ir_optimize_passes_benchmark.c
++++ b/src/buster/compiler/ir_optimize_passes_benchmark.c
+@@ -18,10 +18,8 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
+     IrPassBenchmarkResult candidate = { 0 };
+     if (pass == 0)
+     {
+-        IrGvnOptions options = ir_gvn_options();
+-        options.scalar = scalar;
+         IrGvnResult run = { 0 };
+-        check = ir_optimize_gvn(input, output, scratch, options, &run);
++        check = ir_optimize_gvn(input, output, scratch, ir_gvn_options(), &run);
+         candidate.function = run.function;
+         candidate.analysis_bytes = run.scratch_bytes;
+         candidate.changed = run.removed;
+diff --git a/src/buster/compiler/ir_optimize_text_test.c b/src/buster/compiler/ir_optimize_text_test.c
+index d8f78f2a..0be605d2 100644
+--- a/src/buster/compiler/ir_optimize_text_test.c
++++ b/src/buster/compiler/ir_optimize_text_test.c
+@@ -152,7 +152,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture,
+     if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
+     {
+         IrGvnOptions options = ir_gvn_options();
+-        options.scalar = scalar;
+         options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE;
+         IrGvnResult pass = { 0 };
+         check = ir_optimize_gvn(input, output, scratch, options, &pass);
+@@ -333,18 +332,8 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
+             uint64_t scalar_change = 0;
+             const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, &scalar, &scalar_change);
+             ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
+-            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
+-            {
+-                // GVN's scalar twin is the available-expression oracle: it may find fewer congruences than the vector
+-                // partition refinement, and always finds no more of them.
+-                ir_optimize_text_expect(test, scalar_check.error != IR_OK || scalar_change <= vector_change, fixture->name,
+-                                        "the scalar GVN oracle removes more than the vector partition does");
+-            }
+-            else
+-            {
+-                ir_optimize_text_expect(test, scalar_check.error == IR_OK && ir_optimize_test_equal(&vector, &scalar), fixture->name,
+-                                        "the optimizer twins give different functions");
+-            }
++            ir_optimize_text_expect(test, scalar_check.error == IR_OK && ir_optimize_test_equal(&vector, &scalar), fixture->name,
++                                    "the optimizer twins give different functions");
+             if (vector_check.error == IR_OK)
+             {
+                 ir_optimize_text_execute(test, fixture->name, &before, &vector, scratch, fixture->effects);
+diff --git a/src/buster/compiler/ir_simd_consumer_test.c b/src/buster/compiler/ir_simd_consumer_test.c
+index 3e40e982..3eb03766 100644
+--- a/src/buster/compiler/ir_simd_consumer_test.c
++++ b/src/buster/compiler/ir_simd_consumer_test.c
+@@ -156,7 +156,6 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena*
+                 // GVN and LICM now model masks (#1450).
+                 IrGvnResult gvn = { .function.instruction_count = 123 };
+                 IrGvnOptions gvn_options = ir_gvn_options();
+-                gvn_options.scalar = scalar != 0;
+                 checked = ir_optimize_gvn(&function, output, scratch, gvn_options, &gvn);
+                 ir_test_expect(tally, checked.error == IR_OK && gvn.function.instruction_count == function.instruction_count && scratch->length == 0, "GVN preserves mask loads and stores");
+                 arena_pop_to(output, 0);
+@@ -381,7 +380,6 @@ static int run_ir_simd_tests(int argc, char** argv)
+             arena_pop_to(&output, 0);
+             IrGvnResult gvn = { .function.instruction_count = 123 };
+             IrGvnOptions gvn_options = ir_gvn_options();
+-            gvn_options.scalar = scalar != 0;
+             checked = ir_optimize_gvn(&function, &output, &scratch, gvn_options, &gvn);
+             ir_test_expect(&tally, checked.error == IR_OK && gvn.function.instruction_count == 2 && gvn.function.vector_constant_count == 1 && scratch.length == 0,
+                            "GVN takes SIMD and preserves a vector constant's payload");
+diff --git a/src/buster/compiler/ir_source_benchmark.c b/src/buster/compiler/ir_source_benchmark.c
+index 5b0af14b..7363c115 100644
+--- a/src/buster/compiler/ir_source_benchmark.c
++++ b/src/buster/compiler/ir_source_benchmark.c
+@@ -5,7 +5,7 @@
+ // compiles of a set of files, with the largest function's share (#15: sqlite3.c's sqlite3VdbeExec, 5.0% of its -O0
+ // code), and the time per typed entry of lowering them (ir_lower_typed), of verifying the result
+ // (ir_verify), of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
+-// promotion's phis (#134), of #866's two GVN paths on the lowered IR, and of the shared SCCP/DCE/CFG optimizer's
++// promotion's phis (#134), of value numbering on the lowered IR, and of the shared SCCP/DCE/CFG optimizer's
+ // default and forced-scalar paths (#860). Include after ir_source_test.c and
+ // tier0_benchmark_measure.c, whose clock, counters and medians it takes.
+ //
+@@ -13,7 +13,7 @@
+ //   build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor options] file... (ir_source_passes.c)
+ //
+ // The files' functions are prepared as test-ir-source prepares them (ir_source_prepare), each lowered once into the IR
+-// the verifier, promotion and GVN variants read, and promoted once by both paths (and given to GVN once by both),
++// the verifier, promotion and GVN variants read, and promoted once by both paths (and given to GVN once),
+ // outside the time. Any file that fails or is left out, and any function the lowering or either path refuses, fails
+ // the benchmark, which then reports no time: its corpus would be less than the files'. The bytes are
+ // the function arenas' (IrFunction.arena_bytes: every column and side table, with their alignment gaps, each function
+@@ -21,28 +21,26 @@
+ // run takes every function once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of each
+ // pair runs first; --only times one alone, back to back, and --after-scalar MS runs a vector variant's scalar twin, untimed,
+ // for MS ms before each of its passes. The variants below BUSTER_IR_SOURCE_PAIRED come in pairs, a vector path and then
+-// its twin; optimize-vector, lower and verify have none. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
++// its twin; gvn, optimize-vector, lower and verify have none. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
+ 
+ #define BUSTER_IR_SOURCE_PROMOTE 0
+ #define BUSTER_IR_SOURCE_PROMOTE_SCALAR 1
+-#define BUSTER_IR_SOURCE_GVN 2
+-#define BUSTER_IR_SOURCE_GVN_SCALAR 3
+-#define BUSTER_IR_SOURCE_OPTIMIZE 4
+-#define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 5
+-#define BUSTER_IR_SOURCE_PAIRED 6
+-#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 6
+-#define BUSTER_IR_SOURCE_LOWER 7
+-#define BUSTER_IR_SOURCE_VERIFY 8
+-#define BUSTER_IR_SOURCE_VARIANTS 9
++#define BUSTER_IR_SOURCE_OPTIMIZE 2
++#define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 3
++#define BUSTER_IR_SOURCE_PAIRED 4
++#define BUSTER_IR_SOURCE_GVN 4
++#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 5
++#define BUSTER_IR_SOURCE_LOWER 6
++#define BUSTER_IR_SOURCE_VERIFY 7
++#define BUSTER_IR_SOURCE_VARIANTS 8
+ #define BUSTER_IR_SOURCE_LARGEST 10
+ 
+ static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
+     "promote",
+     "promote-scalar",
+-    "gvn",
+-    "gvn-scalar",
+     "optimize",
+     "optimize-scalar",
++    "gvn",
+     "optimize-vector",
+     "lower",
+     "verify",
+@@ -66,13 +64,8 @@ struct IrSourceCorpus
+     uint64_t promoted_bytes;
+     // Each promotion's phis (#134): the vector path's (ssa_ir_promote), then its twin's.
+     uint64_t phis[2];
+-    // #866's GVN on the lowered IR, run once by each path outside the time: the instructions it removed, those its
+-    // acyclic numbering classed, its refinement rounds, key comparisons and collision-budget completions.
+-    uint64_t gvn_changed[2];
+-    uint64_t gvn_acyclic;
+-    uint64_t gvn_rounds;
+-    uint64_t gvn_probes;
+-    uint64_t gvn_sort_fallbacks;
++    // Value numbering on the lowered IR, run once outside the time: the instructions it removed.
++    uint64_t gvn_changed;
+     // The lowered IR's bytes of its side tables, without the alignment gaps (ir_source_payload).
+     uint64_t tables;
+     // Functions a path refused or the paths lowered apart, and files that failed or were left out.
+@@ -106,12 +99,9 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
+         case BUSTER_IR_SOURCE_PROMOTE: check = ssa_ir_promote(lowered, output, scratch, &result); break;
+         case BUSTER_IR_SOURCE_PROMOTE_SCALAR: check = ssa_ir_promote_scalar(lowered, output, scratch, &result); break;
+         case BUSTER_IR_SOURCE_GVN:
+-        case BUSTER_IR_SOURCE_GVN_SCALAR:
+         {
+-            IrGvnOptions options = ir_gvn_options();
+-            options.scalar = variant == BUSTER_IR_SOURCE_GVN_SCALAR;
+             IrGvnResult run = { 0 };
+-            check = ir_optimize_gvn(lowered, output, scratch, options, &run);
++            check = ir_optimize_gvn(lowered, output, scratch, ir_gvn_options(), &run);
+         }
+         break;
+         case BUSTER_IR_SOURCE_OPTIMIZE:
+@@ -176,16 +166,9 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
+         const IrCheck promotion_twin = lowers ? ssa_ir_promote_scalar(vector, output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+         const uint32_t twin_phis = promotion_twin.error == IR_OK ? ssa_ir_phis(&promoted_twin, &trivial) : 0;
+         arena_pop_to(output, mark);
+-        // #866: both GVN paths on the lowered IR, once, outside the time. GVN verifies its output; the scalar
+-        // available-expression path must accept the function too, and its removal count is the cyclic-quality control
+-        // against the vector congruence solver's.
+-        IrGvnOptions gvn_options = ir_gvn_options();
++        // Value numbering on the lowered IR, once, outside the time. It verifies its output.
+         IrGvnResult gvn = { 0 };
+-        const IrCheck gvn_check = lowers ? ir_optimize_gvn(vector, output, scratch, gvn_options, &gvn) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+-        arena_pop_to(output, mark);
+-        gvn_options.scalar = true;
+-        IrGvnResult gvn_twin = { 0 };
+-        const IrCheck gvn_twin_check = lowers ? ir_optimize_gvn(vector, output, scratch, gvn_options, &gvn_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
++        const IrCheck gvn_check = lowers ? ir_optimize_gvn(vector, output, scratch, ir_gvn_options(), &gvn) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
+         arena_pop_to(output, mark);
+         // #860: the optimizer's default AUTO path and both forced twins on the lowered IR, once, outside the time.
+         // The twins must accept and agree exactly: a corpus function they don't is left out, as the optimizer's own
+@@ -204,7 +187,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
+         arena_pop_to(output, mark);
+         const bool optimizes = optimize_check.error == IR_OK && optimize_vector_check.error == IR_OK && optimize_scalar_check.error == IR_OK &&
+                                ir_optimize_test_equal(&optimized.function, &optimized_vector.function) && ir_optimize_test_equal(&optimized.function, &optimized_scalar.function);
+-        joined = promotion.error == IR_OK && promotion_twin.error == IR_OK && gvn_check.error == IR_OK && gvn_twin_check.error == IR_OK && optimizes;
++        joined = promotion.error == IR_OK && promotion_twin.error == IR_OK && gvn_check.error == IR_OK && optimizes;
+         if (joined)
+         {
+             corpus->functions[corpus->count] = *source;
+@@ -217,19 +200,14 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
+             corpus->promoted_bytes += promoted_bytes;
+             corpus->phis[0] += phis;
+             corpus->phis[1] += twin_phis;
+-            corpus->gvn_changed[0] += gvn.removed;
+-            corpus->gvn_changed[1] += gvn_twin.removed;
+-            corpus->gvn_acyclic += gvn.acyclic;
+-            corpus->gvn_rounds += gvn.rounds;
+-            corpus->gvn_probes += gvn.partition_probes;
+-            corpus->gvn_sort_fallbacks += gvn.partition_sort_fallbacks;
++            corpus->gvn_changed += gvn.removed;
+             bytes += vector->arena_bytes;
+             instructions += vector->instruction_count;
+         }
+         else
+         {
+             const char* reason = !lowers ? "a lowering refused it, or the paths disagree" : promotion.error != IR_OK || promotion_twin.error != IR_OK ? "a promotion refused it" :
+-                                 gvn_check.error != IR_OK || gvn_twin_check.error != IR_OK ? "GVN refused it" : "the optimizer refused it, or its paths disagree";
++                                 gvn_check.error != IR_OK ? "GVN refused it" : "the optimizer refused it, or its paths disagree";
+             printf("benchmark-ir-source: file=%s function=%s failed=\"%s\"\n", name, source->name, reason);
+         }
+         arena_pop_to(output, mark);
+@@ -267,8 +245,7 @@ static void ir_source_bytes(const IrSourceCorpus* corpus)
+            (double)corpus->promoted_instructions / tokens, corpus->promoted_bytes, (double)corpus->promoted_bytes / tokens);
+     printf("benchmark-ir-source: phis: %" PRIu64 " by promote (%.4f per lowered instruction), %" PRIu64 " by promote-scalar (%.4f)\n", corpus->phis[0],
+            (double)corpus->phis[0] / (double)corpus->instructions, corpus->phis[1], (double)corpus->phis[1] / (double)corpus->instructions);
+-    printf("benchmark-ir-source: GVN removed %" PRIu64 " instructions by gvn and %" PRIu64 " by gvn-scalar; %" PRIu64 " of %" PRIu64 " numbered acyclic, %" PRIu64 " refinement rounds, %" PRIu64 " key comparisons, %" PRIu64 " collision-budget completions\n",
+-           corpus->gvn_changed[0], corpus->gvn_changed[1], corpus->gvn_acyclic, corpus->instructions, corpus->gvn_rounds, corpus->gvn_probes, corpus->gvn_sort_fallbacks);
++    printf("benchmark-ir-source: GVN removed %" PRIu64 " instructions\n", corpus->gvn_changed);
+     // The largest functions, by insertion into a short list sorted by bytes, the first function of equal bytes first.
+     uint32_t largest[BUSTER_IR_SOURCE_LARGEST];
+     uint32_t kept = 0;
+@@ -554,7 +531,7 @@ static int ir_source_benchmark_command(int count, char** arguments, bool testing
+         }
+         else
+         {
+-            fprintf(stderr, "usage: compiler benchmark-ir-source [--only promote|promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify] [--after-scalar MS] [--functions] "
++            fprintf(stderr, "usage: compiler benchmark-ir-source [--only promote|promote-scalar|optimize|optimize-scalar|gvn|optimize-vector|lower|verify] [--after-scalar MS] [--functions] "
+                             "[preprocessor options] file...\n");
+         }
+     }
+diff --git a/src/buster/compiler/ir_source_passes.c b/src/buster/compiler/ir_source_passes.c
+index 37017e3a..7ef210d9 100644
+--- a/src/buster/compiler/ir_source_passes.c
++++ b/src/buster/compiler/ir_source_passes.c
+@@ -2,8 +2,8 @@
+ // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+ //
+ // #139's acceptance on real C (test-ir-source --passes): every function -c compiles of a set of files, prepared and
+-// lowered as test-ir-source does them (ir_source_prepare), through each of #139's passes by both of its versions, whose
+-// results must agree: exactly, or for value numbering semantically, as the issue sets it. Include after
++// lowered as test-ir-source does them (ir_source_prepare), through each of #139's passes by both of its versions where it
++// has two, whose results must agree exactly. Include after
+ // ir_source_benchmark.c, with the passes, ir_lower_test.c's and ir_optimize_test.c's comparisons.
+ //
+ //   build/compiler test-ir-source --passes [preprocessor options] file...
+@@ -11,10 +11,7 @@
+ // For each function, its lowered form L (both lowerings must agree, as test-ir-source requires) and L promoted, P:
+ // - SROA on L with Tier 1's options (#1282's simd and flagged), vector and scalar: the same function, or the same
+ //   refusal; a split function must promote.
+-// - #866's solver on L: the acyclic numbering against its complete-refinement oracle (IrGvnOptions.complete), which must
+-//   give the same function, and against the scalar available-expression twin, which must accept the function and remove
+-//   no more instructions than the partition (it doesn't see cyclic congruences): the semantic comparison, as the solver's
+-//   guide has it. The numbering's result must promote.
++// - Value numbering on L (one path since #2924): its result, which it verifies, must promote.
+ // - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
+ //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
+ //   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
+@@ -108,7 +105,6 @@ struct IrSourcePassTotals
+     // Per pass, its total effect: SROA's split slots, GVN's removed instructions (the partition's), the optimizer rows'
+     // removed instructions, LICM's moved values and the inliner's inlined calls; and the scalar GVN twin's removals.
+     uint64_t effect[IR_SOURCE_PASS_COUNT];
+-    uint64_t gvn_scalar_removed;
+ };
+ 
+ // Whether two functions are the same column for column, with every side table: the lowering's comparison and the
+@@ -168,30 +164,14 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
+         arena_pop_to(twin, twin_mark);
+         arena_pop_to(promotion, promotion_mark);
+     }
+-    // #866's solver, before promotion: the acyclic numbering, its exact oracle and the scalar semantic twin.
++    // Value numbering, before promotion: one path, whose result must promote.
+     {
+-        IrGvnOptions options = ir_gvn_options();
+-        IrGvnResult vector = { 0 };
+-        IrGvnResult complete = { 0 };
+-        IrGvnResult scalar = { 0 };
+-        const IrCheck vector_check = ir_optimize_gvn(lowered, output, scratch, options, &vector);
+-        options.complete = true;
+-        const IrCheck complete_check = ir_optimize_gvn(lowered, twin, scratch, options, &complete);
+-        const bool exact = vector_check.error == IR_OK && complete_check.error == IR_OK && ir_source_passes_equal(&vector.function, &complete.function);
+-        arena_pop_to(twin, twin_mark);
+-        options.complete = false;
+-        options.scalar = true;
+-        const IrCheck scalar_check = ir_optimize_gvn(lowered, twin, scratch, options, &scalar);
+-        const bool semantic = exact && scalar_check.error == IR_OK && scalar.removed <= vector.removed;
++        IrGvnResult numbering = { 0 };
++        const IrCheck check = ir_optimize_gvn(lowered, output, scratch, ir_gvn_options(), &numbering);
+         IrFunction numbered = { 0 };
+-        const bool promotes = !semantic || ssa_ir_promote(&vector.function, promotion, scratch, &numbered).error == IR_OK;
+-        // The complete oracle must refuse what the numbering refuses, and take what it takes: where they differ, its
+-        // check stands for the twin's, so that the record fails.
+-        const IrCheck oracle = complete_check.error == vector_check.error ? scalar_check : complete_check;
+-        ir_source_passes_record(totals, IR_SOURCE_PASS_GVN, file, name, vector_check, oracle, semantic, promotes, vector.removed != 0, vector.removed);
+-        totals->gvn_scalar_removed += vector_check.error == IR_OK && scalar_check.error == IR_OK ? scalar.removed : 0;
++        const bool promotes = check.error != IR_OK || ssa_ir_promote(&numbering.function, promotion, scratch, &numbered).error == IR_OK;
++        ir_source_passes_record(totals, IR_SOURCE_PASS_GVN, file, name, check, check, true, promotes, numbering.removed != 0, numbering.removed);
+         arena_pop_to(output, output_mark);
+-        arena_pop_to(twin, twin_mark);
+         arena_pop_to(promotion, promotion_mark);
+     }
+     // The optimizer's rows on the promoted function.
+@@ -542,7 +522,6 @@ static int run_ir_source_passes_tests(int count, char** arguments)
+                    totals.ran[pass], totals.changed[pass], totals.refused[pass], totals.failed[pass], totals.effect[pass]);
+             failed += totals.failed[pass];
+         }
+-        printf("ir-source-passes: gvn-scalar removed=%" PRIu64 " (the partition's: %" PRIu64 ")\n", totals.gvn_scalar_removed, totals.effect[IR_SOURCE_PASS_GVN]);
+     }
+     else
+     {
+@@ -624,10 +603,8 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
+         }
+         else if (pass == IR_SOURCE_PASS_GVN)
+         {
+-            IrGvnOptions options = ir_gvn_options();
+-            options.scalar = scalar;
+             IrGvnResult result = { 0 };
+-            check = ir_optimize_gvn(&corpus->lowered[f], output, scratch, options, &result);
++            check = ir_optimize_gvn(&corpus->lowered[f], output, scratch, ir_gvn_options(), &result);
+         }
+         else if (pass == IR_SOURCE_PASS_LICM)
+         {
+diff --git a/src/buster/compiler/ir_stack_test.c b/src/buster/compiler/ir_stack_test.c
+index f7416a82..aef2763e 100644
+--- a/src/buster/compiler/ir_stack_test.c
++++ b/src/buster/compiler/ir_stack_test.c
+@@ -91,7 +91,6 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
+             case 2:
+             {
+                 IrGvnOptions options = ir_gvn_options();
+-                options.scalar = scalar != 0;
+                 IrGvnResult result = { 0 };
+                 check = ir_optimize_gvn(function, output, scratch, options, &result);
+                 transformed = result.function;
+@@ -232,7 +231,6 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
+             case 2:
+             {
+                 IrGvnOptions options = ir_gvn_options();
+-                options.scalar = scalar != 0;
+                 IrGvnResult result = { 0 };
+                 check = ir_optimize_gvn(&current, output, scratch, options, &result);
+                 next = result.function;
+-- 
+2.43.0
+
