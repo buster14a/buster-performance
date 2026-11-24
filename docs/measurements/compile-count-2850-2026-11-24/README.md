@@ -235,3 +235,11 @@ long ones that ran together, took 1.6 to 34 times their CPU time; the other 38 a
 candidate on the same base ran the same parts in their usual time on four runners of the same CPU model, and a
 container reproduces no slowdown from the base. Nothing in the code explains it; the third candidate passed and
 merged.
+
+## buster14a/buster#3566's direct path against the full pipeline (`direct-3566/`)
+
+`direct-3566/summary.txt`: the pull request's fast path changes the object and the diagnostics. On `sqlite3.c` the
+object is 2,056,840 bytes against 2,063,760. Of the 4,576 C files under `tests/` it takes 783, and for 755 of them
+its verdict differs from the same executable's with `--no-direct`: 411 that the full pipeline rejects are accepted in
+silence, 343 lose their warnings and one dies with SIGFPE. `x == x`, `if (array)` and `printf("%s\n", 42)` compile
+without their warning. Its count is 51.4 M against 312.4 M, which it doesn't state.
