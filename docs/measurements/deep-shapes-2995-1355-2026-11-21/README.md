@@ -1,11 +1,8 @@
-# Deep shapes for #2995's and #1355's linear walks: generators and the owed 9700X A/B
+# Deep shapes for #2995 and #1355
 
-**Inputs and recipe, plus cloud readings; no 9700X figure yet.** Compiler PRs:
-[#3244](https://github.com/buster14a/buster/pull/3244) (#2995: statement expressions' GNU break targets and
-variable-length arrays' statements) and [#3245](https://github.com/buster14a/buster/pull/3245) (#1355: Tier 1's
-lifetime walks for goto, case and break). Both state that the issue's scaling acceptance, and the
-measurement the repository asks for of each part that stays scalar, are owed on the 9700X. This record keeps the
-inputs that measurement needs, which existed only in a session's scratch.
+The Ryzen 7 9700X record for #1355 includes the original return-chain curve and its lifetimes-disabled control. [9700X results for #1355](9700x-1355/README.md)
+
+The generators below reproduce the inputs for the two compiler changes. [GNU break targets and variable-length array statements (#3244)](https://github.com/buster14a/buster/pull/3244) · [Tier 1 lifetime walks (#3245)](https://github.com/buster14a/buster/pull/3245)
 
 ## Generators
 
@@ -26,7 +23,7 @@ inputs that measurement needs, which existed only in a session's scratch.
 Both reproduce, byte for byte, the files the sessions measured (`gen2995`: all 15 of the three shapes at 2,000 to
 32,000; `gen1355`: all 36 of the eight shapes at 4,000 to 32,000).
 
-## Recipe (owed, on the 9700X)
+## 9700X recipe
 
 Release builds (`./build.sh --config Release`) of main and of each PR's head, each run under `exclusive.sh`, one run per
 lock. `timing.sh BINARY RUNS FLAGS DIR SHAPE...` prints the median check-program stage (`--time-stages`) at N = 4,000,
