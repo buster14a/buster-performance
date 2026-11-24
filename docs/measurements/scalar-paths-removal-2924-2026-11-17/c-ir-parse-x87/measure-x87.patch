@@ -1,0 +1,124 @@
+commit f7f6847b6fc87a85985490b8451f6d8edf2f08d0
+Author: Claude <noreply@anthropic.com>
+Date:   Mon Nov 23 21:58:18 2026 +0000
+
+    experiment: measure-c9g-x87 (not for merge)
+
+diff --git a/src/buster/compiler/main.c b/src/buster/compiler/main.c
+index f35f0b5b..68065450 100644
+--- a/src/buster/compiler/main.c
++++ b/src/buster/compiler/main.c
+@@ -2338,6 +2338,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
+     {
+         result = run_ir_lower_tests(argc - 2, argv + 2);
+     }
++    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "measure-c9g-x87") == 0)
++    {
++        result = c9g_measure_x87();
++    }
+     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-parse") == 0)
+     {
+         result = run_ir_parse_tests(argc - 2, argv + 2);
+diff --git a/src/buster/compiler/tier1_x87_transfer_test.c b/src/buster/compiler/tier1_x87_transfer_test.c
+index 5a62b439..0926120a 100644
+--- a/src/buster/compiler/tier1_x87_transfer_test.c
++++ b/src/buster/compiler/tier1_x87_transfer_test.c
+@@ -255,3 +255,98 @@ static void tier1_x87_transfer_tests(Tier1WideTest* test)
+     tier1_x87_transfer_candidate_bounds(test);
+     tier1_x87_transfer_emission(test);
+ }
++
++// #2924 C9g, experiment only: the candidate scan's new kernel against the gather it replaces and the scalar twin.
++static uint64_t c9g_x87_gather(const X86Instruction* records, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count)
++{
++    uint64_t candidates = 0;
++    const __m512i indices = _mm512_setr_epi32(0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240);
++    const __m512i lanes_ids = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
++    for (uint32_t r = 0; r < count; r += 16)
++    {
++        const uint32_t left = count - r;
++        const __mmask16 lanes = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
++        const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, &records[first + r].form, 1);
++        const __m512i forms = _mm512_and_si512(words, _mm512_set1_epi32(0xffff));
++        const __m512i ids = _mm512_add_epi32(lanes_ids, _mm512_set1_epi32((int32_t)(first + r)));
++        const __m512i names = _mm512_maskz_loadu_epi32(lanes, tokens + first + r);
++        const __mmask16 stores = lanes & _mm512_cmpeq_epi32_mask(forms, _mm512_set1_epi32(X86_FORM_FSTP_M80)) & _mm512_cmpeq_epi32_mask(names, ids);
++        candidates |= (uint64_t)stores << r;
++    }
++    uint64_t enabled = candidates;
++    while (enabled != 0)
++    {
++        const uint32_t r = (uint32_t)__builtin_ctzll(enabled);
++        candidates &= eligible[first + r] != 0 ? UINT64_MAX : ~(UINT64_C(1) << r);
++        enabled &= enabled - 1;
++    }
++    return candidates;
++}
++
++static uint64_t c9g_x87_scalar(const X86Instruction* records, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count)
++{
++    uint64_t candidates = 0;
++    for (uint32_t r = 0; r < count; r += 1)
++    {
++        candidates |= (uint64_t)(records[first + r].form == X86_FORM_FSTP_M80 && tokens[first + r] == first + r) << r;
++    }
++    uint64_t enabled = candidates;
++    while (enabled != 0)
++    {
++        const uint32_t r = (uint32_t)__builtin_ctzll(enabled);
++        candidates &= eligible[first + r] != 0 ? UINT64_MAX : ~(UINT64_C(1) << r);
++        enabled &= enabled - 1;
++    }
++    return candidates;
++}
++
++static uint64_t c9g_ticks(void)
++{
++    _mm_lfence();
++    const uint64_t result = __rdtsc();
++    _mm_lfence();
++    return result;
++}
++
++static int c9g_measure_x87(void)
++{
++    uint64_t state = 2924;
++    static X86Instruction records[64 * 1024];
++    static uint32_t tokens[64 * 1024];
++    static uint8_t eligible[64 * 1024];
++    const uint16_t forms[] = { X86_FORM_FSTP_M80, X86_FORM_FLD_M80, X86_FORM_FMULP_ST_ST0, X86_FORM_FSTP_M80 };
++    for (uint32_t r = 0; r < 64 * 1024; r += 1)
++    {
++        state = state * 6364136223846793005ull + 1442695040888963407ull;
++        records[r] = (X86Instruction){ .form = forms[(state >> 33) & 3], .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16 };
++        tokens[r] = ((state >> 40) & 1) != 0 ? r : 1000;
++        eligible[r] = (uint8_t)((state >> 41) & 1);
++    }
++    volatile uint64_t sink = 0;
++    bool agree = true;
++    for (uint32_t count = 1; count <= 64; count = count < 8 ? count + 1 : count * 2)
++    {
++        uint64_t least[3] = { UINT64_MAX, UINT64_MAX, UINT64_MAX };
++        for (uint32_t round = 0; round < 15; round += 1)
++        {
++            for (uint32_t turn = 0; turn < 3; turn += 1)
++            {
++                const uint32_t path = (round + turn) % 3;
++                const uint64_t begin = c9g_ticks();
++                for (uint32_t window = 0; window + 64 <= 64 * 1024; window += 64)
++                {
++                    sink += path == 0 ? c9g_x87_scalar(records, tokens, eligible, window, count) : path == 1 ? c9g_x87_gather(records, tokens, eligible, window, count) : x87_transfer_candidates(records, tokens, eligible, window, count);
++                }
++                const uint64_t taken = c9g_ticks() - begin;
++                least[path] = taken < least[path] ? taken : least[path];
++            }
++        }
++        for (uint32_t window = 0; window + 64 <= 64 * 1024; window += 64)
++        {
++            agree = agree && c9g_x87_scalar(records, tokens, eligible, window, count) == x87_transfer_candidates(records, tokens, eligible, window, count);
++        }
++        printf("x87-candidates count=%u scalar=%.2f gather=%.2f loads=%.2f scalar/loads=%.3f gather/loads=%.3f\n", count, least[0] / 1024.0, least[1] / 1024.0, least[2] / 1024.0, (double)least[0] / (double)least[2], (double)least[1] / (double)least[2]);
++    }
++    printf("x87-candidates agree=%d\n", agree);
++    return agree ? 0 : 1;
++}
