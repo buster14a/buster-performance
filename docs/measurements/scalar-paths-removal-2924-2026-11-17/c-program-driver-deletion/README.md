@@ -18,3 +18,10 @@ By rule 3, check-debug's `exact` goes. The units' merge and link-check lanes cha
 
 **Local checks** (`local/`): the 32 blocks of `tools/ci/correctness.tests` naming test-check-debug, test-check-units,
 test-check-lanes, test-checker, test-checker-driver, test-debug and test-lanes. All passed.
+
+**Review fixes** (51cc646db): the kept-rows test compares each kept row's offset, file and line with the row
+keeping's definition gives. `mutation/run.sh` mutates the vector path's stores on blocks after the first; all three
+are killed (`mutation/results.txt`: lines +1, 178 failures; offsets +0x10000000, 227; keys +1, 178).
+
+**Sanitizers** (`local/sanitizers.txt`): UBSan, ASan and MSan builds of 51cc646db, each running test-checker's 8
+parts, test-check-debug, test-check-units and test-check-lanes: 33 of 33 passed.
