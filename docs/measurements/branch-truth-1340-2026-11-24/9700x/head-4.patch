@@ -1,0 +1,1079 @@
+diff --git a/src/buster/compiler/c_check_branch_truth_driver_test.c b/src/buster/compiler/c_check_branch_truth_driver_test.c
+new file mode 100644
+index 00000000..c41a6385
+--- /dev/null
++++ b/src/buster/compiler/c_check_branch_truth_driver_test.c
+@@ -0,0 +1,391 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// The bit before a branch condition's fold (#1340, check_cfg_decidable in c_check_program_cfg.c): a node whose bit is
++// clear is one that check_program_branch_truth's fold leaves undecided and at which clang's CFG builder's rules fire no
++// event. The fold is the only verdict, so the check is the fold's own answer at every node of a unit, asked every way a
++// condition is (--branch-truth-census, check_driver_branch_truth_census), over:
++//
++// - a unit with a condition for each rule the bit is derived from and for each shape a rule's test rejects, whose census
++//   is frozen: a rule that kept too little is unsound there, and one that kept everything changes the line;
++// - tests/checker/cfg-pruning's units (#2990's conditions, the tautologies and the shapes), frozen too;
++// - every unit of tests/driver/warnings that compiles alone;
++// - generated units: functions of random conditions over the operators, the literals, the casts, the parentheses and the
++//   statements the rules read, with the rules' own shapes among them (`v == 1 && v == 2`, `v || !v`, `(v & 8) == 4`).
++
++#include <glob.h>
++
++// A condition for each rule and each rejection, one a line: the comment says what the bit must do with it.
++static const char check_driver_truth_rules[] =
++    "enum E { A, B, C = 5 };\n"
++    "struct S { int m; int a[4]; _Bool b; struct S* p; };\n"
++    "int g(void);\n"
++    "extern int table[4];\n"
++    "int f(int x, int y, unsigned u, _Bool b, double d, struct S s, struct S* p, int* q)\n"
++    "{\n"
++    "    int r = 0;\n"
++    "    if (x) r += 1;\n"                           // rejected: a value
++    "    if (p->m == 0) r += 1;\n"                   // rejected: a literal beside no boolean
++    "    if (x != 3 && y) r += 1;\n"                 // rejected
++    "    if ((x & 8) == 0) r += 1;\n"                // rejected: a literal 0 beside `&`
++    "    if (x & 8) r += 1;\n"                       // rejected once asked: no constant 0
++    "    if (!(x & 8)) r += 1;\n"                    // rejected once asked
++    "    if ((x & 8) && y) r += 1;\n"                // rejected once asked, the `&` as a first operand too
++    "    r += (x & 16) ? 1 : 2;\n"                   // rejected once asked by the conditional
++    "    if (x == 1 && y == 2) r += 1;\n"            // rejected: two variables
++    "    if (x == 1 || p->m == 2) r += 1;\n"         // rejected: a value and a member
++    "    if (!x && y) r += 1;\n"                     // rejected: a `!` beside another value's
++    "    if (!x || p->m) r += 1;\n"                  // rejected: a `!` of a value beside a member
++    "    if (q) r += 1;\n"                           // rejected: an lvalue's address constant
++    "    if (s.m) r += 1;\n"                         // rejected: a member's
++    "    if (x == y) r += 1;\n"                      // rejected: no literal
++    "    if (1) r += 1;\n"                           // a constant
++    "    if (0 && x) r += 1;\n"                      // through a logical operator
++    "    if (x || 1) r += 1;\n"
++    "    if (!0) r += 1;\n"                          // through `!`
++    "    if ((_Bool)1) r += 1;\n"                    // through a cast
++    "    if (__builtin_constant_p(x)) r += 1;\n"     // a query
++    "    if (table) r += 1;\n"                       // an array's address
++    "    if (g) r += 1;\n"                           // a function's
++    "    if (\"s\") r += 1;\n"                       // a string literal's
++    "    if (&x) r += 1;\n"                          // an object's
++    "    if (x * 0) r += 1;\n"                       // `x * 0`
++    "    if (0 * x) r += 1;\n"
++    "    if (x & 0) r += 1;\n"
++    "    if ((x & 0) && y) r += 1;\n"
++    "    r += (x & 0) ? 1 : 2;\n"
++    "    if (x | 1) r += 1;\n"                       // `x | 1`
++    "    if (1 | x) r += 1;\n"
++    "    if ((x & 8) == 4) r += 1;\n"                // the bitwise equality
++    "    if (4 == (x & 8)) r += 1;\n"
++    "    if ((x | 8) == 0) r += 1;\n"
++    "    if ((x | 8) != -1) r += 1;\n"               // a literal `-` takes
++    "    if ((x & 8) == ~0) r += 1;\n"
++    "    if ((x < y) == 10) r += 1;\n"               // a boolean value and a literal above 1
++    "    if (b == 2) r += 1;\n"                      // a _Bool's
++    "    if (10 > b) r += 1;\n"                      // the relational check
++    "    if (!x >= 2) r += 1;\n"
++    "    if (x == 1 && x == 2) r += 1;\n"            // two comparisons of one variable
++    "    if (1 < x || 5 > x) r += 1;\n"              // their constants on the left
++    "    if (p->m == A && p->m == B) r += 1;\n"      // a member and enumerators
++    "    if (s.a[1] < 2 && s.a[1] > 3) r += 1;\n"    // an element
++    "    if (d < 1.5 && d > 2.5) r += 1;\n"          // floating constants
++    "    if (x || !x) r += 1;\n"                     // a value and its negation
++    "    if (!x && x) r += 1;\n"
++    "    if (p->m && !p->m) r += 1;\n"               // a member's
++    "    if (s.a[1] || !s.a[1]) r += 1;\n"           // an element's
++    "    if ((x == 1 && x == 2) || y) r += 1;\n"     // a logical operator's operand
++    "    do { r += 1; } while (x * 0);\n"            // a do statement's condition
++    "    while (y && (x | 1)) { r += 1; break; }\n"
++    "    r += (x & 8) == 4 ? 1 : 2;\n"               // a conditional's
++    "    r += x ?: 2;\n"                             // GNU's, rejected
++    "    return r;\n"
++    "}\n";
++
++// A unit with a wrapper of _Bool (an aligned one), where a value's type alone doesn't say it is boolean.
++static const char check_driver_truth_wrapped[] =
++    "typedef _Bool __attribute__((aligned(4))) Wide;\n"
++    "int f(Wide w, _Bool b, int x, int y)\n"
++    "{\n"
++    "    int r = 0;\n"
++    "    if (w == 2) r += 1;\n"                     // an aligned _Bool's
++    "    if (3 < w) r += 1;\n"
++    "    if (b == 2) r += 1;\n"
++    "    if (x == 2) r += 1;\n"                     // rejected
++    "    if (x != 3 && y) r += 1;\n"                // rejected
++    "    return r;\n"
++    "}\n";
++
++// xorshift64*.
++static uint32_t check_driver_truth_random(uint64_t* state)
++{
++    uint64_t value = *state;
++    value ^= value >> 12;
++    value ^= value << 25;
++    value ^= value >> 27;
++    *state = value;
++    return (uint32_t)((value * UINT64_C(2685821657736338717)) >> 32);
++}
++
++// A generated unit's expressions come from a stack of pieces: text, written as it is, or an expression to expand `depth`
++// levels deep, of one of three kinds. An integer operand of an arithmetic operator or a comparison
++// (BUSTER_CHECK_TRUTH_INTEGER, `I` in a production) is an atom or a parenthesized production, so that no operator
++// captures another's operand and no comparison chains. An operand of a logical operator, of `!` or of a cast, and a
++// condition itself, is written bare or parenthesized at random, which is where the rules tell the two apart: an integer
++// one (BUSTER_CHECK_TRUTH_LOGICAL, `L`) or any scalar (BUSTER_CHECK_TRUTH_SCALAR, `S`: a pointer, a function, an
++// array, a floating value). A production's operands are pushed in reverse.
++#define BUSTER_CHECK_TRUTH_TEXT 0u
++#define BUSTER_CHECK_TRUTH_INTEGER 1u
++#define BUSTER_CHECK_TRUTH_LOGICAL 2u
++#define BUSTER_CHECK_TRUTH_SCALAR 3u
++#define BUSTER_CHECK_TRUTH_STACK 512u
++
++typedef struct CheckDriverTruthPiece CheckDriverTruthPiece;
++struct CheckDriverTruthPiece
++{
++    const char* text;
++    uint32_t length;
++    uint8_t kind;
++    uint8_t depth;
++};
++
++typedef struct CheckDriverTruthText CheckDriverTruthText;
++struct CheckDriverTruthText
++{
++    char* bytes;
++    size_t length;
++    size_t capacity;
++    bool full;
++};
++
++static void check_driver_truth_put(CheckDriverTruthText* text, const char* bytes, size_t length)
++{
++    text->full |= text->length + length + 1 > text->capacity;
++    if (!text->full)
++    {
++        memcpy(text->bytes + text->length, bytes, length);
++        text->length += length;
++        text->bytes[text->length] = 0;
++    }
++}
++
++// One expression of `kind`, `depth` levels deep at most.
++static void check_driver_truth_expression(CheckDriverTruthText* text, uint64_t* state, uint8_t kind, uint8_t depth)
++{
++    static const char* const integers[] = {
++        "x", "y", "u", "b", "e", "s.m", "p->m", "s.a[1]", "s.a[x]", "arr[2]", "*q", "s.b", "p->p->m",
++        "0", "1", "2", "4", "8", "-1", "3", "'c'", "0u", "1l", "A", "B", "C", "sizeof(int)", "__builtin_constant_p(x)", "g()", "(0)", "(x)", "(2)",
++    };
++    static const char* const scalars[] = { "q", "&x", "\"s\"", "arr", "g", "s.a", "(int*)0", "d", "1.5", "p", "s.p" };
++    // The operators, and the rules' own shapes over one variable.
++    static const char* const productions[] = {
++        "- I", "~ I", "! S", "+ I", "(int)I", "(_Bool)S", "(char)I", "(unsigned)I", "(long)I", "(int)(unsigned char)I",
++        "I * I", "I & I", "I | I", "I ^ I", "I + I", "I == I", "I != I", "I < I", "I <= I", "I > I", "I >= I",
++        "S && S", "S || S", "L && L", "L || L", "L && L && L", "L || L || L", "L && L || L", "(S ? I : I)", "(y = I)", "(I, I)",
++        "I * 0", "0 * I", "0 & I", "I & (0)", "I | 1", "2 | I", "I | (char)3", "I | -1", "I | A", "I | C",
++        "(I & 8) == 4", "4 != (I & 8)", "(I | 8) == 0", "(I & 8) == 0", "(I & 8) == -1", "(I | 2) != ~0", "(I < I) == 10", "b == 2", "10 > b", "s.b < 3", "! I >= 2",
++        "x == 1 && x == 2", "x < 3 || x > 1", "1 < x || 5 > x", "p->m == A && p->m == B", "s.a[1] < 2 && s.a[1] > 3", "d < 1.5 && d > 2.5", "x == -1 || x != (char)2",
++        "u > 4 && u < 3", "e == A && e == C", "x == 1 && y == 2", "x || !x", "!x && x", "p->m && !p->m", "s.a[1] || !s.a[1]", "!x || y", "x && !p->m", "b && !b",
++        "d < I", "I == 0", "I != 1", "__builtin_expect(I, 1)",
++    };
++    CheckDriverTruthPiece stack[BUSTER_CHECK_TRUTH_STACK];
++    uint32_t top = 1;
++    stack[0] = (CheckDriverTruthPiece){ .kind = kind, .depth = depth };
++    while (top != 0)
++    {
++        top -= 1;
++        const CheckDriverTruthPiece piece = stack[top];
++        const uint32_t roll = check_driver_truth_random(state);
++        if (piece.kind == BUSTER_CHECK_TRUTH_TEXT)
++        {
++            check_driver_truth_put(text, piece.text, piece.length);
++        }
++        else if (piece.depth == 0 || roll % 4 == 0 || top + 16 > BUSTER_CHECK_TRUTH_STACK)
++        {
++            // An atom: a scalar expression's is an integer one's three times in four.
++            const bool scalar = piece.kind == BUSTER_CHECK_TRUTH_SCALAR && (roll >> 8) % 4 == 0;
++            const char* atom = scalar ? scalars[(roll >> 16) % BUSTER_ARRAY_LENGTH(scalars)] : integers[(roll >> 16) % BUSTER_ARRAY_LENGTH(integers)];
++            check_driver_truth_put(text, atom, strlen(atom));
++        }
++        else
++        {
++            // A production, parenthesized or not: its pieces in reverse, the last one first.
++            const char* production = productions[(roll >> 8) % BUSTER_ARRAY_LENGTH(productions)];
++            const bool enclosed = piece.kind == BUSTER_CHECK_TRUTH_INTEGER || (roll >> 3) % 3 == 0;
++            const size_t length = strlen(production);
++            if (enclosed)
++            {
++                stack[top++] = (CheckDriverTruthPiece){ .text = ")", .length = 1 };
++            }
++            size_t end = length;
++            for (size_t at = length; at-- > 0;)
++            {
++                const char letter = production[at];
++                if (letter == 'I' || letter == 'L' || letter == 'S')
++                {
++                    stack[top++] = (CheckDriverTruthPiece){ .text = production + at + 1, .length = (uint32_t)(end - at - 1) };
++                    stack[top++] = (CheckDriverTruthPiece){ .kind = letter == 'I' ? BUSTER_CHECK_TRUTH_INTEGER : letter == 'L' ? BUSTER_CHECK_TRUTH_LOGICAL :
++                                                                                                                              BUSTER_CHECK_TRUTH_SCALAR,
++                                                            .depth = (uint8_t)(piece.depth - 1) };
++                    end = at;
++                }
++            }
++            stack[top++] = (CheckDriverTruthPiece){ .text = production, .length = (uint32_t)end };
++            if (enclosed)
++            {
++                stack[top++] = (CheckDriverTruthPiece){ .text = "(", .length = 1 };
++            }
++        }
++    }
++}
++
++// A generated unit: `functions` functions of six statements each, a condition apiece.
++static void check_driver_truth_unit(CheckDriverTruthText* text, uint64_t* state, uint32_t functions)
++{
++    static const char prelude[] =
++        "enum E { A, B, C = 5 };\n"
++        "struct S { int m; int a[4]; _Bool b; struct S* p; };\n"
++        "int g(void);\n";
++    static const char* const statements[][2] = {
++        { "    if (", ") r += 1;\n" },
++        { "    while (", ") { r += 2; break; }\n" },
++        { "    do { r += 3; } while (", ");\n" },
++        { "    for (; ", "; ) { r += 4; break; }\n" },
++        { "    r += (", ") ? 5 : 6;\n" },
++        { "    if (", ") r += 7; else r -= 7;\n" },
++    };
++    check_driver_truth_put(text, prelude, sizeof(prelude) - 1);
++    for (uint32_t f = 0; f < functions; f += 1)
++    {
++        char header[192];
++        const int size = snprintf(header, sizeof(header), "int f%u(int x, int y, unsigned u, _Bool b, double d, struct S s, struct S* p, int* q, int arr[4], enum E e)\n{\n    int r = 0;\n", f);
++        check_driver_truth_put(text, header, (size_t)size);
++        for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(statements); s += 1)
++        {
++            const uint32_t roll = check_driver_truth_random(state);
++            check_driver_truth_put(text, statements[s][0], strlen(statements[s][0]));
++            check_driver_truth_expression(text, state, s == 4 ? BUSTER_CHECK_TRUTH_LOGICAL : BUSTER_CHECK_TRUTH_SCALAR, (uint8_t)(1 + roll % 4));
++            check_driver_truth_put(text, statements[s][1], strlen(statements[s][1]));
++        }
++        static const char gnu[] = "    r += (";
++        static const char tail[] = ") ?: 8;\n    return r;\n}\n";
++        check_driver_truth_put(text, gnu, sizeof(gnu) - 1);
++        check_driver_truth_expression(text, state, BUSTER_CHECK_TRUTH_LOGICAL, 2);
++        check_driver_truth_put(text, tail, sizeof(tail) - 1);
++    }
++}
++
++// A unit's census: whether the compile printed one, and its counts.
++typedef struct CheckDriverTruthCensus CheckDriverTruthCensus;
++struct CheckDriverTruthCensus
++{
++    unsigned nodes;
++    unsigned kept;
++    unsigned decided;
++    unsigned events;
++    unsigned conditions;
++    unsigned condition_kept;
++    unsigned condition_decided;
++    unsigned bits;
++    unsigned unsound;
++    bool printed;
++};
++
++static CheckDriverTruthCensus check_driver_truth_census(const char* executable, const char* source)
++{
++    char* const arguments[] = { (char*)executable, "--branch-truth-census", "-w", "-fsyntax-only", (char*)source, NULL };
++    char* text = NULL;
++    CheckDriverTruthCensus census = { 0 };
++    (void)check_test_driver_spawn(arguments, &text);
++    const char* line = text != NULL ? strstr(text, "branch-truth-census\t") : NULL;
++    census.printed = line != NULL &&
++                     sscanf(line, "branch-truth-census\tnodes\t%u\tkept\t%u\tdecided\t%u\tevents\t%u\tconditions\t%u\tkept\t%u\tdecided\t%u\tbits\t%u\tunsound\t%u\n", &census.nodes,
++                            &census.kept, &census.decided, &census.events, &census.conditions, &census.condition_kept, &census.condition_decided, &census.bits,
++                            &census.unsound) == 9;
++    free(text);
++    return census;
++}
++
++static void check_test_driver_branch_truth(CheckTest* test, const char* clang, const char* executable, const char* directory)
++{
++    (void)clang;
++    char source[PATH_MAX];
++    snprintf(source, sizeof(source), "%s/branch_truth.c", directory);
++    // The rules' unit and #2990's fixtures, frozen: conditions, those the bit keeps and those the fold decides.
++    static const struct
++    {
++        const char* file;
++        unsigned conditions;
++        unsigned kept;
++        unsigned decided;
++        unsigned events;
++    } frozen[] = {
++        { NULL, 76, 41, 35, 20 },
++        { "", 6, 3, 3, 0 },
++        { "checker/cfg-pruning/issue.c", 24, 20, 17, 10 },
++        { "checker/cfg-pruning/runtime.c", 2, 2, 1, 0 },
++        { "checker/cfg-pruning/shapes.c", 78, 46, 31, 23 },
++        { "checker/cfg-pruning/tautologies.c", 57, 34, 22, 34 },
++    };
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(frozen); i += 1)
++    {
++        char path[PATH_MAX];
++        bool ready = true;
++        const bool rules = frozen[i].file == NULL;
++        if (rules || frozen[i].file[0] == 0)
++        {
++            ready = parse_test_write(source, rules ? check_driver_truth_rules : check_driver_truth_wrapped,
++                                     rules ? sizeof(check_driver_truth_rules) - 1 : sizeof(check_driver_truth_wrapped) - 1);
++            snprintf(path, sizeof(path), "%s", source);
++        }
++        else
++        {
++            snprintf(path, sizeof(path), "%s/%s", check_test_fixture_root, frozen[i].file);
++        }
++        const CheckDriverTruthCensus census = ready ? check_driver_truth_census(executable, path) : (CheckDriverTruthCensus){ 0 };
++        const bool same = census.printed && census.bits == 1 && census.unsound == 0 && census.conditions == frozen[i].conditions && census.condition_kept == frozen[i].kept &&
++                          census.condition_decided == frozen[i].decided && census.events == frozen[i].events;
++        if (!same)
++        {
++            fprintf(stderr, "branch truth: %s: printed %d bits %u unsound %u conditions %u kept %u decided %u events %u\n", rules ? "the rules' unit" : frozen[i].file[0] == 0 ? "the wrapped _Bool's unit" : frozen[i].file,
++                    census.printed, census.bits, census.unsound, census.conditions, census.condition_kept, census.condition_decided, census.events);
++        }
++        check_test_expect(test, same, "a branch condition's bit is sound on the frozen unit, and keeps and decides the conditions it did");
++    }
++    // The warnings' fixtures: every one that compiles alone.
++    char pattern[PATH_MAX];
++    snprintf(pattern, sizeof(pattern), "%s/driver/warnings/*/*.c", check_test_fixture_root);
++    glob_t found = { 0 };
++    const bool listed = glob(pattern, 0, NULL, &found) == 0;
++    uint32_t censused = 0;
++    uint32_t unsound = 0;
++    for (size_t i = 0; listed && i < found.gl_pathc; i += 1)
++    {
++        const CheckDriverTruthCensus census = check_driver_truth_census(executable, found.gl_pathv[i]);
++        // (A unit with no node has no bits.)
++        censused += census.printed && census.bits == 1 ? 1 : 0;
++        if (census.printed && census.unsound != 0)
++        {
++            unsound += 1;
++            fprintf(stderr, "branch truth: %s: unsound %u\n", found.gl_pathv[i], census.unsound);
++        }
++    }
++    if (listed)
++    {
++        globfree(&found);
++    }
++    check_test_expect(test, listed && censused >= 400 && unsound == 0, "a branch condition's bit is sound on the warnings' fixtures");
++    // Generated units.
++    CheckDriverTruthText text = { .capacity = 1u << 20 };
++    text.bytes = malloc(text.capacity);
++    uint64_t state = UINT64_C(0x1340134013401340);
++    uint64_t conditions = 0;
++    uint64_t kept = 0;
++    uint64_t decided = 0;
++    uint64_t events = 0;
++    bool sound = text.bytes != NULL;
++    for (uint32_t unit = 0; sound && unit < 12; unit += 1)
++    {
++        text.length = 0;
++        check_driver_truth_unit(&text, &state, 48);
++        const bool written = !text.full && parse_test_write(source, text.bytes, text.length);
++        const CheckDriverTruthCensus census = written ? check_driver_truth_census(executable, source) : (CheckDriverTruthCensus){ 0 };
++        sound = census.printed && census.bits == 1 && census.unsound == 0;
++        conditions += census.conditions;
++        kept += census.condition_kept;
++        decided += census.condition_decided;
++        events += census.events;
++        if (!sound)
++        {
++            char kept_source[PATH_MAX];
++            snprintf(kept_source, sizeof(kept_source), "%s/branch_truth_unsound.c", directory);
++            (void)parse_test_write(kept_source, text.bytes, text.length);
++            fprintf(stderr, "branch truth: generated unit %u (kept as %s): printed %d bits %u unsound %u\n", unit, kept_source, census.printed, census.bits, census.unsound);
++        }
++    }
++    free(text.bytes);
++    // (The generator's conditions are mostly the rules' own shapes: most decide, and some of each kind must.)
++    check_test_expect(test, sound && conditions >= 4000 && decided >= 500 && decided <= kept && kept < conditions && events >= 100,
++                      "a branch condition's bit is sound on generated conditions, some decided and some rejected");
++    unlink(source);
++}
+diff --git a/src/buster/compiler/c_check_program.c b/src/buster/compiler/c_check_program.c
+index b65624d3..571f16d4 100644
+--- a/src/buster/compiler/c_check_program.c
++++ b/src/buster/compiler/c_check_program.c
+@@ -565,6 +565,9 @@ struct CheckProgram
+     // a function whose calls --tier1 expanded (#2541 step 2, check_tier1_inline_rooted).
+     const uint32_t* initializer_references;
+     uint32_t initializer_reference_count;
++    // Per node, whether a rule of clang's CFG builder's may decide it as a condition (check_cfg_decidable, #1340): a bit
++    // each, clear where check_program_branch_truth answers unknown without its fold. Null asks every fold.
++    const uint64_t* decidable;
+     uint32_t* builtin_nodes;
+     uint32_t* asm_offsets;
+     uint32_t* asm_targets;
+@@ -6420,6 +6423,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
+              (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
+     program->object_count = count + 1;
+     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
++    program->decidable = valid ? check_cfg_decidable(program, output, scratch) : NULL;
+     uint32_t exit_capacity = 0;
+     const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, &exit_capacity) : 0;
+     // The exits through cleanups' chains, their records' plans and their dispatches' destinations (#1370).
+diff --git a/src/buster/compiler/c_check_program_cfg.c b/src/buster/compiler/c_check_program_cfg.c
+index eab86327..4c0b8358 100644
+--- a/src/buster/compiler/c_check_program_cfg.c
++++ b/src/buster/compiler/c_check_program_cfg.c
+@@ -982,6 +982,452 @@ static uint8_t check_cfg_branches(const CheckProgram* program, uint32_t context,
+     return result;
+ }
+ 
++// Which nodes a rule above may decide (#1340): a bit a node, clear where check_program_branch_truth's fold and
++// check_cfg_try can only answer unknown and tell an observer nothing, so that a condition whose bit is clear costs its
++// asker one load. The fold stays the one implementation of a verdict: the bit only says where it need not run. It is
++// derived from the rules themselves, each test below a condition its rule can't succeed without:
++//
++// - The evaluator's truth (check_program_fold_truth) is known of a node with a constant (its kind in
++//   `stream->value_constants`) or of a query builtin (check_program_runtime_truth's candidates), and otherwise only
++//   through a CONDITION's, a CONVERT's, a CAST's or a `!`'s operand or a logical operator's two. An lvalue's address
++//   constant is no constant here, since its truth is the value the program loads (check_action_truth), but an array's
++//   with no object, which the bit keeps without asking whether it is an array.
++// - `x * 0` and `x & 0` (check_cfg_leaf) need an operand that is an integer constant, and of value 0
++//   (check_cfg_integer_value). The value is asked only where an operator that reads its operand's bit meets one (a
++//   CONDITION, a conversion, a `!`, a logical operator or a conditional), which then settles the operand's bit too: a
++//   `flags & MASK` that is nobody's condition keeps its bit and is never asked.
++// - `x | 1` (check_cfg_bitwise_or) needs an operand that is an integer constant.
++// - A comparison's two checks (check_cfg_equality, check_cfg_relational) need a literal on one side: an integer
++//   constant, or what `+`, `-`, `~` or `!` takes (check_cfg_literal_value, asked here once the columns allow it). The
++//   other side is then a `&` or a `|`, which a literal 0 decides only where it is a `|`, or a boolean value compared
++//   with a literal above 1. A boolean value is a _Bool's, or one of the operators check_cfg_known_boolean answers for
++//   or reads through. So `x == 0`, `p->n != 3` and `(flags & 8) == 0` decide nothing.
++// - A logical operator (check_cfg_try, check_cfg_branches) is its operands' tryEvaluateBool, each of which is one of the
++//   rules here, or else checkIncorrectLogicOperator's (check_cfg_logic): an operand that is a `!` whose own operand and
++//   the other are operands check_cfg_same_operand takes as the same (no constant is needed), or two comparisons that each have a constant operand (check_cfg_normalize's literal or
++//   enumerator, whose value is an integer or a floating constant) and whose other operands check_cfg_same_operand takes
++//   as the same.
++// - Parentheses and a do statement's condition only choose which of these rules runs (the heuristics or the evaluator
++//   alone, the branches or the whole operator), and a depth past BUSTER_CHECK_CFG_DEPTH only answers unknown: the bit
++//   takes every rule as if it ran. A CONDITION node has its expression's bit (the evaluator reads through it), so a
++//   statement's condition and a conditional's or a logical operator's first operand are asked by the same index.
++// - The observer's events come from the same rules where they decide (check_cfg_equality's, check_cfg_bitwise_or's and
++//   check_cfg_logic's), at a node that check_cfg_try reaches from the one it was asked through logical operators alone,
++//   whose bits their parents take: a node whose bit is clear fires none.
++//
++// The pass (check_cfg_decidable), over the nodes 64 at a time: the operators' column narrowed to bytes and looked up in a
++// 128-byte table (vpermi2b) for what each operator is to these rules, the constants', the categories', the objects' and
++// the types' columns compared, and all of it merged into a byte of facts a node (BUSTER_CHECK_CFG_FACT_*). The
++// operators whose bit depends on their operands' facts (BUSTER_CHECK_CFG_FACT_OPERANDS) then read them in node order,
++// where an operand is an earlier node and so already has its facts: two byte loads and the masks of
++// check_cfg_operator_rules, without a branch on the operator but for the few that have an exact question to ask
++// (check_cfg_decidable_asked). Those loads are scalar because a zmm gather on Zen 5 is 64 uops, one every 12.6 cycles
++// (docs/coding-style.md, "SIMD and Zen 5"), against the two L1 loads it would replace, and because an operand is often
++// the node before. A last sweep takes the bits out of the facts, a word for each 64 nodes.
++#define BUSTER_CHECK_CFG_FACT_DECIDES 0x01u
++// An integer constant; an integer or a floating one.
++#define BUSTER_CHECK_CFG_FACT_INTEGER 0x02u
++#define BUSTER_CHECK_CFG_FACT_NUMBER 0x04u
++// What check_cfg_literal_value may take: an integer constant, or a `+`, `-`, `~` or `!`.
++#define BUSTER_CHECK_CFG_FACT_LITERAL 0x08u
++// A _Bool's value, or an operator check_cfg_known_boolean answers for without one or reads through.
++#define BUSTER_CHECK_CFG_FACT_BOOLEAN 0x10u
++#define BUSTER_CHECK_CFG_FACT_NOT 0x20u
++// A comparison with a constant operand, which check_cfg_normalize may take.
++#define BUSTER_CHECK_CFG_FACT_COMPARED 0x40u
++// Before an operator's turn: its bit depends on its operands' facts. After it: its bit is set for `x * 0`'s rule alone,
++// of an integer constant whose value nobody has asked yet.
++#define BUSTER_CHECK_CFG_FACT_OPERANDS 0x80u
++#define BUSTER_CHECK_CFG_FACT_UNASKED 0x80u
++// The blocks of 64 nodes the pass takes at a time.
++#define BUSTER_CHECK_CFG_CHUNK 64u
++#define BUSTER_CHECK_CFG_FACT_LITERAL_SHIFT 3
++#define BUSTER_CHECK_CFG_FACT_BOOLEAN_SHIFT 4
++
++_Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the decidable pass narrows the operators' column from 32 bits");
++_Static_assert(CHECK_OP_COUNT <= 128, "the decidable pass looks an operator up in a 128-byte table");
++_Static_assert(CHECK_CONSTANT_NONE == 0 && CHECK_CONSTANT_ADDRESS < 128 && CHECK_LVALUE < 128, "the decidable pass compares the constants' and the categories' columns as bytes");
++_Static_assert(BUSTER_CHECK_CFG_FACT_LITERAL == 1u << BUSTER_CHECK_CFG_FACT_LITERAL_SHIFT && BUSTER_CHECK_CFG_FACT_BOOLEAN == 1u << BUSTER_CHECK_CFG_FACT_BOOLEAN_SHIFT, "the facts' shifts");
++
++static const uint8_t check_cfg_operator_facts[128] __attribute__((aligned(64))) = {
++    [CHECK_OP_POSITIVE] = BUSTER_CHECK_CFG_FACT_LITERAL | BUSTER_CHECK_CFG_FACT_BOOLEAN,
++    [CHECK_OP_NEGATIVE] = BUSTER_CHECK_CFG_FACT_LITERAL,
++    [CHECK_OP_BIT_NOT] = BUSTER_CHECK_CFG_FACT_LITERAL,
++    [CHECK_OP_NOT] = BUSTER_CHECK_CFG_FACT_LITERAL | BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_NOT | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_MULTIPLY] = BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_LESS] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_LESS_EQUAL] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_GREATER] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_GREATER_EQUAL] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_EQUAL] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_NOT_EQUAL] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_BIT_AND] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_BIT_OR] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_BIT_XOR] = BUSTER_CHECK_CFG_FACT_BOOLEAN,
++    [CHECK_OP_LOGICAL_AND] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_LOGICAL_OR] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_CONDITIONAL] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_CAST] = BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_ASSIGN] = BUSTER_CHECK_CFG_FACT_BOOLEAN,
++    [CHECK_OP_COMMA] = BUSTER_CHECK_CFG_FACT_BOOLEAN,
++    [CHECK_OP_CONVERT] = BUSTER_CHECK_CFG_FACT_BOOLEAN | BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_CONDITION] = BUSTER_CHECK_CFG_FACT_OPERANDS,
++    [CHECK_OP_BUILTIN_QUERY] = BUSTER_CHECK_CFG_FACT_DECIDES,
++};
++
++// How an operator with BUSTER_CHECK_CFG_FACT_OPERANDS takes its bit from its operands' facts, as masks over them:
++// - `left` and `right`: the facts of each operand that the operator's bit follows: its bit and whether that is unasked
++//   (the evaluator's and tryEvaluateBool's reads), or whether it is unasked alone (a conditional, whose first operand
++//   is asked as a condition though the conditional's own truth isn't its).
++// - `direct`: a fact of either operand that sets the bit (`|`'s integer constant).
++// - `unasked`: one that sets it unasked (`*`'s and `&`'s integer constant).
++// - `compared`: one that gives the operator BUSTER_CHECK_CFG_FACT_COMPARED (a comparison's constant).
++// - `literal`: 1 where a literal operand beside a boolean one has a question (a comparison).
++// - `negation` and `overlap`: a fact of either operand, and one of both, that have a question (a logical operator's `!`
++//   and its two comparisons).
++typedef struct CheckCfgOperatorRule CheckCfgOperatorRule;
++struct CheckCfgOperatorRule
++{
++    uint8_t left;
++    uint8_t right;
++    uint8_t direct;
++    uint8_t unasked;
++    uint8_t compared;
++    uint8_t literal;
++    uint8_t negation;
++    uint8_t overlap;
++};
++
++#define BUSTER_CHECK_CFG_RULE_READS (BUSTER_CHECK_CFG_FACT_DECIDES | BUSTER_CHECK_CFG_FACT_UNASKED)
++#define BUSTER_CHECK_CFG_RULE_THROUGH { .left = BUSTER_CHECK_CFG_RULE_READS }
++#define BUSTER_CHECK_CFG_RULE_COMPARISON { .compared = BUSTER_CHECK_CFG_FACT_NUMBER, .literal = 1 }
++#define BUSTER_CHECK_CFG_RULE_LOGICAL { .left = BUSTER_CHECK_CFG_RULE_READS, .right = BUSTER_CHECK_CFG_RULE_READS, .negation = BUSTER_CHECK_CFG_FACT_NOT, .overlap = BUSTER_CHECK_CFG_FACT_COMPARED }
++#define BUSTER_CHECK_CFG_RULE_PRODUCT { .unasked = BUSTER_CHECK_CFG_FACT_INTEGER }
++
++_Static_assert(sizeof(CheckCfgOperatorRule) == sizeof(uint64_t), "an operator's rule is read as one word");
++
++static const CheckCfgOperatorRule check_cfg_operator_rules[CHECK_OP_COUNT] = {
++    [CHECK_OP_NOT] = BUSTER_CHECK_CFG_RULE_THROUGH,
++    [CHECK_OP_CAST] = BUSTER_CHECK_CFG_RULE_THROUGH,
++    [CHECK_OP_CONVERT] = BUSTER_CHECK_CFG_RULE_THROUGH,
++    [CHECK_OP_CONDITION] = BUSTER_CHECK_CFG_RULE_THROUGH,
++    [CHECK_OP_CONDITIONAL] = { .left = BUSTER_CHECK_CFG_FACT_UNASKED },
++    [CHECK_OP_LOGICAL_AND] = BUSTER_CHECK_CFG_RULE_LOGICAL,
++    [CHECK_OP_LOGICAL_OR] = BUSTER_CHECK_CFG_RULE_LOGICAL,
++    [CHECK_OP_MULTIPLY] = BUSTER_CHECK_CFG_RULE_PRODUCT,
++    [CHECK_OP_BIT_AND] = BUSTER_CHECK_CFG_RULE_PRODUCT,
++    [CHECK_OP_BIT_OR] = { .direct = BUSTER_CHECK_CFG_FACT_INTEGER },
++    [CHECK_OP_LESS] = BUSTER_CHECK_CFG_RULE_COMPARISON,
++    [CHECK_OP_LESS_EQUAL] = BUSTER_CHECK_CFG_RULE_COMPARISON,
++    [CHECK_OP_GREATER] = BUSTER_CHECK_CFG_RULE_COMPARISON,
++    [CHECK_OP_GREATER_EQUAL] = BUSTER_CHECK_CFG_RULE_COMPARISON,
++    [CHECK_OP_EQUAL] = BUSTER_CHECK_CFG_RULE_COMPARISON,
++    [CHECK_OP_NOT_EQUAL] = BUSTER_CHECK_CFG_RULE_COMPARISON,
++};
++
++// An operand's facts for an operator at node `node`: an earlier node's, none where it has no operand, and every one but
++// BUSTER_CHECK_CFG_FACT_UNASKED for an operand that isn't an earlier node, which no graph of the reader's has and of
++// which the pass knows nothing. The last two are bytes the pass keeps past the nodes' (at `absent` and after it), so
++// that the choice is an index's and one load follows, with no branch on whether an operator has a second operand.
++static inline __attribute__((always_inline)) uint32_t check_cfg_operand_facts(const uint8_t* facts, uint32_t absent, uint32_t operand, uint32_t node)
++{
++    const uint32_t other = operand == BUSTER_CHECK_NONE ? absent : absent + 1;
++    return facts[operand < node ? operand : other];
++}
++
++// Whether check_cfg_same_operand could take two operands as the same by their operators alone: two values, two members
++// or two elements.
++static bool check_cfg_decidable_alike(const CheckGraph* graph, uint32_t first, uint32_t second)
++{
++    const CheckOp one = first < graph->count ? graph->ops[first] : CHECK_OP_COUNT;
++    const CheckOp two = second < graph->count ? graph->ops[second] : CHECK_OP_COUNT;
++    const bool member_one = one == CHECK_OP_MEMBER || one == CHECK_OP_ARROW;
++    const bool member_two = two == CHECK_OP_MEMBER || two == CHECK_OP_ARROW;
++    return (one == CHECK_OP_VALUE && two == CHECK_OP_VALUE) || (member_one && member_two) || (one == CHECK_OP_SUBSCRIPT && two == CHECK_OP_SUBSCRIPT);
++}
++
++// Whether a comparison's side `literal`, whose facts say check_cfg_literal_value may take it, beside its other side
++// `other`, whose facts say it may be a boolean value, may decide check_cfg_equality or check_cfg_relational. (The facts
++// take every value for a boolean one in a unit with a wrapper of _Bool, check_cfg_wrapped_boolean: its type is read
++// here.)
++static bool check_cfg_decidable_comparison(const CheckProgram* program, uint32_t literal, uint32_t other)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const CheckOp op = other < graph->count ? graph->ops[other] : CHECK_OP_COUNT;
++    const bool boolean = op < CHECK_OP_COUNT && ((check_cfg_operator_facts[op] & BUSTER_CHECK_CFG_FACT_BOOLEAN) != 0 || check_cfg_type(program, other) == BUSTER_TYPE_BOOL);
++    unsigned __int128 bits = 0;
++    uint32_t width = 0;
++    bool result = false;
++    if (boolean && check_cfg_literal_value(program, literal, &bits, &width))
++    {
++        result = bits > 1 || op == CHECK_OP_BIT_OR || (op == CHECK_OP_BIT_AND && bits != 0);
++    }
++    return result;
++}
++
++// Whether a logical operator's operand `negated`, a `!`, is of an operand check_cfg_same_operand takes as the same as
++// its other operand `other`, past the same conversions (which takes every pair it takes past different ones).
++static bool check_cfg_decidable_negation(const CheckProgram* program, uint32_t negated, uint32_t other)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const uint32_t operand = negated < graph->count ? graph->operand0[negated] : BUSTER_CHECK_NONE;
++    return operand < graph->count && other < graph->count && check_cfg_decidable_alike(graph, operand, other) && check_cfg_same_operand(program, operand, other, true);
++}
++
++// Whether an operand is an integer constant 0, as check_cfg_leaf's `x * 0` and `x & 0` take it.
++static bool check_cfg_decidable_zero(const CheckProgram* program, uint32_t operand)
++{
++    unsigned __int128 bits = 0;
++    uint32_t width = 0;
++    bool is_signed = false;
++    return check_cfg_integer_value(program, operand, &bits, &width, &is_signed) && bits == 0;
++}
++
++// An operand whose bit is unasked (a `*` or a `&` of an integer constant), asked: its bit stays where a constant operand
++// of its is 0 and is cleared where none is. Whether it stays.
++static bool check_cfg_decidable_ask(const CheckProgram* program, uint8_t* facts, uint32_t operand)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const bool zero = check_cfg_decidable_zero(program, graph->operand0[operand]) || check_cfg_decidable_zero(program, graph->operand1[operand]);
++    facts[operand] = (uint8_t)((facts[operand] & ~(BUSTER_CHECK_CFG_FACT_UNASKED | BUSTER_CHECK_CFG_FACT_DECIDES)) | (zero ? BUSTER_CHECK_CFG_FACT_DECIDES : 0u));
++    return zero;
++}
++
++// Whether check_cfg_logic's two comparisons could be of the same variable: an operand of each whose other is a constant
++// (check_cfg_normalize's variable is one of them), which check_cfg_same_operand takes as the same past the same
++// conversions (which takes every pair it takes past different ones).
++static bool check_cfg_decidable_overlap(const CheckProgram* program, uint32_t left, uint32_t right)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const CheckStream* stream = program->stream;
++    bool result = false;
++    for (uint32_t pair = 0; !result && pair < 4; pair += 1)
++    {
++        const uint32_t one = (pair & 1) != 0 ? graph->operand1[left] : graph->operand0[left];
++        const uint32_t one_constant = (pair & 1) != 0 ? graph->operand0[left] : graph->operand1[left];
++        const uint32_t two = (pair & 2) != 0 ? graph->operand1[right] : graph->operand0[right];
++        const uint32_t two_constant = (pair & 2) != 0 ? graph->operand0[right] : graph->operand1[right];
++        const CheckConstantKind kind_one = one_constant < graph->count ? check_stream_constant_kind(stream, one_constant) : CHECK_CONSTANT_NONE;
++        const CheckConstantKind kind_two = two_constant < graph->count ? check_stream_constant_kind(stream, two_constant) : CHECK_CONSTANT_NONE;
++        result = (kind_one == CHECK_CONSTANT_INTEGER || kind_one == CHECK_CONSTANT_FLOATING) && (kind_two == CHECK_CONSTANT_INTEGER || kind_two == CHECK_CONSTANT_FLOATING) &&
++                 check_cfg_decidable_alike(graph, one, two) && check_cfg_same_operand(program, one, two, true);
++    }
++    return result;
++}
++
++// The questions an operator at `node` has that its operands' facts don't answer (check_cfg_decidable_operators): an
++// operand whose bit is unasked, a comparison's literal beside a boolean value, a logical operator's `!` or its two
++// comparisons. Whether the operator's bit is set by any; every unasked operand is asked. An operand that is no earlier
++// node sets it.
++static __attribute__((noinline)) bool check_cfg_decidable_asked(const CheckProgram* program, uint8_t* facts, uint32_t absent, uint32_t node)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const CheckOp op = graph->ops[node];
++    const CheckCfgOperatorRule rule = check_cfg_operator_rules[op];
++    const uint32_t left = graph->operand0[node];
++    const uint32_t right = graph->operand1[node];
++    const uint32_t one = check_cfg_operand_facts(facts, absent, left, node);
++    const uint32_t two = check_cfg_operand_facts(facts, absent, right, node);
++    bool result = (left >= node && left != BUSTER_CHECK_NONE) || (right >= node && right != BUSTER_CHECK_NONE);
++    if ((one & rule.left & BUSTER_CHECK_CFG_FACT_UNASKED) != 0)
++    {
++        const bool stays = check_cfg_decidable_ask(program, facts, left);
++        result |= stays && (rule.left & BUSTER_CHECK_CFG_FACT_DECIDES) != 0;
++    }
++    // (One node as both operands is asked once: its facts are read again.)
++    if ((check_cfg_operand_facts(facts, absent, right, node) & rule.right & BUSTER_CHECK_CFG_FACT_UNASKED) != 0)
++    {
++        const bool stays = check_cfg_decidable_ask(program, facts, right);
++        result |= stays && (rule.right & BUSTER_CHECK_CFG_FACT_DECIDES) != 0;
++    }
++    if (!result && rule.literal != 0)
++    {
++        result = ((one & BUSTER_CHECK_CFG_FACT_LITERAL) != 0 && (two & BUSTER_CHECK_CFG_FACT_BOOLEAN) != 0 && check_cfg_decidable_comparison(program, left, right)) ||
++                 ((two & BUSTER_CHECK_CFG_FACT_LITERAL) != 0 && (one & BUSTER_CHECK_CFG_FACT_BOOLEAN) != 0 && check_cfg_decidable_comparison(program, right, left));
++    }
++    if (!result && rule.negation != 0)
++    {
++        result = ((one & BUSTER_CHECK_CFG_FACT_NOT) != 0 && check_cfg_decidable_negation(program, left, right)) ||
++                 ((two & BUSTER_CHECK_CFG_FACT_NOT) != 0 && check_cfg_decidable_negation(program, right, left)) ||
++                 ((one & two & BUSTER_CHECK_CFG_FACT_COMPARED) != 0 && check_cfg_decidable_overlap(program, left, right));
++    }
++    return result;
++}
++
++// The operators of the blocks `first_word` up to `end_word` (their BUSTER_CHECK_CFG_FACT_OPERANDS lanes in `pending`,
++// a word a block), in node order: each one's facts from its operands' by its rule's masks (check_cfg_operator_rules),
++// with one branch, to the questions, which few take. A function of its own, with the columns' bases in registers.
++static __attribute__((noinline)) void check_cfg_decidable_operators(const CheckProgram* program, uint8_t* facts, uint32_t absent, const uint64_t* pending,
++                                                                     uint64_t first_word, uint64_t end_word)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const CheckOp* ops = graph->ops;
++    const uint32_t* operand0 = graph->operand0;
++    const uint32_t* operand1 = graph->operand1;
++    for (uint64_t word = first_word; word < end_word; word += 1)
++    {
++        uint64_t operators = pending[word - first_word];
++        while (operators != 0)
++        {
++            const uint32_t node = (uint32_t)(word * 64) + (uint32_t)__builtin_ctzll(operators);
++            uint64_t rule = 0;
++            memcpy(&rule, &check_cfg_operator_rules[ops[node]], sizeof(rule));
++            const uint32_t rule_left = (uint8_t)rule;
++            const uint32_t rule_right = (uint8_t)(rule >> 8);
++            const uint32_t rule_direct = (uint8_t)(rule >> 16);
++            const uint32_t rule_unasked = (uint8_t)(rule >> 24);
++            const uint32_t rule_compared = (uint8_t)(rule >> 32);
++            const uint32_t rule_literal = (uint8_t)(rule >> 40);
++            const uint32_t rule_negation = (uint8_t)(rule >> 48);
++            const uint32_t rule_overlap = (uint8_t)(rule >> 56);
++            const uint32_t own = facts[node] & ~BUSTER_CHECK_CFG_FACT_OPERANDS;
++            const uint32_t one = check_cfg_operand_facts(facts, absent, operand0[node], node);
++            const uint32_t two = check_cfg_operand_facts(facts, absent, operand1[node], node);
++            const uint32_t either = one | two;
++            const uint32_t read_one = one & rule_left;
++            const uint32_t read_two = two & rule_right;
++            // The bit an operand that is asked gives, or a fact; then the questions, where neither sets it.
++            const uint32_t read = (read_one & ~(read_one >> 7)) | (read_two & ~(read_two >> 7));
++            const uint32_t sure = (own | read | ((either & rule_direct) != 0 ? 1u : 0u)) & BUSTER_CHECK_CFG_FACT_DECIDES;
++            const uint32_t unasked = (either & rule_unasked) != 0 ? 1u : 0u;
++            const uint32_t literal = (((one >> BUSTER_CHECK_CFG_FACT_LITERAL_SHIFT) & (two >> BUSTER_CHECK_CFG_FACT_BOOLEAN_SHIFT)) |
++                                      ((two >> BUSTER_CHECK_CFG_FACT_LITERAL_SHIFT) & (one >> BUSTER_CHECK_CFG_FACT_BOOLEAN_SHIFT))) & rule_literal;
++            const uint32_t questions = ((read_one | read_two) & BUSTER_CHECK_CFG_FACT_UNASKED) | literal | (either & rule_negation) | (one & two & rule_overlap);
++            uint32_t decides = sure | unasked;
++            if (__builtin_expect((questions & (sure - 1)) != 0, 0))
++            {
++                decides = check_cfg_decidable_asked(program, facts, absent, node) ? 1u : 0u;
++            }
++            facts[node] = (uint8_t)(own | decides | ((unasked & ~sure) << 7) | ((either & rule_compared) != 0 ? BUSTER_CHECK_CFG_FACT_COMPARED : 0u));
++            operators &= operators - 1;
++        }
++    }
++}
++
++// Whether an ALIGNED or QUALIFIED wrapper of the table's is _Bool's, whose values' types the pass can't tell by their
++// own bits: the wrappers' kinds found 64 at a time, each one's base looked up (a unit has few, most none).
++static bool check_cfg_wrapped_boolean(const TypeTable* types)
++{
++    const uint32_t count = types->types.count;
++    const uint8_t* kinds = types->types.kind;
++    bool result = false;
++    for (uint32_t first = 0; !result && first < count; first += 64)
++    {
++        const uint32_t left = count - first;
++        const uint64_t lanes = left >= 64 ? UINT64_MAX : (1ull << left) - 1;
++        uint64_t wrappers = _mm512_cmpge_epu8_mask(_mm512_maskz_loadu_epi8(lanes, kinds + first), _mm512_set1_epi8(BUSTER_TYPE_KIND_WRAPPERS)) & lanes;
++        while (!result && wrappers != 0)
++        {
++            const uint32_t index = first + (uint32_t)__builtin_ctzll(wrappers);
++            result = (TypeId)type_unwrapped_index(types, index) << BUSTER_TYPE_INDEX_SHIFT == BUSTER_TYPE_BOOL;
++            wrappers &= wrappers - 1;
++        }
++    }
++    return result;
++}
++
++// The bits: a word for each 64 nodes, in `output`; null where the stream has no columns (a hand-built one) or no room is
++// left, which asks every condition's fold. `program`'s input, stream, types and parser are set.
++static const uint64_t* check_cfg_decidable(const CheckProgram* program, Arena* output, Arena* scratch)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const CheckStream* stream = program->stream;
++    const uint32_t count = graph->count;
++    const CheckOp* ops = graph->ops;
++    const uint8_t* constants = stream->value_constants;
++    const uint8_t* categories = stream->value_categories;
++    const uint32_t* objects = stream->value_objects;
++    const TypeId* value_types = stream->value_types;
++    const bool columns = count != 0 && stream->dense_values == NULL && constants != NULL && categories != NULL && objects != NULL && value_types != NULL &&
++                         stream->payload_rows != NULL;
++    const uint64_t words = ((uint64_t)count + 63) / 64;
++    const uint64_t mark = scratch->length;
++    uint64_t* bits = columns ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, words) : NULL;
++    // (The facts are stored a whole block at a time, and two bytes follow them: check_cfg_operand_facts' two.)
++    const uint32_t absent = (uint32_t)(words * 64);
++    uint8_t* facts = bits != NULL && words * 64 + 2 < BUSTER_CHECK_NONE ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, words * 64 + 2) : NULL;
++    if (facts != NULL)
++    {
++        facts[absent] = 0;
++        facts[absent + 1] = (uint8_t)~BUSTER_CHECK_CFG_FACT_UNASKED;
++        const __m512i table_low = _mm512_load_si512(check_cfg_operator_facts);
++        const __m512i table_high = _mm512_load_si512(check_cfg_operator_facts + 64);
++        const __m512i decides = _mm512_set1_epi8((char)BUSTER_CHECK_CFG_FACT_DECIDES);
++        const __m512i integer = _mm512_set1_epi8((char)(BUSTER_CHECK_CFG_FACT_INTEGER | BUSTER_CHECK_CFG_FACT_NUMBER | BUSTER_CHECK_CFG_FACT_LITERAL));
++        const __m512i number = _mm512_set1_epi8((char)BUSTER_CHECK_CFG_FACT_NUMBER);
++        const __m512i boolean = _mm512_set1_epi8((char)BUSTER_CHECK_CFG_FACT_BOOLEAN);
++        const __m512i operands = _mm512_set1_epi8((char)BUSTER_CHECK_CFG_FACT_OPERANDS);
++        const __m512i unqualified = _mm512_set1_epi32((int32_t)~BUSTER_TYPE_QUALIFIERS);
++        const __m512i boolean_type = _mm512_set1_epi32((int32_t)BUSTER_TYPE_BOOL);
++        const __m512i zero = _mm512_setzero_si512();
++        // With a wrapper of _Bool in the table, any value may be a boolean one.
++        const uint64_t wrapped = check_cfg_wrapped_boolean(program->types) ? UINT64_MAX : 0;
++        // A chunk of blocks at a time: their facts from the columns, then their operators in node order. (An operator's
++        // loads of its operands' bytes then find the blocks' stores long done: a byte isn't forwarded out of a 64-byte
++        // store still in flight.)
++        for (uint64_t chunk = 0; chunk < words; chunk += BUSTER_CHECK_CFG_CHUNK)
++        {
++            const uint64_t end = chunk + BUSTER_CHECK_CFG_CHUNK < words ? chunk + BUSTER_CHECK_CFG_CHUNK : words;
++            uint64_t pending[BUSTER_CHECK_CFG_CHUNK];
++            for (uint64_t word = chunk; word < end; word += 1)
++            {
++                const uint32_t first = (uint32_t)(word * 64);
++                const uint32_t left = count - first;
++                const uint64_t lanes = left >= 64 ? UINT64_MAX : (1ull << left) - 1;
++                const __mmask16 lanes0 = (__mmask16)lanes;
++                const __mmask16 lanes1 = (__mmask16)(lanes >> 16);
++                const __mmask16 lanes2 = (__mmask16)(lanes >> 32);
++                const __mmask16 lanes3 = (__mmask16)(lanes >> 48);
++                const __m128i ops0 = _mm512_cvtepi32_epi8(_mm512_maskz_loadu_epi32(lanes0, ops + first));
++                const __m128i ops1 = _mm512_cvtepi32_epi8(_mm512_maskz_loadu_epi32(lanes1, ops + first + 16));
++                const __m128i ops2 = _mm512_cvtepi32_epi8(_mm512_maskz_loadu_epi32(lanes2, ops + first + 32));
++                const __m128i ops3 = _mm512_cvtepi32_epi8(_mm512_maskz_loadu_epi32(lanes3, ops + first + 48));
++                const __m512i narrowed = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_inserti128_si256(_mm256_castsi128_si256(ops0), ops1, 1)),
++                                                            _mm256_inserti128_si256(_mm256_castsi128_si256(ops2), ops3, 1), 1);
++                const uint64_t booleans0 = _mm512_cmpeq_epi32_mask(_mm512_and_si512(_mm512_maskz_loadu_epi32(lanes0, value_types + first), unqualified), boolean_type);
++                const uint64_t booleans1 = _mm512_cmpeq_epi32_mask(_mm512_and_si512(_mm512_maskz_loadu_epi32(lanes1, value_types + first + 16), unqualified), boolean_type);
++                const uint64_t booleans2 = _mm512_cmpeq_epi32_mask(_mm512_and_si512(_mm512_maskz_loadu_epi32(lanes2, value_types + first + 32), unqualified), boolean_type);
++                const uint64_t booleans3 = _mm512_cmpeq_epi32_mask(_mm512_and_si512(_mm512_maskz_loadu_epi32(lanes3, value_types + first + 48), unqualified), boolean_type);
++                const __mmask64 booleans = (booleans0 | booleans1 << 16 | booleans2 << 32 | booleans3 << 48 | wrapped) & lanes;
++                const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, constants + first);
++                // An lvalue's address constant with an object.
++                const __mmask64 loaded = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(CHECK_CONSTANT_ADDRESS)) &
++                                         _mm512_cmpeq_epi8_mask(_mm512_maskz_loadu_epi8(lanes, categories + first), _mm512_set1_epi8(CHECK_LVALUE));
++                const uint64_t objects0 = _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)loaded, objects + first), zero);
++                const uint64_t objects1 = _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)(loaded >> 16), objects + first + 16), zero);
++                const uint64_t objects2 = _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)(loaded >> 32), objects + first + 32), zero);
++                const uint64_t objects3 = _mm512_cmpneq_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)(loaded >> 48), objects + first + 48), zero);
++                const __mmask64 constant = _mm512_test_epi8_mask(kinds, kinds) & ~(objects0 | objects1 << 16 | objects2 << 32 | objects3 << 48);
++                const __mmask64 integers = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(CHECK_CONSTANT_INTEGER));
++                const __mmask64 numbers = integers | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(CHECK_CONSTANT_FLOATING));
++                __m512i fact = _mm512_maskz_permutex2var_epi8(lanes, table_low, narrowed, table_high);
++                fact = _mm512_or_si512(fact, _mm512_maskz_mov_epi8(constant, decides));
++                fact = _mm512_or_si512(fact, _mm512_maskz_mov_epi8(integers, integer));
++                fact = _mm512_or_si512(fact, _mm512_maskz_mov_epi8(numbers, number));
++                fact = _mm512_or_si512(fact, _mm512_maskz_mov_epi8(booleans, boolean));
++                _mm512_storeu_si512(facts + first, fact);
++                pending[word - chunk] = _mm512_test_epi8_mask(fact, operands);
++            }
++            check_cfg_decidable_operators(program, facts, absent, pending, chunk, end);
++        }
++        // (An operator may clear an earlier node's bit, check_cfg_decidable_ask: the bits are taken once all have had their turn.)
++        for (uint64_t word = 0; word < words; word += 1)
++        {
++            const uint32_t first = (uint32_t)(word * 64);
++            bits[word] = _mm512_test_epi8_mask(_mm512_loadu_si512(facts + first), decides);
++        }
++    }
++    arena_pop_to(scratch, mark);
++    return facts != NULL ? bits : NULL;
++}
++
++// A node's bit: whether a rule may decide it. Every node's without the bits.
++static inline __attribute__((always_inline)) bool check_program_decidable(const CheckProgram* program, uint32_t node)
++{
++    const uint64_t* bits = program->decidable;
++    return bits == NULL || node >= program->input->graph.count || (bits[node >> 6] >> (node & 63) & 1) != 0;
++}
++
+ // A branch condition's truth as clang's CFG builder prunes its edges (#1447, #2990), which the -Wreturn-type walk, the
+ // runtime warnings' reachability (check_common_body_reached, check_common_operand_mask) and the uninitialized flow read:
+ // `condition` is a statement's condition (a CONDITION node, `node` itself), a conditional's (`node`'s first operand) or
+@@ -989,8 +1435,8 @@ static uint8_t check_cfg_branches(const CheckProgram* program, uint32_t context,
+ // (check_cfg_branches); a logical operator's other first operand is its tryEvaluateBool past its parentheses, and any
+ // other condition its tryEvaluateBool as written, whose parentheses stop the heuristics (`if ((x * 0))`). A do
+ // statement's condition is its tryEvaluateBool as written, a logical operator's too (VisitDoStmt), and GNU's `a ?: b`'s
+-// its evaluator's alone.
+-static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
++// its evaluator's alone. check_program_branch_truth asks it where the condition's bit says a rule may decide it.
++static bool check_program_branch_fold(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+ {
+     const CheckGraph* graph = &program->input->graph;
+     const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+@@ -1018,3 +1464,9 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
+     *truth = branches == 1;
+     return branches == 1 || branches == 2;
+ }
++
++static inline __attribute__((always_inline)) bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
++{
++    *truth = false;
++    return check_program_decidable(program, condition) && check_program_branch_fold(program, node, condition, truth);
++}
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index d7f397a4..a4f17c5e 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -10869,6 +10869,53 @@ static bool check_driver_provisional_check(CheckProgramSelection* provisional, c
+     return usable;
+ }
+ 
++// --branch-truth-census (#1340), a test option: that the bit check_program_branch_truth asks before its fold
++// (check_cfg_decidable) is sound on this unit, with every node asked every way a condition is, not only the ones a walk
++// asks. Each node as a condition of its own (a statement's), each logical operator's and each conditional's first
++// operand as its operator's, and each node's tryEvaluateBool, as written and parenthesized, under an observer with no
++// cache, which hears every event: a node whose bit is clear must be undecided by all of them and fire no event. One line
++// on stderr: the nodes, those whose bit is set and those some form decides or fires an event at; the same of the
++// conditions (the CONDITION nodes and those first operands); and `unsound`, the nodes with a clear bit that a form
++// decided, which fails the compile where it isn't 0.
++static bool check_driver_branch_truth_census(const CheckProgram* program)
++{
++    const CheckGraph* graph = &program->input->graph;
++    const uint32_t count = graph->count;
++    uint32_t kept = 0;
++    uint32_t decided = 0;
++    uint32_t conditions = 0;
++    uint32_t condition_kept = 0;
++    uint32_t condition_decided = 0;
++    uint32_t events = 0;
++    uint32_t unsound = 0;
++    for (uint32_t node = 0; node < count; node += 1)
++    {
++        const CheckOp op = graph->ops[node];
++        const bool first = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL;
++        const uint32_t operand = first ? graph->operand0[node] : BUSTER_CHECK_NONE;
++        bool truth = false;
++        CheckCfgObserver observer = { 0 };
++        const bool own = check_program_branch_fold(program, node, node, &truth);
++        const bool bare = check_cfg_try(program, node, node, true, &observer) != BUSTER_CHECK_CFG_UNKNOWN;
++        const bool enclosed = check_cfg_try(program, node, node, false, &observer) != BUSTER_CHECK_CFG_UNKNOWN;
++        const bool found = own || bare || enclosed || observer.count != 0;
++        const bool bit = check_program_decidable(program, node);
++        const bool operand_found = operand < count && check_program_branch_fold(program, node, operand, &truth);
++        const bool operand_bit = operand < count && check_program_decidable(program, operand);
++        const bool condition = op == CHECK_OP_CONDITION;
++        events += observer.count;
++        kept += bit ? 1 : 0;
++        decided += found ? 1 : 0;
++        conditions += (condition ? 1 : 0) + (operand < count ? 1 : 0);
++        condition_kept += (condition && bit ? 1 : 0) + (operand_bit ? 1 : 0);
++        condition_decided += (condition && own ? 1 : 0) + (operand_found ? 1 : 0);
++        unsound += (found && !bit ? 1 : 0) + (operand_found && !operand_bit ? 1 : 0);
++    }
++    fprintf(stderr, "branch-truth-census\tnodes\t%u\tkept\t%u\tdecided\t%u\tevents\t%u\tconditions\t%u\tkept\t%u\tdecided\t%u\tbits\t%d\tunsound\t%u\n", count, kept, decided,
++            events, conditions, condition_kept, condition_decided, program->decidable != NULL, unsound);
++    return unsound == 0;
++}
++
+ // --selection-census's builtins (#2536's step 2.2c.3, part 2), a line of its own: the exact selection's builtins
+ // (CheckProgram.builtin_nodes of its bodies) and those of the candidates' pass in the same bodies
+ // (CheckProgram.census_pass_builtins), with the candidates' extra and missing ones, and whether the helpers
+@@ -12157,6 +12204,9 @@ struct CheckDriverCommand
+     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
+     // they differ, reported on stderr (check_driver_selection_census).
+     bool selection_census;
++    // --branch-truth-census (#1340): the bit before a branch condition's fold checked against the fold at every node
++    // (check_driver_branch_truth_census).
++    bool branch_truth_census;
+     // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols
+     // left out of the object (check_driver_provisional_check).
+     bool provisional_selection;
+@@ -14481,6 +14531,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
+                     check_driver_x86_reports(checking, recovered, pp, &input, reported, &types, quiet);
+                     if (program_checked)
+                     {
++                        if (command->branch_truth_census && program.status == CHECK_PROGRAM_OK)
++                        {
++                            result = check_driver_branch_truth_census(&program) ? result : 1;
++                        }
+                         // A repaired view keeps complete original statements alone; a prefix keeps its original
+                         // lookahead for warnings deferred to its final body's end (CheckCommonView, #2406).
+                         check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+@@ -15283,6 +15337,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     bool root_image = true;
+     bool invalid_root_image = false;
+     bool selection_census = false;
++    bool branch_truth_census = false;
+     bool provisional_selection = false;
+     bool windowed_loop = false;
+     uint32_t parse_tile_tokens = BUSTER_PARSE_TILE_TOKENS;
+@@ -15733,6 +15788,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         {
+             selection_census = true;
+         }
++        else if (match.exact == C_OPTION_BRANCH_TRUTH_CENSUS)
++        {
++            branch_truth_census = true;
++        }
+         else if (match.exact == C_OPTION_PROVISIONAL_SELECTION)
+         {
+             provisional_selection = true;
+@@ -16085,6 +16144,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         .poison_arenas = poison_arenas,
+         .root_image = root_image,
+         .selection_census = selection_census,
++        .branch_truth_census = branch_truth_census,
+         .provisional_selection = provisional_selection,
+         .windowed_loop = windowed_loop,
+         .shared_parts = shared_parts,
+diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
+index 51bebab1..c042ae42 100644
+--- a/src/buster/compiler/c_checker_driver_test.c
++++ b/src/buster/compiler/c_checker_driver_test.c
+@@ -9418,6 +9418,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
+ #include "c_check_enum_arithmetic_driver_test.c"
+ #include "c_check_float_precision_driver_test.c"
+ #include "c_check_vla_fold_driver_test.c"
++#include "c_check_branch_truth_driver_test.c"
+ #include "c_check_for_loop_driver_test.c"
+ #include "c_check_enum_cast_driver_test.c"
+ #include "c_check_type_safety_driver_test.c"
+@@ -9656,6 +9657,8 @@ static int run_checker_driver_tests(int argc, char** argv)
+     bool assert_diagnostics_only = false;
+     // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
+     bool unused_comparison_only = false;
++    // --branch-truth-only: the bit before a branch condition's fold against the fold (#1340).
++    bool branch_truth_only = false;
+     // --float-precision-only: -Wimplicit-float-conversion's and -Wliteral-range's floating comparisons (#1875).
+     bool float_precision_only = false;
+     // --constant-logical-only: logical constant diagnostics and their construction-time policy (#2900).
+@@ -9747,6 +9750,10 @@ static int run_checker_driver_tests(int argc, char** argv)
+         {
+             query_bool_only = true;
+         }
++        else if (strcmp(argv[i], "--branch-truth-only") == 0)
++        {
++            branch_truth_only = true;
++        }
+         else if (strcmp(argv[i], "--assert-diagnostics-only") == 0)
+         {
+             assert_diagnostics_only = true;
+@@ -9843,7 +9850,7 @@ static int run_checker_driver_tests(int argc, char** argv)
+                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
+                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
+                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
+-                             (uint32_t)float_precision_only +
++                             (uint32_t)float_precision_only + (uint32_t)branch_truth_only +
+                              (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only;
+     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
+     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
+@@ -10425,6 +10432,10 @@ static int run_checker_driver_tests(int argc, char** argv)
+     {
+         check_test_driver_unused_comparisons(&test, clang, executable, directory);
+     }
++    if (temporary && branch_truth_only)
++    {
++        check_test_driver_branch_truth(&test, clang, executable, directory);
++    }
+     if (temporary && float_precision_only)
+     {
+         check_test_driver_float_precision(&test, clang, executable, directory);
+@@ -10842,6 +10853,11 @@ static int run_checker_driver_tests(int argc, char** argv)
+                 .check = check_test_driver_sizeof_array_decay,
+                 .weight = 47,
+             },
++            // The bit before a branch condition's fold (#1340), against the fold at every node.
++            {
++                .check = check_test_driver_branch_truth,
++                .weight = 600,
++            },
+         };
+         for (uint32_t s = 0; !lazy && s < BUSTER_ARRAY_LENGTH(sweeps); s += 1)
+         {
+diff --git a/src/buster/compiler/c_option_table.c b/src/buster/compiler/c_option_table.c
+index dea84242..0a1525b8 100644
+--- a/src/buster/compiler/c_option_table.c
++++ b/src/buster/compiler/c_option_table.c
+@@ -39,6 +39,7 @@
+     ENTRY(END_OF_OPTIONS, "--") \
+     ENTRY(ATTESTED_MEMO_EQ, "--attested-memo=") \
+     ENTRY(ATTESTED_EQ, "--attested=") \
++    ENTRY(BRANCH_TRUTH_CENSUS, "--branch-truth-census") \
+     ENTRY(BUSTER_HEADERS, "--buster-headers") \
+     ENTRY(CHECK_TRANSITIONS, "--check-transitions") \
+     ENTRY(CLANG_FEATURES, "--clang-features") \
