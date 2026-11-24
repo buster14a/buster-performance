@@ -136,4 +136,9 @@ replacement that keeps the variable in use: 3 → 17, 7 → 18, 8 → 19, 13 →
 
 ## Checks
 
-In progress: the correctness blocks on the 9700X and the sanitizer builds.
+- On the 9700X, the 5 blocks of `tools/ci/correctness.tests` that name `test-bind`, `test-dynamic`, `test-static`,
+  `test-snapshot` and `test-executable` pass through `parallel` on head ([`logs/p2-tests.log`](logs/p2-tests.log): 5
+  passed, 0 failed).
+- The same five commands pass under `BUSTER_SANITIZER=undefined`, `address` and `memory` builds.
+- `./build.sh check-call-graph --config Release` finds 0 cycles, and `build_regression --ownership-only` passes once
+  `bind_test.c`'s fingerprint is updated (its shared builders lost their `BindPath` argument).
