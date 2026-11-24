@@ -204,3 +204,34 @@ buster14a/buster#3560's two runs of "Count the compile against its base's":
 The two runners' counts are 0.00005% apart; a cloud container's was 0.01% from them. `mutants/run.py` is the fault
 round as it ended: 83 mutants of the reader, the verdict and the script, each killed by a test (`mutants/result-83.txt`;
 `mutants/result.txt` is the first round's, which left the survivors that the added tests now kill).
+
+## #3553's regression and #3564's fix (`9700x/ab-main-3553/`, `9700x/ab-fix-3553/`, `9700x/ab-fix-3553-pr/`, `count/added-by-3553.txt`)
+
+`scripts/ab-pr.sh NAME BASE HEAD` builds two revisions on the 9700X as its job builds them and runs `sqlite3.c`'s
+`--lanes 1 -c` compile with the default warnings and with `-w`, base and head interleaved in three rounds (forward,
+reverse, forward) of 11 runs, in one hold; `scripts/ab-patch.sh` does the same for a revision and a patch;
+`scripts/ab-reduce.py` gives each directory's `reduced.txt`. Every run exited 0 and each pair's objects are identical.
+
+| run | base | head | default, base to head, ms | by round | `-w`, ms |
+| --- | --- | --- | ---: | --- | ---: |
+| `ab-main-188cef807` (the script's first run) | `e347ec526` | main `188cef807` | 111.80 to 111.72 | -0.14, +0.03, -0.14 | 100.01 to 100.12 |
+| `ab-main-3553` | main `dc8efaacd` | main `b4fda31b9` (#3553 merged) | 112.20 to **123.02** | +10.81, +10.93, +10.73 | 100.40 to 100.70 |
+| `ab-fix-3553` | main `64e88df4d` | the same with `fix-3553.diff` (the first four reorderings) | 123.02 to 115.48 | -7.40, -7.74, -7.46 | 100.62 to 100.79 |
+| `ab-fix-3553-pr` | main `31fd25ce8` | buster14a/buster#3564's head `eb000ae5d` | 122.99 to **114.71** | -8.33, -8.53, -7.98 | 100.72 to 100.72 |
+
+#3553's pass put 10.82 ms on the default compile of a file with no diagnostics; the warnings went from 11.80 to
+22.32 ms. `count/added-by-3553.txt` has the counts it added by function, in a cloud container: 44.07 M (+14.40%), of
+which `check_common_token_descendant` 31.4 M (417,962 calls, from 874) and `check_semantic_member_token` 5.4 M (3,143
+calls, from 366). #3564 runs the same tests cheapest first: 8.28 ms back, the warnings at 13.99 ms. The count's check
+on main against that head (`tools/ci/compile-count.sh check`, cloud container): 350,285,104 to 312,364,924, stated
+-10.830%, moved -10.825%, passed. `count/expression-forms.c` is the file of the four families' forms compared between
+main's compiler and the fix's (62 warnings by default, clang 23.1.4's count too).
+
+## A merge-queue candidate lost to one slow runner (`hosted/queue-candidate-45410258620.txt`)
+
+buster14a/buster#3560's second queue candidate failed in one job: `test-checker --seed 133 --part 6/8` timed out at 600 s
+on item n1. The file compares that job's blocks with the same item's in the pull request's own run. Six blocks, the
+long ones that ran together, took 1.6 to 34 times their CPU time; the other 38 a median of 1.02. The next
+candidate on the same base ran the same parts in their usual time on four runners of the same CPU model, and a
+container reproduces no slowdown from the base. Nothing in the code explains it; the third candidate passed and
+merged.
