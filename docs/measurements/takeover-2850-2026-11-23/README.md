@@ -550,3 +550,48 @@ So the file's two arenas take 20.6 M cycles off the compile, 3.7 ms at the core'
 131 MB after one compile (`file-after-make.txt`) and 191 MB after Lua's `lvm.c`, `shell.c` and the rounds
 (`file-at-end.txt`). Every object and diagnostic is main's in the three settings, and `lvm.c`'s and `shell.c`'s on
 `sqlite3.c`'s leftovers are theirs without the file (`leftovers.txt`).
+
+## Warm arenas as built: 3.7 ms of `sqlite3.c`, nothing without a pool (`warm-arenas/`, [buster14a/buster#3500](https://github.com/buster14a/buster/pull/3500))
+
+The pool as the pull request has it: `lane.c`'s warm arenas (`arena_reserve_warm`), the C driver's command arena and its
+output arena in a file of `BUSTER_ARENA_POOL`'s directory, claimed under a lock that doesn't wait, allocated at each
+commit so that a full tmpfs refuses a commit and never a touch.
+
+**The hold** (`summary-v1.txt`; `scripts/warm-hold.sh`, `scripts/job-warm2.sh`, `scripts/warm-reduce.py`; the measured
+tree is `scripts/warm-arenas-v1.patch` on main `939732da`, the pull request's change one revision before its head: it
+lacked the claim's end, the fork check, the block size's test and tests). A tmpfs mounted `huge=always` for the hold
+and unmounted (`v1-mount.txt`); the file made by two compiles, then seven rounds of main, the change, the pool, the
+pool, the change, main:
+
+| `sqlite3.c`, medians of 14 | main | the change, no pool | with the pool |
+| --- | ---: | ---: | ---: |
+| elapsed, ms | 113.257 | 113.292 | **109.521** |
+| against main, by round | | +0.003 (3/7 lower) | **-3.690 (7/7 lower, -3.24 to -4.22)** |
+| kernel cycles, M | 79.429 | 79.399 | 52.960 (-26.296, 7/7) |
+| user cycles, M | 548.242 | 548.669 | 554.185 (+5.540, 0/7) |
+| user instructions, M | 1,277.881 | 1,277.882 (+921) | 1,288.022 (+10.141) |
+
+Every run's object and diagnostics are one (the filled compile's too). Stage tables: `v1-stages-a-1.txt` 113.561 ms,
+`v1-stages-b-1.txt` 112.765, `v1-stages-p-1.txt` 109.752 (`warm-arenas 2`; check-input 42.2 to 39.5 ms).
+
+**Paid once.** The first compile into an empty file took 132.713 ms (kernel 181.5 M cycles: the file's pages are new
+and are allocated for everything committed), the second 123.902 (kernel 123.2 M: a second allocation clears the pages
+the first left unwritten), and from the third the rounds above.
+
+**What the file holds.** 446 MB after `sqlite3.c` (`v1-file-after-first.txt`, the same after the rounds): what the two
+arenas commit. They write 130 MB of it (84 of the command's arena's 344, 46 of the output's 88; `scripts/warm-extent.c`
+on a file one compile made, in the cloud container): the reader pushes columns it fills in part, which cost an ordinary
+arena nothing and a warm one their pages.
+
+**Lua's 34 files, each a process, on those leftovers** (three rounds of main, pool, pool, main): kernel cycles
+247.86 M to 191.08 M a pass, user 495.91 M to 497.60 M; every object and diagnostic the same.
+
+**Base pages lose.** In the cloud container (a virtual machine, transparent huge pages off for the process) a pool on
+plain `/dev/shm` took `sqlite3.c` from 297 ms to 334 to 353 (system time 70 ms to 109 to 125); on a tmpfs mounted
+`huge=always` there, 309 to 262. A tmpfs file's block size reads 2 MB only under `huge=always` (Linux 6.18, both
+hosts), which is what the claim asks.
+
+**Faults.** `scripts/warm-faults.py` with `scripts/warm-faults-harness.c` (lane.c and lane_test.c as one object, the
+warm arenas' tests alone, a second a mutant): 43 mutants of the lane code, all killed, six of them only after a test
+was added (another user's file, a file that can't be mapped, the quarter's growth, the overlay not writing the file,
+the end of a refused claim, the block size).
