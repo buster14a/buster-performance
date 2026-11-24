@@ -35,6 +35,19 @@ millisecond of the 111.9 ms compile (−2.4 to −3.2 M user cycles of 548 M), n
 | `ab-final-2` | **head** | `c2c31ec6` | **−0.43** | −0.20 −0.48 −0.62 | **−2.93** | −24.4 |
 | `ab-final-3` | **head** | `c2c31ec6` | **−0.58** | (−1.40) −0.09 −0.25 | **−2.39** | −24.4 |
 
+**Against the merged base** (the delegating session's request: main `85a032f8` against the branch's head on it,
+`011a75d2`, both rebuilt; main's default warnings cost about 14 ms now):
+
+| hold | d ms | by round | d Mcyc | d Minst |
+| --- | ---: | --- | ---: | ---: |
+| `ab-merged-3` | **−0.81** | −0.86 −0.38 −1.18 | −4.86 | −24.4 |
+| `ab-merged-4` | **−0.54** | −0.46 −0.62 −0.54 | −3.39 | −24.4 |
+| `ab-merged-1` | −0.24 | −0.83 (+0.93) −0.81 | −3.16 | −24.4 |
+| `ab-merged-2` | −0.92 | −0.70 (−2.45) (+0.40) | −4.13 | −24.4 |
+
+(In `ab-merged-1` and `-2` three rounds have a disturbed side, 0.7 to 1.6% deviation, in brackets.) The compile's
+count (`tools/ci/compile-count.sh check`) moves by −2.244%: 312,423,048 to 305,411,280.
+
 (`ab-second`, `ab-fifth` and the first round of `ab-final-3` each have a base round that something disturbed, 0.6 to
 1.7% deviation over its 11 runs against the usual 0.1%; they are kept, and not used above but for `ab-final-3`, whose
 disturbed round is in brackets. A hold's `head` is the branch's head when it ran: the gather form in `ab-first`, the
