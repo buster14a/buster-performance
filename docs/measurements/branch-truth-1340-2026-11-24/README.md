@@ -38,6 +38,24 @@ only a local variable's name and a comment differ from the commit), 45 minutes e
 mean is 0.83 ms and 4.7 M cycles. So the honest reading is 0.5 to 1.1 ms: about 0.8, and 1.0 for the commit's own two
 holds.
 
+## Against the merged base
+
+Main moved while this was measured (buster14a/buster#3553, #3560, #3564), and the branch merged it. `9700x/merged/`:
+main `5cd20eff` against the branch's `0c6ae9dd` (the merge), both built clean there, two holds (`scripts/queue8.sh`).
+Every run exited 0 with base's object. The count of buster#3560's check (`tools/ci/compile-count.sh check`) goes from
+312,423,283 to 308,136,234, -1.37%, which `55accf6e` states.
+
+| hold | saved, ms | saved, M cycles |
+| --- | --- | --- |
+| `ab10` | 1.21, 1.46, 1.27 | 7.7, 8.1, 7.6 |
+| `ab11` | 2.41, 0.87, 1.15 | 13.1, 6.3, 6.6 |
+
+Base 115.13 ms and 563.0 M cycles, head 113.74 ms and 554.8 M: **1.40 ms** over the six rounds. `ab11`'s first base
+run is disturbed (spread 0.85%; the load average was 2.9 to 3.3 as these holds began); without that round, 1.19 ms
+and 7.2 M cycles. Instructions: 1,265.38 M to 1,252.78 M, 12.6 M as before. Why the same instructions buy more
+cycles on this base than on `188cef80` I haven't traced; main's new pass (#3553) sits between the two bases, and base
+itself is 3.2 ms slower here than `188cef80`'s was.
+
 ## What the profile showed
 
 `9700x/prof8/report-base.txt` and `report-head.txt`: cycles of 20 compiles, percent of the compile.
