@@ -11,7 +11,7 @@
 
 ## Paired command measurements
 
-Each binary reads an identical checkout of the parent revision. The inventory includes the preprocessor test's own source through `main.c`, so holding the input revision fixed matters. The vector Release builds use the repository's pinned LLVM 23.1.4 toolchain, `-O3` and the configured sanitizer and runtime options. Each comparison uses the same Clang server build. The changed executables relink the owning frontend object with the other objects from the corresponding baseline, except the final MSan executable, which uses the normal full Release build. The address build uses the same post-link table baking as the baseline.
+Each binary reads an identical checkout of the parent revision. The inventory includes the preprocessor test's own source through `main.c`, so holding the input revision fixed matters. The vector Release builds use the repository's pinned LLVM 23.1.4 toolchain, `-O3` and the configured sanitizer and runtime options. Each comparison uses the same Clang server build. The changed executables relink the owning frontend object with the other objects from the corresponding baseline, except the final MSan executable, which uses the normal full Release build. The address build uses the same post-link table baking as the baseline. [Executable SHA-256 digests](test-executables.sha256)
 
 The cloud machine has an AMD EPYC 9V74 and a four-CPU quota. Each timed command has affinity to CPUs 0–3. On the Ryzen 7 9700X, each run takes the shared host lock, uses the same executable and has affinity to CPUs 4,12,5,13. In both environments the inventory command receives its normal grant of two CPUs. Clang's resource headers come from `clang -print-resource-dir`. Each sanitizer uses the runtime options emitted by `tools/ci/sanitizers.sh configure`.
 
@@ -32,7 +32,7 @@ Bash's `time` reports elapsed, user and system seconds including children. For a
 
 ## Ordering and resource checks
 
-`check-file-order.sh COMPILER` wraps Clang for three files and grants two CPUs. The first file waits for the third and the third requires the second to have reached its final macro check. The old scheduler reaches the wrapper timeout. The new scheduler completes all three and prints their warnings in input order. The 66-file descriptor check uses one file containing 50,000 declarations, 65 small inputs and a soft descriptor limit of 24. Guard, macro dump, line placement and token comparisons also ran with `-dD`, `-dI`, both options and without the Clang oracle.
+`check-file-order.sh COMPILER` wraps Clang for three files and grants two CPUs. The first file waits for the third and the third requires the second to have reached its final macro check. The old scheduler reaches the wrapper timeout. The new scheduler completes all three and prints their warnings in input order. The 66-file descriptor check uses one file containing 50,000 declarations, 65 small inputs and a soft descriptor limit of 24. Guard, macro dump, line placement and token comparisons also ran with `-dD`, `-dI`, both options and without the Clang oracle. [Directive-check results](directive-checks.tsv) · [Final MSan ordering run](order-final-msan.txt)
 
 ## Merge-queue accounting
 
@@ -44,21 +44,21 @@ The job TSV columns are job ID, name, start, completion and conclusion for the s
 
 | Sanitizer | Parent elapsed | #3523 elapsed | Both changes elapsed | Elapsed reduction | Parent CPU | Both changes CPU |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ASan, UBSan and LSan | 66.83 s | 63.84 s | 41.59 s | 37.8% | 86.07 s | 81.82 s |
-| MSan with origins | 37.86 s | 34.65 s | 23.73 s | 37.3% | 49.27 s | 46.37 s |
-| TSan | 52.08 s | 48.89 s | 32.66 s | 37.3% | 67.92 s | 64.03 s |
+| ASan, UBSan and LSan | 67.06 s | 63.84 s | 42.30 s | 36.9% | 86.35 s | 83.00 s |
+| MSan with origins | 37.86 s | 34.65 s | 23.68 s | 37.4% | 49.27 s | 46.30 s |
+| TSan | 52.35 s | 48.89 s | 32.70 s | 37.5% | 68.25 s | 64.08 s |
 
-The last column pair uses revision `079138b0e`.
+The measurements with both changes use revision `8d7232b64`.
 
 ### AMD EPYC 9V74 cloud instance
 
 | Sanitizer | Parent elapsed | #3523 elapsed | Both changes elapsed | Elapsed reduction | Parent CPU | Both changes CPU |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| ASan, UBSan and LSan | 186.67 s | — | 122.25 s | 34.5% | 242.58 s | 239.83 s |
-| MSan with origins | 183.97 s | 168.20 s | 114.57 s | 37.7% | 237.44 s | 222.19 s |
-| TSan | 159.90 s | 186.37 s | 102.07 s | 36.2% | 207.37 s | 198.62 s |
+| ASan, UBSan and LSan | 186.67 s | 161.29 s | 119.76 s | 35.8% | 242.58 s | 235.16 s |
+| MSan with origins | 183.97 s | 168.20 s | 110.03 s | 40.2% | 237.44 s | 214.47 s |
+| TSan | 159.90 s | 186.37 s | 109.33 s | 31.6% | 207.37 s | 213.36 s |
 
-The last column pair uses revision `079138b0e`.
+The measurements with both changes use revision `8d7232b64`.
 
 Every timed command compared all 66 inputs and their system levels, served all 133 Clang requests and reported zero differences. The source inputs and token totals match within each host. The systems supply different headers, yielding 30,793,478 tokens on the 9700X and 30,791,614 in the cloud. CPU seconds include the children. Each cell uses the median of the recorded samples at that revision. [Per-command values and sample counts](command-times.tsv)
 
@@ -70,6 +70,10 @@ Every timed command compared all 66 inputs and their system levels, served all 1
 | Queue parent of #3523 | [45363391633](https://github.com/buster14a/buster/actions/runs/45363391633) | 24.6 | 377.1 |
 | #3523 | [45363394830](https://github.com/buster14a/buster/actions/runs/45363394830) | 26.7 | 384.8 |
 | Next queue candidate containing #3523 | [45363397899](https://github.com/buster14a/buster/actions/runs/45363397899) | 24.6 | 384.3 |
+| Queue parent of #3529 | [45367549139](https://github.com/buster14a/buster/actions/runs/45367549139) | 25.5 | 408.8 |
+| #3529 | [45367765564](https://github.com/buster14a/buster/actions/runs/45367765564) | 27.4 | 395.8 |
+
+Each candidate drew several CPU models. The 23 allocated correctness and coverage workers are grouped by their reported processor. The remaining setup, verdict and short draw jobs appear as “Other jobs”. Candidate wall time measures the full workflow, including overlapping jobs. [Runner-minutes by CPU model](queue-runner-minutes-by-cpu.tsv) · [Worker job IDs](queue-worker-cpus.tsv)
 
 Each command is compared with earlier passing candidates using the same CPU model, compiler target and sanitizer. The controls come from jobs that ran before either change. Runner assignments and other changes in a queue group can still affect a command. [CPU seconds, control runs and job IDs](queue-command-comparisons.tsv)
 
@@ -80,6 +84,27 @@ Each command is compared with earlier passing candidates using the same CPU mode
 | #3523 | vector address | Xeon 8573C | 3 | 252.5 s | 236.7 s | -6.3% |
 | #3523 | vector thread | Xeon 8370C | 2 | 265.95 s | 239.1 s | -10.1% |
 | #3523 | vector none | Xeon 8573C | 3 | 49.5 s | 46.7 s | -5.7% |
+| #3529 | native none | Xeon 8573C | 3 | 31.2 s | 25.5 s | -18.3% |
+| #3529 | vector memory | Xeon 8573C | 4 | 145.0 s | 103.6 s | -28.6% |
+| #3529 | vector address | AMD EPYC 9V74 | 2 | 210.45 s | 145.5 s | -30.9% |
+| #3529 | vector thread | AMD EPYC 9V45 | 4 | 162.15 s | 112.1 s | -30.9% |
+| #3529 | vector none | Intel(R) Xeon(R) 6973P-C | 1 | 40.3 s | 25.4 s | -37.0% |
+
+### Increment from scheduling file workers
+
+Only passing candidates that already include #3523 and precede #3529 supply the controls in this table. Each comparison uses the same CPU model, target and sanitizer. [Elapsed and CPU seconds, with linked job IDs](queue-worker-change.tsv)
+
+| Target and sanitizer | CPU model | #3523-only samples | Earlier median | #3529 | Elapsed change |
+| --- | --- | ---: | ---: | ---: | ---: |
+| native none | Xeon 8573C | 2 | 33.4 s | 25.5 s | -23.7% |
+| vector memory | Xeon 8573C | 2 | 137.9 s | 103.6 s | -24.9% |
+| vector address | AMD EPYC 9V74 | 1 | 208.3 s | 145.5 s | -30.1% |
+| vector thread | AMD EPYC 9V45 | 3 | 145.7 s | 112.1 s | -23.1% |
+| vector none | Intel(R) Xeon(R) 6973P-C | 0 | — | 25.4 s | — |
+
+## Final candidate’s critical path
+
+The last worker was a vector TSan consumer on an Intel Xeon 8370C. It waited 279 seconds for its shared product and then spent 1,136 seconds running correctness. Its largest commands were semantic-driver parts 10 (345.3 seconds), 7 (289.8) and 6 (230.0). The repository-file preprocessor command ran on a different TSan worker. Across all twelve waiting workers, the final candidate spent 76.0 runner-minutes on product waits. [Last worker steps](final-critical-worker-steps.tsv) · [Commands](final-critical-worker-commands.tsv) · [Candidate step totals](final-step-totals.tsv)
 
 ## Remaining work, ranked from the parent candidate
 
