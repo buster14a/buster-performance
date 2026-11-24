@@ -10,7 +10,9 @@ functions take 0.51 to 0.91 of the base's whole-promotion ticks, except Lua's 1,
 default passes and 0.841 with +all. Every other bin read about 1.01 against a control of 0.999, also on musl, which has
 none of the 7; the construction alone read 0.99 there, and `perf stat` of the whole musl compile (`scripts/perf-c1.sh`,
 five alternating runs) read equal instructions (9.0776-9.0781 G) and cycles (median 4.282 G both): code placement in the
-promotion, not work. `logs/c1.txt` has the comparisons, the perf runs and the gate's status.
+promotion, not work. `logs/c1.txt` has the comparisons, the perf runs and the gate's status. All 1,371 objects are
+byte-identical between the base and the head in both configurations: the dense construction gives the 7 functions
+the code the bounded one did.
 
 Not merged yet: the #1353 work contract's scoped-loops fixture now takes the dense construction and passes at 4.14 MB of
 its 4.26 MB bound at 1,024 locals, but its bit rows grow as blocks times locals, so placement's bit rows go into groups
