@@ -16,7 +16,7 @@ The direct path is the fused lexer-to-ELF compiler of buster#3566 (`src/buster/c
   steps' A/B readings), `scripts/funcs.sh` and `scripts/lines.sh` (events by function and by source line),
   `scripts/equiv/` (every corpus unit's object by two compilers).
 
-## Result: the branch `claude/modest-einstein-tx5wvj` against main `1c5287c3`
+## Result: buster#3580 against main `1c5287c3`
 
 Both built on the 9700X by `scripts/build-tree.sh`; `steps/ab.txt` has the rows.
 
@@ -217,7 +217,7 @@ store to the window still in flight, which the counter takes for a conflict.
   FTS5's `1e-6` was `1e - 6` (-5.0).
 - **The skipper against the function it replaces** (`scripts/skipfuzz.c`): 3 M random and assembled texts, each from
   a line's start and from inside a line, give the same directive, position and line number.
-- **The lexer at every offset** (`test-direct`, in the repository): 100 token sequences at 131 offsets between six
+- **The lexer at every offset** (`test-direct`, in the repository): 103 token sequences at 131 offsets between six
   separators, with an inactive group. It found two bugs the corpus did not: a literal's prefix that ended at a block's
   last byte was not seen as a prefix (`u8"x"` at 2 of 131 offsets, in `64417534`), and `+++++` across a block's end
   lost a `+` once the pair's carry was removed. `scripts/lexer-faults.py` seeds 35 single-line faults; all fail the
