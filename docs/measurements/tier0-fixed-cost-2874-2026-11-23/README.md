@@ -162,6 +162,26 @@ every round (`scripts/ab3.sh`, `results/ab3-cd`), medians, ms:
   cycles each faster): missed, at the refutation line, and its premise refuted by the knobs above. What its fixes
   are worth is this 0.03 ms.
 
+## The pull request on the main it merges into (`results/ab3-merged`)
+
+While the pieces were measured, main took buster#3467 (#2972: Tier 0's one compile path, the fusion passes skipped
+where a function gives them nothing, the front's bitsets and the references cleared without `memset`), which
+conflicted with them in three places. Merged (buster#3486's `c9c4f8d2f`): the counts keep main's `tier0_clear`, so
+this branch's zeroing of them goes; P3a's distances stay carried in a register, under main's `absorbing`; and the
+driver's scalar arm is gone with the path.
+
+Main `eaf2a7c98` against the merged head, both built from that tree, 30 rounds with the order rotated
+(`scripts/ab3.sh`), medians, ms:
+
+| stage | main `eaf2a7c98` | the pull request | change |
+| --- | ---: | ---: | ---: |
+| `tier0` | 3.658 | 3.569 | -0.089 |
+| `branch-sizing` | 0.398 | 0.389 | -0.009 |
+| the row, `tier0` to `object-write` | 6.349 | 6.247 | -0.102 |
+
+Both objects are the same. Exact against that main: 3,731 compiles of the corpora (2,151 built) and 6,052 at the AVX
+targets (2,907 built); `test-tier0 --cross-check` 21,775,786 checks, 0 failed.
+
 ## Files
 
 - `scripts/bins.sh`, `run-bins.sh`: the passes by size; `scripts/perf-small.sh`, `run-small.sh`: the small functions'
@@ -175,5 +195,5 @@ every round (`scripts/ab3.sh`, `results/ab3-cd`), medians, ms:
   `b7d0b5ed`) and their scan. Not for main.
 - `scripts/piece-d.patch`, `run-d.sh`: piece D and its two A/Bs; `scripts/ab3.sh`, `run-ab3.sh`: the three
   executables with the order rotated.
-- `results/ab-ahead`, `ab-d`, `ab-cd`, `ab3-cd`: the tables, the objects' hashes, `stages.tar.zst` (and `order.txt`,
-  each round's order); `results/stalls1`: the scan's tables and `stages.tar.zst`.
+- `results/ab-ahead`, `ab-d`, `ab-cd`, `ab3-cd`, `ab3-merged`: the tables, the objects' hashes, `stages.tar.zst` (and
+  `order.txt`, each round's order); `results/stalls1`: the scan's tables and `stages.tar.zst`.
