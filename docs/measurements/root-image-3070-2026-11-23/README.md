@@ -203,6 +203,32 @@ faults where it made 17 and took 46. What remains above the gate's 101 thousand 
 The last is the one a test can't see: the stream is the only thing a lane's units' options differ in that an output
 depends on, and its address repeats.
 
+## 6. After the pull request opened: its off path, a process a unit, and its profile (9700X)
+
+**`--root-image=off` is main within what two builds of main differ by** (`results/off-check`, 6 rounds of
+`scripts/measure2.sh`, each a hold of the lock: `base` is main, `off` the pull request with `--root-image=off`, `again` a
+second build of main's same commit; medians, M cycles, and each against `base` paired by round):
+
+| workload | main | the pull request, `--root-image=off` | main, built again |
+| --- | ---: | --- | --- |
+| 1,336 empty units | 444.8 | 447.0, +0.44% (lower in 2 of 6) | 447.6, +0.57% (2 of 6) |
+| musl, one lane | 3,616.0 | 3,622.2, +0.34% (1 of 6) | 3,623.1, +0.38% (1 of 6) |
+| musl, four lanes | 4,580.3 | 4,593.8, +0.31% (0 of 6) | 4,587.0, +0.13% (2 of 6) |
+| Lua, one lane | 377.1 | 378.1, +0.35% (2 of 6) | 377.6, +0.04% (3 of 6) |
+
+Section 3's `off` on the empty units (+1.1%, lower in 1 round of 7) was the first build's place in memory, not the
+option's path: the second build of main reads as far from the first.
+
+**A process a unit is as it was** (`results/single`, `scripts/single.sh`, 5 rounds: 300 commands of one empty unit each
+and 100 of one musl unit each, `scripts/single-table.py`): the empty units' loop 591.9 M cycles on main and 590.5 M with
+the pull request (-0.31% paired, lower in 5 of 5), the musl units' 297.3 M and 296.6 M (+0.14%, lower in 1 of 5). A
+command of one unit has no lane and no root.
+
+**The pull request as opened, profiled** (`results/profile-root2`, `scripts/profile2.sh`): the 1,336 empty units in
+that hold took 74.3 M user and 73.3 M kernel cycles and 15,111 faults (medians of five), with 13,373 `madvise` and
+13,360 `ioctl` calls (`empty-strace.txt`): ten of each a unit, as with the first version. `memset` is 8.2% and `memmove`
+6.8% of the samples (`empty-flat.txt`), the pool's discards and the faults most of the kernel's half.
+
 ## Reproducing
 
 ```sh
