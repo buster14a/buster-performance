@@ -1,0 +1,117 @@
+diff --git a/src/buster/compiler/ssa.c b/src/buster/compiler/ssa.c
+index 61bac62a3..495d289e9 100644
+--- a/src/buster/compiler/ssa.c
++++ b/src/buster/compiler/ssa.c
+@@ -978,8 +978,11 @@ static void ssa_vector_operands(SsaWork* work, const uint64_t* placed, const uin
+     }
+ }
+ 
++static uint64_t ssa_stage[8];
+ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
+ {
++    uint64_t stage_t = __rdtsc();
++#define SSA_STAGE(k) do { const uint64_t now_ = __rdtsc(); ssa_stage[k] = now_ - stage_t; stage_t = now_; } while (0)
+     const SsaInput* input = work->input;
+     const uint32_t blocks = input->block_count;
+     const uint64_t cells = (uint64_t)blocks * work->promoted_count;
+@@ -1000,17 +1003,23 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
+     {
+         memset(work->last, 0xff, cells * sizeof(uint32_t));
+         memset(placed, 0, rows);
++        SSA_STAGE(0);
+         ssa_vector_scan(work, values, exposed, exposed_offsets);
++        SSA_STAGE(1);
+         error = ssa_frontiers(work, frontier_budget, &frontier_offsets, &frontier_targets);
++        SSA_STAGE(2);
+     }
+     if (error == SSA_OK)
+     {
+         dataflow_liveness(&work->flow);
++        SSA_STAGE(3);
+         error = ssa_vector_place(work, frontier_offsets, frontier_targets, placed);
+     }
+     if (error == SSA_OK)
+     {
++        SSA_STAGE(4);
+         error = ssa_vector_phis(work, placed, phi_first);
++        SSA_STAGE(5);
+     }
+     if (error == SSA_OK)
+     {
+@@ -1029,7 +1038,9 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
+             _mm512_mask_storeu_epi32(work->aliases + value, (__mmask16)((1u << lanes) - 1), _mm512_add_epi32(positions, _mm512_set1_epi32((int)value)));
+         }
+         ssa_vector_rows(work, placed, phi_first, exposed, exposed_offsets, row);
++        SSA_STAGE(6);
+         ssa_vector_operands(work, placed, phi_first, row);
++        SSA_STAGE(7);
+     }
+     return error;
+ }
+diff --git a/src/buster/compiler/ssa_ir.c b/src/buster/compiler/ssa_ir.c
+index be14411c9..5753a8fab 100644
+--- a/src/buster/compiler/ssa_ir.c
++++ b/src/buster/compiler/ssa_ir.c
+@@ -932,7 +932,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+     if (check.error == IR_OK)
+     {
+         // Bound the complete dense workspace; above that cap use the bounded predecessor reader.
+-        dense = !BUSTER_TIER1_PRIVATE_VALUES && ssa_dense_fits(&work.source);
++        dense = !BUSTER_TIER1_PRIVATE_VALUES && (ssa_dense_fits(&work.source) || getenv("BUSTER_SSA_CENSUS_DENSE") != 0);
+         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
+         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
+         check.error = ssa_ir_error(ssa_prepare_path(&work.work, &work.source, scratch, dense));
+@@ -953,13 +953,52 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
+         }
+         else
+         {
+-            check.error = ssa_ir_error(dense ? ssa_construct_dense(&work.work, BUSTER_SSA_FRONTIER_PAIRS) : ssa_construct_bounded(&work.work));
++            const uint64_t census_mark = work.work.scratch->length;
++            const uint64_t census_peak = work.work.scratch->peak;
++            work.work.scratch->peak = census_mark;
++            const uint64_t census_t0 = __rdtsc();
++            SsaError census_error = dense ? ssa_construct_vector(&work.work, BUSTER_SSA_FRONTIER_PAIRS) : ssa_construct_bounded(&work.work);
++            const char* route = dense ? "dense" : "fit";
++            if (dense && census_error == SSA_ERROR_LIMIT)
++            {
++                arena_pop_to(work.work.scratch, census_mark);
++                work.work.construction_error = SSA_OK;
++                census_error = ssa_construct_bounded(&work.work);
++                route = "frontier";
++            }
++            const uint64_t census_ticks = __rdtsc() - census_t0;
++            const uint64_t census_used = work.work.scratch->peak - census_mark;
++            work.work.scratch->peak = work.work.scratch->peak > census_peak ? work.work.scratch->peak : census_peak;
++            static int census = -1;
++            if (census < 0)
++            {
++                census = getenv("BUSTER_SSA_CENSUS") != 0;
++            }
++            if (census)
++            {
++                const SsaInput* in = &work.source;
++                uint32_t promoted = 0;
++                for (uint32_t l = 0; l < in->local_count; l += 1)
++                {
++                    promoted += work.work.result.promoted[l] != 0;
++                }
++                fprintf(stderr, "ssa-census %s blocks=%u locals=%u promoted=%u edges=%u instructions=%u cells=%llu operands=%llu error=%d ticks=%llu peak=%llu\n", route, in->block_count, in->local_count, promoted, in->edge_count, in->instruction_count,
++                        (unsigned long long)in->block_count * in->local_count, (unsigned long long)in->edge_count * in->local_count, (int)census_error, (unsigned long long)census_ticks, (unsigned long long)census_used);
++            }
++            check.error = ssa_ir_error(census_error);
+         }
+     }
++    const uint64_t simplify_t0 = __rdtsc();
+     if (check.error == IR_OK)
+     {
+         check.error = ssa_ir_error(ssa_simplify(&work.work));
+     }
++    if (getenv("BUSTER_SSA_CENSUS") != 0)
++    {
++        fprintf(stderr, "ssa-stages blocks=%u phis=%u simplify=%llu stages=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n", work.source.block_count, work.work.phi_count, (unsigned long long)(__rdtsc() - simplify_t0),
++                (unsigned long long)ssa_stage[0], (unsigned long long)ssa_stage[1], (unsigned long long)ssa_stage[2], (unsigned long long)ssa_stage[3], (unsigned long long)ssa_stage[4], (unsigned long long)ssa_stage[5], (unsigned long long)ssa_stage[6], (unsigned long long)ssa_stage[7]);
++        memset(ssa_stage, 0, sizeof(ssa_stage));
++    }
+     if (check.error == IR_OK)
+     {
+         // The private emitter only appends; its result may safely share scratch with completed construction work.
