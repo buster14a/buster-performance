@@ -218,6 +218,7 @@ reverse, forward) of 11 runs, in one hold; `scripts/ab-patch.sh` does the same f
 | `ab-main-3553` | main `dc8efaacd` | main `b4fda31b9` (#3553 merged) | 112.20 to **123.02** | +10.81, +10.93, +10.73 | 100.40 to 100.70 |
 | `ab-fix-3553` | main `64e88df4d` | the same with `fix-3553.diff` (the first four reorderings) | 123.02 to 115.48 | -7.40, -7.74, -7.46 | 100.62 to 100.79 |
 | `ab-fix-3553-pr` | main `31fd25ce8` | buster14a/buster#3564's head `eb000ae5d` | 122.99 to **114.71** | -8.33, -8.53, -7.98 | 100.72 to 100.72 |
+| `ab-pr3569` (an independent run of a child session's pull request) | main `5cd20effd` | buster14a/buster#3569's head `0c6ae9dd8` | 115.50 to 113.71 | -2.91, -0.95, -1.53 | 100.93 to **101.50** (+0.37, +0.59, +0.74) |
 
 #3553's pass put 10.82 ms on the default compile of a file with no diagnostics; the warnings went from 11.80 to
 22.32 ms. `count/added-by-3553.txt` has the counts it added by function, in a cloud container: 44.07 M (+14.40%), of
@@ -243,3 +244,7 @@ object is 2,056,840 bytes against 2,063,760. Of the 4,576 C files under `tests/`
 its verdict differs from the same executable's with `--no-direct`: 411 that the full pipeline rejects are accepted in
 silence, 343 lose their warnings and one dies with SIGFPE. `x == x`, `if (array)` and `printf("%s\n", 42)` compile
 without their warning. Its count is 51.4 M against 312.4 M, which it doesn't state.
+
+`ab-pr3569` ran with the host's load average near 3, so its rounds spread; the instructions don't: -12.60 M with the
+default warnings and +5.14 M with `-w`. The pull request's pass ran on every compile, a `-w` one included, which
+asks no branch's truth: 0.57 ms slower there. Its session was asked to build the bits where they are first asked for.
