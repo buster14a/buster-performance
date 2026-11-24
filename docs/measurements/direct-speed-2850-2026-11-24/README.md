@@ -20,19 +20,23 @@ The direct path is the fused lexer-to-ELF compiler of buster#3566 (`src/buster/c
 
 Both built on the 9700X by `scripts/build-tree.sh`; `steps/ab.txt` has the rows.
 
-| | main `1c5287c3` | the branch `b3e9576d` | |
+| | main `1c5287c3` | the branch `5b7cf291` | |
 | --- | ---: | ---: | ---: |
-| the product's `-c`, wall (21 rotated runs, one compile a process) | 18.75 ms | 17.71 ms | -5.5% |
-| user cycles | 92.53 M | 87.07 M | -5.9% |
-| kernel cycles | 11.15 M | 11.07 M | |
-| user instructions | 231.3 M | 234.3 M | +1.3% |
-| mispredicted branches | 1.082 M | 0.959 M | -11.4% |
-| lexing and preprocessing (the harness's stage, 11 rotated rounds) | 8.408 ms | 7.554 ms | -10.2% |
-| parsing and generating code | 9.183 ms | 9.192 ms | +0.1% |
+| the product's `-c`, wall (21 rotated runs, one compile a process) | 18.71 ms | 17.40 ms | -7.0% |
+| user cycles | 92.53 M | 85.28 M | -7.8% |
+| kernel cycles | 11.08 M | 11.17 M | |
+| user instructions | 231.3 M | 229.5 M | -0.8% |
+| mispredicted branches | 1.082 M | 0.962 M | -11.1% |
+| lexing and preprocessing (the harness's stage, 11 rotated rounds) | 8.413 ms | 7.338 ms | -12.8% |
+| parsing and generating code | 9.152 ms | 9.260 ms | +1.2% |
 | the object | `ff67ee922b96b089` | the same | |
 
-The instructions rise while the time falls: a block of the window's lexer runs the same instructions whatever its
-tokens are, where the loop it replaces ran fewer and mispredicted more.
+At `b3e9576d`, before the expansion's loop and the long identifiers, the same hold read 17.70 ms and 86.85 M cycles
+(an earlier hold: 18.75 against 17.71 ms), with 234.3 M instructions, 1.3% more than main: a block of the window's
+lexer runs the same instructions whatever its tokens are, where the loop it replaces ran fewer and mispredicted more.
+
+The code generator's stage is 1% slower in the branch's build though its source is main's but for the specifiers'
+step: see "The steps" on how that stage moves between builds.
 
 ## Baseline: main `dd503f2a1`
 
@@ -161,6 +165,8 @@ harness; the stage is lexing and preprocessing.
 | the masks' skipper | `2456c401` | 86.6 M | 7.72 | inactive groups: 47,323 blocks with 20,623 events, where every `#`, `/` and quote was one |
 | one class table, marked tokens | `64417534` | 85.2 M | 7.54 | ten compares a block to one lookup and bit tests; no block lexed twice; nothing read back from the window |
 | tested at every offset | `b3e9576d` | 85.6 to 85.9 M | 7.55 | two carries removed, two bugs fixed (below) |
+| an expansion's tokens in one loop | `3f7b52ea` | 84.5 M | 7.34 | the drain took a frame's token an iteration of its outer loop, its place and the output's count through memory: 175 K tokens a compile |
+| long identifiers through the cache | `402290ef` | 84.5 M | 7.29 | a name of more than 16 bytes went to the table's four dependent loads each time: 21.5 K lookups |
 
 The code generator's stage reads between 9.09 and 9.33 ms across these builds though no step after `131f60aa` touches
 it (its code lands at other addresses), and one binary read 85.19 M and 86.41 M user cycles in two holds, all of the
@@ -239,17 +245,18 @@ store to the window still in flight, which the counter takes for a conflict.
 
 ## What is left
 
-By share of the compile's user cycles after the branch (`steps/functions.txt`, `final`): `fast_cc_expr` 14.3%,
-`fast_pp_drain` 12.2% (the emitter's identifier lookups, a quarter of it; the expansion stack's loop, a token an
-iteration), `fast_pp_lex_window` 8.4%, `fast_cc_compile_func` 5.7%, `fast_pp_read_tok` 4.7%, `fast_expr_reduce_top`
-4.4%, `fast_pp_try_expand_ex` 4.4%, `fast_ident_intern` 3.7%, `fval_emit_call` 3.4%, `fast_cc_parse_declarator` 3.2%.
+By share of the compile's user cycles after the branch (`steps/functions.txt`, `final2`): `fast_cc_expr` 15.5%,
+`fast_pp_drain` 13.2% (the emitter with its identifier lookups), `fast_pp_lex_window` 8.3%, `fast_cc_compile_func`
+6.2%, `fast_pp_try_expand_ex` 5.1%, `fast_expr_reduce_top` 5.0%, `fast_pp_read_tok` 4.3%, `fval_emit_call` 3.5%,
+`fval_to_gp` 3.3%, `fast_cc_parse_declarator` 3.0%, `fast_pp_skip_inactive` 2.5%, `fast_ident_intern` 2.2%.
 
-- Identifiers of more than 16 bytes go to `fast_ident_intern` every time (21.5 K calls, about 80 cycles each: four
-  dependent loads); the 16-byte cache answers 95% of the rest but its hit is followed by a second load for the
-  macro's bit.
+- The identifier cache's hit is followed by a second load for the macro's bit, and its 384 KB are the second-level
+  cache's, not the first's.
 - The reader serves a directive's and an argument's tokens one at a time (94 K calls a compile), each with a scan of
   the gap before it.
-- The code generator is 9.2 ms of 17.1 and was not redesigned: its cost is a mispredicted branch every 230
-  instructions and a token's path through about 100 KB of code. A profile-guided build is worth 7% there.
+- The code generator is 9.2 ms of 17.0 and was not redesigned: its cost is a mispredicted branch every 230
+  instructions and a token's path through about 100 KB of code. A profile-guided build is worth 7% there; the
+  build's `BUSTER_PGO=1` trains on the compiler's own sources, few of which take the direct path, so it would take a
+  `BUSTER_PGO_TRAIN` script with plain `-c` compiles.
 - The kernel's 9 to 11 M cycles a compile: clearing fresh pages 17%, mapping the source's pages 19%, unmapping 7%,
   path lookups 4%, the object's pages 6%.
