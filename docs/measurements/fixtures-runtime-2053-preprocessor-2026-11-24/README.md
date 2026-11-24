@@ -1,0 +1,7 @@
+# Auxiliary preprocessor fixture migration for #2053
+
+Eight runtime catalogs cover 231 cases. Clang 23.1.4 extracted 5 system-level cases, 54 diagnostic histories, 82 directive diagnostic cases, 20 guard/link cases and 70 option sets. The ordered catalog fields and all 233 source, header, probe and expected-output files match the dumped values. Both the main file and its included files retain their original staged names, including symbolic and hard links. The stress generators and independent token, diagnostic and guard oracles remain in C.
+
+All four hosted-style `test-preprocessor --clang` parts passed locally. A sixth system-level case passed on the original executable, then failed when one expected token level was deliberately wrong. Data-only changes scheduled zero host build steps. Touching the history runner scheduled its existing frontend and checker owners, link and bake. The net host-source reduction was 28,170 bytes. The frontend object changed from 6,864,312 to 6,804,280 bytes and the executable from 74,109,920 to 74,113,272 bytes.
+
+The candidate is 70b58a66f against 2d20b1826. The baseline frontend object is from the warning packet, which had no frontend source changes. The original lookup tables in pp.c emit their raw records as little-endian lengths and values. Configuration is Clang 23.1.4 vector Release with debug information disabled. Build timings are cloud-host observations.
