@@ -13,3 +13,5 @@ The normal call-count focus with --in-process ran 12 cases both times. The added
 Across the changed host C files the net reduction was 643,126 bytes. The Release checker object went from 30,935,944 to 30,478,232 bytes. The published executable went from 74,109,920 to 74,102,008 bytes. The before and after files record their hashes.
 
 Both clean builds compiled 43 units. Ninja reported 175.5 s before and 233.0 s after. The after run shared this cloud VM with another build. These are build observations under different loads. The incremental fixture controls above measure scheduled commands. The runner positive control and its actual incremental build are recorded separately.
+
+Commit `fa263aba2` accepts the plus sign in `-Wc++-compat`. All 16 local driver shards passed on that revision (243,117 checks). The `corrected` files record its executable and object.
