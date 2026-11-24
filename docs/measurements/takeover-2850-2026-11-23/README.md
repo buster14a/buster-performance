@@ -607,3 +607,23 @@ checker's 8, lanes, units, c-testsuite, the per-file jobs) run in the cloud cont
 in their environment, which fills the two arenas of every compile the tests run in their own process: all pass. And
 again with the scratch arena warm and filled too (an experiment's switch, `scripts/warm-arenas-v2-scratch.patch`): all
 pass.
+
+**The scratch arena warm too: 7.3 ms** (`summary-scratch.txt`, `scratch-stages-*.txt`; `scripts/warms-hold.sh`,
+`scripts/job-warms1.sh`, `scripts/reduce-warms.py`; `scripts/warm-arenas-v2-scratch.patch` on `939732da`, whose switch
+the pull request's second commit makes the rule). Seven rounds of main, the two arenas, the three, the three, the two,
+main:
+
+| `sqlite3.c`, medians of 14 | main | two arenas warm | and the scratch |
+| --- | ---: | ---: | ---: |
+| elapsed, ms | 112.928 | 109.399 | **105.757** |
+| against main, by round | | -3.737 (7/7) | **-7.337 (7/7, -6.67 to -8.26)** |
+| kernel cycles, M | 74.929 | 50.713 (-24.300) | 32.733 (-42.191) |
+| user cycles, M | 550.884 | 556.042 | 553.371 |
+| user instructions, M | 1,277.881 | 1,288.022 | 1,288.024 |
+| peak resident set, MB (stage tables) | 243.9 | 253.8 | 282.3 |
+
+The driver gives the scratch's pages back between the stages (#628) and the next stage takes them cleared again; warm,
+the discards do nothing and the pages stay, in the process and in the file. No instructions: nothing takes the scratch
+for zero past its first pushes (one object over every run, the filled one too; and the suites above). The file is
+528 MB. First compile into an empty file 142.341 ms, second 125.268. Lua's 34 files: kernel 247.58 M to 177.18 M a
+pass, the objects the same.
