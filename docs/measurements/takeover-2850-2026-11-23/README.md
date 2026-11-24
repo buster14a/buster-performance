@@ -516,3 +516,37 @@ about 80 MB against the process's peak. It is the first thing the next census ha
 So as the arenas stand a pool takes 37 to 56 MB, a fifth of the compile's memory. The two large arenas mix both
 kinds: ten pushes each need zeros and own 15 to 18 MB of 51 to 79 and 13.5 to 15.7 of 36 to 44. With those twenty
 pushes in an arena of their own, the two arenas' other 58 to 89 MB are the pool's too.
+
+## The reader's and the run's arenas from a pool file: 3.7 ms of `sqlite3.c` (`pool-file/driver-arenas/`)
+
+**No push has to move.** `arenas/zero-sites-by-reservation.txt` (`scripts/pairs.py`: the 4,714 cases, each
+zero-needing push's site with its reservation's) shows what the driver's two large arenas take that needs zeros: the
+reader's ten output columns and the sparse columns' directory, and the run's stream's ten columns. Each of those
+asks first whether its arena is untouched (`arena_untouched`, #628's fresh output) and clears or writes for itself
+where it is not, as a command's later units already make it. So an arena of left pages only has to read as used
+before: its peak at its capacity. Checked with garbage (`scripts/experiment-arenas-census-touched.patch`,
+`scripts/touched-campaign.py`): the two arenas' peaks at their capacities, every push of theirs filled with 0xA5, and
+garbage in every other fresh push but seven sites of other arenas: none of the 4,714 cases differs.
+
+**What their own clearing costs** (`used-before-summary.txt`; `scripts/experiment-used-before.patch` on `db3c3e22`,
+`scripts/touched-hold.sh`; the 9700X, one hold, the memory fresh in both settings): `sqlite3.c` +10.139 M user
+instructions (0.79%) and +5.4 M user cycles, about a millisecond; musl's command, Lua's, the mixed one and two units
+of `sqlite3.c` nothing.
+
+**With their memory the file's** (`pool-summary.txt`, `stages-a.txt`, `stages-p.txt`;
+`scripts/experiment-pool-driver-arenas.patch`, `scripts/pooldrv-hold.sh`; a tmpfs mounted `huge=always` for the hold
+and unmounted, `mount.txt`; the file made by one compile, then seven rounds of main, used before, the file, the file,
+used before, main):
+
+| `sqlite3.c`, M cycles | main | used before | the file |
+| --- | ---: | ---: | ---: |
+| user | 551.759 | +5.470 (0/7 lower) | +3.944 (0/7 lower) |
+| kernel | 75.827 | +1.520 (0/7) | **-24.534 (7/7 lower)** |
+| user instructions, M | 1,282.146 | +10.139 | +10.138 |
+| page faults | 5,574 | the same | the same |
+
+So the file's two arenas take 20.6 M cycles off the compile, 3.7 ms at the core's clock; the two stage tables read
+113.871 ms and 109.821 (check-input's system time 10.2 ms and 3.3, check-expressions' 2.9 and 0). The file holds
+131 MB after one compile (`file-after-make.txt`) and 191 MB after Lua's `lvm.c`, `shell.c` and the rounds
+(`file-at-end.txt`). Every object and diagnostic is main's in the three settings, and `lvm.c`'s and `shell.c`'s on
+`sqlite3.c`'s leftovers are theirs without the file (`leftovers.txt`).

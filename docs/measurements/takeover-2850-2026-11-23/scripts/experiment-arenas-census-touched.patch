@@ -1,0 +1,389 @@
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index 73aa62e8..c4f2131b 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -15097,6 +15097,18 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     Arena arena = arena_reserve(reservation_bytes);
+     Arena scratch = arena_reserve(reservation_bytes);
+     Arena output_arena = arena_reserve(reservation_bytes);
++    // EXPERIMENT (not for merge, #2850): BUSTER_EXPERIMENT_TOUCHED makes the reader's and the run's arenas read as used
++    // before (their peaks at their capacities), as arenas of pages a previous compile left would: nothing may take their
++    // bytes for zeros, and what asks whether they are untouched clears for itself.
++    if (getenv("BUSTER_EXPERIMENT_TOUCHED") != NULL)
++    {
++        arena.peak = arena.capacity;
++        output_arena.peak = output_arena.capacity;
++#ifdef BUSTER_EXPERIMENT_TOUCH_FILL
++        arena_experiment_touch(&arena);
++        arena_experiment_touch(&output_arena);
++#endif
++    }
+     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
+     const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
+     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 19ff4f6f..a4fc7ccf 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -1355,6 +1355,24 @@ static bool arena_release_keeps(const Arena* arena, const uint8_t* mapping)
+     return small && __atomic_fetch_add(&arena_regions.kept, 1, __ATOMIC_RELAXED) < BUSTER_ARENA_KEPT_COUNT;
+ }
+ 
++// EXPERIMENT: what is given back is counted first (arena_experiment_account, below).
++static void arena_experiment_account(const uint8_t* address, uint64_t bytes);
++static int arena_experiment_madvise(void* address, size_t bytes, int advice)
++{
++    if (advice == MADV_DONTNEED)
++    {
++        arena_experiment_account((const uint8_t*)address, bytes);
++    }
++    return (madvise)(address, bytes, advice);
++}
++static int arena_experiment_munmap(void* address, size_t bytes)
++{
++    arena_experiment_account((const uint8_t*)address, bytes);
++    return (munmap)(address, bytes);
++}
++#define madvise(address, bytes, advice) arena_experiment_madvise((address), (bytes), (advice))
++#define munmap(address, bytes) arena_experiment_munmap((address), (bytes))
++
+ static void arena_release(Arena* arena)
+ {
+     if (arena->base != 0 && arena->grows)
+@@ -1571,9 +1589,253 @@ static bool arena_commit(Arena* arena, uint64_t end)
+     return result;
+ }
+ 
++// EXPERIMENT (not for merge, #2850): which pushes need the zeros a fresh arena promises. A push's site is the file and
++// line of the call (the macros below set them); the bytes of a push past the arena's peak, which no push took before,
++// are counted by site, and filled with 0xA5 for the sites the list file marks G. BUSTER_EXPERIMENT_FRESH_LIST names the
++// list ("basename:line G" or "basename:line Z" a line), BUSTER_EXPERIMENT_FRESH_LOG the file each unit appends its
++// sites to at exit ("basename:line bytes pushes garbage").
++#include <stdatomic.h>
++#include <fcntl.h>
++typedef struct ArenaExperimentSite ArenaExperimentSite;
++struct ArenaExperimentSite
++{
++    const char* file;
++    uint32_t line;
++    uint8_t garbage;
++    uint64_t bytes;
++    uint64_t pushes;
++    uint64_t resident;
++};
++typedef struct ArenaExperimentRange ArenaExperimentRange;
++struct ArenaExperimentRange
++{
++    const uint8_t* base;
++    uint64_t bytes;
++    uint32_t slot;
++};
++static ArenaExperimentRange arena_experiment_ranges[65536];
++static uint32_t arena_experiment_range_count;
++static _Thread_local const char* arena_experiment_file;
++static _Thread_local uint32_t arena_experiment_line;
++static ArenaExperimentSite arena_experiment_sites[8192];
++// The reservations by their call's file and line (the macros at the file's end name them): each one's mapping, what its
++// pushes took fresh, what of that is resident when it is given back, and whether a push at a site that needs zeros (or
++// one of lane.c's own) took any.
++typedef struct ArenaExperimentArena ArenaExperimentArena;
++struct ArenaExperimentArena
++{
++    uintptr_t low;
++    uintptr_t high;
++    const char* file;
++    uint32_t line;
++    uint64_t capacity;
++    uint64_t fresh;
++    uint64_t zero_fresh;
++    uint64_t resident;
++    uint64_t zero_resident;
++    uint32_t zero_pushes;
++    // BUSTER_EXPERIMENT_TOUCHED's: an arena made to read as used before, and how far from its mapping's start its pushes
++    // have been filled with 0xA5 (each byte once: what a push took before holds its user's data).
++    bool touched;
++    uintptr_t filled;
++};
++static ArenaExperimentArena arena_experiment_arenas[16384];
++static ArenaExperimentArena arena_experiment_unnamed = { .file = "unnamed" };
++static uint32_t arena_experiment_arena_count;
++
++// The latest reservation whose mapping holds `address`, or null.
++static ArenaExperimentArena* arena_experiment_arena_of(uintptr_t address)
++{
++    ArenaExperimentArena* found = NULL;
++    for (uint32_t i = arena_experiment_arena_count; found == NULL && i != 0; i -= 1)
++    {
++        ArenaExperimentArena* entry = arena_experiment_arenas + i - 1;
++        found = address >= entry->low && address < entry->high ? entry : NULL;
++    }
++    return found;
++}
++static atomic_flag arena_experiment_lock = ATOMIC_FLAG_INIT;
++static int arena_experiment_state;
++static char* arena_experiment_list;
++
++static const char* arena_experiment_basename(const char* file)
++{
++    const char* slash = strrchr(file, '/');
++    return slash != NULL ? slash + 1 : file;
++}
++
++// The resident pages of the recorded pushes within [address, address + bytes), added to their sites: called before
++// the range is given back, and for everything at exit.
++static void arena_experiment_account(const uint8_t* address, uint64_t bytes)
++{
++    while (atomic_flag_test_and_set(&arena_experiment_lock))
++    {
++    }
++    for (uint32_t r = 0; r < arena_experiment_range_count; r += 1)
++    {
++        const ArenaExperimentRange* range = arena_experiment_ranges + r;
++        const uintptr_t low = (uintptr_t)(range->base > address ? range->base : address);
++        const uintptr_t range_end = (uintptr_t)range->base + range->bytes;
++        const uintptr_t asked_end = (uintptr_t)address + bytes;
++        const uintptr_t high = range_end < asked_end ? range_end : asked_end;
++        // A page is its first byte's push's: the pages that start within the range.
++        uintptr_t at = (low + 4095) & ~(uintptr_t)4095;
++        while (low < high && at < high)
++        {
++            static unsigned char pages[16384];
++            const uintptr_t span = high - at < sizeof(pages) * 4096 ? ((high - at + 4095) & ~(uintptr_t)4095) : sizeof(pages) * 4096;
++            if (mincore((void*)at, span, pages) == 0)
++            {
++                uint64_t resident = 0;
++                for (uintptr_t i = 0; i < span / 4096; i += 1)
++                {
++                    resident += pages[i] & 1;
++                }
++                arena_experiment_sites[range->slot].resident += resident * 4096;
++                ArenaExperimentArena* entry = arena_experiment_arena_of((uintptr_t)range->base);
++                if (entry == NULL)
++                {
++                    // A reservation no macro named (one of lane.c's own, a lane's): all of them one entry, the first.
++                    entry = &arena_experiment_unnamed;
++                }
++                entry->resident += resident * 4096;
++                entry->zero_resident += arena_experiment_sites[range->slot].garbage ? 0 : resident * 4096;
++            }
++            at += span;
++        }
++    }
++    atomic_flag_clear(&arena_experiment_lock);
++}
++
++static void arena_experiment_dump(void)
++{
++    arena_experiment_account((const uint8_t*)0, UINT64_MAX / 2);
++    const char* path = getenv("BUSTER_EXPERIMENT_FRESH_LOG");
++    const int fd = path != NULL ? open(path, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
++    for (uint32_t i = 0; fd >= 0 && i < 8192; i += 1)
++    {
++        const ArenaExperimentSite* site = arena_experiment_sites + i;
++        if (site->file != NULL)
++        {
++            char line[512];
++            const int length = snprintf(line, sizeof(line), "%s:%u %llu %llu %u %llu\n", arena_experiment_basename(site->file), site->line, (unsigned long long)site->bytes,
++                                        (unsigned long long)site->pushes, site->garbage, (unsigned long long)site->resident);
++            if (write(fd, line, (size_t)length) < 0)
++            {
++                break;
++            }
++        }
++    }
++    if (fd >= 0)
++    {
++        close(fd);
++    }
++    const char* arenas_path = getenv("BUSTER_EXPERIMENT_ARENAS_LOG");
++    FILE* arenas = arenas_path != NULL ? fopen(arenas_path, "a") : NULL;
++    for (uint32_t i = 0; arenas != NULL && i <= arena_experiment_arena_count; i += 1)
++    {
++        const ArenaExperimentArena* entry = i == arena_experiment_arena_count ? &arena_experiment_unnamed : arena_experiment_arenas + i;
++        fprintf(arenas, "%s:%u %llu %llu %llu %llu %llu %u\n", arena_experiment_basename(entry->file), entry->line, (unsigned long long)entry->capacity,
++                (unsigned long long)entry->fresh, (unsigned long long)entry->zero_fresh, (unsigned long long)entry->resident, (unsigned long long)entry->zero_resident,
++                entry->zero_pushes);
++    }
++    if (arenas != NULL)
++    {
++        fclose(arenas);
++    }
++}
++
++// (lane.c's own pushes, site "internal", are never filled.)
++static bool arena_experiment_file_known(const char* file)
++{
++    return strcmp(file, "internal") != 0;
++}
++
++static void arena_experiment_fresh(uint8_t* bytes, uint64_t count)
++{
++    const char* file = arena_experiment_file != NULL ? arena_experiment_file : "internal";
++    const uint32_t line = arena_experiment_file != NULL ? arena_experiment_line : 0;
++    arena_experiment_file = NULL;
++    while (atomic_flag_test_and_set(&arena_experiment_lock))
++    {
++    }
++    if (arena_experiment_state == 0)
++    {
++        const char* path = getenv("BUSTER_EXPERIMENT_FRESH_LIST");
++        const int fd = path != NULL ? open(path, O_RDONLY) : -1;
++        arena_experiment_state = 1;
++        if (fd >= 0)
++        {
++            static char text[1u << 20];
++            const ssize_t length = read(fd, text + 1, sizeof(text) - 2);
++            text[0] = '\n';
++            text[length > 0 ? length + 1 : 1] = 0;
++            arena_experiment_list = text;
++            close(fd);
++        }
++        if (path != NULL || getenv("BUSTER_EXPERIMENT_FRESH_LOG") != NULL)
++        {
++            arena_experiment_state = 2;
++            atexit(arena_experiment_dump);
++        }
++    }
++    bool garbage = false;
++    if (arena_experiment_state == 2)
++    {
++        uint32_t slot = (uint32_t)(((uintptr_t)file >> 3) * 2654435761u + line * 40503u) & 8191;
++        while (arena_experiment_sites[slot].file != NULL && (arena_experiment_sites[slot].file != file || arena_experiment_sites[slot].line != line))
++        {
++            slot = (slot + 1) & 8191;
++        }
++        ArenaExperimentSite* site = arena_experiment_sites + slot;
++        if (site->file == NULL)
++        {
++            site->file = file;
++            site->line = line;
++            char key[512];
++            // BUSTER_EXPERIMENT_FRESH_DEFAULT=G: every site garbage but those the list marks Z.
++            const char* fallback = getenv("BUSTER_EXPERIMENT_FRESH_DEFAULT");
++            const bool inverted = fallback != NULL && fallback[0] == 'G';
++            snprintf(key, sizeof(key), "\n%s:%u %c", arena_experiment_basename(file), line, inverted ? 'Z' : 'G');
++            const bool listed = arena_experiment_list != NULL && strstr(arena_experiment_list, key) != NULL;
++            site->garbage = inverted ? !listed && arena_experiment_file_known(file) : listed;
++        }
++        site->bytes += count;
++        site->pushes += 1;
++        garbage = site->garbage != 0;
++        ArenaExperimentArena* entry = arena_experiment_arena_of((uintptr_t)bytes);
++        if (entry == NULL)
++        {
++            entry = &arena_experiment_unnamed;
++        }
++        entry->fresh += count;
++        entry->zero_fresh += garbage ? 0 : count;
++        entry->zero_pushes += garbage ? 0 : 1;
++        // Each zero-needing push's site with its reservation's, a line a pair (BUSTER_EXPERIMENT_PAIRS_LOG).
++        const char* pairs_path = !garbage ? getenv("BUSTER_EXPERIMENT_PAIRS_LOG") : NULL;
++        FILE* pairs = pairs_path != NULL ? fopen(pairs_path, "a") : NULL;
++        if (pairs != NULL)
++        {
++            fprintf(pairs, "%s:%u %s:%u %llu\n", arena_experiment_basename(file), line, arena_experiment_basename(entry->file), entry->line, (unsigned long long)count);
++            fclose(pairs);
++        }
++        if (arena_experiment_range_count < 65536)
++        {
++            arena_experiment_ranges[arena_experiment_range_count++] = (ArenaExperimentRange){ .base = bytes, .bytes = count, .slot = slot };
++        }
++    }
++    atomic_flag_clear(&arena_experiment_lock);
++    // (BUSTER_EXPERIMENT_FRESH_NOFILL: the sites classed, nothing filled, so that what is resident is what the compile wrote.)
++    if (garbage && getenv("BUSTER_EXPERIMENT_FRESH_NOFILL") == NULL)
++    {
++        memset(bytes, 0xA5, count);
++    }
++}
++
+ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+ {
+     void* result = 0;
++    const uint64_t experiment_peak = arena->peak;
+     const uintptr_t base = (uintptr_t)arena->base;
+     const uintptr_t position = base + arena->length;
+     const uintptr_t aligned = (position + alignment - 1) & ~(alignment - 1);
+@@ -1587,12 +1849,28 @@ static void* arena_push(Arena* arena, uint64_t size, uint64_t alignment)
+             result = (void*)aligned;
+             arena->length = end;
+             arena->peak = end > arena->peak ? end : arena->peak;
++            if (arena->peak == arena->capacity && size != 0 && base != (uintptr_t)BUSTER_ARENA_MAX_CAPACITY && getenv("BUSTER_EXPERIMENT_TOUCHED_FILL") != NULL)
++            {
++                ArenaExperimentArena* entry = arena_experiment_arena_of(aligned);
++                if (entry != NULL && entry->touched && aligned + size > entry->filled)
++                {
++                    const uintptr_t from = aligned > entry->filled ? aligned : entry->filled;
++                    memset((void*)from, 0xA5, aligned + size - from);
++                    entry->filled = aligned + size;
++                }
++            }
++            if (end > experiment_peak && size != 0 && base != (uintptr_t)BUSTER_ARENA_MAX_CAPACITY)
++            {
++                const uint64_t fresh = experiment_peak > begin ? experiment_peak : begin;
++                arena_experiment_fresh(arena->base + fresh, end - fresh);
++            }
+         }
+     }
+     else if (arena->mapping_bytes != 0 && size > capacity - (begin < capacity ? begin : capacity))
+     {
+         arena_failure = (ArenaFailure){ .bytes = size, .error = ENOMEM };
+     }
++    arena_experiment_file = NULL;
+     return result;
+ }
+ 
+@@ -1613,6 +1891,53 @@ static void arena_pop_to(Arena* arena, uint64_t length)
+     arena->length = length;
+ }
+ 
++// EXPERIMENT: every call after this point names its site.
++static __attribute__((unused)) void* arena_push_site(Arena* arena, uint64_t size, uint64_t alignment, const char* file, uint32_t line)
++{
++    arena_experiment_file = file;
++    arena_experiment_line = line;
++    return (arena_push)(arena, size, alignment);
++}
++
++static __attribute__((unused)) void* arena_push_array_site(Arena* arena, uint64_t count, uint64_t element_bytes, uint64_t alignment, const char* file, uint32_t line)
++{
++    arena_experiment_file = file;
++    arena_experiment_line = line;
++    return (arena_push_array)(arena, count, element_bytes, alignment);
++}
++
++#define arena_push(arena, size, alignment) arena_push_site((arena), (size), (alignment), __FILE__, __LINE__)
++#define arena_push_array(arena, count, element_bytes, alignment) arena_push_array_site((arena), (count), (element_bytes), (alignment), __FILE__, __LINE__)
++
++static __attribute__((unused)) Arena arena_experiment_reserved(Arena arena, const char* file, uint32_t line)
++{
++    while (atomic_flag_test_and_set(&arena_experiment_lock))
++    {
++    }
++    if (arena.base != 0 && arena.mapping_bytes != 0 && arena_experiment_arena_count < 16384)
++    {
++        const uintptr_t low = (uintptr_t)arena.base - arena.mapping_offset;
++        arena_experiment_arenas[arena_experiment_arena_count++] = (ArenaExperimentArena){ .low = low, .high = low + arena.mapping_bytes, .file = file, .line = line, .capacity = arena.capacity };
++    }
++    atomic_flag_clear(&arena_experiment_lock);
++    return arena;
++}
++
++static __attribute__((unused)) void arena_experiment_touch(const Arena* arena)
++{
++    ArenaExperimentArena* entry = arena_experiment_arena_of((uintptr_t)arena->base);
++    if (entry != NULL)
++    {
++        entry->touched = true;
++        entry->filled = (uintptr_t)arena->base + arena->length;
++    }
++}
++#define BUSTER_EXPERIMENT_TOUCH_FILL 1
++
++#define arena_reserve(capacity) arena_experiment_reserved((arena_reserve)(capacity), __FILE__, __LINE__)
++#define arena_reserve_small(capacity, small) arena_experiment_reserved((arena_reserve_small)((capacity), (small)), __FILE__, __LINE__)
++#define arena_reserve_tables(tables, count) arena_experiment_reserved((arena_reserve_tables)((tables), (count)), __FILE__, __LINE__)
++
+ static bool arena_untouched(const Arena* arena)
+ {
+     return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
