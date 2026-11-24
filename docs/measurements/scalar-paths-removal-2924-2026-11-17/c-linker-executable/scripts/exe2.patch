@@ -1,0 +1,159 @@
+From 8777382ef5cdc1340f9bc6aa2a76facd398cf9fd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 23 Nov 2026 21:55:31 +0000
+Subject: [PATCH 1/3] executable_impl.c: the FDE count's heads gathered (#2924)
+
+executable_eh_frame_fdes stored each candidate's 8-byte head to the stack
+and loaded the 16 of a group as two vectors, which no store forwards to:
+on the 9700X its count lost to the exact walk at a dozen FDEs (8.2 against
+7.3 ns an FDE). The heads are now gathered from the candidates inside the
+atom.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EgbxndRcXK2s4tcJhwpfvC
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/executable_impl.c | 17 ++++++-----------
+ 1 file changed, 6 insertions(+), 11 deletions(-)
+
+diff --git a/src/buster/compiler/executable_impl.c b/src/buster/compiler/executable_impl.c
+index f9153a804..bd912360a 100644
+--- a/src/buster/compiler/executable_impl.c
++++ b/src/buster/compiler/executable_impl.c
+@@ -2140,8 +2140,8 @@ static uint32_t executable_eh_frame_walk(const Link* link, AtomId atom, int32_t*
+ // The FDEs of an .eh_frame atom that is a CIE then FDEs pointing back to it, and perhaps a terminator, each FDE with
+ // its pc_begin a PC32 fixup's field (of an addend in the column) and nothing else fixed up: their count, or UINT32_MAX
+ // for an atom that isn't, which the exact walk then reads. 16 fixups at a time, each a candidate FDE 8 bytes before its
+-// field: the candidates' lengths and CIE pointers are loaded, 8 bytes each by scalar loads that don't wait on each other
+-// (gathers cost more on Zen 5), then compared 16 at a time: each must start where the one before it ends (the first
++// field: the candidates' lengths and CIE pointers are gathered, 8 bytes each from those inside the atom, then compared
++// 16 at a time: each must start where the one before it ends (the first
+ // where the CIE does, the one before a group's first in the last group's last lane), point back to the CIE, and be long
+ // enough for pc_begin and the range; and the last must end at the atom's end or its terminator's start, so none ends
+ // past it: the one after an FDE that did would start past its field's candidate.
+@@ -2172,16 +2172,11 @@ static uint32_t executable_eh_frame_fdes(const Link* link, AtomId atom)
+         const __mmask16 inside = _mm512_mask_cmpge_epu32_mask(lanes, offsets, _mm512_set1_epi32(8)) &
+                                  _mm512_mask_cmple_epu32_mask(lanes, _mm512_add_epi32(offsets, _mm512_set1_epi32(4)), size_vector);
+         valid = inside == lanes && _mm512_mask_cmpneq_epi32_mask(lanes, kinds, _mm512_set1_epi32(BUSTER_LINK_FIXUP_PC32)) == 0;
+-        uint32_t start_of[16];
+-        uint64_t head_of[16] = { 0 };
+-        _mm512_storeu_si512(start_of, starts);
+-        for (uint32_t j = 0; valid && j < n; j += 1)
+-        {
+-            memcpy(&head_of[j], bytes + start_of[j], sizeof(head_of[j]));
+-        }
++        // The heads, gathered from the candidates inside the atom: a group's few loads don't wait on stores to the stack
++        // and a vector load of them that can't forward.
++        const __m512i heads_low = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)inside, _mm512_castsi512_si256(starts), bytes, 1);
++        const __m512i heads_high = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)(inside >> 8), _mm512_extracti64x4_epi64(starts, 1), bytes, 1);
+         // The lengths are the heads' low halves, the CIE pointers their high ones.
+-        const __m512i heads_low = _mm512_loadu_si512(head_of);
+-        const __m512i heads_high = _mm512_loadu_si512(head_of + 8);
+         const __m512i lengths = _mm512_permutex2var_epi32(heads_low, evens, heads_high);
+         const __m512i pointers = _mm512_permutex2var_epi32(heads_low, odds, heads_high);
+         // Lengths within the atom first, so that the ends fit 32 bits.
+-- 
+2.43.0
+
+
+From f66158ef0662de920466fdf6ccb56b32fe86cd0f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 23 Nov 2026 22:26:01 +0000
+Subject: [PATCH 2/3] executable_impl.c: no second gather of the FDE heads for
+ a group of eight or fewer (#2924)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EgbxndRcXK2s4tcJhwpfvC
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/executable_impl.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/src/buster/compiler/executable_impl.c b/src/buster/compiler/executable_impl.c
+index bd912360a..5baddf635 100644
+--- a/src/buster/compiler/executable_impl.c
++++ b/src/buster/compiler/executable_impl.c
+@@ -2175,7 +2175,9 @@ static uint32_t executable_eh_frame_fdes(const Link* link, AtomId atom)
+         // The heads, gathered from the candidates inside the atom: a group's few loads don't wait on stores to the stack
+         // and a vector load of them that can't forward.
+         const __m512i heads_low = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)inside, _mm512_castsi512_si256(starts), bytes, 1);
+-        const __m512i heads_high = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)(inside >> 8), _mm512_extracti64x4_epi64(starts, 1), bytes, 1);
++        // A group of eight or fewer gathers no second half: a gather issues its loads' work whatever its mask.
++        const __m512i heads_high = inside >> 8 != 0 ? _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)(inside >> 8), _mm512_extracti64x4_epi64(starts, 1), bytes, 1)
++                                                    : _mm512_setzero_si512();
+         // The lengths are the heads' low halves, the CIE pointers their high ones.
+         const __m512i lengths = _mm512_permutex2var_epi32(heads_low, evens, heads_high);
+         const __m512i pointers = _mm512_permutex2var_epi32(heads_low, odds, heads_high);
+-- 
+2.43.0
+
+
+From f7c8e5811057abdca0c7b43510be6b48ac306795 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 23 Nov 2026 22:26:32 +0000
+Subject: [PATCH 3/3] benchmark-executable: the unwind tables' passes repeated
+ past the clock's resolution (#2924)
+
+A small program's dozen FDEs took about 80 ns a pass, a few ticks of the
+clock: each run now passes over the atoms enough times for about 4,096 FDEs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EgbxndRcXK2s4tcJhwpfvC
+Signed-off-by: David Gonzalez Martin <davidgmbb@gmail.com>
+---
+ src/buster/compiler/executable_benchmark.c | 30 +++++++++++++---------
+ 1 file changed, 18 insertions(+), 12 deletions(-)
+
+diff --git a/src/buster/compiler/executable_benchmark.c b/src/buster/compiler/executable_benchmark.c
+index 49a722be1..73db117fe 100644
+--- a/src/buster/compiler/executable_benchmark.c
++++ b/src/buster/compiler/executable_benchmark.c
+@@ -508,27 +508,33 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
+         const bool entries = way >= 2;
+         uint64_t times[BUSTER_EXECUTABLE_BENCHMARK_RUNS];
+         uint64_t found = 0;
++        // Each run passes over the atoms enough times for about 4,096 FDEs, so that a small program's few take longer than
++        // the clock's resolution.
++        const uint64_t repeats = fdes != 0 && fdes < 4096 ? 4096 / fdes : 1;
+         for (uint32_t run = 0; run < BUSTER_EXECUTABLE_BENCHMARK_RUNS; run += 1)
+         {
+-            found = 0;
+             const uint64_t begin = executable_now();
+-            for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
++            for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
+             {
+-                if (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME)
++                found = 0;
++                for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+                 {
+-                    // The count either way; then the entries, from the fixups of an atom the vector path reads (all of a
+-                    // generated program's), or by the walk.
+-                    const uint64_t address = link->atoms.address[atom];
+-                    bool walked = false;
+-                    const uint32_t count = !entries ? executable_eh_frame(link, atom, exact, &walked)
+-                                           : !exact ? (executable_eh_frame_entries(link, atom, table + 2 * found, 0, address) ? link->atoms.fixup_count[atom] : 0)
+-                                                    : executable_eh_frame_walk(link, atom, table + 2 * found, 0, address);
+-                    found += count != UINT32_MAX ? count : 0;
++                    if (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME)
++                    {
++                        // The count either way; then the entries, from the fixups of an atom the vector path reads (all of a
++                        // generated program's), or by the walk.
++                        const uint64_t address = link->atoms.address[atom];
++                        bool walked = false;
++                        const uint32_t count = !entries ? executable_eh_frame(link, atom, exact, &walked)
++                                               : !exact ? (executable_eh_frame_entries(link, atom, table + 2 * found, 0, address) ? link->atoms.fixup_count[atom] : 0)
++                                                        : executable_eh_frame_walk(link, atom, table + 2 * found, 0, address);
++                        found += count != UINT32_MAX ? count : 0;
++                    }
+                 }
+             }
+             times[run] = executable_now() - begin;
+         }
+-        printf("  unwind tables, %-16s %8.3f ns per FDE (%llu FDEs in %llu atoms)%s\n", names[way], executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)fdes,
++        printf("  unwind tables, %-16s %8.3f ns per FDE (%llu FDEs in %llu atoms)%s\n", names[way], executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)(fdes * repeats),
+                (unsigned long long)fdes, (unsigned long long)frame_atoms, found == fdes ? "" : "  A DIFFERENT COUNT");
+     }
+     for (uint32_t exact = 0; table != 0 && exact < 2; exact += 1)
+-- 
+2.43.0
+
