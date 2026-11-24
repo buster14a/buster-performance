@@ -35,3 +35,7 @@ Every window's result agrees with the twin's. The new kernel beats the gather at
 records up, but still loses at one to three records and five: about 4.5 ticks for the twin's one compare against
 about 10 for the kernel's fixed loads, compares and mask arithmetic. Under rule 2 the twin can't go yet, so the x87
 piece waits for the owner.
+
+[`x87-rewrite/`](x87-rewrite/) holds the branch as patches on main `968a085f`, waiting for the owner: the parser's and
+the x87 scans' tests and deletion as first written (the parser's half went into #3507 alone), the fixture for regions
+past record 0, the 64-byte-load kernel, and (`fixture-bytes/`) the fixture for the bytes beside a store's form.
