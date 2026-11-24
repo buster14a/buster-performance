@@ -23,7 +23,8 @@ with step 1's root image ([buster#3475](https://github.com/buster14a/buster/pull
   296,948** (section 2). [#2531](https://github.com/buster14a/buster/issues/2531) never attests a function definition,
   so each unit's reader reads every `static inline` function of every header it includes: 64% of the 2.14 million
   tokens the reader reads in the command (1.66 million in definitions, 0.48 million outside them that aren't skipped).
-- **What the reduced units don't spend is in four places** (section 3, container samples): the preprocessor 31%, the
+- **The reduced units take 1,745 M cycles on the 9700X where the units take 3,160 M** (section 4), and what they don't
+  spend is in four places (section 3, container samples): the preprocessor 31%, the
   reader and the passes after it 30%, the parser and the attested passes 16%, memory and the kernel 21%.
 - **With `-w` musl's command takes a sixth fewer samples in the container** (section 3). Its 321 warnings are each in
   a header's function definition; a unit with one preprocesses again for its history (the preprocessor's samples fall
@@ -101,8 +102,21 @@ that `-w` turns off), the parser and the attested passes 979 (16%), `memset`, `m
 files' calls 1,311 (21%). The reduced units are preprocessed text, so their preprocessor's 291 is the floor of a unit
 that has no directive at all.
 
-The 9700X's reading of the same four commands (`scripts/emul.sh`: the units, with `-w`, the reduced units with `-w`
-and without) is queued behind the lock as this is written; its rounds go in `results/emul-root2`.
+## 4. The same four commands on the 9700X (`scripts/emul.sh`, `results/emul-root2`, 5 rounds)
+
+Each round a hold of the lock, the four in an order that rotates by round; medians, M cycles:
+
+| musl's 1,336 units, one lane, with the root image | user | kernel | all | user instructions | faults |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the units | 2,577.2 | 581.8 | 3,160.2 | 6,410.3 | 177,395 |
+| the units, `-w` | 2,221.2 | 478.4 | 2,699.6 | 5,628.8 | 152,091 |
+| the reduced units | 1,269.2 | 477.4 | 1,745.1 | 2,592.5 | 105,198 |
+| the reduced units, `-w` | 1,122.2 | 448.2 | 1,566.1 | 2,386.2 | 99,794 |
+
+- **The reduced units take 1,745 M cycles where the units take 3,160 M** (1.81 times fewer; with `-w` both, 1,566 M and
+  2,700 M). Step 2's gate, set from the first emulation before the root image, is 2,230 M.
+- **`-w` alone takes 461 M cycles off musl's command (14.6%)**, 356 M of them user: its 321 warnings, each in a header's
+  function definition. The reduced units keep fewer of those definitions, so their `-w` is worth 179 M.
 
 ## Reproducing
 
