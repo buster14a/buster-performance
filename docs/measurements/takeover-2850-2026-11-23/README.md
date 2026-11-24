@@ -595,3 +595,15 @@ hosts), which is what the claim asks.
 warm arenas' tests alone, a second a mutant): 43 mutants of the lane code, all killed, six of them only after a test
 was added (another user's file, a file that can't be mapped, the quarter's growth, the overlay not writing the file,
 the end of a refused claim, the block size).
+
+**The pull request's head, confirmed** (`summary-v2.txt`; `scripts/warm-arenas-v2.patch` on `939732da`,
+`scripts/job-warm3.sh`; the same hold): main 113.084 ms, the change without a pool 112.752 (-0.43 by round, 6/7 lower),
+with the pool **109.555: -3.640 by round, 7/7 lower**; kernel cycles -25.131 M (7/7), user +6.073 M, user instructions
++10.141 M (+921 without a pool). First compile into an empty file 134.048 ms, second 124.250. Lua's 34 files: kernel
+249.44 M to 191.05 M a pass. One object and one set of diagnostics over every run.
+
+**The suites with every compile's arenas filled.** 37 blocks of `tools/ci/correctness.tests` (the driver's 16 parts, the
+checker's 8, lanes, units, c-testsuite, the per-file jobs) run in the cloud container with `BUSTER_TEST_ARENA_FILL=1`
+in their environment, which fills the two arenas of every compile the tests run in their own process: all pass. And
+again with the scratch arena warm and filled too (an experiment's switch, `scripts/warm-arenas-v2-scratch.patch`): all
+pass.

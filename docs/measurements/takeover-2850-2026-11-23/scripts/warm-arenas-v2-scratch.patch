@@ -1,0 +1,1401 @@
+diff --git a/docs/arena-memory.md b/docs/arena-memory.md
+index 0e6f7d01..4c5286d8 100644
+--- a/docs/arena-memory.md
++++ b/docs/arena-memory.md
+@@ -456,6 +456,104 @@ Complete IR verification and SSA analysis borrow only output already pushed
+ through the owner; temporary work also pushes through that owner. They never
+ write an uncommitted tail or commit half a large reservation just to split it.
+ 
++## Warm arenas (#2850)
++
++The kernel clears every page a process touches for the first time, and a
++compile's memory is new to it each time: of sqlite3.c's 114 ms on the 9700X the
++kernel's clearing is the first single cost. A file of a tmpfs keeps its pages
++after the process that wrote them has gone, and the next process maps them as
++they are. On the 9700X, 256 MB touched for the first time took 11.4 ms as fresh
++huge pages, 9.5 ms in a file of `/dev/shm` (base pages), and 0.68 ms in a file
++of a tmpfs mounted `huge=always` that a previous process had written.
++
++A warm arena (`arena_reserve_warm`) is an arena whose memory is a part of such
++a file, mapped shared. It is off unless the command names a directory:
++
++```sh
++sudo mount -t tmpfs -o huge=always,size=2G,mode=0700,uid=$(id -u) tmpfs /path/to/pool
++BUSTER_ARENA_POOL=/path/to/pool ./build/compiler -c unit.c
++```
++
++- **The claim.** `arena_warm_begin` takes the first file of the directory,
++  `buster-arena-N` from N = 0, that no other process holds: a lock that does
++  not wait (`flock`), on up to 64 files. Compiles that run at once so take a
++  file each, and one that runs alone finds the file the last one left. A file
++  is taken only if it is a regular file of the user's own, closed to every
++  other user, on a tmpfs that gives it huge pages, which its
++  block size says (2 MB under `huge=always`): a disk's file system would write
++  the pages back, another user's file would show them the compile's memory,
++  and a file's base pages cost more to map than the process's own huge pages
++  cost to clear (sqlite3.c's compile was a sixth slower in a file of a plain
++  `/dev/shm` on a virtual machine). Where no file can be claimed, a warm
++  reservation is an ordinary arena. The claim is the command's that made it
++  (`arena_warm_begin` returns whether it did): once its warm arenas are
++  released, `arena_warm_end` closes the file, so that a process that runs
++  several commands claims for each by its own environment. A process ends its
++  lock as it exits, or at `arena_warm_unlock`, which `lane_exit_helper_start`
++  calls: the exit helper shares the address space, whose mapping of the file
++  would hold the lock until the helper had torn it down, after the next
++  compile had started. A process that a claimant forked has the descriptor
++  and not the claim: its warm reservations are ordinary arenas, since the
++  file's pages are its parent's arenas (a shared mapping is not copied on
++  write).
++- **Slots.** Each warm arena takes a slot of the file, 1 TB of offsets of its
++  own (`BUSTER_ARENA_WARM_SLOT_BYTES`; the file is sparse and holds only the
++  pages that were written), and the caller gives each of its arenas the same
++  slot in every process, so that an arena finds the pages its own last use
++  left: the reader's tokens where the reader wrote tokens. The mapping starts
++  at a huge page's boundary, as its slot does in the file, which is what the
++  kernel needs to map the file's huge pages as such. A slot holds one arena at
++  a time; a second reservation of it is an ordinary arena.
++- **Not zero.** What a warm arena holds past its length is what an earlier
++  process wrote. `arena_untouched` is false of it, so the code that takes an
++  untouched arena's bytes for zero clears for itself there (the reader's
++  columns, `check_input_run`; the run's output, `CheckOptions.fresh_output`),
++  and no other code may read a byte of a warm arena before writing it. That
++  costs sqlite3.c 10.1 million instructions, about 1 ms, against the 3.7 the
++  pages save. The compiler's output depends on none of those bytes:
++  `BUSTER_TEST_ARENA_FILL=1` writes 0xA5 over each warm arena's memory as it is
++  committed, with or without a directory, and the object must be the same.
++- **Commits.** A commit allocates its pages in the file first (`fallocate`,
++  which finds the pages a previous process left and takes the others from the
++  file system) and then makes them writable, in whole huge pages, growing by a
++  quarter where an ordinary arena's commits quadruple: what it allocates stays
++  in the file. A tmpfs without room refuses the allocation, where the first
++  touch of an unallocated page would kill the process with `SIGBUS`; the
++  arena's memory past what the file holds of it is then the process's own, as
++  an ordinary arena's, for the rest of its use. The slot, not the arena, keeps
++  how far the file is allocated and how far a fill has written, so that a
++  commit through a copy of the arena counts.
++- **Release and discards.** `arena_release` unmaps a warm arena and leaves its
++  pages in the file; it is never put in a thread's pool. `arena_discard` does
++  nothing to it, and `arena_clear` clears its bytes in place: `MADV_DONTNEED`
++  on a shared mapping drops the page table's entries and leaves the file's
++  pages as they were.
++- **What it holds.** A file only grows, to the most its slots' arenas have
++  committed, which is more than they wrote: sqlite3.c's two commit 432 MB and
++  write 130, since the reader pushes columns it fills in part. An ordinary
++  arena's committed pages cost nothing until they are written; a warm arena's
++  are allocated, so that no later touch can fail, and the second compile into
++  a file clears the ones the first left unwritten, once. The mount's `size=`
++  bounds the pool, and removing the files frees it. The files hold the memory
++  of the user's last compiles, readable by that user alone.
++
++The C driver's command reserves its arena and its output's arena warm
++(`check_driver_command`): 130 MB of sqlite3.c's. `--time-stages` reports how
++many of the command's arenas are warm (`warm-arenas`).
++
++The tests' switches: `BUSTER_TEST_ARENA_FILL=1` fills the command's warm
++arenas, with or without a directory, and `BUSTER_TEST_ARENA_BASE_PAGES=1`
++takes a directory on a tmpfs of base pages, such as `/dev/shm`, which a test
++on a host without a `huge=always` mount needs.
++
++`tools/ci/correctness.tests` compiles the frozen sqlite3.c and c-testsuite's
++programs plain and filled and compares status, diagnostics and object.
++`test-lanes` checks the claim and its refusals, the slots, the commits and a
++refused allocation, the clears and discards, another process's claim and the
++fill, each case in a process of its own ([lanes guide](commands/lanes.md));
++`test-checker-driver` compiles a unit with its arenas filled, in a pool's file
++and after another compile's bytes, and compares the objects.
++
+ ## Initial qualification
+ 
+ [Hosted qualification run 41196519751](https://github.com/buster14a/buster/actions/runs/41196519751)
+diff --git a/docs/commands/compile-time.md b/docs/commands/compile-time.md
+index 7440609b..92f33f2a 100644
+--- a/docs/commands/compile-time.md
++++ b/docs/commands/compile-time.md
+@@ -14,7 +14,9 @@ requirements. [Command index](README.md).
+   ran on (#905: `lanes-asked` and `lanes`), whether transparent huge pages were off for it (#1109: `huge-pages`, `off`,
+   `busy` or `system`; `lane.c`'s `arena_page_policy` turns them off on a virtual machine or by `BUSTER_HUGE_PAGES=0`,
+   `BUSTER_HUGE_PAGES=1` leaves them as the system has them, and `busy` means the process's arenas alone took base pages
+-  on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), how many of its
++  on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), how many of the
++  command's arenas are warm (#2850: `warm-arenas`, 2 with `BUSTER_ARENA_POOL` naming a directory whose file it could
++  claim, [arena memory](../arena-memory.md#warm-arenas-2850)), how many of its
+   units were preprocessed a second time for their expansion history (#2850: `history-replays`; a unit that says nothing
+   must read 0, since only a diagnostic or a warning's test of a macro asks for the history), the tiles its parses
+   took and the units a tile sent to be parsed as one (#2536: `parse-tiles` and `parse-tiles-refused`, for a unit parsed
+diff --git a/docs/commands/driver.md b/docs/commands/driver.md
+index 9cf2a0ab..bdcad5aa 100644
+--- a/docs/commands/driver.md
++++ b/docs/commands/driver.md
+@@ -143,6 +143,15 @@ requirements. [Command index](README.md).
+   mapped the executable's code and read-only data and asks the kernel for huge pages of the 2 MB ranges it used
+   (#2873, `lane_exit_look`; `BUSTER_EXECUTABLE_HUGE_PAGES=0` turns both off): the
+   [build guide](build.md#the-executable-in-huge-pages) has what that takes and saves.
++  `BUSTER_ARENA_POOL=DIRECTORY` has the command's arena and its output's keep their pages in a file of the directory
++  from one compile to the next (#2850, warm arenas: `lane.c`'s `arena_reserve_warm`), so that a compile finds them
++  resident where the kernel would clear fresh ones: 3.7 ms of sqlite3.c's 114 on the 9700X, with the directory on a
++  tmpfs mounted `huge=always`. Off unless the variable names a directory; a file that can't be claimed (another process
++  holds each, the directory is on no tmpfs or on one that gives base pages, the file is another user's or open to
++  others) leaves the command as without it, and so does a tmpfs that runs out of room, from the commit it refuses on.
++  The object and the diagnostics are the same either way. [Arena memory](../arena-memory.md#warm-arenas-2850) has the
++  claim, the slots and what the files hold, and the tests' switches (`BUSTER_TEST_ARENA_FILL`,
++  `BUSTER_TEST_ARENA_BASE_PAGES`).
+   The checker reads
+   a unit in source order; `--deferred-bodies` reads its function bodies apart on
+   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
+diff --git a/docs/commands/lanes.md b/docs/commands/lanes.md
+index 83ad95f6..307a130c 100644
+--- a/docs/commands/lanes.md
++++ b/docs/commands/lanes.md
+@@ -45,7 +45,28 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
+   releases (#3070, `arena_pool_writable`): an arena's writable prefix its
+   commit, its written pages freed and the arena taken again zero, a copy's
+   commit past it found, its page freed and read zero again, and without
+-  `PROCMAP_QUERY` the whole mapping's pages freed;
++  `PROCMAP_QUERY` the whole mapping's pages freed; and, each case in a child
++  of its own, warm arenas (#2850, `arena_reserve_warm`,
++  [arena memory](../arena-memory.md#warm-arenas-2850)): in a file of a tmpfs
++  (`/dev/shm`, or `$XDG_RUNTIME_DIR`; skipped with a line where neither can be
++  written), the claimed file held and closed to others, a warm arena from a
++  huge page's boundary and never untouched, the ordinary arenas a taken slot,
++  a slot past the last and a capacity of base pages get, a commit of whole
++  huge pages allocated in the file, a long clear in place, a discard that
++  unmaps nothing (no fault to read the pages again), a rewind, a slot's next
++  arena finding its last one's bytes, a refused allocation after which the
++  arena goes on in the process's own memory with its bytes kept and the
++  file's unwritten, a file that can't be mapped leaving an ordinary arena, a
++  forked process taking none of its parent's file and claiming the next for
++  itself, the unlocked file free with the claim standing, the claim's end
++  doing nothing under a reserved arena and then closing the file, and the
++  process beginning again by other flags; a
++  directory that isn't there, a file open to others, a directory of no tmpfs
++  and, without the tests' flag, one of a tmpfs's base pages (and as root
++  another user's file), each leaving ordinary arenas and ending so that the
++  process can begin again; and the fill, a commit a quarter past what is
++  committed, each commit's bytes the
++  pattern once, whichever copy of the arena commits;
+ - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
+   seven cost patterns: the parts must cover the items in lane order, and each
+   item must go to the lane whose share of the total cost holds its midpoint;
+diff --git a/src/buster/compiler/c_check_clock.c b/src/buster/compiler/c_check_clock.c
+index 4ab73f32..4a353b42 100644
+--- a/src/buster/compiler/c_check_clock.c
++++ b/src/buster/compiler/c_check_clock.c
+@@ -221,6 +221,9 @@ struct CheckClock
+     // Whether the process's arenas took base pages because the host was busy when it started (#672: lane.c's
+     // arena_pages_busy), which the driver copies in; the report says `busy` for them.
+     bool pages_busy;
++    // How many of the command's arenas are warm (#2850: lane.c's arena_reserve_warm), which the driver copies in; the
++    // report's `warm-arenas` line.
++    uint32_t warm_arenas;
+     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
+     // #1038), which the report gives on a `time-check` line; its parts' (CheckInput.expression_part_ticks, in
+     // check_clock_walk_parts' order), each on a `time-check expressions.PART` line; and the minor faults and system
+@@ -495,6 +498,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
+     // the host was busy when it started (#672), or as the system has them.
+     const bool pages_off = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1;
+     fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off ? "off" : stage_clock->pages_busy ? "busy" : "system");
++    fprintf(stream, "time-process\twarm-arenas\t%u\n", stage_clock->warm_arenas);
+     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
+     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
+     fprintf(stream, "time-process\tstage-system-status\t%s\n", stage_clock->usage_available ? "available" : "unavailable");
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index dab3456f..302656c9 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -15074,6 +15074,13 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
+ static CheckProgramLanes check_driver_lanes;
+ static bool check_driver_lanes_taken;
+ 
++// The command's warm arenas' slots (arena_reserve_warm), the same in every process, so that each finds its own pages.
++typedef enum CheckDriverWarm
++{
++    CHECK_DRIVER_WARM_ARENA,
++    CHECK_DRIVER_WARM_OUTPUT,
++} CheckDriverWarm;
++
+ // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
+ // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
+ // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
+@@ -15101,9 +15108,23 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
+     int result = 1;
+     const uint64_t reservation_bytes = UINT64_C(1) << 36;
+-    Arena arena = arena_reserve(reservation_bytes);
+-    Arena scratch = arena_reserve(reservation_bytes);
+-    Arena output_arena = arena_reserve(reservation_bytes);
++    // The command's arena and its output's are warm where BUSTER_ARENA_POOL names a directory (#2850, arena_reserve_warm):
++    // they hold what a unit's reader and its expressions' run write, 131 MB of sqlite3.c's, which a compile then finds
++    // in the file the last one left rather than in pages the kernel clears: 3.7 ms of its 114 on the 9700X. Both stages
++    // ask whether their arena is untouched before they take a byte of it for zero (CheckOptions.fresh_output,
++    // check_input_run), which a warm arena never is. The tests' switches: BUSTER_TEST_ARENA_FILL=1 has a compile find a
++    // pattern there, with or without a directory, and BUSTER_TEST_ARENA_BASE_PAGES=1 takes a directory on a tmpfs of
++    // base pages, which a compile is slower by.
++    const char* warm_directory = getenv("BUSTER_ARENA_POOL");
++    const char* warm_fill = getenv("BUSTER_TEST_ARENA_FILL");
++    const char* warm_base_pages = getenv("BUSTER_TEST_ARENA_BASE_PAGES");
++    const uint32_t warm_flags = (warm_fill != NULL && strcmp(warm_fill, "1") == 0 ? BUSTER_ARENA_WARM_FILL : 0) |
++                                (warm_base_pages != NULL && strcmp(warm_base_pages, "1") == 0 ? BUSTER_ARENA_WARM_BASE_PAGES : 0);
++    const bool warm_begun = arena_warm_begin(warm_directory != NULL && warm_directory[0] != 0 ? warm_directory : NULL, warm_flags);
++    Arena arena = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_ARENA);
++    Arena scratch = getenv("BUSTER_EXPERIMENT_WARM_SCRATCH") != NULL ? arena_reserve_warm(reservation_bytes, 2) : arena_reserve(reservation_bytes);
++    Arena output_arena = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_OUTPUT);
++    clock_storage.warm_arenas = (arena.warm != 0 ? 1 : 0) + (output_arena.warm != 0 ? 1 : 0);
+     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
+     const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
+     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
+@@ -16126,6 +16147,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         arena_release(&output_arena);
+         arena_release(&scratch);
+         arena_release(&arena);
++        // The claim this command made is its own: the process's next command makes another, by its own environment.
++        if (warm_begun)
++        {
++            arena_warm_end();
++        }
+     }
+     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+     if (default_path_checked)
+diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
+index 385e3632..7bdbdb06 100644
+--- a/src/buster/compiler/c_checker_driver_test.c
++++ b/src/buster/compiler/c_checker_driver_test.c
+@@ -7554,6 +7554,155 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
+     }
+ }
+ 
++// Warm arenas (#2850, lane.c's arena_reserve_warm): a compile's object is the same whatever its warm arenas held before
++// it. The command's two are filled with a pattern (BUSTER_TEST_ARENA_FILL), without a file and with one, and then hold
++// what that compile left (BUSTER_ARENA_POOL alone, twice: the second finds the first's own bytes), for one unit and for
++// a command of two; --time-stages says how many of the command's arenas are warm. The file's cases need a tmpfs the
++// test may write, /dev/shm, whose base pages a command takes only with the tests' switch
++// (BUSTER_TEST_ARENA_BASE_PAGES): the last case, without it, has no warm arena.
++static void check_test_driver_warm_arenas(CheckTest* test, const char* executable, const char* directory)
++{
++    static const char unit_text[] = "struct pair { int first; long second; };\n"
++                                    "enum shade { RED, GREEN = 4, BLUE };\n"
++                                    "static const char* const names[] = { \"red\", \"green\", \"blue\" };\n"
++                                    "extern int printf(const char*, ...);\n"
++                                    "static long total(const struct pair* pairs, int count)\n"
++                                    "{\n"
++                                    "    long sum = 0;\n"
++                                    "    for (int i = 0; i < count; i += 1)\n"
++                                    "    {\n"
++                                    "        sum += pairs[i].first * 3 + pairs[i].second;\n"
++                                    "    }\n"
++                                    "    return sum;\n"
++                                    "}\n"
++                                    "int shade_of(int value)\n"
++                                    "{\n"
++                                    "    switch (value & 3)\n"
++                                    "    {\n"
++                                    "    case 0: return RED;\n"
++                                    "    case 1: return GREEN;\n"
++                                    "    default: return BLUE;\n"
++                                    "    }\n"
++                                    "}\n"
++                                    "int report(int value)\n"
++                                    "{\n"
++                                    "    struct pair pairs[3] = { { value, 2 }, { 3, value }, { 5, 6 } };\n"
++                                    "    const int shade = shade_of(value);\n"
++                                    "    return printf(\"%s %ld\\n\", names[shade == GREEN ? 1 : shade == BLUE ? 2 : 0], total(pairs, 3));\n"
++                                    "}\n";
++    static const char other_text[] = "int report(int value);\nint main(void)\n{\n    return report(7) > 0 ? 0 : 1;\n}\n";
++    char* compiler = (char*)executable;
++    char source[PATH_MAX];
++    char other[PATH_MAX];
++    char pool[PATH_MAX];
++    char pool_file[PATH_MAX + 32];
++    char objects[6][PATH_MAX];
++    char others[2][PATH_MAX];
++    snprintf(source, sizeof(source), "%s/warm_unit.c", directory);
++    snprintf(other, sizeof(other), "%s/warm_other.c", directory);
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
++    {
++        snprintf(objects[i], sizeof(objects[i]), "%s/warm_unit_%u.o", directory, i);
++    }
++    const bool made = parse_test_write(source, unit_text, sizeof(unit_text) - 1) && parse_test_write(other, other_text, sizeof(other_text) - 1);
++    snprintf(pool, sizeof(pool), "/dev/shm/buster-warm-XXXXXX");
++    const bool pooled = mkdtemp(pool) != NULL;
++    snprintf(pool_file, sizeof(pool_file), "%s/buster-arena-0", pool);
++    if (!pooled)
++    {
++        printf("  warm arenas: no /dev/shm to write a file in: the file's cases are skipped\n");
++    }
++    // Whether /dev/shm gives a file huge pages, which the file's block size says: then a command takes it unasked.
++    struct stat probed = { 0 };
++    const int probe = pooled ? open(pool_file, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
++    const bool huge = probe >= 0 && fstat(probe, &probed) == 0 && probed.st_blksize >= (2 << 20);
++    if (probe >= 0)
++    {
++        close(probe);
++    }
++    // Each case's directory (or none), whether its arenas are filled, and the warm arenas its report states.
++    typedef struct CheckTestWarm CheckTestWarm;
++    struct CheckTestWarm
++    {
++        bool file;
++        bool fill;
++        bool base_pages;
++        const char* warm;
++    };
++    static const CheckTestWarm cases[] = {
++        { false, false, false, "\ntime-process\twarm-arenas\t0\n" },
++        { false, true, false, "\ntime-process\twarm-arenas\t2\n" },
++        { true, true, true, "\ntime-process\twarm-arenas\t2\n" },
++        { true, false, true, "\ntime-process\twarm-arenas\t2\n" },
++        { true, false, true, "\ntime-process\twarm-arenas\t2\n" },
++        // /dev/shm's base pages, which no command takes unasked.
++        { true, false, false, "\ntime-process\twarm-arenas\t0\n" },
++    };
++    bool same = made;
++    bool stated = made;
++    for (uint32_t c = 0; made && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
++    {
++        if (!cases[c].file || pooled)
++        {
++            char* const compile[] = { compiler, "-c", "--time-stages", "-o", objects[c], source, NULL };
++            char* text = NULL;
++            const bool switched = (cases[c].file ? setenv("BUSTER_ARENA_POOL", pool, 1) : unsetenv("BUSTER_ARENA_POOL")) == 0 &&
++                                  (cases[c].fill ? setenv("BUSTER_TEST_ARENA_FILL", "1", 1) : unsetenv("BUSTER_TEST_ARENA_FILL")) == 0 &&
++                                  setenv("BUSTER_TEST_ARENA_BASE_PAGES", cases[c].base_pages ? "1" : "0", 1) == 0;
++            const int status = switched ? check_test_driver_spawn(compile, &text) : -1;
++            const char* warm = cases[c].file && !cases[c].base_pages && huge ? cases[1].warm : cases[c].warm;
++            stated = stated && status == 0 && text != NULL && strstr(text, warm) != NULL;
++            same = same && status == 0 && (c == 0 || check_test_driver_same_files(objects[0], objects[c]));
++            if (status != 0 || text == NULL || strstr(text, warm) == NULL)
++            {
++                printf("  warm arenas: case %u: status %d: %s\n", c, status, text != NULL ? text : "");
++            }
++            free(text);
++        }
++    }
++    // The file holds what the compiles wrote, and is no other user's to read.
++    struct stat status = { 0 };
++    const bool kept = !pooled || (stat(pool_file, &status) == 0 && (status.st_mode & 0777) == 0600 && status.st_blocks != 0);
++    // A command of two units, whose lanes' arenas are their own: the command's are warm and each object is the same.
++    bool units = made;
++    for (uint32_t c = 0; made && c < 2; c += 1)
++    {
++        snprintf(others[c], sizeof(others[c]), "%s/warm_units_%u", directory, c);
++        char* const link[] = { compiler, "-o", others[c], source, other, NULL };
++        char* text = NULL;
++        const bool switched = (c == 1 && pooled ? setenv("BUSTER_ARENA_POOL", pool, 1) : unsetenv("BUSTER_ARENA_POOL")) == 0 &&
++                              (c == 1 ? setenv("BUSTER_TEST_ARENA_FILL", "1", 1) : unsetenv("BUSTER_TEST_ARENA_FILL")) == 0 &&
++                              setenv("BUSTER_TEST_ARENA_BASE_PAGES", "1", 1) == 0;
++        const int linked = switched ? check_test_driver_spawn(link, &text) : -1;
++        units = units && linked == 0 && (c == 0 || check_test_driver_same_files(others[0], others[1]));
++        if (linked != 0)
++        {
++            printf("  warm arenas: two units, case %u: status %d: %s\n", c, linked, text != NULL ? text : "");
++        }
++        free(text);
++    }
++    unsetenv("BUSTER_ARENA_POOL");
++    unsetenv("BUSTER_TEST_ARENA_FILL");
++    unsetenv("BUSTER_TEST_ARENA_BASE_PAGES");
++    check_test_expect(test, stated, "--time-stages states the command's warm arenas: none unasked, and its two with a pool's directory or a fill");
++    check_test_expect(test, same, "a unit's object is the same whatever its warm arenas held: a pattern, or what the last compile left in the pool's file");
++    check_test_expect(test, kept, "the pool's file holds what the compiles wrote, closed to other users");
++    check_test_expect(test, units, "a command of two units links the same executable with its arenas warm and filled");
++    unlink(source);
++    unlink(other);
++    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
++    {
++        unlink(objects[i]);
++    }
++    unlink(others[0]);
++    unlink(others[1]);
++    if (pooled)
++    {
++        unlink(pool_file);
++        rmdir(pool);
++    }
++}
++
+ // Exact-capacity warning sinks end at an unreadable page. Scalar scans also visit the non-warning tokens after
+ // their last output, which must never write a speculative token beyond the sink's logical extent.
+ static void check_test_driver_warning_order(CheckTest* test)
+@@ -12419,6 +12568,7 @@ static int run_checker_driver_tests(int argc, char** argv)
+             if (!lazy && check_test_driver_takes())
+             {
+                 check_test_driver_time_stages(&test, executable, directory);
++                check_test_driver_warm_arenas(&test, executable, directory);
+                 check_test_driver_cpu_pinning(&test, executable, directory);
+             }
+         }
+diff --git a/src/buster/compiler/lane.c b/src/buster/compiler/lane.c
+index 0524d36e..5f9da8c9 100644
+--- a/src/buster/compiler/lane.c
++++ b/src/buster/compiler/lane.c
+@@ -38,7 +38,8 @@
+ //     the arenas it releases for its next reservations, which take them zero-filled, their committed prefixes still
+ //     writable unless commit charge is bounded, and their mappings perhaps larger than the capacity asked for.
+ //     arena_reserve_tables lays out tables of fixed sizes that are reserved and released together in one arena, each
+-//     in the pages an arena of its own would have.
++//     in the pages an arena of its own would have. arena_reserve_warm gives an arena whose pages are a file's, which
++//     the next process finds as this one left them (warm arenas, #2850).
+ //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
+ //     scratch_end.
+ //   - Lanes: Lane, LaneGroup, LaneSession, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index,
+@@ -83,7 +84,10 @@
+ #include <sys/prctl.h>
+ #include <sys/resource.h>
+ #include <sys/auxv.h>
++#include <sys/file.h>
++#include <sys/stat.h>
+ #include <sys/syscall.h>
++#include <sys/vfs.h>
+ #include <sys/utsname.h>
+ #include <elf.h>
+ #include <linux/futex.h>
+@@ -156,6 +160,9 @@ struct Arena
+     // Whether the arena grows its mapping in place as its pushes reach past it (#1118: arena_reserve_growing), in a slot of
+     // the address space that is its own: then its mapping_bytes are all writable but its first page, and equal committed.
+     bool grows;
++    // For a warm arena (arena_reserve_warm), its slot's number and one; 0 for any other. Its bytes are never promised
++    // zero (arena_untouched), its pages are its file's to keep (arena_discard, arena_clear), and it is never pooled.
++    uint8_t warm;
+     // The requested ceiling can exceed capacity after a constrained-address-space reservation.
+     uint64_t requested_capacity;
+     // For an owned mapping, the capacity it was laid out for, at least capacity (0 for borrowed storage, including
+@@ -355,6 +362,102 @@ static __attribute__((unused)) void arena_discard_huge(Arena* arena);
+ // length if that is further: for an arena whose next users push about `kept` bytes into it again, which they then find
+ // resident rather than fault in again, cleared (#628: the C driver's scratch after the reader).
+ static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t kept, bool whole);
++// Warm arenas (#2850): arenas whose pages outlive the process. The kernel clears every page a process touches for the
++// first time, which is the first cost of a large unit's compile (sqlite3.c's writes 250 MB so); a file of a tmpfs
++// keeps its pages when the process that wrote them has gone, and the next process maps them as they are. On the 9700X,
++// 256 MB touched for the first time took 11.4 ms in fresh huge pages and 0.68 ms in a file of a tmpfs mounted
++// `huge=always`, which a previous process had written. A warm arena's memory is a part of such a file, mapped shared:
++//   - arena_warm_begin names the directory. The process claims the first file of it, `buster-arena-N` from N = 0, that
++//     no other process holds (a lock that doesn't wait: flock), up to BUSTER_ARENA_WARM_FILES of them, so that compiles
++//     that run at once take a file each and one that runs alone finds the file the last one left. A file is taken only
++//     if it is the user's own, closed to others, and a tmpfs's that gives it huge pages (mounted `huge=always`, which
++//     its block size says): a disk's file system would write the pages back, and a file's base pages cost more to map
++//     than the process's own huge pages cost to clear (BUSTER_ARENA_WARM_BASE_PAGES takes one all the same, for tests
++//     on a host without such a mount). Where none can be claimed, a warm reservation is an ordinary one. The claim is
++//     the command's that made it: arena_warm_end gives it up once the command's warm arenas are released, for a
++//     process that runs another command after it, and a process that a claimant forked takes none of the claimant's
++//     file, whose pages the two would share.
++//   - arena_reserve_warm maps its `slot` of the file, BUSTER_ARENA_WARM_SLOT_BYTES of file offsets that are its own,
++//     at an address congruent with its offset in the file by a huge page, which the kernel maps a file's huge pages at.
++//     The caller gives each of its arenas a slot, the same in every process, so that an arena finds the pages that
++//     arena's last use left.
++//   - What a warm arena holds past its length is what an earlier process wrote, never promised zero: arena_untouched is
++//     false of it, and what pushes into it clears for itself what it reads before it writes. The compiler's output
++//     depends on none of those bytes; BUSTER_ARENA_WARM_FILL has BUSTER_ARENA_WARM_PATTERN written over each warm
++//     arena's memory as it is committed, with or without a directory, for tests to find a byte that is read so.
++//   - A commit allocates its pages in the file first (fallocate, which finds those a previous process left and takes
++//     the others from the file system), and grows by a quarter where an ordinary arena's quadruples
++//     (BUSTER_ARENA_WARM_GROWTH), since what it allocates stays in the file. A file system without room refuses the
++//     allocation, where a first touch of an unallocated page would kill the process (SIGBUS): the arena's memory past
++//     what the file holds of it is then the process's own, as an ordinary arena's, for the rest of its use.
++//   - Release unmaps the arena, whose pages stay in the file; its discards (arena_discard) do nothing, and arena_clear
++//     clears its bytes in place. The file only grows, to the most its slots' arenas have committed, which is more than
++//     they wrote (sqlite3.c's two commit 432 MB and write 130): the mount's size is what bounds the pool, and removing
++//     the files frees it.
++#define BUSTER_ARENA_WARM_SLOTS 8
++#define BUSTER_ARENA_WARM_SLOT_BYTES (1ull << 40)
++#define BUSTER_ARENA_WARM_FILES 64
++#define BUSTER_ARENA_WARM_GROWTH 4
++#define BUSTER_ARENA_WARM_PATTERN 0xa5
++// arena_warm_begin's flags.
++#define BUSTER_ARENA_WARM_FILL 1u
++#define BUSTER_ARENA_WARM_BASE_PAGES 2u
++// TMPFS_MAGIC (linux/magic.h).
++#define BUSTER_ARENA_WARM_TMPFS 0x01021994
++typedef struct ArenaWarmSlot ArenaWarmSlot;
++struct ArenaWarmSlot
++{
++    // The mapping of the slot's arena, null while the slot is free, and where its start is in the file.
++    uint8_t* mapping;
++    uint64_t bytes;
++    uint64_t place;
++    // How far from the mapping's start its pages are allocated in the file, and how far its commits were filled
++    // (BUSTER_ARENA_WARM_FILL): the slot's, not the arena's, so that a commit through a copy of the arena counts.
++    uint64_t allocated;
++    uint64_t filled;
++    // Whether its memory past `allocated` is the process's own: without a file, or once the file's file system refused
++    // an allocation.
++    bool own;
++};
++typedef struct ArenaWarm ArenaWarm;
++struct ArenaWarm
++{
++    // 0 before arena_warm_begin, 1 while it runs, then 2 where warm reservations are served (a file is claimed, or
++    // the fill asked for) or 3 where they are ordinary ones.
++    uint32_t state;
++    // The slots that hold an arena, a bit each.
++    uint32_t taken;
++    // The claimed file, or -1, and the process that claimed it: one it forked has the descriptor and not the claim.
++    int file;
++    pid_t pid;
++    bool fill;
++    ArenaWarmSlot slots[BUSTER_ARENA_WARM_SLOTS];
++};
++// The process's warm arenas. main.c's units share it, as an arena that one unit's code reserves is another's to commit
++// and release.
++#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
++extern ArenaWarm arena_warm;
++#elif defined(BUSTER_UNIT)
++ArenaWarm arena_warm;
++#else
++static ArenaWarm arena_warm;
++#endif
++// Claims a file of `directory` for the process's warm arenas, if it is not null, and has their commits filled with
++// BUSTER_ARENA_WARM_FILL among `flags`. Returns whether this call began the process's warm arenas, which a call with
++// neither a directory nor the fill doesn't, nor one while an earlier call's stand: the caller it returns true to ends
++// them with arena_warm_end.
++static __attribute__((unused)) bool arena_warm_begin(const char* directory, uint32_t flags);
++// Ends what arena_warm_begin began, once the warm arenas reserved since are released (while one isn't, it does nothing):
++// the claimed file is closed, which frees it for another process, and the next arena_warm_begin begins anew.
++static __attribute__((unused)) void arena_warm_end(void);
++// arena_reserve whose memory is `slot`'s part of the process's claimed file, below BUSTER_ARENA_WARM_SLOTS; or an
++// ordinary arena where no file is claimed and no fill asked for, the slot holds an arena already, or the capacity is one
++// the address space cuts short or the base pages hold whole.
++static __attribute__((unused)) Arena arena_reserve_warm(uint64_t capacity, uint32_t slot);
++// Gives up the lock on the claimed file, whose pages the process's warm arenas no longer write: for a process to call
++// once its work is done, where its address space outlives it (lane_exit_helper_start), so that the next process finds
++// the file free.
++static __attribute__((unused)) void arena_warm_unlock(void);
+ // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
+ // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
+ // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
+@@ -1379,6 +1482,14 @@ static void arena_release(Arena* arena)
+         munmap(mapping, slot_bytes > arena->mapping_bytes ? slot_bytes : arena->mapping_bytes);
+         __atomic_store_n(&arena_slots.bytes[slot], 0, __ATOMIC_RELEASE);
+     }
++    else if (arena->base != 0 && arena->warm != 0)
++    {
++        // Unmapped, its pages left in the file, and its slot freed for the process's next reservation of it.
++        ArenaWarmSlot* slot = arena_warm.slots + (arena->warm - 1);
++        munmap(arena->base - arena->mapping_offset, arena->mapping_bytes);
++        __atomic_store_n(&slot->mapping, 0, __ATOMIC_RELEASE);
++        __atomic_fetch_and(&arena_warm.taken, ~(1u << (arena->warm - 1)), __ATOMIC_RELEASE);
++    }
+     else if (arena->base != 0 && arena->mapping_bytes != 0)
+     {
+         ArenaPool* pool = arena_pool;
+@@ -1487,6 +1598,217 @@ static void arena_unaccounted(Arena* arena, uint64_t at)
+     arena->capacity = room < arena->capacity ? room : arena->capacity;
+ }
+ 
++// Whether `bytes` are in a warm arena's mapping.
++static bool arena_warm_holds(const uint8_t* bytes)
++{
++    bool result = false;
++    for (uint32_t taken = __atomic_load_n(&arena_warm.taken, __ATOMIC_ACQUIRE); taken != 0; taken &= taken - 1)
++    {
++        const ArenaWarmSlot* slot = arena_warm.slots + __builtin_ctz(taken);
++        const uintptr_t mapping = (uintptr_t)__atomic_load_n(&slot->mapping, __ATOMIC_ACQUIRE);
++        result |= mapping != 0 && (uintptr_t)bytes - mapping < slot->bytes;
++    }
++    return result;
++}
++
++static bool arena_warm_begin(const char* directory, uint32_t flags)
++{
++    bool result = false;
++    const bool fill = (flags & BUSTER_ARENA_WARM_FILL) != 0;
++    // The block size a file must state: a huge page's on a tmpfs that gives the file huge pages.
++    const uint64_t block = (flags & BUSTER_ARENA_WARM_BASE_PAGES) != 0 ? BUSTER_ARENA_PAGE_BYTES : BUSTER_ARENA_HUGE_PAGE_BYTES;
++    uint32_t state = 0;
++    if ((directory != 0 || fill) && __atomic_compare_exchange_n(&arena_warm.state, &state, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
++    {
++        const off_t size = (off_t)(BUSTER_ARENA_WARM_SLOTS * BUSTER_ARENA_WARM_SLOT_BYTES);
++        int file = -1;
++        // A file another process holds is passed over. One that can't be taken for another reason ends the search: the
++        // directory's others would be refused for it too.
++        bool held = true;
++        for (uint32_t i = 0; directory != 0 && file < 0 && held && i < BUSTER_ARENA_WARM_FILES; i += 1)
++        {
++            char path[PATH_MAX];
++            const int length = snprintf(path, sizeof(path), "%s/buster-arena-%u", directory, i);
++            const int opened = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
++            const bool locked = opened >= 0 && flock(opened, LOCK_EX | LOCK_NB) == 0;
++            held = opened >= 0 && !locked && errno == EWOULDBLOCK;
++            struct stat status;
++            struct statfs system;
++            const bool own = locked && fstat(opened, &status) == 0 && S_ISREG(status.st_mode) && status.st_uid == geteuid() && (status.st_mode & 077) == 0 &&
++                             (uint64_t)status.st_blksize >= block && fstatfs(opened, &system) == 0 && (uint64_t)system.f_type == BUSTER_ARENA_WARM_TMPFS;
++            // Every slot's offsets are in the file, which holds only the pages that are written.
++            const bool sized = own && (status.st_size == size || ftruncate(opened, size) == 0);
++            if (sized)
++            {
++                file = opened;
++            }
++            else if (opened >= 0)
++            {
++                close(opened);
++            }
++        }
++        arena_warm.file = file;
++        arena_warm.pid = getpid();
++        arena_warm.fill = fill;
++        __atomic_store_n(&arena_warm.state, file >= 0 || fill ? 2 : 3, __ATOMIC_RELEASE);
++        result = true;
++    }
++    return result;
++}
++
++static void arena_warm_end(void)
++{
++    uint32_t state = __atomic_load_n(&arena_warm.state, __ATOMIC_ACQUIRE);
++    if ((state == 2 || state == 3) && __atomic_load_n(&arena_warm.taken, __ATOMIC_ACQUIRE) == 0 &&
++        __atomic_compare_exchange_n(&arena_warm.state, &state, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
++    {
++        if (arena_warm.file >= 0)
++        {
++            close(arena_warm.file);
++        }
++        arena_warm.file = -1;
++        __atomic_store_n(&arena_warm.state, 0, __ATOMIC_RELEASE);
++    }
++}
++
++static void arena_warm_unlock(void)
++{
++    if (__atomic_load_n(&arena_warm.state, __ATOMIC_ACQUIRE) == 2 && arena_warm.file >= 0)
++    {
++        flock(arena_warm.file, LOCK_UN);
++    }
++}
++
++static Arena arena_reserve_warm(uint64_t capacity, uint32_t slot)
++{
++    Arena result = { 0 };
++    ArenaWarm* warm = &arena_warm;
++    // Not the file of a process that forked this one: its pages are that process's arenas' too.
++    const bool served = __atomic_load_n(&warm->state, __ATOMIC_ACQUIRE) == 2 && (warm->file < 0 || warm->pid == getpid()) && slot < BUSTER_ARENA_WARM_SLOTS &&
++                        capacity > BUSTER_ARENA_SMALL_BYTES && capacity <= arena_reservation_limit() &&
++                        capacity <= BUSTER_ARENA_WARM_SLOT_BYTES - BUSTER_ARENA_HUGE_PAGE_BYTES;
++    const uint32_t bit = served ? 1u << slot : 0;
++    const bool taken = served && (__atomic_fetch_or(&warm->taken, bit, __ATOMIC_ACQ_REL) & bit) == 0;
++    if (taken)
++    {
++        // Whole huge pages from a huge page's boundary, as the file's are from its slot's first offset: reserved with one
++        // to spare, cut to them, and then the file's in their place.
++        const uint64_t bytes = (capacity + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++        const uint64_t place = (uint64_t)slot * BUSTER_ARENA_WARM_SLOT_BYTES;
++        const bool own = warm->file < 0;
++        uint8_t* region = mmap(0, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
++        uint8_t* mapping = MAP_FAILED;
++        if (region != MAP_FAILED)
++        {
++            mapping = (uint8_t*)(((uintptr_t)region + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1));
++            const uint64_t before = (uint64_t)(mapping - region);
++            if (before != 0)
++            {
++                munmap(region, before);
++            }
++            munmap(mapping + bytes, BUSTER_ARENA_HUGE_PAGE_BYTES - before);
++            if (!own && mmap(mapping, bytes, PROT_NONE, MAP_SHARED | MAP_NORESERVE | MAP_FIXED, warm->file, (off_t)place) != mapping)
++            {
++                munmap(mapping, bytes);
++                mapping = MAP_FAILED;
++            }
++        }
++        if (mapping != MAP_FAILED)
++        {
++            // The file's pages are huge where its mount gives them, or gives them to a mapping that asks; the process's
++            // own follow its arenas' (arena_pages_busy).
++            if (!own || !arena_pages_busy)
++            {
++                madvise(mapping, bytes, MADV_HUGEPAGE);
++            }
++            warm->slots[slot] = (ArenaWarmSlot){
++                .bytes = bytes,
++                .place = place,
++                .own = own,
++            };
++            __atomic_store_n(&warm->slots[slot].mapping, mapping, __ATOMIC_RELEASE);
++            result = (Arena){
++                .base = mapping,
++                .capacity = capacity,
++                .small = BUSTER_ARENA_SMALL_BYTES,
++                .huge = true,
++                .mapping_bytes = bytes,
++                .warm = (uint8_t)(slot + 1),
++                .requested_capacity = capacity,
++                .reserved = capacity,
++            };
++        }
++        else
++        {
++            __atomic_fetch_and(&warm->taken, ~bit, __ATOMIC_RELEASE);
++        }
++    }
++    if (result.base == 0)
++    {
++        result = arena_reserve(capacity);
++    }
++    return result;
++}
++
++// A warm arena's commit (above): whole huge pages, a quarter more than are committed or what the push needs, allocated
++// in the file before they are made writable.
++static bool arena_warm_commit(Arena* arena, uint64_t end)
++{
++    ArenaWarm* warm = &arena_warm;
++    ArenaWarmSlot* slot = warm->slots + (arena->warm - 1);
++    uint8_t* mapping = arena->base - arena->mapping_offset;
++    const uint64_t offset = arena->mapping_offset;
++    const uint64_t committed = arena->committed;
++    const uint64_t used = committed > offset ? committed - offset : 0;
++    uint64_t grown = used + used / BUSTER_ARENA_WARM_GROWTH;
++    grown = grown > end ? grown : end;
++    uint64_t target = (offset + grown + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
++    target = target < arena->mapping_bytes ? target : arena->mapping_bytes;
++    bool result = true;
++    if (!slot->own && target > slot->allocated)
++    {
++        // (The system call itself: its wrapper is declared only with _GNU_SOURCE.)
++        long refused = 0;
++        do
++        {
++            refused = syscall(SYS_fallocate, warm->file, 0, (off_t)(slot->place + slot->allocated), (off_t)(target - slot->allocated));
++        } while (refused != 0 && errno == EINTR);
++        if (refused == 0)
++        {
++            slot->allocated = target;
++        }
++        else
++        {
++            // The file system has no room for them: from what the file holds of the arena on, the process's own pages
++            // take the file's place. No push has been given a byte there, since every commit allocates first.
++            uint8_t* own = mapping + slot->allocated;
++            const uint64_t own_bytes = slot->bytes - slot->allocated;
++            slot->own = true;
++            result = mmap(own, own_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0) == own;
++            if (result && !arena_pages_busy)
++            {
++                madvise(own, own_bytes, MADV_HUGEPAGE);
++            }
++        }
++    }
++    result = result && mprotect(mapping + committed, target - committed, PROT_READ | PROT_WRITE) == 0;
++    if (result)
++    {
++        arena->committed = target;
++        if (warm->fill && target > slot->filled)
++        {
++            memset(mapping + slot->filled, BUSTER_ARENA_WARM_PATTERN, target - slot->filled);
++            slot->filled = target;
++        }
++    }
++    else
++    {
++        arena_failure = (ArenaFailure){ .bytes = target - committed, .error = errno, .commit = true };
++        arena_commit_refused = true;
++    }
++    return result;
++}
++
+ // The most of an arena's base pages that its first commit makes writable at once where commit charge is unbounded, and
+ // the factor its later commits grow by there (arena_commit).
+ #define BUSTER_ARENA_COMMIT_BYTES (16ull << 20)
+@@ -1516,6 +1838,10 @@ static bool arena_commit(Arena* arena, uint64_t end)
+     {
+         result = arena_grow(arena, end);
+     }
++    else if (arena->warm != 0 && needed > committed)
++    {
++        result = arena_warm_commit(arena, end);
++    }
+     else if (arena->mapping_bytes != 0 && needed > committed)
+     {
+         const uint64_t used = committed > offset ? committed - offset : 0;
+@@ -1631,7 +1957,8 @@ static void arena_clear(uint8_t* bytes, uint64_t size)
+     // The whole pages past the bytes cleared in place: given back, with the part of a page on each side of them cleared.
+     const uintptr_t begin = ((uintptr_t)bytes + kept + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+     const uintptr_t end = ((uintptr_t)bytes + size) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+-    const bool discarded = size > kept && end > begin && madvise((void*)begin, end - begin, MADV_DONTNEED) == 0;
++    // A warm arena's pages are its file's, which the advice would leave as they are.
++    const bool discarded = size > kept && end > begin && !arena_warm_holds(bytes) && madvise((void*)begin, end - begin, MADV_DONTNEED) == 0;
+     if (discarded)
+     {
+         memset(bytes, 0, begin - (uintptr_t)bytes);
+@@ -1656,14 +1983,14 @@ static void arena_rewind(Arena* arena, uint64_t length)
+ 
+ static bool arena_untouched(const Arena* arena)
+ {
+-    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
++    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->warm == 0 && arena->peak <= arena->length;
+ }
+ 
+ // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
+ // with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
+ static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
+ {
+-    if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
++    if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->warm == 0)
+     {
+         const uintptr_t base = (uintptr_t)arena->base;
+         const uint64_t kept = from > arena->length ? from : arena->length;
+@@ -4184,6 +4511,8 @@ static void lane_exit_helper_start(void)
+     if (wanted)
+     {
+         fflush(0);
++        // The helper shares the address space, in which a warm arena's mapping would hold its file's lock.
++        arena_warm_unlock();
+         const bool closed = syscall(BUSTER_LANE_EXIT_SYS_CLOSE_RANGE, 0u, ~0u, 0u) == 0;
+         lane_exit_caller = getpid();
+         // What the helper looks at of the executable once this process has gone: nothing, where a huge page maps its code.
+diff --git a/src/buster/compiler/lane_test.c b/src/buster/compiler/lane_test.c
+index d79729dd..df671cdf 100644
+--- a/src/buster/compiler/lane_test.c
++++ b/src/buster/compiler/lane_test.c
+@@ -133,9 +133,12 @@
+ #include <fcntl.h>
+ #include <dirent.h>
+ #include <errno.h>
++#include <sys/file.h>
+ #include <sys/mman.h>
++#include <sys/resource.h>
+ #include <sys/stat.h>
+ #include <sys/syscall.h>
++#include <sys/vfs.h>
+ #include <sys/wait.h>
+ #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
+ #include <execinfo.h>
+@@ -1007,6 +1010,336 @@ static void lane_test_arena_clear(LaneTestTally* tally)
+     arena_release(&arena);
+ }
+ 
++// Whether each of `count` bytes is `value`.
++static bool lane_test_bytes(const uint8_t* bytes, uint64_t count, uint8_t value)
++{
++    bool result = true;
++    for (uint64_t i = 0; i < count; i += 1)
++    {
++        result = result && bytes[i] == value;
++    }
++    return result;
++}
++
++#define BUSTER_LANE_TEST_WARM_CAPACITY (64ull << 20)
++
++// A process whose warm arenas are a file's (#2850, arena_reserve_warm), `directory` a tmpfs's: the claim and its lock;
++// what a warm reservation is, and which are ordinary ones; commits, in whole huge pages allocated in the file; clears in
++// place and discards that do nothing; a slot's next arena, which finds the bytes its last one left; a refused
++// allocation, past which the arena is the process's own memory; another process's claim, of the next file; and the
++// claim's end.
++static void lane_test_arena_warm_file_child(LaneTestTally* tally, const char* directory)
++{
++    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
++    const uint64_t huge = BUSTER_ARENA_HUGE_PAGE_BYTES;
++    const uint64_t bytes = 3 * huge + 123;
++    char path[PATH_MAX];
++    char next_path[PATH_MAX];
++    snprintf(path, sizeof(path), "%s/buster-arena-0", directory);
++    snprintf(next_path, sizeof(next_path), "%s/buster-arena-1", directory);
++    // A call with neither a directory nor the fill begins nothing; the first with one does, and a later one changes
++    // nothing while it stands.
++    const bool begun = !arena_warm_begin(0, BUSTER_ARENA_WARM_BASE_PAGES) && arena_warm.state == 0 && arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES) &&
++                       !arena_warm_begin(0, BUSTER_ARENA_WARM_FILL);
++    Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
++    const ArenaWarmSlot* slot = arena_warm.slots + 2;
++    struct stat status = { 0 };
++    const bool claimed = begun && stat(path, &status) == 0 && (status.st_mode & 0777) == 0600 && !arena_warm.fill && arena_warm.pid == getpid();
++    lane_test_expect(tally, claimed && arena.warm == 3 && ((uintptr_t)arena.base & (huge - 1)) == 0 && arena.capacity == BUSTER_LANE_TEST_WARM_CAPACITY && !arena_untouched(&arena) &&
++                                arena_warm_holds(arena.base) && arena_warm_holds(arena.base + BUSTER_LANE_TEST_WARM_CAPACITY - 1) && !arena_warm_holds(arena.base - 1) &&
++                                !arena_warm_holds(arena.base + BUSTER_LANE_TEST_WARM_CAPACITY) && slot->place == 2 * BUSTER_ARENA_WARM_SLOT_BYTES && !slot->own,
++                     "a warm arena wasn't its slot's part of the claimed file, from a huge page's boundary and never untouched");
++    // What another process's claim would meet: a second description of the file, which can't be locked.
++    const int second = open(path, O_RDWR | O_CLOEXEC);
++    lane_test_expect(tally, second >= 0 && flock(second, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK, "the claimed file wasn't held");
++    // Ordinary arenas: the slot's second, one of no slot, and one that its base pages hold.
++    Arena again = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
++    Arena past = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, BUSTER_ARENA_WARM_SLOTS);
++    Arena little = arena_reserve_warm(BUSTER_ARENA_SMALL_BYTES, 3);
++    lane_test_expect(tally, again.base != 0 && again.warm == 0 && arena_untouched(&again) && past.base != 0 && past.warm == 0 && little.base != 0 && little.warm == 0 &&
++                                arena_warm.taken == 4,
++                     "a taken slot's reservation, one past the slots or one of base pages alone wasn't an ordinary arena");
++    arena_release(&again);
++    arena_release(&past);
++    arena_release(&little);
++    // A commit: whole huge pages, allocated in the file.
++    uint8_t* memory = arena_push(&arena, bytes, 1);
++    const bool allocated = memory == arena.base && arena.committed == 4 * huge && slot->allocated == 4 * huge && fstat(arena_warm.file, &status) == 0 &&
++                           (uint64_t)status.st_blocks * 512 >= 4 * huge;
++    lane_test_expect(tally, allocated, "a warm arena's commit wasn't whole huge pages, allocated in its file");
++    if (allocated)
++    {
++        // A long stretch is cleared in place, alone: given back, a file's pages return as they were.
++        memset(memory, 0x5a, bytes);
++        const uint64_t cleared = BUSTER_ARENA_CLEAR_BYTES + 5 * page + 9;
++        arena_clear(memory + 77, cleared);
++        lane_test_expect(tally, lane_test_bytes(memory, 77, 0x5a) && lane_test_zero(memory + 77, cleared) && lane_test_bytes(memory + 77 + cleared, bytes - 77 - cleared, 0x5a),
++                         "a long stretch of a warm arena wasn't cleared, alone");
++        // A discard leaves its pages mapped: reading them takes no fault.
++        memset(memory, 0x5a, bytes);
++        arena_pop_to(&arena, huge);
++        struct rusage before = { 0 };
++        struct rusage after = { 0 };
++        const bool measured = getrusage(RUSAGE_SELF, &before) == 0;
++        arena_discard(&arena);
++        arena_discard_huge(&arena);
++        const bool kept = lane_test_bytes(memory, bytes, 0x5a);
++        lane_test_expect(tally, measured && kept && getrusage(RUSAGE_SELF, &after) == 0 && after.ru_minflt == before.ru_minflt, "a warm arena's discard unmapped its pages");
++        // A rewind clears to the peak in place, and the arena is as little untouched as before.
++        arena_rewind(&arena, page + 9);
++        lane_test_expect(tally, arena.length == page + 9 && lane_test_bytes(memory, page + 9, 0x5a) && lane_test_zero(memory + page + 9, bytes - page - 9) && !arena_untouched(&arena),
++                         "a rewound warm arena didn't keep its bytes to its length and none past it, or was untouched");
++        // The slot's next arena finds the bytes its last one left, at their places.
++        memset(memory, 0x5a, bytes);
++        memory[huge + 3] = 0x77;
++    }
++    arena_release(&arena);
++    lane_test_expect(tally, arena.base == 0 && arena_warm.taken == 0 && slot->mapping == 0 && !arena_warm_holds(memory), "a released warm arena kept its slot");
++    arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
++    memory = arena_push(&arena, bytes, 1);
++    lane_test_expect(tally, allocated && arena.warm == 3 && memory != 0 && lane_test_bytes(memory, huge + 3, 0x5a) && memory[huge + 3] == 0x77 &&
++                                lane_test_bytes(memory + huge + 4, bytes - huge - 4, 0x5a),
++                     "a slot's next arena didn't find the bytes its last one left");
++    // An allocation the file system refuses (here a descriptor in the file's place, which has none): the arena goes on
++    // in the process's own memory past what the file holds of it, which stays.
++    const int file = arena_warm.file;
++    const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
++    arena_warm.file = null;
++    uint8_t* more = memory != 0 && null >= 0 ? arena_push(&arena, 6 * huge, 1) : 0;
++    arena_warm.file = file;
++    const bool own = more != 0 && slot->own && slot->allocated == 4 * huge && arena.committed == 10 * huge && lane_test_zero(memory + 4 * huge, 5 * huge + 123);
++    lane_test_expect(tally, own, "a warm arena whose allocation was refused didn't go on in the process's own memory");
++    if (own)
++    {
++        memset(more, 0x33, 6 * huge);
++        // The file holds what was written before the refusal, and nothing of what was written after it.
++        uint8_t held = 0;
++        uint8_t past = 0xff;
++        const bool read = pread(file, &held, 1, (off_t)(slot->place + huge + 3)) == 1 && pread(file, &past, 1, (off_t)(slot->place + 5 * huge)) == 1;
++        lane_test_expect(tally, lane_test_bytes(memory, huge + 3, 0x5a) && memory[huge + 3] == 0x77 && lane_test_bytes(memory + huge + 4, bytes - huge - 4, 0x5a) &&
++                                    lane_test_bytes(more, 6 * huge, 0x33) && read && held == 0x77 && past == 0,
++                         "a warm arena that went on in the process's own memory lost its bytes, or wrote the file's");
++    }
++    arena_release(&arena);
++    // A file that can't be mapped (the same descriptor, a device's): the reservation is an ordinary arena, its slot free.
++    arena_warm.file = null;
++    Arena unmapped = null >= 0 ? arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2) : (Arena){ 0 };
++    arena_warm.file = file;
++    lane_test_expect(tally, unmapped.base != 0 && unmapped.warm == 0 && arena_untouched(&unmapped) && arena_warm.taken == 0,
++                     "a reservation whose file couldn't be mapped wasn't an ordinary arena, or kept its slot");
++    arena_release(&unmapped);
++    if (null >= 0)
++    {
++        close(null);
++    }
++    // Another process's claim: the next file, this one's being held.
++    fflush(stdout);
++    const pid_t other = fork();
++    if (other == 0)
++    {
++        // The process this one forked has its descriptor and not its claim: an ordinary arena, until it has ended what
++        // it inherited and begun for itself, which claims the next file.
++        Arena inherited = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 0);
++        const bool ordinary = inherited.base != 0 && inherited.warm == 0 && !arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES);
++        arena_release(&inherited);
++        arena_warm_end();
++        const bool again = arena_warm.state == 0 && arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES);
++        Arena its = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 0);
++        const bool next = its.warm == 1 && arena_warm.file >= 0 && fstat(arena_warm.file, &status) == 0 && stat(next_path, &status) == 0 && arena_push(&its, 16, 1) != 0;
++        _exit(ordinary && again && next ? 0 : 1);
++    }
++    int ended = 0;
++    lane_test_expect(tally, other > 0 && waitpid(other, &ended, 0) == other && WIFEXITED(ended) && WEXITSTATUS(ended) == 0,
++                     "a forked process took its parent's file, or didn't claim the next one for itself");
++    // Unlocked, the file is free for the next process, and the claim stands.
++    arena_warm_unlock();
++    lane_test_expect(tally, second >= 0 && flock(second, LOCK_EX | LOCK_NB) == 0 && flock(second, LOCK_UN) == 0 && arena_warm.state == 2, "the unlocked file stayed held");
++    // The end does nothing while a warm arena is reserved; after it, the process begins again, by other flags.
++    arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 5);
++    arena_warm_end();
++    const bool standing = arena.warm == 6 && arena_warm.state == 2 && arena_warm.file == file;
++    arena_release(&arena);
++    arena_warm_end();
++    const bool ended_claim = arena_warm.state == 0 && arena_warm.file == -1 && fcntl(file, F_GETFD) == -1;
++    Arena ordinary = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
++    const bool none = ordinary.base != 0 && ordinary.warm == 0;
++    arena_release(&ordinary);
++    const bool anew = arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES | BUSTER_ARENA_WARM_FILL) && arena_warm.state == 2 && arena_warm.fill && arena_warm.file >= 0;
++    arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
++    memory = arena_push(&arena, 16, 1);
++    lane_test_expect(tally, standing && ended_claim && none && anew && arena.warm == 3 && memory != 0 && lane_test_bytes(memory, 16, BUSTER_ARENA_WARM_PATTERN),
++                     "a claim ended under a reserved arena, or its end didn't close the file and let the process begin again");
++    arena_release(&arena);
++    arena_warm_end();
++    if (second >= 0)
++    {
++        close(second);
++    }
++    unlink(path);
++    unlink(next_path);
++}
++
++// A process whose claim finds no file to take: a directory that isn't there (`refusal` 0), a file of the directory's that
++// is open to others (1), a directory that is no tmpfs's (2), one of a tmpfs's that gives its files base pages, which
++// only the tests' flag takes (3), and a file that is another user's, which only root can make (4). Its warm
++// reservations are ordinary arenas.
++static void lane_test_arena_warm_refused_child(LaneTestTally* tally, const char* directory, uint32_t refusal)
++{
++    char path[PATH_MAX];
++    snprintf(path, sizeof(path), "%s/%s", directory, refusal == 0 ? "missing" : "buster-arena-0");
++    const int open_file = refusal == 1 || refusal == 4 ? open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
++    const bool prepared = (refusal != 1 || (open_file >= 0 && fchmod(open_file, 0644) == 0)) && (refusal != 4 || (open_file >= 0 && fchown(open_file, 65534, (gid_t)-1) == 0));
++    arena_warm_begin(refusal == 0 ? path : directory, refusal == 3 ? 0 : BUSTER_ARENA_WARM_BASE_PAGES);
++    Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 0);
++    static const char* const refusals[] = {
++        "a directory that isn't there gave a warm arena",
++        "a file that is open to others was claimed",
++        "a file of no tmpfs was claimed",
++        "a file of a tmpfs's base pages was claimed unasked",
++        "another user's file was claimed",
++    };
++    lane_test_expect(tally, prepared && arena_warm.state == 3 && arena_warm.file == -1 && arena.base != 0 && arena.warm == 0 && arena_untouched(&arena) && arena_warm.taken == 0,
++                     refusals[refusal]);
++    arena_release(&arena);
++    // The end of a claim that took no file lets the process begin again.
++    arena_warm_end();
++    lane_test_expect(tally, arena_warm.state == 0 && arena_warm_begin(0, BUSTER_ARENA_WARM_FILL) && arena_warm.state == 2, "a claim that took no file didn't end");
++    if (open_file >= 0)
++    {
++        close(open_file);
++    }
++    if (refusal != 0)
++    {
++        unlink(path);
++    }
++}
++
++// A process whose warm arenas are filled, without a file: each commit's bytes are the pattern before a push returns
++// them, once, whichever copy of the arena commits.
++static void lane_test_arena_warm_fill_child(LaneTestTally* tally)
++{
++    const uint64_t huge = BUSTER_ARENA_HUGE_PAGE_BYTES;
++    arena_warm_begin(0, BUSTER_ARENA_WARM_FILL);
++    Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 1);
++    const ArenaWarmSlot* slot = arena_warm.slots + 1;
++    // The process's own memory from the start, without a file to allocate in.
++    const bool own = arena.warm == 2 && arena_warm.file == -1 && slot->own && !arena_untouched(&arena);
++    uint8_t* memory = arena_push(&arena, huge + 5, 1);
++    const bool filled = own && memory != 0 && arena.committed == 2 * huge && slot->filled == 2 * huge && lane_test_bytes(memory, 2 * huge, BUSTER_ARENA_WARM_PATTERN);
++    lane_test_expect(tally, filled, "a filled warm arena's first commit wasn't the pattern");
++    if (filled)
++    {
++        memset(memory, 0x11, huge + 5);
++        // A copy commits past the arena, and writes there; the arena's next commit, from where its own ended, fills only
++        // what no commit has.
++        Arena copy = arena;
++        uint8_t* copied = arena_push(&copy, 3 * huge, 1);
++        const bool through = copied != 0 && copy.committed == 5 * huge && arena.committed == 2 * huge && lane_test_bytes(copied + huge - 5, 3 * huge, BUSTER_ARENA_WARM_PATTERN);
++        if (through)
++        {
++            memset(copied, 0x22, 3 * huge);
++        }
++        uint8_t* next = through ? arena_push(&arena, 5 * huge, 1) : 0;
++        lane_test_expect(tally, next == copied && next != 0 && arena.committed == 7 * huge && slot->filled == 7 * huge && lane_test_bytes(memory, huge + 5, 0x11) &&
++                                    lane_test_bytes(next, 3 * huge, 0x22) && lane_test_bytes(next + 3 * huge, 2 * huge, BUSTER_ARENA_WARM_PATTERN),
++                         "a commit after a copy's filled what the copy wrote, or left bytes of its own unfilled");
++        // A commit takes a quarter more than is committed, in whole huge pages, where the push needs less: 9 after 7.
++        const bool full = next != 0 && arena_push(&arena, 7 * huge - arena.length, 1) != 0 && arena.committed == 7 * huge;
++        lane_test_expect(tally, full && arena_push(&arena, 16, 1) != 0 && arena.committed == 9 * huge && slot->filled == 9 * huge,
++                         "a warm arena's commit didn't grow by a quarter of what was committed");
++    }
++    arena_release(&arena);
++}
++
++// The warm arenas' cases, each in a process of its own, as a process claims once: `kind` 0 is the file's, 1 to 5 the
++// refusals and 6 the fill's. One check here, that every check of the case passed.
++static void lane_test_arena_warm_case(LaneTestTally* tally, const char* directory, uint32_t kind)
++{
++    fflush(stdout);
++    const pid_t child = fork();
++    if (child == 0)
++    {
++        LaneTestTally own = { 0 };
++        if (kind == 0)
++        {
++            lane_test_arena_warm_file_child(&own, directory);
++        }
++        else if (kind < 6)
++        {
++            lane_test_arena_warm_refused_child(&own, directory, kind - 1);
++        }
++        else
++        {
++            lane_test_arena_warm_fill_child(&own);
++        }
++        fflush(stdout);
++        _exit(own.failures == 0 && own.checks != 0 ? 0 : 1);
++    }
++    int status = 0;
++    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
++    lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of a process's warm arenas failed in their process");
++}
++
++// Warm arenas (#2850). The file's cases need a tmpfs the tests may write: /dev/shm, or the user's runtime directory.
++// The case of a directory that is no tmpfs's takes the tests' temporary directory, where that is none.
++static void lane_test_arena_warm(LaneTestTally* tally)
++{
++    char directory[PATH_MAX];
++    const char* runtime = getenv("XDG_RUNTIME_DIR");
++    struct statfs system = { 0 };
++    snprintf(directory, sizeof(directory), "/dev/shm/buster-warm-XXXXXX");
++    bool made = mkdtemp(directory) != 0;
++    if (!made && runtime != 0 && runtime[0] != 0)
++    {
++        snprintf(directory, sizeof(directory), "%s/buster-warm-XXXXXX", runtime);
++        made = mkdtemp(directory) != 0;
++    }
++    if (made && statfs(directory, &system) == 0 && (uint64_t)system.f_type == BUSTER_ARENA_WARM_TMPFS)
++    {
++        lane_test_arena_warm_case(tally, directory, 0);
++        lane_test_arena_warm_case(tally, directory, 1);
++        lane_test_arena_warm_case(tally, directory, 2);
++        // Where the tmpfs gives a file base pages, which the file's block size says, no claim takes it unasked.
++        char probe[PATH_MAX];
++        struct stat status = { 0 };
++        snprintf(probe, sizeof(probe), "%s/probe", directory);
++        const int probed = open(probe, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
++        const bool base_pages = probed >= 0 && fstat(probed, &status) == 0 && (uint64_t)status.st_blksize < BUSTER_ARENA_HUGE_PAGE_BYTES;
++        if (probed >= 0)
++        {
++            close(probed);
++            unlink(probe);
++        }
++        if (base_pages)
++        {
++            lane_test_arena_warm_case(tally, directory, 4);
++        }
++        if (geteuid() == 0)
++        {
++            lane_test_arena_warm_case(tally, directory, 5);
++        }
++    }
++    else
++    {
++        printf("  arenas: no tmpfs to write a file in: the warm arenas' file checks are skipped\n");
++    }
++    if (made)
++    {
++        rmdir(directory);
++    }
++    char other[PATH_MAX];
++    snprintf(other, sizeof(other), "%s/buster-warm-XXXXXX", oracle_temporary_directory());
++    if (mkdtemp(other) != 0)
++    {
++        if (statfs(other, &system) == 0 && (uint64_t)system.f_type != BUSTER_ARENA_WARM_TMPFS)
++        {
++            lane_test_arena_warm_case(tally, other, 3);
++        }
++        rmdir(other);
++    }
++    lane_test_arena_warm_case(tally, directory, 6);
++}
++
+ static bool lane_test_arenas(void)
+ {
+     LaneTestTally tally = { 0 };
+@@ -1014,6 +1347,7 @@ static bool lane_test_arenas(void)
+     lane_test_arena_regions(&tally);
+     lane_test_arena_pool_writable(&tally);
+     lane_test_arena_clear(&tally);
++    lane_test_arena_warm(&tally);
+ 
+     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
+     static const struct
+diff --git a/tools/ci/correctness.tests b/tools/ci/correctness.tests
+index c6cf10ef..12266ad0 100644
+--- a/tools/ci/correctness.tests
++++ b/tools/ci/correctness.tests
+@@ -169,6 +169,31 @@ mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
+ test "${#host_flags[@]}" -gt 0
+ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
+ ./build/test-driver-multicore "$BUSTER_COMPILER"
++== Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
++# #2850: a warm arena (lane.c's arena_reserve_warm, docs/arena-memory.md) holds an earlier compile's bytes where an
++# ordinary arena's are zero, so code that read a byte of one before writing it would give an object that depends on
++# them. BUSTER_TEST_ARENA_FILL=1 has the command's warm arenas hold a pattern instead: each unit's status, diagnostics
++# and object must be the plain compile's.
++unset CPATH C_INCLUDE_PATH
++directory=$(mktemp -d build/warm-arenas.XXXXXX)
++trap 'rm -rf "$directory"' EXIT
++test -f "$BUSTER_CORPUS/sqlite/sqlite3.c"
++test -f build/c-testsuite/tests/single-exec/00001.c
++compiled=0
++for source in "$BUSTER_CORPUS/sqlite/sqlite3.c" build/c-testsuite/tests/single-exec/*.c; do
++    plain=0
++    filled=0
++    "$BUSTER_COMPILER" -c -o "$directory/plain.o" "$source" > "$directory/plain.txt" 2>&1 || plain=$?
++    BUSTER_TEST_ARENA_FILL=1 "$BUSTER_COMPILER" -c -o "$directory/filled.o" "$source" > "$directory/filled.txt" 2>&1 || filled=$?
++    test "$plain" -eq "$filled" || { echo "$source: status $plain plain and $filled filled"; exit 1; }
++    cmp "$directory/plain.txt" "$directory/filled.txt" || { echo "$source: the diagnostics differ"; exit 1; }
++    if [ "$plain" -eq 0 ]; then
++        cmp "$directory/plain.o" "$directory/filled.o" || { echo "$source: the objects differ"; exit 1; }
++        compiled=$((compiled + 1))
++    fi
++done
++echo "warm arenas filled: $compiled units' objects are the plain compiles'"
++test "$compiled" -ge 200
+ == Test c-testsuite's programs end to end [4 CPUs]
+ # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
+ # the scalar twins, these with the identifiers' ids in another order (#153's --id-order), into the same bytes,
+diff --git a/tools/ci/costs/native-address-O3.costs b/tools/ci/costs/native-address-O3.costs
+index 186455d6..518dc3d0 100644
+--- a/tools/ci/costs/native-address-O3.costs
++++ b/tools/ci/costs/native-address-O3.costs
+@@ -31,6 +31,7 @@
+ #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -237,6 +238,7 @@
+ 99.4 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 231.2 Test the driver's commands of several source files [8 CPUs]
+ 58.0 Test mixed-tier single- and multi-file determinism [8 CPUs]
++17.7 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 168.9 Test c-testsuite's programs end to end [4 CPUs]
+ 226.6 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 17.7 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/native-memory-O3.costs b/tools/ci/costs/native-memory-O3.costs
+index 2d5714d9..3b73a679 100644
+--- a/tools/ci/costs/native-memory-O3.costs
++++ b/tools/ci/costs/native-memory-O3.costs
+@@ -33,6 +33,7 @@
+ #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -239,6 +240,7 @@
+ 87.2 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 296.8 Test the driver's commands of several source files [8 CPUs]
+ 207.8 Test mixed-tier single- and multi-file determinism [8 CPUs]
++35.6 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 149.7 Test c-testsuite's programs end to end [4 CPUs]
+ 516.3 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 35.6 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/native-none-O3.costs b/tools/ci/costs/native-none-O3.costs
+index 7b56ff33..0adfd5f9 100644
+--- a/tools/ci/costs/native-none-O3.costs
++++ b/tools/ci/costs/native-none-O3.costs
+@@ -33,6 +33,7 @@
+ #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -239,6 +240,7 @@
+ 6.6 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 57.6 Test the driver's commands of several source files [8 CPUs]
+ 18.4 Test mixed-tier single- and multi-file determinism [8 CPUs]
++9.9 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 33.1 Test c-testsuite's programs end to end [4 CPUs]
+ 41.1 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 9.9 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/native-thread-O3.costs b/tools/ci/costs/native-thread-O3.costs
+index 03247add..fadcb3e0 100644
+--- a/tools/ci/costs/native-thread-O3.costs
++++ b/tools/ci/costs/native-thread-O3.costs
+@@ -32,6 +32,7 @@
+ #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -238,6 +239,7 @@
+ 96.8 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 309.6 Test the driver's commands of several source files [8 CPUs]
+ 156.8 Test mixed-tier single- and multi-file determinism [8 CPUs]
++34.3 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 189.5 Test c-testsuite's programs end to end [4 CPUs]
+ 449.8 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 34.3 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/vector-address-O3.costs b/tools/ci/costs/vector-address-O3.costs
+index 373544a4..9dd701fc 100644
+--- a/tools/ci/costs/vector-address-O3.costs
++++ b/tools/ci/costs/vector-address-O3.costs
+@@ -27,6 +27,7 @@
+ #: cpu 7 0.81 INTEL(R) XEON(R) PLATINUM 8573C
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -233,6 +234,7 @@
+ 93.0 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 263.4 Test the driver's commands of several source files [8 CPUs]
+ 62.4 Test mixed-tier single- and multi-file determinism [8 CPUs]
++15.0 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 155.2 Test c-testsuite's programs end to end [4 CPUs]
+ 226.6 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 15.0 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/vector-memory-O3.costs b/tools/ci/costs/vector-memory-O3.costs
+index 75d5ccde..15022438 100644
+--- a/tools/ci/costs/vector-memory-O3.costs
++++ b/tools/ci/costs/vector-memory-O3.costs
+@@ -28,6 +28,7 @@
+ #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -234,6 +235,7 @@
+ 74.1 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 216.3 Test the driver's commands of several source files [8 CPUs]
+ 118.7 Test mixed-tier single- and multi-file determinism [8 CPUs]
++25.9 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 133.7 Test c-testsuite's programs end to end [4 CPUs]
+ 453.8 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 25.9 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/vector-none-O3.costs b/tools/ci/costs/vector-none-O3.costs
+index 01cf845f..c94bc458 100644
+--- a/tools/ci/costs/vector-none-O3.costs
++++ b/tools/ci/costs/vector-none-O3.costs
+@@ -27,6 +27,7 @@
+ #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -233,6 +234,7 @@
+ 7.3 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 56.3 Test the driver's commands of several source files [8 CPUs]
+ 19.5 Test mixed-tier single- and multi-file determinism [8 CPUs]
++8.6 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 33.1 Test c-testsuite's programs end to end [4 CPUs]
+ 40.4 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 8.6 Test -S of c-testsuite's programs against -c and GNU as
+diff --git a/tools/ci/costs/vector-thread-O3.costs b/tools/ci/costs/vector-thread-O3.costs
+index 37ec53dc..5b664ad3 100644
+--- a/tools/ci/costs/vector-thread-O3.costs
++++ b/tools/ci/costs/vector-thread-O3.costs
+@@ -28,6 +28,7 @@
+ #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+ #: unmeasured Test the early driver feedback corpus
+ #: unmeasured Test deterministic work and growth contracts [1 CPU]
++#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+ #: unmeasured Test the caret display against clang
+ #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+@@ -234,6 +235,7 @@
+ 98.0 Compile c-testsuite's programs as the units of one command [8 CPUs]
+ 270.9 Test the driver's commands of several source files [8 CPUs]
+ 152.4 Test mixed-tier single- and multi-file determinism [8 CPUs]
++23.7 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+ 202.0 Test c-testsuite's programs end to end [4 CPUs]
+ 498.0 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+ 23.7 Test -S of c-testsuite's programs against -c and GNU as
