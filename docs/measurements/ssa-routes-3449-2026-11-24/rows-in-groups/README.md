@@ -2,8 +2,10 @@
 
 buster#3449 asks for the dense SSA constructor to handle large functions within bounded memory, so that the bounded
 construction (`ssa_construct_bounded`, Braun et al.'s on-demand reads) can go. This record is its first piece: the
-constructor's exit rows (`last`, a u32 a block and local) become a buffer of at most 256 KiB, a group of chunks of 16
-locals for every reachable block, taken a group at a time. Base: buster main `c61e37a11447e379f959c396b6d7abd2c99516f4`.
+constructor's exit rows (`last`, a u32 a block and local) become a buffer of a group of chunks of 16 locals for every
+reachable block, taken a group at a time: at most 256 KiB, or one 64-byte chunk a reachable block where that is more.
+The rows are 64 bytes a reachable block a chunk whatever the local count, so a narrow function's buffer can be larger
+than main's `last` was (16 times for a 1-local function); the 0-64-cell bin below covers those functions. Base: buster main `c61e37a11447e379f959c396b6d7abd2c99516f4`.
 
 ## Census (cloud container, indicative only)
 
@@ -57,6 +59,8 @@ r7, by bin of cells (whole promotion, ratio to the base; the control is the base
 test-ssa (which builds every generated CFG with its rows in groups of one chunk, 128 bytes and 1 KiB, and compares them
 with the one group's phis and replacements), test-ssa-ir, test-ssa-source over c-testsuite's subset and
 `test-ssa-source --generate 48` (`mutation/run.py`). test-ssa kills 13 of 15 (g01 to g08, g10 to g13, g15); g00 is the
-unchanged control. Two survive as equivalent: g09 lets an exposed read take a lane one past its group, which the next
-group (that read's own) always overwrites, and no slot sits past the last group; g14 makes a group one chunk wider,
-with the buffer sized from the same group, so only the 256 KiB budget is passed. `mutation/results.txt` has the round.
+unchanged control. Two survived: g09 is equivalent (it lets an exposed read take a lane one past its group, which the
+next group, that read's own, always overwrites; no slot sits past the last group); g14 made a group one chunk wider,
+with the buffer sized from the same group, passing only the budget. After #3511's review, test-ssa checks the buffer
+against its bound at each budget (`SsaWork.row_bytes`), and g14 fails it (4 checks). `mutation/results.txt` has the
+round.
