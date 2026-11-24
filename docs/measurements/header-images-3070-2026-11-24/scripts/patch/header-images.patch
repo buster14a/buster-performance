@@ -1,0 +1,3004 @@
+diff --git a/src/buster/compiler/c_check_repair.c b/src/buster/compiler/c_check_repair.c
+index f7348764..f735de46 100644
+--- a/src/buster/compiler/c_check_repair.c
++++ b/src/buster/compiler/c_check_repair.c
+@@ -60,6 +60,9 @@ static Preprocessor* check_repair_preprocessor(Preprocessor* original, Arena* ou
+     if (view != 0)
+     {
+         *view = *original;
++        // (Nor does the view make or take the lane's header images, which are its unit's own preprocessor's.)
++        view->images = 0;
++        view->image_recording = false;
+         const uint32_t count = original->output.count;
+         view->output = (PPTokens)
+         {
+diff --git a/src/buster/compiler/c_check_units_test.c b/src/buster/compiler/c_check_units_test.c
+index b03479a2..f60168a4 100644
+--- a/src/buster/compiler/c_check_units_test.c
++++ b/src/buster/compiler/c_check_units_test.c
+@@ -1623,6 +1623,218 @@ static void check_units_test_root_image(CheckUnitsTestTally* tally, const char*
+            (uint32_t)BUSTER_ARRAY_LENGTH(commands));
+ }
+ 
++// The count before `label` in the header images' report line of `errors` (--time-stages), or UINT64_MAX without one.
++static uint64_t check_units_test_images_count(const char* errors, const char* label)
++{
++    uint64_t result = UINT64_MAX;
++    const char* line = errors != NULL ? strstr(errors, "header images: ") : NULL;
++    const char* end = line != NULL ? strchr(line, '\n') : NULL;
++    const char* at = line != NULL ? strstr(line, label) : NULL;
++    if (at != NULL && end != NULL && at < end)
++    {
++        // The number that ends right before the label.
++        const char* digits = at;
++        while (digits > line && digits[-1] >= '0' && digits[-1] <= '9')
++        {
++            digits -= 1;
++        }
++        result = digits < at ? strtoull(digits, NULL, 10) : UINT64_MAX;
++    }
++    return result;
++}
++
++// #3070's header images (--header-images, PPImages): units that read two headers under the same macros and under
++// others compile to the objects and the diagnostics each has alone, with the images taken (on), with each segment
++// compared with the image its key has (verify), and by several lanes; a lane's later units take the images its earlier
++// ones made; a fault in an image (BUSTER_TEST_IMAGE_DIRT) fails verify's command; and without a root image there are none.
++static void check_units_test_header_images(CheckUnitsTestTally* tally, const char* executable, const char* directory)
++{
++    // A guarded header that reads a macro of its includer's, defines macros (one pastes, one stringizes) and is read
++    // once; and one without a guard, read under other macros each time, whose inclusion of the first is inside a
++    // condition it leaves open.
++    static const char first[] = "#ifndef IMAGES_FIRST_H\n"
++                                "#define IMAGES_FIRST_H\n"
++                                "#pragma once\n"
++                                "#ifdef IMAGES_WIDE\n"
++                                "typedef long images_word;\n"
++                                "#define IMAGES_BITS 64\n"
++                                "#else\n"
++                                "typedef int images_word;\n"
++                                "#define IMAGES_BITS 32\n"
++                                "#endif\n"
++                                "#define IMAGES_JOIN(a, b) a##b\n"
++                                "#define IMAGES_TEXT(text) #text\n"
++                                "#define IMAGES_DECLARE(name) images_word IMAGES_JOIN(images_get_, name)(images_word)\n"
++                                "IMAGES_DECLARE(first);\n"
++                                "IMAGES_DECLARE(IMAGES_BITS);\n"
++                                "static const char images_text[] = IMAGES_TEXT(IMAGES_BITS bits);\n"
++                                "#endif\n";
++    static const char second[] = "#if defined(IMAGES_NEED_PAIR) && !defined(IMAGES_HAVE_PAIR)\n"
++                                 "#define IMAGES_HAVE_PAIR 1\n"
++                                 "#include \"images_first.h\"\n"
++                                 "typedef struct images_pair { images_word left; images_word right; } images_pair;\n"
++                                 "#endif\n"
++                                 "#if defined(IMAGES_NEED_FLOAT) && !defined(IMAGES_HAVE_FLOAT)\n"
++                                 "#define IMAGES_HAVE_FLOAT __FLT_EVAL_METHOD__\n"
++                                 "typedef double images_float;\n"
++                                 "#endif\n"
++                                 "#undef IMAGES_NEED_PAIR\n"
++                                 "#undef IMAGES_NEED_FLOAT\n";
++    // Two headers that ask the second for one thing each: the macro it reads is theirs, the same definition in every unit
++    // (a macro a unit's own file defines is another definition in each, and its readers' images are that unit's alone).
++    static const char pair[] = "#define IMAGES_NEED_PAIR\n#include \"images_second.h\"\n";
++    static const char real[] = "#define IMAGES_NEED_FLOAT\n#include \"images_second.h\"\n";
++    // The units: %u is each one's number, %s what it defines before its headers.
++    static const char unit[] = "%s"
++                               "#include \"images_pair.h\"\n"
++                               "#include \"images_float.h\"\n"
++                               "#include \"images_first.h\"\n"
++                               "images_word images_unit_%u(images_pair pair, images_float real)\n"
++                               "{\n"
++                               "    return images_get_first(pair.left) + (images_word)real + IMAGES_BITS + IMAGES_HAVE_FLOAT + images_text[%u] + (images_word)sizeof(images_word);\n"
++                               "}\n";
++    static const char* const before[] = { "", "", "#define IMAGES_WIDE\n", "", "#define IMAGES_WIDE\n", "#define images_get_first images_get_other\n" };
++    enum { units = BUSTER_ARRAY_LENGTH(before) };
++    char root[PATH_MAX];
++    char alone[PATH_MAX];
++    char together[PATH_MAX];
++    char errors_path[PATH_MAX];
++    char path[PATH_MAX];
++    char text[2048];
++    char names[units][24];
++    snprintf(root, sizeof(root), "%s/images", directory);
++    snprintf(alone, sizeof(alone), "%s/images/alone", directory);
++    snprintf(together, sizeof(together), "%s/images/together", directory);
++    snprintf(errors_path, sizeof(errors_path), "%s/images/errors.txt", directory);
++    bool written = mkdir(root, 0755) == 0 && mkdir(alone, 0755) == 0 && mkdir(together, 0755) == 0;
++    snprintf(path, sizeof(path), "%s/images_first.h", root);
++    written = written && parse_test_write(path, first, strlen(first));
++    snprintf(path, sizeof(path), "%s/images_second.h", root);
++    written = written && parse_test_write(path, second, strlen(second));
++    snprintf(path, sizeof(path), "%s/images_pair.h", root);
++    written = written && parse_test_write(path, pair, strlen(pair));
++    snprintf(path, sizeof(path), "%s/images_float.h", root);
++    written = written && parse_test_write(path, real, strlen(real));
++    for (uint32_t u = 0; written && u < units; u += 1)
++    {
++        snprintf(text, sizeof(text), unit, before[u], u, u % 4);
++        snprintf(names[u], sizeof(names[u]), "../images_%u.c", u);
++        snprintf(path, sizeof(path), "%s/images_%u.c", root, u);
++        written = parse_test_write(path, text, strlen(text));
++    }
++    check_units_test_expect(tally, written, "write the header images' units", root);
++    // Each unit alone: its object, and its diagnostics (none).
++    bool compiled = written;
++    for (uint32_t u = 0; compiled && u < units; u += 1)
++    {
++        char* arguments[] = { (char*)executable, "-c", names[u], NULL };
++        compiled = check_units_test_run(alone, arguments, "/dev/null", errors_path, false) == 0;
++    }
++    check_units_test_expect(tally, compiled, "the header images' units compile alone", root);
++    // The commands: the mode, the lanes, and whether the report must say that segments were taken or verified.
++    static const struct
++    {
++        const char* name;
++        const char* mode;
++        const char* lanes;
++        const char* root;
++        bool taken;
++        bool verified;
++        bool reported;
++    } commands[] = {
++        { "the images taken", "--header-images=on", "1", "--root-image=on", true, false, true },
++        { "each segment compared with its image", "--header-images=verify", "1", "--root-image=on", false, true, true },
++        { "the images taken by several lanes", "--header-images=on", "3", "--root-image=on", false, false, true },
++        { "no images", "--header-images=off", "1", "--root-image=on", false, false, false },
++        { "no images without a root image", "--header-images=on", "1", "--root-image=off", false, false, false },
++    };
++    for (uint32_t c = 0; compiled && c < BUSTER_ARRAY_LENGTH(commands); c += 1)
++    {
++        char* arguments[16 + units];
++        uint32_t used = 0;
++        arguments[used++] = (char*)executable;
++        arguments[used++] = "-c";
++        arguments[used++] = "--time-stages";
++        arguments[used++] = "--lanes";
++        arguments[used++] = (char*)commands[c].lanes;
++        arguments[used++] = (char*)commands[c].root;
++        arguments[used++] = (char*)commands[c].mode;
++        for (uint32_t u = 0; u < units; u += 1)
++        {
++            arguments[used++] = names[u];
++        }
++        arguments[used] = NULL;
++        const int status = check_units_test_run(together, arguments, "/dev/null", errors_path, false);
++        uint64_t length = 0;
++        char* report = check_units_test_read(errors_path, &length);
++        check_units_test_expect(tally, status == 0, "a command of the header images' units succeeds", commands[c].name);
++        const uint64_t taken = check_units_test_images_count(report, " taken (");
++        const uint64_t recorded = check_units_test_images_count(report, " recorded (");
++        const uint64_t verified = check_units_test_images_count(report, " (");
++        const uint64_t differed = check_units_test_images_count(report, " differed");
++        (void)verified;
++        if (!commands[c].reported)
++        {
++            check_units_test_expect(tally, report != NULL && strstr(report, "header images: ") == NULL, "a command without header images reports none", commands[c].name);
++        }
++        else
++        {
++            check_units_test_expect(tally, recorded != UINT64_MAX && recorded != 0 && differed == 0, "its lanes record images, and none differs", commands[c].name);
++        }
++        if (commands[c].taken)
++        {
++            // One lane: three of the units read the headers under the same macros, so two of them take the first's images,
++            // and the two that define IMAGES_WIDE share theirs.
++            check_units_test_expect(tally, taken != UINT64_MAX && taken >= 12, "a lane's later units take its earlier units' images", commands[c].name);
++        }
++        if (commands[c].verified)
++        {
++            check_units_test_expect(tally, report != NULL && strstr(report, "verified 0 (") == NULL && taken == 0, "verify takes none and compares those it has",
++                                    commands[c].name);
++        }
++        free(report);
++        for (uint32_t u = 0; u < units; u += 1)
++        {
++            char object[32];
++            char in_command[PATH_MAX];
++            char by_itself[PATH_MAX];
++            snprintf(object, sizeof(object), "images_%u.o", u);
++            snprintf(in_command, sizeof(in_command), "%s/%s", together, object);
++            snprintf(by_itself, sizeof(by_itself), "%s/%s", alone, object);
++            check_units_test_expect(tally, check_test_driver_same_files(in_command, by_itself), "a unit's object in the command is its object alone", commands[c].name);
++            unlink(in_command);
++        }
++    }
++    // Verify itself: each kind of fault in a new image (BUSTER_TEST_IMAGE_DIRT, pp_image_test_dirt) fails the unit that
++    // reaches its key next, with the check's message; without the fault the command succeeds; and a command that takes
++    // images reads no fault.
++    static const char dirt[] = "kfvlrmwcedgos";
++    for (uint32_t d = 0; compiled && d <= strlen(dirt); d += 1)
++    {
++        char value[2] = { dirt[d], 0 };
++        const bool set = d == strlen(dirt) ? unsetenv("BUSTER_TEST_IMAGE_DIRT") == 0 : setenv("BUSTER_TEST_IMAGE_DIRT", value, 1) == 0;
++        char* checked[] = { (char*)executable, "-c", "--lanes", "1", "--header-images=verify", names[0], names[1], names[2], names[3], NULL };
++        const int status = set ? check_units_test_run(together, checked, "/dev/null", errors_path, false) : -1;
++        uint64_t length = 0;
++        char* diagnostics = check_units_test_read(errors_path, &length);
++        const bool reported = diagnostics != NULL && strstr(diagnostics, "fatal error: a header's segment differs from its image") != NULL;
++        check_units_test_expect(tally, d == strlen(dirt) ? status == 0 && !reported : status == 1 && reported,
++                                "verify reports an image that isn't what its segment did, and nothing without one", d == strlen(dirt) ? "no fault" : value);
++        free(diagnostics);
++    }
++    const bool unread = compiled && setenv("BUSTER_TEST_IMAGE_DIRT", "v", 1) == 0;
++    char* taking[] = { (char*)executable, "-c", "--lanes", "1", "--header-images=on", names[0], names[1], names[2], names[3], NULL };
++    check_units_test_expect(tally, !compiled || (unread && check_units_test_run(together, taking, "/dev/null", errors_path, false) == 0),
++                            "a command that takes images reads no fault", NULL);
++    unsetenv("BUSTER_TEST_IMAGE_DIRT");
++    // An option's value that is none of on, off and verify is refused.
++    char* refused[] = { (char*)executable, "-c", "--header-images=sometimes", names[0], names[1], NULL };
++    const int refusal = compiled ? check_units_test_run(together, refused, "/dev/null", errors_path, false) : 1;
++    check_units_test_expect(tally, refusal != 0, "--header-images takes on, off or verify alone", NULL);
++    printf("  header images: %u commands' units, objects as alone, the images taken and verified, and %u faults verify reports\n", (uint32_t)BUSTER_ARRAY_LENGTH(commands),
++           (uint32_t)strlen(dirt));
++}
++
+ // A few large units (see the file's comment), in a directory of its own under `directory`: the count that the command's
+ // --shared-parts report gives after `prefix` (the shared parts', or the lanes' that left their memory to the exit), or
+ // `missing` without one.
+@@ -3084,6 +3296,7 @@ static int run_check_units_tests(int argc, char** argv)
+         check_units_test_fatals(&tally, executable, directory);
+         check_units_test_preprocessed(&tally, executable, directory);
+         check_units_test_root_image(&tally, executable, directory);
++        check_units_test_header_images(&tally, executable, directory);
+         check_units_test_refusals(&tally, executable, directory);
+         check_units_test_merge(&tally, executable, directory);
+         check_units_test_selectany(&tally, executable, clang, directory);
+diff --git a/src/buster/compiler/c_checker_driver.c b/src/buster/compiler/c_checker_driver.c
+index dd86d03b..6c976237 100644
+--- a/src/buster/compiler/c_checker_driver.c
++++ b/src/buster/compiler/c_checker_driver.c
+@@ -12153,6 +12153,10 @@ struct CheckDriverCommand
+     // predefines and the command line for their later units to start from (PPRoot); on unless the option says off, which
+     // is how the tests and the measurements compare a command with it and without.
+     bool root_image;
++    // --header-images=on|off|verify (#3070 step 2): whether those lanes keep an image of each header segment their
++    // units run, for their later units to take (PPImages, a PPImagesMode); with verify none is taken, and a segment
++    // whose image a lane has is compared with it.
++    uint8_t header_images;
+     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
+     // they differ, reported on stderr (check_driver_selection_census).
+     bool selection_census;
+@@ -15165,6 +15169,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     bool poison_arenas = false;
+     bool root_image = true;
+     bool invalid_root_image = false;
++    uint8_t header_images = PP_IMAGES_OFF;
++    bool invalid_header_images = false;
+     bool selection_census = false;
+     bool provisional_selection = false;
+     bool windowed_loop = false;
+@@ -15630,6 +15636,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+             root_image = strcmp(mode, "off") != 0;
+             invalid_root_image |= strcmp(mode, "on") != 0 && strcmp(mode, "off") != 0;
+         }
++        else if (match.joined == C_OPTION_HEADER_IMAGES_EQ)
++        {
++            const char* mode = arguments[i] + 16;
++            header_images = strcmp(mode, "on") == 0 ? PP_IMAGES_ON : strcmp(mode, "verify") == 0 ? PP_IMAGES_VERIFY : PP_IMAGES_OFF;
++            invalid_header_images |= strcmp(mode, "on") != 0 && strcmp(mode, "off") != 0 && strcmp(mode, "verify") != 0;
++        }
+         else if (match.joined == C_OPTION_ATTESTED_EQ)
+         {
+             const char* mode = arguments[i] + 11;
+@@ -15812,7 +15824,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
+     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
+     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && !pie_conflict && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
+-                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_root_image && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
++                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_root_image && !invalid_header_images && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+     if (parsed && (stdin_count > 1 || invalid_stdin))
+     {
+         fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
+@@ -15952,6 +15964,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+         .id_order = id_order,
+         .poison_arenas = poison_arenas,
+         .root_image = root_image,
++        .header_images = header_images,
+         .selection_census = selection_census,
+         .provisional_selection = provisional_selection,
+         .windowed_loop = windowed_loop,
+@@ -16023,7 +16036,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
+     }
+     else if (!parsed)
+     {
+-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--node-bodies] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--root-image=on|off] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
++        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--node-bodies] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--root-image=on|off] [--header-images=on|off|verify] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
+         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
+     }
+diff --git a/src/buster/compiler/c_checker_units.c b/src/buster/compiler/c_checker_units.c
+index c4a742bd..29768ed9 100644
+--- a/src/buster/compiler/c_checker_units.c
++++ b/src/buster/compiler/c_checker_units.c
+@@ -158,6 +158,8 @@ struct CheckUnitsLane
+     // back at their release. Made with the lane's memory and released with it; null with --root-image=off, or where it
+     // couldn't be reserved, and then every unit starts and releases its preprocessor as a command of one unit does.
+     PPRoot* root;
++    // Whether its root's header images' counts are reported at its release (--time-stages).
++    bool images_report;
+     // Its counts, kept past its release for --time-stages' report (check_units_root_counts).
+     uint64_t root_counts[CHECK_UNITS_ROOT_COUNTS];
+ };
+@@ -2229,6 +2231,9 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
+         {
+             lane->root->verify = command->poison_arenas;
+             lane->root->poison = command->poison_arenas ? BUSTER_CHECK_UNITS_POISON : 0;
++            // Its header images (#3070 step 2), the root's.
++            pp_root_images(lane->root, command->header_images);
++            lane->images_report = command->options.timing;
+         }
+     }
+     return lane->ready;
+@@ -2258,6 +2263,10 @@ static void check_units_lane_release(CheckUnitsLane* lane)
+ {
+     // The root's image names the table's ids and the cache's records: before them.
+     check_units_root_counts(lane, lane->root_counts);
++    if (lane->root != NULL && lane->root->images != NULL && lane->images_report)
++    {
++        pp_images_report(lane->root->images, stderr);
++    }
+     pp_root_release(lane->root);
+     lane->root = NULL;
+     file_cache_release(&lane->cache);
+@@ -2398,6 +2407,14 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane,
+             unit->status = 1;
+             unit->fatal = true;
+         }
++        // --header-images=verify's check (PPImages): a segment that differs from the image its key has fails the unit.
++        if (lane->root != NULL && lane->root->images != NULL && lane->root->images->mismatches != 0)
++        {
++            fprintf(errors, "fatal error: a header's segment differs from its image (%u segments): %s\n", lane->root->images->mismatches, lane->root->images->mismatch);
++            lane->root->images->mismatches = 0;
++            unit->status = 1;
++            unit->fatal = true;
++        }
+         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
+         if (command->helper_report != NULL)
+         {
+@@ -2924,6 +2941,14 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs,
+                 }
+                 fprintf(stderr, "root images: %" PRIu64 " captured, %" PRIu64 " dropped, %" PRIu64 " starts from one\n", roots[CHECK_UNITS_ROOT_CAPTURES],
+                         roots[CHECK_UNITS_ROOT_DROPS], roots[CHECK_UNITS_ROOT_RESUMES]);
++                // (And the header images of a lane that still has its root: the others reported theirs at their release.)
++                for (uint32_t l = 0; l < active; l += 1)
++                {
++                    if (states[l].root != NULL && states[l].root->images != NULL)
++                    {
++                        pp_images_report(states[l].root->images, stderr);
++                    }
++                }
+             }
+             if (command->units_memory != 0)
+             {
+diff --git a/src/buster/compiler/c_option_table.c b/src/buster/compiler/c_option_table.c
+index 4ac7349b..0eb531d3 100644
+--- a/src/buster/compiler/c_option_table.c
++++ b/src/buster/compiler/c_option_table.c
+@@ -49,6 +49,7 @@
+     ENTRY(DUMP_TYPED, "--dump-typed") \
+     ENTRY(EMBED_DIR_EQ, "--embed-dir=") \
+     ENTRY(EMIT_WINDOW_EQ, "--emit-window=") \
++    ENTRY(HEADER_IMAGES_EQ, "--header-images=") \
+     ENTRY(HELPER_FORMS_EQ, "--helper-forms=") \
+     ENTRY(HELPER_REPORT, "--helper-report") \
+     ENTRY(ID_ORDER, "--id-order") \
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index a604eaa2..c2528a58 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -303,6 +303,7 @@ struct PPSearchDirectories
+ 
+ // A units lane's root image (below, after Preprocessor): what PPOptions.root names.
+ typedef struct PPRoot PPRoot;
++typedef struct PPImages PPImages;
+ 
+ typedef struct PPOptions PPOptions;
+ struct PPOptions
+@@ -1973,6 +1974,14 @@ struct Preprocessor
+     bool root_unrestorable;
+     // The most items a macro's compile has written (pp_compile_macro), which can be past item_count.
+     uint32_t item_peak;
++    // The lane's header images this unit makes and takes (#3070 step 2, PPImages), or null: its root's, for a unit that
++    // started from the root or was captured as it. `image_recording`: a segment is being recorded, so every macro lookup,
++    // macro write and generated spelling is logged (pp_image_log_read and the others). `images_blocked`: the unit did
++    // something no image's key covers (a pushed or popped macro, a poisoned name, a diagnostic pragma), and makes and
++    // takes none from then on.
++    PPImages* images;
++    bool image_recording;
++    bool images_blocked;
+ };
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
+@@ -2075,6 +2084,9 @@ struct PPRoot
+     uint32_t ids;
+     const PPMacroId* macro_of;
+     const uint64_t* is_macro;
++    // The lane's header images (#3070 step 2), or null: its owner's choice (pp_root_images). They name the image's
++    // macros by their ids, so a root that is dropped drops them.
++    PPImages* images;
+ };
+ 
+ // A root, empty, in an arena of its own; null if it can't be reserved. Its owner gives it to its units' options, one unit
+@@ -2086,6 +2098,294 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_root_release(PPRoot* r
+ // caller then releases.
+ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_root_park(Preprocessor* pp);
+ 
++// ---------------------------------------------------------------------------------------------------------------------
++// Header images (#3070 step 2; docs/translation-units.md, "Header images")
++//
++// A command's units include the same headers, and each unit's preprocessor ran every one of them again: its
++// conditions, its definitions and its expansions, over tokens the file cache had lexed once. On the 9700X that is most
++// of the preprocessor's 18% of musl's command (buster-performance's docs/measurements/header-work-3070-2026-11-23).
++//
++// A segment is a file's processing from its entry, or from its return from a nested inclusion, to its next inclusion or
++// its end: what it does is a function of where it starts (the file's record, the token, the conditions open, the
++// inclusion's system level) and of the macros it looks up before it sets them. A lane's images (PPImages, its root's)
++// keep, for each start and each set of answers to those lookups, what the segment did: the tokens it put out, the
++// macros it set, the conditions it left open and where it stopped. A unit that reaches a start with the same answers
++// (pp_image_find walks them, a name a step) appends the image's tokens and applies its effects (pp_image_apply)
++// instead of running the segment. The unit's stream is then what it would have been, token for token.
++//
++// What a key names a macro's definition by (an identity): nothing; the root image's macro id, for the predefines' and
++// the command line's, which every unit of the lane has under the same id; or the cache record of the file that defines
++// it and the place of its name there, which hold the same tokens in every unit. So only a unit started from the root
++// makes or takes images.
++//
++// A segment is never recorded where its run is more than that function (PPImageReason): it reported or weighed a
++// diagnostic, read a directive or a builtin that depends on the unit (#line, #pragma, __FILE__, __COUNTER__, ...),
++// began or ended with anything open, or changed any state of the preprocessor that an image doesn't hold: the
++// recorder compares the Preprocessor before and after against the fields it knows (pp_image_state_same), so that what
++// it doesn't know refuses the image rather than being lost.
++//
++// PPImagesMode: `on` takes hits; `verify` takes none, records every segment, and compares a segment whose key an image
++// has with that image (a difference is counted, and fails the unit as a root's mismatch does).
++
++typedef enum PPImagesMode
++{
++    PP_IMAGES_OFF,
++    PP_IMAGES_ON,
++    PP_IMAGES_VERIFY,
++} PPImagesMode;
++
++// Why a segment wasn't recorded (the first that held), or that it was.
++typedef enum PPImageReason
++{
++    PP_IMAGE_RECORDED,
++    // A diagnostic was given, or a warning's severity depended on more than the command line.
++    PP_IMAGE_DIAGNOSTIC,
++    // A directive other than a definition, an #undef, a condition or #pragma once.
++    PP_IMAGE_DIRECTIVE,
++    // A builtin macro whose answer depends on the unit, the place or the time.
++    PP_IMAGE_BUILTIN,
++    // Something was open at its start or its end: a capture, an invocation, pending flags, a context that isn't plain.
++    PP_IMAGE_OPEN,
++    // The preprocessor's state changed in a field no image holds (PPImages.state_offset says which).
++    PP_IMAGE_STATE,
++    // A token's place is in no range an image can name, or its spelling in another range than its place.
++    PP_IMAGE_PLACE,
++    // A macro it looked up has no identity (defined in a buffer of the unit's own).
++    PP_IMAGE_IDENTITY,
++    // The recorder's logs or the lane's store had no room.
++    PP_IMAGE_ROOM,
++    // Its key disagrees with the keys already under its start: the lookups' order differed.
++    PP_IMAGE_ORDER,
++    PP_IMAGE_REASONS,
++} PPImageReason;
++
++typedef struct PPImage PPImage;
++
++// Where two images of one start part: a unit whose answers are `from`'s up to its key `depth`, and `identity` there, has
++// `to`'s up to there and at it. A slot of the lane's table of them (PPImages.branches), empty where `from` is null.
++typedef struct PPImageBranch PPImageBranch;
++struct PPImageBranch
++{
++    const PPImage* from;
++    PPImage* to;
++    uint64_t identity;
++    uint32_t depth;
++};
++
++// Where a segment starts: the file's cache record, its token and next directive there, the inclusion's system level,
++// whether its guard's group was taken, and the conditions open above the file's base (how many, and three bits each:
++// taken, its #else read, skipping). `first` is the first image made for it, from which the others branch.
++typedef struct PPImageStart PPImageStart;
++struct PPImageStart
++{
++    PPImageStart* next;
++    uint32_t record;
++    uint32_t position;
++    uint32_t next_directive;
++    uint32_t conditional_count;
++    uint64_t conditionals;
++    uint8_t system;
++    bool guard_taken;
++    PPImage* first;
++};
++
++// A name the segment looked up before setting it, and the identity of what it had.
++typedef struct PPImageKey PPImageKey;
++struct PPImageKey
++{
++    uint64_t identity;
++    IdentId name;
++};
++
++// A generated spelling the segment made (pp_scratch_in), in order: `length` bytes at `offset` of the image's spelling
++// bytes, for the clean scratch space or the other.
++typedef struct PPImageSpelling PPImageSpelling;
++struct PPImageSpelling
++{
++    uint32_t offset;
++    uint32_t length;
++    bool clean;
++};
++
++// A macro name's last write in the segment: its record among the image's (an index + 1), or 0 for an #undef.
++typedef struct PPImageWrite PPImageWrite;
++struct PPImageWrite
++{
++    IdentId name;
++    uint32_t macro;
++};
++
++// A condition the segment left open: its flags, and its place from the file's start.
++typedef struct PPImageConditional PPImageConditional;
++struct PPImageConditional
++{
++    uint32_t location;
++    bool taken;
++    bool seen_else;
++    bool skipping;
++};
++
++// A use of __FLT_EVAL_METHOD__ the segment recorded (PPEvalMethodUse): the output's tokens before it, counted from the
++// segment's first, and where its name is, from the base `ref` names as a token's place is.
++typedef struct PPImageUse PPImageUse;
++struct PPImageUse
++{
++    uint32_t position;
++    uint32_t location;
++    uint32_t ref;
++};
++
++// What a segment did. Its tokens' values (for a token that isn't a name) and places are offsets from a base that
++// `refs` names: 0 none (a root range's location, the same in every unit), 1 the inclusion's own range, then for each
++// of `foreign_count` a key macro's defining range (`foreign_keys`: its place in `keys`), then each spelling's place.
++struct PPImage
++{
++    // Its keys, in the order the segment looked them up: each name, and the identity it had (eight entries' slack past
++    // them, which pp_image_keys_differ's whole loads read).
++    const IdentId* key_names;
++    const uint64_t* key_identities;
++    uint32_t key_count;
++    uint32_t token_count;
++    const uint8_t* kinds;
++    const uint8_t* flags;
++    const uint32_t* values;
++    const uint32_t* locations;
++    const uint16_t* refs;
++    uint32_t foreign_count;
++    const uint32_t* foreign_keys;
++    uint32_t spelling_count;
++    const PPImageSpelling* spellings;
++    const uint8_t* spelling_bytes;
++    uint32_t spelling_byte_count;
++    // The macro records it made, as their definitions left them (data and base zero, their place from the file's
++    // start), the names' last writes, and how many writes there were (macro_epoch's steps).
++    uint32_t macro_count;
++    const PPMacro* macros;
++    uint32_t write_count;
++    const PPImageWrite* writes;
++    uint32_t epoch_steps;
++    uint32_t conditional_count;
++    const PPImageConditional* conditionals;
++    uint32_t use_count;
++    const PPImageUse* uses;
++    // Its file's cache record (its macros' identities'), where it stopped, whether its guard's group was taken by then,
++    // and whether it read #pragma once.
++    uint32_t record;
++    uint32_t end_position;
++    uint32_t end_directive;
++    bool end_guard_taken;
++    bool once;
++    // Why the segment made no image (a PPImageReason), where its keys are all it holds: a unit that reaches them runs
++    // the segment without recording it again.
++    uint8_t refused;
++    // How many units took it.
++    uint64_t hits;
++};
++
++// The recorder's log of a segment, in order: a lookup (the name and the macro it had), or with BUSTER_PP_IMAGE_WRITE a
++// write (the name and the macro it got).
++#define BUSTER_PP_IMAGE_WRITE (1u << 31)
++typedef struct PPImageEvent PPImageEvent;
++struct PPImageEvent
++{
++    IdentId name;
++    uint32_t macro;
++};
++_Static_assert(sizeof(PPImageEvent) == 8, "the run's logger stores an event as a quadword: the name low, the macro high");
++
++#define BUSTER_PP_IMAGES_BYTES (1ull << 32)
++#define BUSTER_PP_IMAGE_STARTS (1u << 12)
++// The branches' table's slots: an image past the first of its start has one, so the lane keeps at most half as many.
++#define BUSTER_PP_IMAGE_BRANCHES (1u << 16)
++#define BUSTER_PP_IMAGE_EVENTS (1u << 20)
++#define BUSTER_PP_IMAGE_SPELLINGS (1u << 14)
++#define BUSTER_PP_IMAGE_SPELLING_BYTES (1u << 20)
++#define BUSTER_PP_IMAGE_MACROS (1u << 14)
++#define BUSTER_PP_IMAGE_CONDITIONALS 20u
++#define BUSTER_PP_IMAGE_USES 16u
++// The macro records whose identities a lane's images keep (PPImages.identities): one past them has none.
++#define BUSTER_PP_IMAGE_IDENTITIES (1u << 20)
++// A segment's most base references: a halfword each (PPImage.refs).
++#define BUSTER_PP_IMAGE_REFS 4096u
++
++struct PPImages
++{
++    uint8_t mode;
++    // The root's macros when its images began: an id below it is its own identity. And its ranges, whose locations are
++    // every unit's, but for what a unit spells in the root's last scratch chunks past what the root had used of them
++    // (`root_scratch`, the chunks' ranges, and `root_spelled`).
++    uint32_t root_macros;
++    uint32_t root_ranges;
++    uint32_t root_scratch[2];
++    uint32_t root_spelled[2];
++    // The store: the starts' table, the keys' steps, the images and the recorder's buffers.
++    Arena storage;
++    uint64_t fixed;
++    PPImageStart** starts;
++    PPImageBranch* branches;
++    uint32_t branch_count;
++    uint64_t image_count;
++    // The bytes of Preprocessor a segment may change (pp_image_state_mask).
++    uint8_t* state_mask;
++    // Each macro record's identity in the unit under way, by its id: the root's are theirs for good, and a unit's are
++    // written as it makes each record (pp_new_macro, pp_define, pp_image_apply), so that a key's step is two loads.
++    uint64_t* identities;
++    // The segment under way: where it starts, the image its key has (verify), the preprocessor and the context before
++    // it, the log, the spellings and the fresh macro records, and why it can't be an image, if anything.
++    PPImageStart start;
++    bool start_valid;
++    uint8_t reason;
++    PPImage* known;
++    uint32_t context;
++    Preprocessor* before;
++    PPContext before_context;
++    uint32_t before_tokens;
++    bool before_once;
++    PPImageEvent* events;
++    uint32_t event_count;
++    PPImageSpelling* spellings;
++    uint32_t* spelling_places;
++    uint32_t spelling_count;
++    uint8_t* spelling_bytes;
++    uint32_t spelling_byte_count;
++    uint32_t chunks;
++    PPMacro* macros;
++    uint32_t macro_first;
++    uint32_t macro_count;
++    // Whether the log lost a lookup, and the segment's uses of __FLT_EVAL_METHOD__ (their positions from its first token).
++    bool overflow;
++    PPImageUse uses[BUSTER_PP_IMAGE_USES];
++    uint32_t use_count;
++    // The first field whose change refused an image, by its offset in Preprocessor (PP_IMAGE_STATE), for the report.
++    uint32_t state_offset;
++    uint64_t state_offsets[8];
++    uint64_t state_counts[8];
++    // The counts: segments begun, those an image was taken for and their tokens, those recorded and their tokens, those
++    // refused by reason and their tokens, the keys' names walked, and verify's segments that had an image and those that
++    // differed from it.
++    uint64_t segments;
++    uint64_t hits;
++    uint64_t hit_tokens;
++    uint64_t recorded;
++    uint64_t recorded_tokens;
++    uint64_t refused[PP_IMAGE_REASONS];
++    uint64_t refused_tokens[PP_IMAGE_REASONS];
++    uint64_t unstarted;
++    uint64_t declined;
++    uint64_t names_walked;
++    uint64_t verified;
++    uint64_t verified_tokens;
++    uint64_t differed;
++    uint32_t mismatches;
++    char mismatch[192];
++};
++
++// Gives `root` images of `mode` (PPImagesMode), for its owner; without them, or where they can't be reserved, its units
++// run as without images. Before its first unit.
++BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_root_images(PPRoot* root, uint8_t mode);
++// The lane's images' counts, for --time-stages: what its units took, recorded and refused, by reason.
++BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_images_report(const PPImages* images, FILE* stream);
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // Token stacks
+ 
+diff --git a/src/buster/compiler/c_preprocessor_history_impl.c b/src/buster/compiler/c_preprocessor_history_impl.c
+index e5193323..11577cab 100644
+--- a/src/buster/compiler/c_preprocessor_history_impl.c
++++ b/src/buster/compiler/c_preprocessor_history_impl.c
+@@ -1584,6 +1584,7 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
+ 
+ static __attribute__((format(printf, 5, 6))) void pp_diagnose_note(Preprocessor* pp, PPSeverity severity, uint32_t location, const PPDiagnosticNote* note, const char* format, ...)
+ {
++    pp_image_refuse(pp, PP_IMAGE_DIAGNOSTIC);
+     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
+     severity = always ? PP_SEVERITY_WARNING : severity;
+     const PPSeverity requested = severity;
+@@ -1631,6 +1632,7 @@ static void pp_diagnose_source_location(Preprocessor* pp, PPSeverity severity, u
+                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const PPDiagnosticSourceNote* placed, uint32_t placed_count,
+                                         const char* format, va_list arguments)
+ {
++    pp_image_refuse(pp, PP_IMAGE_DIAGNOSTIC);
+     // The notes' places are the output's (pp_release_output).
+     pp_output_ensure(pp);
+     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
+@@ -1862,6 +1864,7 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused, format(printf, 8, 9))) void pp_
+ static __attribute__((format(printf, 6, 7))) void pp_diagnose_notes(Preprocessor* pp, PPSeverity severity, uint32_t location, const PPDiagnosticSourceNote* notes, uint32_t note_count,
+                                                                    const char* format, ...)
+ {
++    pp_image_refuse(pp, PP_IMAGE_DIAGNOSTIC);
+     const PPSeverity requested = severity;
+     const bool visible = severity != PP_SEVERITY_WARNING || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0);
+     bool limited = false;
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index f36e19f0..abf52d86 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -57,6 +57,81 @@ static bool pp_tokens_reserve(PPTokens* tokens, uint32_t capacity)
+     return tokens->columns.base != 0;
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------------------
++// Header images: the recorder's hooks (#3070 step 2). The images themselves are after the root image's.
++
++static void pp_image_begin(Preprocessor* pp, PPContext* context);
++static void pp_image_end(Preprocessor* pp, PPContext* context);
++
++// A root macro's identity is its id with this bit; a macro defined in a buffer of the unit's own has none.
++#define BUSTER_PP_IMAGE_ROOT_MACRO (1ull << 63)
++#define BUSTER_PP_IMAGE_NO_IDENTITY UINT64_MAX
++
++// Refuses the segment being recorded, for the first reason given.
++BUSTER_INLINE void pp_image_refuse(const Preprocessor* pp, PPImageReason reason)
++{
++    if (BUSTER_UNLIKELY(pp->image_recording) && pp->images->reason == PP_IMAGE_RECORDED)
++    {
++        pp->images->reason = (uint8_t)reason;
++    }
++}
++
++// A unit that did what no image's key covers makes and takes no image from then on (Preprocessor.images_blocked).
++BUSTER_INLINE void pp_image_block(Preprocessor* pp)
++{
++    pp_image_refuse(pp, PP_IMAGE_DIRECTIVE);
++    pp->images_blocked = true;
++}
++
++// Logs a lookup of `name`, which has `macro`, or with BUSTER_PP_IMAGE_WRITE in it a write.
++static __attribute__((noinline, cold)) void pp_image_log(const Preprocessor* pp, IdentId name, uint32_t macro)
++{
++    PPImages* images = pp->images;
++    if (images->event_count < BUSTER_PP_IMAGE_EVENTS)
++    {
++        images->events[images->event_count] = (PPImageEvent){ .name = name, .macro = macro };
++        images->event_count += 1;
++    }
++    else
++    {
++        images->overflow = true;
++        pp_image_refuse(pp, PP_IMAGE_ROOM);
++    }
++}
++
++// Logs a lookup of each identifier among tokens [begin, end) of `kinds` and `values` (a file's, whose kinds have the
++// line starts' bit above `kind_mask`'s 0x7F, or a buffer's, whose kinds are whole), with the macro it has: the tokens a run's kernel tested (pp_copy_file_run_vector,
++// pp_copy_buffer_run_vector), which doesn't log them one by one. Eight at a time: the names' macros gathered, each pair
++// a quadword, the identifiers' compressed in a register and stored whole (the log has eight events' slack).
++static __attribute__((noinline, cold)) void pp_image_log_run(const Preprocessor* pp, const uint8_t* kinds, uint8_t kind_mask, const uint32_t* values, uint32_t begin,
++                                                             uint32_t end)
++{
++    PPImages* images = pp->images;
++    uint32_t count = images->event_count;
++    bool room = true;
++    for (uint32_t i = begin; room && i < end; i += 8)
++    {
++        const __mmask8 valid = end - i >= 8 ? 0xFF : (__mmask8)_bzhi_u32(0xFF, end - i);
++        const __m128i tokens = _mm_and_si128(_mm_maskz_loadu_epi8(valid, kinds + i), _mm_set1_epi8((char)kind_mask));
++        const __mmask8 identifiers = (__mmask8)_mm_mask_cmpeq_epi8_mask(valid, tokens, _mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++        room = count + 8 <= BUSTER_PP_IMAGE_EVENTS;
++        if (identifiers != 0 && room)
++        {
++            const __m256i names = _mm256_maskz_loadu_epi32(identifiers, values + i);
++            const __m256i macros = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), identifiers, names, pp->macro_of, 4);
++            const __m512i pairs = _mm512_or_si512(_mm512_cvtepu32_epi64(names), _mm512_slli_epi64(_mm512_cvtepu32_epi64(macros), 32));
++            _mm512_storeu_si512(images->events + count, _mm512_maskz_compress_epi64(identifiers, pairs));
++            count += (uint32_t)__builtin_popcount(identifiers);
++        }
++    }
++    images->event_count = count;
++    if (!room)
++    {
++        images->overflow = true;
++        pp_image_refuse(pp, PP_IMAGE_ROOM);
++    }
++}
++
+ BUSTER_INLINE void pp_tokens_set(PPTokens* tokens, uint32_t index, uint8_t kind, uint8_t flags, uint32_t value, uint32_t location)
+ {
+     tokens->kinds[index] = kind;
+@@ -69,6 +144,7 @@ BUSTER_INLINE void pp_tokens_set(PPTokens* tokens, uint32_t index, uint8_t kind,
+ // The cutoff has no source location or notes; once fatal, later errors and warnings contribute neither text nor counts.
+ static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* limited)
+ {
++    pp_image_refuse(pp, PP_IMAGE_DIAGNOSTIC);
+     // A source pragma's error, or a command-line warning whose complete policy was already resolved, is MAPPED_ERROR
+     // and keeps its ordinary error severity under -Wfatal-errors; every other error becomes fatal below. It has no
+     // effect on warnings, and the error budget can't cut in first: the diagnostic is already fatal.
+@@ -116,6 +192,8 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(con
+ 
+ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose(Preprocessor* pp, PPSeverity severity, uint32_t location, const char* format, ...)
+ {
++    // A diagnostic, given or not (a warning's place decides): none of it is a header image's (#3070).
++    pp_image_refuse(pp, PP_IMAGE_DIAGNOSTIC);
+     const bool always = severity == PP_SEVERITY_WARNING_ALWAYS;
+     severity = always ? PP_SEVERITY_WARNING : severity;
+     const PPSeverity requested = severity;
+@@ -352,6 +430,12 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint3
+     const PPWarningKind* info = pp_warnings + warning;
+     PPSeverity result = pp_warning_command_read(pp, warning);
+     const uint8_t mapping = pp->warning_mappings[warning];
++    // A warning the command line ignores and no pragma maps is ignored in every unit; any other's severity depends on
++    // where it is, which a header image's key doesn't name (#3070).
++    if (result != BUSTER_PP_IGNORED || mapping != PP_PRAGMA_MAPPING_NONE)
++    {
++        pp_image_refuse(pp, PP_IMAGE_DIAGNOSTIC);
++    }
+     result = mapping == PP_PRAGMA_MAPPING_IGNORED ? BUSTER_PP_IGNORED : mapping == PP_PRAGMA_MAPPING_WARNING ? PP_SEVERITY_WARNING :
+              mapping == PP_PRAGMA_MAPPING_ERROR ? PP_SEVERITY_MAPPED_ERROR : mapping == PP_PRAGMA_MAPPING_FATAL ? PP_SEVERITY_MAPPED_FATAL : result;
+     const bool seen = !pp->options.suppress_warnings && (info->system || pp_diagnostic_warning_visible(pp, location, location != 0 ? pp->diagnostic_origin : 0));
+@@ -510,6 +594,26 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnose_empty_unit(Pr
+     }
+ }
+ 
++// A generated spelling of a segment being recorded (#3070's header images): its bytes, kept in order, the place it got,
++// and whether it took a new chunk's range.
++static __attribute__((noinline, cold)) void pp_image_log_spelling(Preprocessor* pp, const uint8_t* bytes, uint32_t length, bool clean, uint32_t place, uint32_t chunks)
++{
++    PPImages* images = pp->images;
++    if (place != 0 && images->spelling_count < BUSTER_PP_IMAGE_SPELLINGS && (uint64_t)images->spelling_byte_count + length <= BUSTER_PP_IMAGE_SPELLING_BYTES)
++    {
++        images->spellings[images->spelling_count] = (PPImageSpelling){ .offset = images->spelling_byte_count, .length = length, .clean = clean };
++        images->spelling_places[images->spelling_count] = place;
++        memcpy(images->spelling_bytes + images->spelling_byte_count, bytes, length);
++        images->spelling_count += 1;
++        images->spelling_byte_count += length;
++        images->chunks += chunks;
++    }
++    else
++    {
++        pp_image_refuse(pp, PP_IMAGE_ROOM);
++    }
++}
++
+ // Copies `length` bytes into the scratch space, and returns their location (or 0 and a fatal error). A zero byte follows
+ // them, so that an identifier spelled there ends where its spelling does when it is read as written
+ // (pp_identifier_as_written), rather than running into the next spelling.
+@@ -518,6 +622,7 @@ static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t l
+     uint32_t result = 0;
+     uint32_t* current = &pp->scratch_range[clean];
+     uint32_t* used = &pp->scratch_used[clean];
++    const uint32_t ranges = pp->range_count;
+     if (*current == BUSTER_PP_NONE || *used + length >= pp->ranges[*current].length - 1)
+     {
+         const uint32_t chunk = length >= BUSTER_PP_SCRATCH_CHUNK_BYTES ? length + 1 : BUSTER_PP_SCRATCH_CHUNK_BYTES;
+@@ -537,6 +642,10 @@ static uint32_t pp_scratch_in(Preprocessor* pp, const uint8_t* bytes, uint32_t l
+         result = range->base + *used;
+         *used += length + 1;
+     }
++    if (BUSTER_UNLIKELY(pp->image_recording))
++    {
++        pp_image_log_spelling(pp, bytes, length, clean, result, pp->range_count - ranges);
++    }
+     return result;
+ }
+ 
+@@ -959,11 +1068,55 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t
+ 
+ // Whether `id` names a macro, by the cached name bits. Poisoned names and `defined` also have records: both must stop a
+ // run, although pp_is_defined does not consider them definitions.
+-BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
++BUSTER_INLINE bool pp_is_macro_bit(const Preprocessor* pp, IdentId id)
+ {
+     return (pp->is_macro[id / 64] >> (id % 64)) & 1;
+ }
+ 
++// pp_is_macro_bit, logged for a segment being recorded (#3070's header images): every lookup but the runs' kernels',
++// whose callers log a run's names at once (pp_image_log_run).
++BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
++{
++    if (BUSTER_UNLIKELY(pp->image_recording))
++    {
++        pp_image_log(pp, id, pp->macro_of[id]);
++    }
++    return pp_is_macro_bit(pp, id);
++}
++
++// `id`'s macro (0 for none), for a reader that hasn't asked pp_is_macro of it: logged as that is.
++BUSTER_INLINE PPMacroId pp_macro_read(const Preprocessor* pp, IdentId id)
++{
++    const PPMacroId result = pp->macro_of[id];
++    if (BUSTER_UNLIKELY(pp->image_recording))
++    {
++        pp_image_log(pp, id, result);
++    }
++    return result;
++}
++
++// A write of `name`'s macro in a segment being recorded: logged, and a record the segment made is kept as it is now,
++// which is as its definition left it (pp_define sets the name right after it fills the record).
++static __attribute__((noinline, cold)) void pp_image_log_write(Preprocessor* pp, IdentId name, PPMacroId macro)
++{
++    PPImages* images = pp->images;
++    pp_image_log(pp, name, macro | BUSTER_PP_IMAGE_WRITE);
++    if (macro >= images->macro_first)
++    {
++        const uint32_t index = macro - images->macro_first;
++        if (index == images->macro_count && index < BUSTER_PP_IMAGE_MACROS)
++        {
++            images->macros[index] = pp->macros[macro];
++            images->macro_count += 1;
++        }
++        else
++        {
++            // A record the segment made out of order, or one too many.
++            pp_image_refuse(pp, index < BUSTER_PP_IMAGE_MACROS ? PP_IMAGE_STATE : PP_IMAGE_ROOM);
++        }
++    }
++}
++
+ // Sets `name`'s macro (0 for none: a poisoned name then gets its own record back, as pp_poison makes it).
+ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
+ {
+@@ -984,6 +1137,10 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
+     {
+         pp->is_macro[name / 64] &= ~(1ull << (name % 64));
+     }
++    if (BUSTER_UNLIKELY(pp->image_recording))
++    {
++        pp_image_log_write(pp, name, id);
++    }
+ }
+ 
+ // Records a -dD or -dI directive (PPOutputEvent) before the next output token, after the include exits recorded so far,
+@@ -1035,6 +1192,11 @@ static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name)
+         result = pp->macro_count;
+         pp->macros[result] = (PPMacro){ .name = name };
+         pp->macro_count += 1;
++        // Its identity for the lane's header images (#3070): none, until a definition in a file gives it one (pp_define).
++        if (pp->images != 0 && result < BUSTER_PP_IMAGE_IDENTITIES)
++        {
++            pp->images->identities[result] = BUSTER_PP_IMAGE_NO_IDENTITY;
++        }
+     }
+     else
+     {
+@@ -1118,6 +1280,7 @@ static void pp_check_poison_range(Preprocessor* pp, const PPFileData* data, uint
+ // its record.
+ static void pp_poison(Preprocessor* pp, IdentId name, uint32_t location)
+ {
++    pp_image_block(pp);
+     if (!pp_is_poisoned(pp, name))
+     {
+         if (pp_is_defined(pp, name))
+@@ -2350,6 +2513,11 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
+             if (id != 0)
+             {
+                 pp->macros[id] = macro;
++                // (A header image's key names it by its file's cache record and its name's place there, #3070.)
++                if (pp->images != 0 && id < BUSTER_PP_IMAGE_IDENTITIES && data->record != BUSTER_PP_NONE)
++                {
++                    pp->images->identities[id] = ((uint64_t)data->record << 32) | (location - base);
++                }
+                 pp_set_macro(pp, name, id);
+                 if (BUSTER_UNLIKELY(pp->options.dump_defines))
+                 {
+@@ -3144,6 +3312,10 @@ static void pp_note_file_run(Preprocessor* pp)
+ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
+ {
+     PPContext* context = &pp->contexts[pp->context_count - 1];
++    if (BUSTER_UNLIKELY(pp->image_recording) && context->kind == BUSTER_PP_CONTEXT_FILE)
++    {
++        pp_image_end(pp, context);
++    }
+     const bool relexed = context->relexed;
+     const uint32_t relex_position = context->relex_position;
+     const uint32_t relex_file = context->relex_file;
+@@ -3197,6 +3369,11 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
+     {
+         pp->contexts[pp->context_count - 1].pending_flags |= passed;
+     }
++    // Back in a file after one it included: its next segment (#3070's header images).
++    if (pp->images != 0 && context->kind == BUSTER_PP_CONTEXT_FILE && pp->context_count != 0 && pp->contexts[pp->context_count - 1].kind == BUSTER_PP_CONTEXT_FILE)
++    {
++        pp_image_begin(pp, &pp->contexts[pp->context_count - 1]);
++    }
+ }
+ 
+ // The token where a file context's run ends: its next directive, or its end.
+@@ -3307,7 +3484,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
+         for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
+         {
+             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+-            if (pp_is_macro(pp, data->values[p + lane]))
++            if (pp_is_macro_bit(pp, data->values[p + lane]))
+             {
+                 take = lane;
+                 stopped = true;
+@@ -3352,13 +3529,13 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
+         {
+             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+             const IdentId value = data->values[p + lane];
+-            if (pp_is_macro(pp, value))
++            if (pp_is_macro_bit(pp, value))
+             {
+                 const PPMacro* macro = &pp->macros[pp->macro_of[value]];
+                 const PPFileData* body = &pp->datas[macro->data];
+                 const uint32_t b = macro->body_begin;
+                 const bool direct = !pp->options.preprocessed && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
+-                                    macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, body->values[b]));
++                                    macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_bit(pp, body->values[b]));
+                 if (!direct)
+                 {
+                     take = lane;
+@@ -3430,7 +3607,7 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
+         {
+             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
+             const IdentId id = tokens->values[p + lane];
+-            if (pp_is_macro(pp, id))
++            if (pp_is_macro_bit(pp, id))
+             {
+                 if (pp->macros[pp->macro_of[id]].disabled != 0)
+                 {
+@@ -6813,7 +6990,7 @@ static bool pp_expand_nested(Preprocessor* pp, PPNested* nested, PPToken name, u
+                                        BUSTER_PP_NAME_SPACE);
+             for (uint32_t t = at; t < out->count; t += 1)
+             {
+-                const PPMacroId named = out->kinds[t] == C_TOKEN_RAW_IDENTIFIER && !(out->flags[t] & BUSTER_PP_NO_EXPAND) ? pp->macro_of[out->values[t]] : 0;
++                const PPMacroId named = out->kinds[t] == C_TOKEN_RAW_IDENTIFIER && !(out->flags[t] & BUSTER_PP_NO_EXPAND) ? pp_macro_read(pp, out->values[t]) : 0;
+                 out->flags[t] |= named != 0 && (named == nested->macro || pp->macros[named].disabled != 0) ? BUSTER_PP_NO_EXPAND : 0;
+             }
+             if (pp->options.timing)
+@@ -6880,7 +7057,7 @@ static bool pp_expand_argument_in_place(Preprocessor* pp, PPArgument* argument)
+     for (uint32_t i = argument->raw_begin; result && i < argument->raw_end; i += 1)
+     {
+         PPToken token = pp_stack_token(out, i);
+-        const PPMacroId id = token.kind == C_TOKEN_RAW_IDENTIFIER && !(token.flags & BUSTER_PP_NO_EXPAND) ? pp->macro_of[token.value] : 0;
++        const PPMacroId id = token.kind == C_TOKEN_RAW_IDENTIFIER && !(token.flags & BUSTER_PP_NO_EXPAND) ? pp_macro_read(pp, token.value) : 0;
+         if (id != 0 && pp->macros[id].disabled == 0)
+         {
+             const PPMacro* macro = &pp->macros[id];
+@@ -6964,8 +7141,11 @@ static bool pp_finish_simple(Preprocessor* pp, PPInvocation* invocation)
+     // A macro with ## and # takes its template's path alone (pp_finish_operators), when its plan has one.
+     PPTemplate* template = pp_template_of(pp, macro);
+     const bool operators = template != 0 && (template->pastes | template->strings) != 0;
++    // (Not in a segment being recorded for a header image, #3070: its lookups are those of the one path that makes
++    // every one of them, in one order, whatever the unit compiled or planned before; pp_invoke_file, pp_expand_file_direct
++    // and pp_condition_direct stand back for the same reason.)
+     bool result = ((macro->flags & BUSTER_PP_MACRO_SIMPLE) || operators) && (pp->stream_count | pp->limit_count) == 0 && !pp->fatal &&
+-                  count + omitted == macro->parameter_count && pp->argument_record_count < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift);
++                  count + omitted == macro->parameter_count && pp->argument_record_count < (BUSTER_PP_MAX_STACK_TOKENS >> pp->capacity_shift) && !pp->image_recording;
+     const PPItem* order = pp->items + macro->items_begin + macro->item_count;
+     // The arguments to expand in place, by their places in the order (a macro expands at most 64 so), and the plans of
+     // the invocations in them.
+@@ -7807,6 +7987,12 @@ static void pp_defer_pragma(Preprocessor* pp, uint32_t name_location, uint8_t na
+ // collects the operand (pp_collect_step, as an invocation's arguments, from its '(' on), then pp_close_builtin takes it.
+ static void pp_start_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint8_t flags, uint32_t expansion_end)
+ {
++    // A header query's answer is the file system's and the includer's, which no header image's key names (#3070).
++    const uint8_t queried = pp->macros[id].builtin;
++    if (queried == PP_BUILTIN_HAS_INCLUDE || queried == PP_BUILTIN_HAS_INCLUDE_NEXT || queried == PP_BUILTIN_HAS_EMBED || queried == PP_BUILTIN_BUILDING_MODULE)
++    {
++        pp_image_refuse(pp, PP_IMAGE_BUILTIN);
++    }
+     bool valid = pp->invocation_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift);
+     if (!valid)
+     {
+@@ -8382,40 +8568,60 @@ static void pp_format_timestamp(char* text, uint32_t capacity, const struct tm*
+              calendar->tm_min, calendar->tm_sec, calendar->tm_year + 1900);
+ }
+ 
++// Records a use of __FLT_EVAL_METHOD__ before the output's token `position`, named at `location`.
++static void pp_eval_method_record(Preprocessor* pp, uint32_t position, uint32_t location, uint32_t origin)
++{
++    const uint32_t count = pp->eval_method_use_count;
++    if (count == pp->eval_method_use_capacity)
++    {
++        const uint64_t capacity = count != 0 ? (uint64_t)count * 2 : 8;
++        PPEvalMethodUse* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(&pp->arena, PPEvalMethodUse, capacity) : NULL;
++        if (records == NULL)
++        {
++            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for floating evaluation macro uses");
++        }
++        else
++        {
++            if (count != 0)
++            {
++                memcpy(records, pp->eval_method_uses, (uint64_t)count * sizeof(PPEvalMethodUse));
++            }
++            pp->eval_method_uses = records;
++            pp->eval_method_use_capacity = (uint32_t)capacity;
++        }
++    }
++    if (!pp->fatal)
++    {
++        pp->eval_method_uses[count] = (PPEvalMethodUse)
++        {
++            .position = position,
++            .pragmas = pp->pragma_lines,
++            .location = location,
++            .origin = origin,
++        };
++        pp->eval_method_use_count = count + 1;
++    }
++}
++
+ static void pp_eval_method_use(Preprocessor* pp, PPToken name)
+ {
+     if (pp->options.semantic_pragmas && !pp->fatal)
+     {
+-        const uint32_t count = pp->eval_method_use_count;
+-        if (count == pp->eval_method_use_capacity)
++        pp_eval_method_record(pp, pp->output.count, name.location, name.origin);
++        // A segment being recorded for a header image keeps the use (#3070), which no history holds the origin of.
++        if (BUSTER_UNLIKELY(pp->image_recording))
+         {
+-            const uint64_t capacity = count != 0 ? (uint64_t)count * 2 : 8;
+-            PPEvalMethodUse* records = capacity <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(&pp->arena, PPEvalMethodUse, capacity) : NULL;
+-            if (records == NULL)
++            PPImages* images = pp->images;
++            if (images->use_count < BUSTER_PP_IMAGE_USES && name.origin == 0 && !pp->fatal)
+             {
+-                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for floating evaluation macro uses");
++                images->uses[images->use_count] = (PPImageUse){ .position = pp->output.count - images->before_tokens, .location = name.location };
++                images->use_count += 1;
+             }
+             else
+             {
+-                if (count != 0)
+-                {
+-                    memcpy(records, pp->eval_method_uses, (uint64_t)count * sizeof(PPEvalMethodUse));
+-                }
+-                pp->eval_method_uses = records;
+-                pp->eval_method_use_capacity = (uint32_t)capacity;
++                pp_image_refuse(pp, name.origin == 0 ? PP_IMAGE_ROOM : PP_IMAGE_BUILTIN);
+             }
+         }
+-        if (!pp->fatal)
+-        {
+-            pp->eval_method_uses[count] = (PPEvalMethodUse)
+-            {
+-                .position = pp->output.count,
+-                .pragmas = pp->pragma_lines,
+-                .location = name.location,
+-                .origin = name.origin,
+-            };
+-            pp->eval_method_use_count = count + 1;
+-        }
+     }
+ }
+ 
+@@ -8427,6 +8633,12 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
+     pp->history_anchor = name.location;
+     pp->diagnostic_origin = name.origin;
+     const PPBuiltin builtin = (PPBuiltin)pp->macros[id].builtin;
++    // Of these, a header image's segment (#3070) holds `defined` and __FLT_EVAL_METHOD__, the command's, whose uses it
++    // keeps (pp_eval_method_use): the others' answers are the unit's, the place's or the time's.
++    if (builtin != PP_BUILTIN_DEFINED && builtin != PP_BUILTIN_FLT_EVAL_METHOD)
++    {
++        pp_image_refuse(pp, PP_IMAGE_BUILTIN);
++    }
+     // The answer takes the name's flags, as clang's ExpandBuiltinMacro gives them: its line start among a macro's
+     // arguments too (BUSTER_PP_LINE_SPACE), and pp_name_line's.
+     const uint8_t flags = (uint8_t)((name.flags & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE | BUSTER_PP_LINE_SPACE)) | pp_name_line(pp, name.flags, name.location));
+@@ -8705,7 +8917,7 @@ static bool pp_expand_file_direct(Preprocessor* pp, PPContext* context, const PP
+     PPTokens* target = pp_target(pp);
+     bool result = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
+                   macro->body_begin < macro->body_end && (pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
+-                  !pp->options.expansion_starts && (uint64_t)target->count + (macro->body_end - macro->body_begin) <= target->capacity;
++                  !pp->options.expansion_starts && (uint64_t)target->count + (macro->body_end - macro->body_begin) <= target->capacity && !pp->image_recording;
+     for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
+     {
+         result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, body->values[t]);
+@@ -8763,12 +8975,18 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
+             const uint32_t run_end = pp_step_limit(pp, context->position, limit);
+             // A file's text read straight into the output: nothing open that a token read from a file goes to or is counted
+             // by, no poisoned name, no raw string error to report, no -E markers' starts, nothing pending.
++            // (Nor a segment being recorded for an image, #3070: the run's kernel tests names alone, which are logged below.)
+             const bool text = (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
+-                              !pp->options.expansion_starts && data->raw_error_count == 0;
++                              !pp->options.expansion_starts && data->raw_error_count == 0 && !pp->image_recording;
+             uint32_t directs = 0;
+             uint32_t runs = 0;
+             const uint32_t stop = text ? pp_copy_file_text_vector(pp, data, base, context->position, run_end, &directs, &runs)
+                                        : pp_copy_file_run_vector(pp, data, base, context->position, run_end);
++            if (BUSTER_UNLIKELY(pp->image_recording))
++            {
++                // The names the kernel tested: the run's, and the macro's it stopped at.
++                pp_image_log_run(pp, data->kinds, 0x7F, data->values, context->position, stop < run_end ? stop + 1 : stop);
++            }
+             if (pp->options.collect_diagnostics && data->raw_error_count != 0 && pp_target(pp) == &pp->output)
+             {
+                 pp->diagnostic_run_first = pp->output.count - (stop - context->position);
+@@ -8833,7 +9051,20 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
+             pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+             pp->keywords_resolved = pp->output.count;
+         }
++        // A header image's segment (#3070) ends before an inclusion's directive, and the next begins after one that
++        // entered no file (its guard's, or #pragma once's); one that did begins the file's (pp_enter_file).
++        const uint8_t kind = data->directive_kind[context->next_directive];
++        const bool inclusion = pp->images != 0 && (kind == PP_DIRECTIVE_INCLUDE || kind == PP_DIRECTIVE_INCLUDE_NEXT || kind == PP_DIRECTIVE_IMPORT);
++        const uint32_t depth = pp->context_count;
++        if (inclusion)
++        {
++            pp_image_end(pp, context);
++        }
+         pp_directive(pp, context);
++        if (inclusion && pp->context_count == depth)
++        {
++            pp_image_begin(pp, context);
++        }
+     }
+     else
+     {
+@@ -8845,6 +9076,10 @@ static void pp_step_buffer(Preprocessor* pp, PPContext* context)
+ {
+     const uint32_t run_end = pp_step_limit(pp, context->position, context->end);
+     const uint32_t stop = pp_copy_buffer_run_vector(pp, context->tokens, context->position, run_end);
++    if (BUSTER_UNLIKELY(pp->image_recording))
++    {
++        pp_image_log_run(pp, context->tokens->kinds, 0xFF, context->tokens->values, context->position, stop < run_end ? stop + 1 : stop);
++    }
+     PPTokens* target = pp_target(pp);
+     pp_history_copy(pp, target, target->count - (stop - context->position), context->tokens, context->position, stop);
+     pp_take_pending_flags(pp, context, stop - context->position);
+@@ -9227,6 +9462,10 @@ static void pp_enter_file(Preprocessor* pp, uint32_t file, uint32_t parent, uint
+             pp_note_system_run(pp, range, pp->ranges[range].base, pp->ranges[range].system);
+             pp->include_depth += pp->context_count > 1;
+             pp_show_include(pp, file);
++            if (pp->images != 0)
++            {
++                pp_image_begin(pp, context);
++            }
+         }
+     }
+ }
+@@ -9487,10 +9726,10 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
+                   data->raw_error_count == 0 && !pp_collecting(pp) && pp->arguments.count + (end - begin) <= pp->arguments.capacity &&
+                   (uint64_t)captures->count + (end - begin) <= captures->capacity &&
+                   pp->expansions.count + BUSTER_PP_CONDITION_CHAIN <= pp->expansions.capacity &&
+-                  (pp->options.no_history || pp_history_origin_room(pp, captures, captures->count + (end - begin)));
++                  (pp->options.no_history || pp_history_origin_room(pp, captures, captures->count + (end - begin))) && !pp->image_recording;
+     for (uint32_t t = begin; result && t < end; t += 1)
+     {
+-        const PPMacroId id = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[t]] : 0;
++        const PPMacroId id = (data->kinds[t] & 0x7F) == C_TOKEN_RAW_IDENTIFIER ? pp_macro_read(pp, data->values[t]) : 0;
+         const PPMacro* macro = &pp->macros[id];
+         if (id != 0 && (macro->flags & BUSTER_PP_MACRO_BUILTIN) && macro->builtin == PP_BUILTIN_DEFINED)
+         {
+@@ -9527,7 +9766,7 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
+                 result = single && (body_kind == C_TOKEN_NUMERIC_CONSTANT || body_kind == C_TOKEN_RAW_IDENTIFIER);
+                 chain[depth < BUSTER_PP_CONDITION_CHAIN ? depth : 0] = next;
+                 depth += 1;
+-                next = result && body_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[body->values[link->body_begin]] : 0;
++                next = result && body_kind == C_TOKEN_RAW_IDENTIFIER ? pp_macro_read(pp, body->values[link->body_begin]) : 0;
+                 ended = next == 0;
+             }
+         }
+@@ -9555,7 +9794,7 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
+         for (uint32_t t = begin; t < end; t += 1)
+         {
+             const uint8_t token_kind = data->kinds[t] & 0x7F;
+-            const PPMacroId id = token_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[data->values[t]] : 0;
++            const PPMacroId id = token_kind == C_TOKEN_RAW_IDENTIFIER ? pp_macro_read(pp, data->values[t]) : 0;
+             const PPMacro* macro = &pp->macros[id];
+             const uint32_t name_location = base + data->starts[t];
+             // The name's flags in the line's buffer (pp_copy_line's), which the answer or the body's token takes.
+@@ -9614,7 +9853,7 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
+                     const uint8_t body_kind = body->kinds[b] & 0x7F;
+                     const uint32_t record = pp_history_expansion(pp, next, place, parent);
+                     pp_macro_used(pp, next);
+-                    const PPMacroId after = body_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[body->values[b]] : 0;
++                    const PPMacroId after = body_kind == C_TOKEN_RAW_IDENTIFIER ? pp_macro_read(pp, body->values[b]) : 0;
+                     if (after != 0)
+                     {
+                         buffered += 1;
+@@ -10418,6 +10657,7 @@ static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t
+ // note's file was entered, and 0 the latest note's.
+ static void pp_add_line_note(Preprocessor* pp, uint32_t range, uint32_t location, int64_t delta, const char* name, uint32_t name_length, uint32_t system, uint32_t entry)
+ {
++    pp_image_refuse(pp, PP_IMAGE_DIRECTIVE);
+     PPRange* record = &pp->ranges[range];
+     const uint32_t latest = record->last_line_directive;
+     if (pp->line_directive_count < (BUSTER_PP_MAX_LINE_DIRECTIVES >> pp->capacity_shift))
+@@ -11297,6 +11537,17 @@ static void pp_pragma_run(Preprocessor* pp, PPPragmaKind kind, const PPTokens* n
+                           uint32_t end, uint32_t location, bool from_operator)
+ {
+     const uint32_t file = pp_current_file(pp);
++    // Of the pragmas, a header image's segment (#3070) holds #pragma once alone; a pushed or popped macro and a diagnostic
++    // mapping change what the unit's later segments do in ways no key names (pp_image_block).
++    if (kind != PP_PRAGMA_ONCE)
++    {
++        pp_image_refuse(pp, PP_IMAGE_DIRECTIVE);
++    }
++    if (kind == PP_PRAGMA_PUSH_MACRO || kind == PP_PRAGMA_POP_MACRO || kind == PP_PRAGMA_DIAGNOSTIC || kind == PP_PRAGMA_WARNING || kind == PP_PRAGMA_ERROR ||
++        kind == PP_PRAGMA_SYSTEM_HEADER)
++    {
++        pp_image_block(pp);
++    }
+     switch (kind)
+     {
+         case PP_PRAGMA_ONCE:
+@@ -11571,6 +11822,12 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
+         const bool angled_embed = kind == PP_DIRECTIVE_EMBED && hash + 2 < end && (data->kinds[hash + 2] & 0x7F) == C_TOKEN_LESS;
+         pp_check_poison_range(pp, data, base, 0, hash + 1, text || angled_embed ? hash + 2 : end, include ? hash + 2 : BUSTER_PP_NONE, true);
+     }
++    // A header image's segment (#3070) holds definitions, #undefs and conditions; a pragma is pp_pragma_run's to refuse.
++    if (BUSTER_UNLIKELY(pp->image_recording) && kind != PP_DIRECTIVE_NULL && kind != PP_DIRECTIVE_DEFINE && kind != PP_DIRECTIVE_UNDEF &&
++        !(kind >= PP_DIRECTIVE_IF && kind <= PP_DIRECTIVE_ENDIF) && kind != PP_DIRECTIVE_PRAGMA)
++    {
++        pp_image_refuse(pp, PP_IMAGE_DIRECTIVE);
++    }
+     switch (kind)
+     {
+         case PP_DIRECTIVE_NULL:
+@@ -11595,7 +11852,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
+                     {
+                         pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
+                     }
+-                    const PPMacroId previous = pp->macro_of[name];
++                    const PPMacroId previous = pp_macro_read(pp, name);
+                     if (previous != 0 && pp->macros[previous].unused != 0)
+                     {
+                         pp_unused_macro_replaced(pp, previous, 0, true);
+@@ -14353,6 +14610,1069 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
+     return result;
+ }
+ 
++// ---------------------------------------------------------------------------------------------------------------------
++// Header images (#3070 step 2): c_preprocessor.c, at PPImages, has what they are.
++
++// What a key names macro `macro`'s definition by (0 for none): the lane's table's entry for the unit's record.
++BUSTER_INLINE uint64_t pp_image_identity(const PPImages* images, PPMacroId macro)
++{
++    return macro == 0 ? 0 : macro < BUSTER_PP_IMAGE_IDENTITIES ? images->identities[macro] : BUSTER_PP_IMAGE_NO_IDENTITY;
++}
++
++// Forgets every image and the segment under way: the store back to its fixed buffers, the starts' table empty. For a
++// root captured anew, whose macros' ids the old images' keys named.
++static void pp_images_reset(PPImages* images, const Preprocessor* root)
++{
++    const uint32_t root_macros = root != 0 ? root->macro_count : 0;
++    const uint32_t root_ranges = root != 0 ? root->range_count : 0;
++    for (uint32_t c = 0; c < 2; c += 1)
++    {
++        images->root_scratch[c] = root != 0 ? root->scratch_range[c] : BUSTER_PP_NONE;
++        images->root_spelled[c] = root != 0 ? root->scratch_used[c] : 0;
++    }
++    arena_rewind(&images->storage, images->fixed);
++    memset(images->starts, 0, BUSTER_PP_IMAGE_STARTS * sizeof(*images->starts));
++    memset(images->branches, 0, BUSTER_PP_IMAGE_BRANCHES * sizeof(*images->branches));
++    images->branch_count = 0;
++    // (No macro has no identity: a key's name that isn't one.)
++    images->identities[0] = 0;
++    images->root_macros = root_macros;
++    images->root_ranges = root_ranges;
++    images->start_valid = false;
++    images->image_count = 0;
++    for (uint32_t m = 1; m < root_macros && m < BUSTER_PP_IMAGE_IDENTITIES; m += 1)
++    {
++        images->identities[m] = BUSTER_PP_IMAGE_ROOT_MACRO | m;
++    }
++}
++
++// The fields of Preprocessor a segment may change and still be an image: those an image's effects give back (the output,
++// the macros, the conditions, the scratch spellings), the stacks and the arenas they grow in (their counts are tested
++// apart), and what only caches or counts (the compiled macros' items, the keywords resolved, the command line's
++// severities read, the statistics). Every other byte must be as it was (pp_image_end).
++#define BUSTER_PP_IMAGE_ALLOW(mask, field) memset((mask) + offsetof(Preprocessor, field), 0xFF, sizeof(((Preprocessor*)0)->field))
++static void pp_image_state_mask(uint8_t* mask)
++{
++    memset(mask, 0, sizeof(Preprocessor));
++    BUSTER_PP_IMAGE_ALLOW(mask, arena);
++    BUSTER_PP_IMAGE_ALLOW(mask, columns);
++    BUSTER_PP_IMAGE_ALLOW(mask, arrays);
++    BUSTER_PP_IMAGE_ALLOW(mask, scratch);
++    BUSTER_PP_IMAGE_ALLOW(mask, output);
++    BUSTER_PP_IMAGE_ALLOW(mask, arguments);
++    BUSTER_PP_IMAGE_ALLOW(mask, captures);
++    BUSTER_PP_IMAGE_ALLOW(mask, expansions);
++    BUSTER_PP_IMAGE_ALLOW(mask, argument_links);
++    BUSTER_PP_IMAGE_ALLOW(mask, argument_indexed);
++    BUSTER_PP_IMAGE_ALLOW(mask, argument_link_arena);
++    BUSTER_PP_IMAGE_ALLOW(mask, range_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, location_top);
++    BUSTER_PP_IMAGE_ALLOW(mask, scratch_range);
++    BUSTER_PP_IMAGE_ALLOW(mask, scratch_used);
++    BUSTER_PP_IMAGE_ALLOW(mask, macro_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, item_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, item_peak);
++    BUSTER_PP_IMAGE_ALLOW(mask, parameter_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, template_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, macro_epoch);
++    BUSTER_PP_IMAGE_ALLOW(mask, conditional_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, keywords_resolved);
++    BUSTER_PP_IMAGE_ALLOW(mask, warning_commands);
++    BUSTER_PP_IMAGE_ALLOW(mask, warnings_possible);
++    BUSTER_PP_IMAGE_ALLOW(mask, ticks);
++    BUSTER_PP_IMAGE_ALLOW(mask, input_tokens);
++    BUSTER_PP_IMAGE_ALLOW(mask, statistics);
++    BUSTER_PP_IMAGE_ALLOW(mask, image_recording);
++    // An expansion's parameters to its own substitution, set before each use.
++    BUSTER_PP_IMAGE_ALLOW(mask, history_anchor);
++    BUSTER_PP_IMAGE_ALLOW(mask, history_spelling);
++    // The uses of __FLT_EVAL_METHOD__, which an image holds.
++    BUSTER_PP_IMAGE_ALLOW(mask, eval_method_uses);
++    BUSTER_PP_IMAGE_ALLOW(mask, eval_method_use_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, eval_method_use_capacity);
++    // An invocation's plans of the invocations among its arguments, made anew for each (pp_finish_simple).
++    BUSTER_PP_IMAGE_ALLOW(mask, nested);
++    BUSTER_PP_IMAGE_ALLOW(mask, nested_count);
++    BUSTER_PP_IMAGE_ALLOW(mask, nested_taken);
++}
++
++BUSTER_PREPROCESSOR_ENTRY void pp_root_images(PPRoot* root, uint8_t mode)
++{
++    if (root != 0 && root->images == 0 && mode != PP_IMAGES_OFF)
++    {
++        Arena storage = arena_reserve(BUSTER_PP_IMAGES_BYTES);
++        PPImages* images = arena_push(&storage, sizeof(PPImages), _Alignof(PPImages));
++        if (images != 0)
++        {
++            memset(images, 0, sizeof(*images));
++            images->mode = mode;
++            images->storage = storage;
++            images->starts = arena_push_array(&images->storage, BUSTER_PP_IMAGE_STARTS, sizeof(*images->starts), _Alignof(PPImageStart*));
++            images->branches = arena_push_array(&images->storage, BUSTER_PP_IMAGE_BRANCHES, sizeof(PPImageBranch), _Alignof(PPImageBranch));
++            images->before = arena_push(&images->storage, sizeof(Preprocessor), _Alignof(Preprocessor));
++            images->state_mask = arena_push(&images->storage, sizeof(Preprocessor), 64);
++            // (Eight events' slack for the run's logger's whole stores.)
++            images->events = arena_push_array(&images->storage, (uint64_t)BUSTER_PP_IMAGE_EVENTS + 8, sizeof(PPImageEvent), _Alignof(PPImageEvent));
++            images->spellings = arena_push_array(&images->storage, BUSTER_PP_IMAGE_SPELLINGS, sizeof(PPImageSpelling), _Alignof(PPImageSpelling));
++            images->spelling_places = arena_push_array(&images->storage, BUSTER_PP_IMAGE_SPELLINGS, sizeof(uint32_t), _Alignof(uint32_t));
++            images->spelling_bytes = arena_push(&images->storage, BUSTER_PP_IMAGE_SPELLING_BYTES, 1);
++            images->macros = arena_push_array(&images->storage, BUSTER_PP_IMAGE_MACROS, sizeof(PPMacro), _Alignof(PPMacro));
++            images->identities = arena_push_array(&images->storage, BUSTER_PP_IMAGE_IDENTITIES, sizeof(uint64_t), 64);
++            images->fixed = images->storage.length;
++            const bool reserved = images->starts != 0 && images->branches != 0 && images->before != 0 && images->state_mask != 0 && images->events != 0 && images->spellings != 0 &&
++                                  images->spelling_places != 0 && images->spelling_bytes != 0 && images->macros != 0 && images->identities != 0;
++            if (reserved)
++            {
++                pp_image_state_mask(images->state_mask);
++                root->images = images;
++            }
++            else
++            {
++                storage = images->storage;
++                arena_release(&storage);
++            }
++        }
++        else
++        {
++            arena_release(&storage);
++        }
++    }
++}
++
++static void pp_images_release(PPImages* images)
++{
++    if (images != 0)
++    {
++        // The record is in the arena it describes.
++        Arena storage = images->storage;
++        arena_release(&storage);
++    }
++}
++
++// The first byte of Preprocessor that differs between `before` and `after` outside `mask`, or its size if none does:
++// 64 bytes at a time.
++static uint32_t pp_image_state_differs(const Preprocessor* before, const Preprocessor* after, const uint8_t* mask)
++{
++    const uint8_t* a = (const uint8_t*)before;
++    const uint8_t* b = (const uint8_t*)after;
++    uint32_t result = sizeof(Preprocessor);
++    for (uint32_t i = 0; result == sizeof(Preprocessor) && i < sizeof(Preprocessor); i += 64)
++    {
++        const __mmask64 valid = sizeof(Preprocessor) - i >= 64 ? ~0ull : _bzhi_u64(~0ull, sizeof(Preprocessor) - i);
++        const __m512i changed = _mm512_xor_si512(_mm512_maskz_loadu_epi8(valid, a + i), _mm512_maskz_loadu_epi8(valid, b + i));
++        const uint64_t differs = _mm512_test_epi8_mask(_mm512_andnot_si512(_mm512_maskz_loadu_epi8(valid, mask + i), changed), _mm512_set1_epi8(-1));
++        result = differs != 0 ? i + (uint32_t)__builtin_ctzll(differs) : result;
++    }
++    return result;
++}
++
++// Whether a file context is one a segment can start or end in: the file's own data and no other view of it, nothing
++// pending and nothing lexed again, and in the unit nothing open that a token goes to or is counted by.
++static bool pp_image_plain(Preprocessor* pp, const PPContext* context)
++{
++    return context->kind == BUSTER_PP_CONTEXT_FILE && !context->barrier && context->pending_flags == 0 && context->trailing_flags == 0 && !context->hidden_directives &&
++           !context->relexed && context->relex_position == 0 && !context->comment_read && context->opaque_spans == 0 && context->macro == 0 &&
++           context->data == pp->files[context->file].data && pp_target(pp) == &pp->output && (pp->capture_count | pp->stream_count | pp->limit_count | pp->invocation_count) == 0 &&
++           !pp_collecting(pp) && !pp->fatal;
++}
++
++// Where a segment starting at `context` starts (PPImageStart), or false where none can: in the main file or a file the
++// unit made, in a unit whose options or state an image doesn't cover (its history recorded as it runs, preprocessed
++// input, -Wunused-macros' tracking, a poisoned name, a line remapped in this inclusion), or with too many conditions open.
++static bool pp_image_start(Preprocessor* pp, const PPContext* context, PPImageStart* start)
++{
++    const PPFileData* data = &pp->datas[pp->files[context->file].data];
++    const uint32_t open = pp->conditional_count - context->conditional_base;
++    bool result = !pp->images_blocked && pp->context_count >= 2 && context->file != pp->main_file && pp->macro_count < BUSTER_PP_IMAGE_IDENTITIES && pp->options.no_history && !pp->options.preprocessed &&
++                  !pp->options.expansion_starts && !pp->unused_tracking && pp->poison_count == 0 && data->record != BUSTER_PP_NONE && open <= BUSTER_PP_IMAGE_CONDITIONALS &&
++                  pp->ranges[context->range].first_line_directive == BUSTER_PP_NONE && pp_image_plain(pp, context);
++    if (result)
++    {
++        uint64_t conditionals = 0;
++        for (uint32_t c = 0; c < open; c += 1)
++        {
++            const PPConditional* conditional = &pp->conditionals[context->conditional_base + c];
++            conditionals |= (uint64_t)(conditional->taken | (conditional->seen_else << 1) | (conditional->skipping << 2)) << (3 * c);
++        }
++        *start = (PPImageStart){
++            .record = data->record,
++            .position = context->position,
++            .next_directive = context->next_directive,
++            .conditional_count = open,
++            .conditionals = conditionals,
++            .system = pp->ranges[context->range].system,
++            .guard_taken = context->guard_taken,
++        };
++    }
++    return result;
++}
++
++static uint32_t pp_image_start_slot(const PPImageStart* start)
++{
++    uint64_t hash = ((uint64_t)start->record << 32 | start->position) * 0x9E3779B97F4A7C15ull;
++    hash ^= (start->conditionals + start->conditional_count + ((uint64_t)start->system << 8) + ((uint64_t)start->guard_taken << 16) + ((uint64_t)start->next_directive << 24)) *
++            0xC2B2AE3D27D4EB4Full;
++    return (uint32_t)(hash >> 40) & (BUSTER_PP_IMAGE_STARTS - 1);
++}
++
++static bool pp_image_start_same(const PPImageStart* a, const PPImageStart* b)
++{
++    return a->record == b->record && a->position == b->position && a->next_directive == b->next_directive && a->conditional_count == b->conditional_count &&
++           a->conditionals == b->conditionals && a->system == b->system && a->guard_taken == b->guard_taken;
++}
++
++// The lane's record of `start`, or null.
++static PPImageStart* pp_image_start_find(const PPImages* images, const PPImageStart* start)
++{
++    PPImageStart* result = images->starts[pp_image_start_slot(start)];
++    while (result != 0 && !pp_image_start_same(result, start))
++    {
++        result = result->next;
++    }
++    return result;
++}
++
++// The first of `image`'s keys from `from` on whose name has another identity in the unit than the key's, or the keys'
++// count: eight at a time, the names' macros gathered, then the macros' identities, and compared.
++static uint32_t pp_image_keys_differ(const Preprocessor* pp, const PPImages* images, const PPImage* image, uint32_t from)
++{
++    const uint32_t count = image->key_count;
++    uint32_t result = count;
++    for (uint32_t k = from; result == count && k < count; k += 8)
++    {
++        const __mmask8 valid = count - k >= 8 ? 0xFF : (__mmask8)_bzhi_u32(0xFF, count - k);
++        const __m256i names = _mm256_maskz_loadu_epi32(valid, image->key_names + k);
++        const __m256i macros = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), valid, names, pp->macro_of, 4);
++        const __m512i identities = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), valid, macros, images->identities, 8);
++        const __mmask8 differ = _mm512_mask_cmpneq_epu64_mask(valid, identities, _mm512_maskz_loadu_epi64(valid, image->key_identities + k));
++        result = differ != 0 ? k + (uint32_t)__builtin_ctz(differ) : result;
++    }
++    return result;
++}
++
++static uint32_t pp_image_branch_slot(const PPImage* from, uint32_t depth, uint64_t identity)
++{
++    const uint64_t hash = ((uint64_t)(uintptr_t)from * 0x9E3779B97F4A7C15ull) ^ ((identity + depth) * 0xC2B2AE3D27D4EB4Full);
++    return (uint32_t)(hash >> 40) & (BUSTER_PP_IMAGE_BRANCHES - 1);
++}
++
++// The image that has `from`'s keys up to `depth` and `identity` there, or null.
++static PPImage* pp_image_branch(const PPImages* images, const PPImage* from, uint32_t depth, uint64_t identity)
++{
++    uint32_t slot = pp_image_branch_slot(from, depth, identity);
++    while (images->branches[slot].from != 0 && (images->branches[slot].from != from || images->branches[slot].depth != depth || images->branches[slot].identity != identity))
++    {
++        slot = (slot + 1) & (BUSTER_PP_IMAGE_BRANCHES - 1);
++    }
++    return images->branches[slot].from != 0 ? images->branches[slot].to : 0;
++}
++
++// The image the unit's macros select under `start`, or null: from the start's first image, each one's keys are compared
++// with the unit's answers from where the last parted, and where one parts, the branch for the unit's answer there has
++// the image to go on with.
++static PPImage* pp_image_find(Preprocessor* pp, PPImages* images, const PPImageStart* start)
++{
++    const PPImageStart* known = pp_image_start_find(images, start);
++    PPImage* image = known != 0 ? known->first : 0;
++    PPImage* result = 0;
++    uint32_t depth = 0;
++    // (An identity past the table's is none's: such a unit takes no image, pp_image_start.)
++    while (image != 0 && result == 0)
++    {
++        const uint32_t parted = pp_image_keys_differ(pp, images, image, depth);
++        images->names_walked += (parted < image->key_count ? parted + 1 : parted) - depth;
++        if (parted == image->key_count)
++        {
++            result = image;
++        }
++        else
++        {
++            image = pp_image_branch(images, image, parted, pp_image_identity(images, pp->macro_of[image->key_names[parted]]));
++            depth = parted + 1;
++        }
++    }
++    return result;
++}
++
++static bool pp_image_apply(Preprocessor* pp, PPContext* context, const PPImage* image);
++
++// A segment starts at `context`: with an image for it, a hit (`on`); else the recorder begins.
++static void pp_image_begin(Preprocessor* pp, PPContext* context)
++{
++    PPImages* images = pp->images;
++    PPImageStart start;
++    pp->image_recording = false;
++    images->start_valid = false;
++    if (pp_image_start(pp, context, &start))
++    {
++        images->segments += 1;
++        PPImage* image = pp_image_find(pp, images, &start);
++        if (image != 0 && images->mode == PP_IMAGES_ON && image->refused != PP_IMAGE_RECORDED)
++        {
++            // Its keys made no image in an earlier unit: the segment runs, unrecorded.
++            images->declined += 1;
++        }
++        else if (image != 0 && images->mode == PP_IMAGES_ON && pp_image_apply(pp, context, image))
++        {
++            image->hits += 1;
++            images->hits += 1;
++            images->hit_tokens += image->token_count;
++        }
++        else
++        {
++            // The recorder: the state before, the logs empty, and every template's names found again, so that each
++            // lookup of theirs is logged (pp_template_names takes them from its cache while no macro was written).
++            images->start = start;
++            images->start_valid = true;
++            images->known = image;
++            images->reason = PP_IMAGE_RECORDED;
++            images->event_count = 0;
++            images->spelling_count = 0;
++            images->spelling_byte_count = 0;
++            images->chunks = 0;
++            images->macro_first = pp->macro_count;
++            images->macro_count = 0;
++            images->overflow = false;
++            images->use_count = 0;
++            images->context = (uint32_t)(context - pp->contexts);
++            images->before_tokens = pp->output.count;
++            images->before_context = *context;
++            images->before_once = pp->datas[pp->files[context->file].data].once;
++            pp->macro_epoch += 1;
++            *images->before = *pp;
++            pp->image_recording = true;
++        }
++    }
++    else
++    {
++        images->unstarted += 1;
++    }
++}
++
++// Whether two macro records an image holds are the same definition, field by field (their padding isn't compared).
++static bool pp_image_macro_same(const PPMacro* a, const PPMacro* b)
++{
++    return a->name == b->name && a->flags == b->flags && a->builtin == b->builtin && a->parameter_count == b->parameter_count && a->body_begin == b->body_begin &&
++           a->body_end == b->body_end && a->parameters_begin == b->parameters_begin && a->location == b->location;
++}
++
++// Whether two images of one key are the same: verify's test that an image is a function of its key.
++static bool pp_image_same(const PPImage* a, const PPImage* b, const char** what)
++{
++    const char* differs = 0;
++    differs = a->token_count != b->token_count ? "token count" : differs;
++    differs = differs == 0 && memcmp(a->kinds, b->kinds, a->token_count) != 0 ? "kinds" : differs;
++    differs = differs == 0 && memcmp(a->flags, b->flags, a->token_count) != 0 ? "flags" : differs;
++    differs = differs == 0 && memcmp(a->refs, b->refs, (uint64_t)a->token_count * sizeof(uint16_t)) != 0 ? "bases" : differs;
++    differs = differs == 0 && memcmp(a->values, b->values, (uint64_t)a->token_count * sizeof(uint32_t)) != 0 ? "values" : differs;
++    differs = differs == 0 && memcmp(a->locations, b->locations, (uint64_t)a->token_count * sizeof(uint32_t)) != 0 ? "places" : differs;
++    differs = differs == 0 && (a->foreign_count != b->foreign_count || memcmp(a->foreign_keys, b->foreign_keys, (uint64_t)a->foreign_count * sizeof(uint32_t)) != 0) ?
++              "ranges" : differs;
++    differs = differs == 0 && (a->spelling_count != b->spelling_count || a->spelling_byte_count != b->spelling_byte_count ||
++                               memcmp(a->spelling_bytes, b->spelling_bytes, a->spelling_byte_count) != 0) ? "spellings" : differs;
++    for (uint32_t s = 0; differs == 0 && s < a->spelling_count; s += 1)
++    {
++        differs = a->spellings[s].offset != b->spellings[s].offset || a->spellings[s].length != b->spellings[s].length || a->spellings[s].clean != b->spellings[s].clean ?
++                  "spellings" : differs;
++    }
++    differs = differs == 0 && a->macro_count != b->macro_count ? "macro count" : differs;
++    for (uint32_t m = 0; differs == 0 && m < a->macro_count; m += 1)
++    {
++        differs = !pp_image_macro_same(a->macros + m, b->macros + m) ? "macros" : differs;
++    }
++    differs = differs == 0 && (a->write_count != b->write_count || a->epoch_steps != b->epoch_steps) ? "write count" : differs;
++    for (uint32_t w = 0; differs == 0 && w < a->write_count; w += 1)
++    {
++        differs = a->writes[w].name != b->writes[w].name || a->writes[w].macro != b->writes[w].macro ? "writes" : differs;
++    }
++    differs = differs == 0 && a->conditional_count != b->conditional_count ? "condition count" : differs;
++    for (uint32_t c = 0; differs == 0 && c < a->conditional_count; c += 1)
++    {
++        const PPImageConditional* x = a->conditionals + c;
++        const PPImageConditional* y = b->conditionals + c;
++        differs = x->location != y->location || x->taken != y->taken || x->seen_else != y->seen_else || x->skipping != y->skipping ? "conditions" : differs;
++    }
++    differs = differs == 0 && a->use_count != b->use_count ? "uses" : differs;
++    for (uint32_t u = 0; differs == 0 && u < a->use_count; u += 1)
++    {
++        differs = a->uses[u].position != b->uses[u].position || a->uses[u].location != b->uses[u].location || a->uses[u].ref != b->uses[u].ref ? "uses" : differs;
++    }
++    differs = differs == 0 && (a->end_position != b->end_position || a->end_directive != b->end_directive || a->end_guard_taken != b->end_guard_taken || a->once != b->once) ?
++              "end" : differs;
++    *what = differs;
++    return differs == 0;
++}
++
++// Puts `image` under its start, by its keys: the start's first, or a branch of the image its keys part from. Returns the
++// image there: `image`, or the one its keys already had; or null where the keys under the start don't agree with its
++// own (another name where they part, or one's keys the other's beginning), or the lane has no room, which makes no image
++// of it.
++static PPImage* pp_image_insert(PPImages* images, const PPImageStart* start, PPImage* image)
++{
++    PPImageStart* known = pp_image_start_find(images, start);
++    PPImage* result = 0;
++    if (known == 0)
++    {
++        known = arena_push(&images->storage, sizeof(PPImageStart), _Alignof(PPImageStart));
++        if (known != 0)
++        {
++            const uint32_t slot = pp_image_start_slot(start);
++            *known = *start;
++            known->first = image;
++            known->next = images->starts[slot];
++            images->starts[slot] = known;
++            result = image;
++        }
++    }
++    else
++    {
++        PPImage* at = known->first;
++        uint32_t depth = 0;
++        bool agrees = true;
++        while (agrees && result == 0)
++        {
++            // Where the two keys part.
++            const uint32_t shared = at->key_count < image->key_count ? at->key_count : image->key_count;
++            uint32_t parted = depth;
++            while (parted < shared && at->key_names[parted] == image->key_names[parted] && at->key_identities[parted] == image->key_identities[parted])
++            {
++                parted += 1;
++            }
++            if (parted == at->key_count && parted == image->key_count)
++            {
++                result = at;
++            }
++            else if (parted == shared || at->key_names[parted] != image->key_names[parted])
++            {
++                agrees = false;
++            }
++            else
++            {
++                PPImage* next = pp_image_branch(images, at, parted, image->key_identities[parted]);
++                if (next != 0)
++                {
++                    at = next;
++                    depth = parted + 1;
++                }
++                else if (images->branch_count < BUSTER_PP_IMAGE_BRANCHES / 2)
++                {
++                    uint32_t slot = pp_image_branch_slot(at, parted, image->key_identities[parted]);
++                    while (images->branches[slot].from != 0)
++                    {
++                        slot = (slot + 1) & (BUSTER_PP_IMAGE_BRANCHES - 1);
++                    }
++                    images->branches[slot] = (PPImageBranch){ .from = at, .to = image, .identity = image->key_identities[parted], .depth = parted };
++                    images->branch_count += 1;
++                    result = image;
++                }
++                else
++                {
++                    agrees = false;
++                }
++            }
++        }
++    }
++    images->image_count += result == image ? 1 : 0;
++    return result;
++}
++
++// A spelling's reference while a segment's ranges are still being met (pp_image_end gives it its place after theirs).
++#define BUSTER_PP_IMAGE_SPELLING_REF (1u << 20)
++
++// The base a token at `location` is counted from, as an image names it (PPImage.refs: none, the inclusion's own range, a
++// key macro's defining range, a spelling the segment made), with the base itself in `*base` and the bounds of what
++// holds the location in `*low` and `*extent`; BUSTER_PP_NONE where an image can't name one. `foreign_bases` and
++// `foreign_keys` (the ranges met, and for each a key whose macro is defined there) grow as new ranges are met.
++static uint32_t pp_image_place(const Preprocessor* pp, const PPImages* images, const PPContext* context, const PPMacroId* key_macros, uint32_t key_count,
++                               uint32_t* foreign_bases, uint32_t* foreign_keys, uint32_t* foreign_count, uint32_t location, uint32_t* base, uint32_t* low, uint32_t* extent)
++{
++    const PPRange* own = &pp->ranges[context->range];
++    uint32_t result = BUSTER_PP_NONE;
++    *base = 0;
++    *low = 0;
++    *extent = 0;
++    if (location - own->base < own->length)
++    {
++        result = 1;
++        *base = own->base;
++        *low = own->base;
++        *extent = own->length;
++    }
++    else
++    {
++        const uint32_t range = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
++        if (range != BUSTER_PP_NONE && pp->ranges[range].file == BUSTER_PP_NONE)
++        {
++            // A spelling's place: one the segment made, the latest first; else one the root made, in a chunk of its
++            // own or in its last chunk's part that it had used (a unit's spellings go on from there, each unit's its own).
++            for (uint32_t s = images->spelling_count; result == BUSTER_PP_NONE && s != 0; s -= 1)
++            {
++                if (location - images->spelling_places[s - 1] <= images->spellings[s - 1].length)
++                {
++                    result = BUSTER_PP_IMAGE_SPELLING_REF + (s - 1);
++                    *base = images->spelling_places[s - 1];
++                    *low = *base;
++                    *extent = images->spellings[s - 1].length;
++                }
++            }
++            const uint32_t offset = location - pp->ranges[range].base;
++            const bool rooted = range < images->root_ranges && (range != images->root_scratch[0] || offset < images->root_spelled[0]) &&
++                                (range != images->root_scratch[1] || offset < images->root_spelled[1]);
++            if (result == BUSTER_PP_NONE && rooted)
++            {
++                result = 0;
++                *low = pp->ranges[range].base;
++                *extent = pp->ranges[range].length;
++            }
++        }
++        else if (range != BUSTER_PP_NONE && range < images->root_ranges)
++        {
++            // A root range's locations are every unit's.
++            result = 0;
++            *low = pp->ranges[range].base;
++            *extent = pp->ranges[range].length;
++        }
++        else if (range != BUSTER_PP_NONE)
++        {
++            const uint32_t range_base = pp->ranges[range].base;
++            for (uint32_t f = 0; result == BUSTER_PP_NONE && f < *foreign_count; f += 1)
++            {
++                result = foreign_bases[f] == range_base ? 2 + f : result;
++            }
++            for (uint32_t k = 0; result == BUSTER_PP_NONE && k < key_count && *foreign_count < BUSTER_PP_IMAGE_REFS; k += 1)
++            {
++                if (key_macros[k] >= images->root_macros && pp->macros[key_macros[k]].base == range_base)
++                {
++                    foreign_bases[*foreign_count] = range_base;
++                    foreign_keys[*foreign_count] = k;
++                    result = 2 + *foreign_count;
++                    *foreign_count += 1;
++                }
++            }
++            *base = range_base;
++            *low = range_base;
++            *extent = pp->ranges[range].length;
++        }
++    }
++    return result;
++}
++
++// Whether a file context is, at a segment's end, what it was at its start but for where it is and its guard's group.
++static bool pp_image_context_same(const PPContext* a, const PPContext* b)
++{
++    return a->kind == b->kind && a->barrier == b->barrier && a->pending_flags == b->pending_flags && a->trailing_flags == b->trailing_flags &&
++           a->hidden_directives == b->hidden_directives && a->relexed == b->relexed && a->relex_position == b->relex_position && a->relex_file == b->relex_file &&
++           a->comment_read == b->comment_read && a->opaque_spans == b->opaque_spans && a->header_gap_data == b->header_gap_data &&
++           a->header_gap_token == b->header_gap_token && a->macro == b->macro && a->end == b->end && a->expansion_end == b->expansion_end &&
++           a->search_index == b->search_index && a->file == b->file && a->data == b->data && a->range == b->range && a->conditional_base == b->conditional_base &&
++           a->tokens == b->tokens && a->begin == b->begin;
++}
++
++static void pp_image_readable(const void* bytes, uint64_t size)
++{
++#if __has_feature(memory_sanitizer)
++    __msan_unpoison(bytes, (size_t)size);
++#else
++    (void)bytes;
++    (void)size;
++#endif
++}
++
++// Counts a segment that made no image, for `reason`, with its `tokens`.
++static void pp_image_refused(PPImages* images, PPImageReason reason, uint32_t tokens, uint32_t offset)
++{
++    images->refused[reason] += 1;
++    images->refused_tokens[reason] += tokens;
++    if (reason == PP_IMAGE_STATE)
++    {
++        // The field, among the first few met.
++        uint32_t slot = 0;
++        while (slot < BUSTER_ARRAY_LENGTH(images->state_offsets) && images->state_counts[slot] != 0 && images->state_offsets[slot] != offset)
++        {
++            slot += 1;
++        }
++        if (slot < BUSTER_ARRAY_LENGTH(images->state_offsets))
++        {
++            images->state_offsets[slot] = offset;
++            images->state_counts[slot] += 1;
++        }
++    }
++}
++
++// test-check-units' faults in an image (BUSTER_TEST_IMAGE_DIRT): one of its parts changed, where it has that part.
++static void pp_image_test_dirt(PPImage* image, char kind)
++{
++    switch (kind)
++    {
++        case 'k': if (image->token_count != 0) { ((uint8_t*)image->kinds)[0] ^= 1; } break;
++        case 'f': if (image->token_count != 0) { ((uint8_t*)image->flags)[image->token_count - 1] ^= BUSTER_PP_SPACE; } break;
++        case 'v': if (image->token_count != 0) { ((uint32_t*)image->values)[image->token_count / 2] += 1; } break;
++        case 'l': if (image->token_count != 0) { ((uint32_t*)image->locations)[0] += 1; } break;
++        case 'r': if (image->token_count != 0) { ((uint16_t*)image->refs)[image->token_count - 1] ^= 1; } break;
++        case 'm': if (image->macro_count != 0) { ((PPMacro*)image->macros)[image->macro_count - 1].body_end += 1; } break;
++        case 'w': if (image->write_count != 0) { ((PPImageWrite*)image->writes)[0].macro ^= 1; } break;
++        case 'c': if (image->conditional_count != 0) { ((PPImageConditional*)image->conditionals)[0].seen_else ^= 1; } break;
++        case 'e': image->end_position += 1; break;
++        case 'd': image->end_directive += 1; break;
++        case 'g': image->end_guard_taken ^= 1; break;
++        case 'o': image->once ^= 1; break;
++        case 's': if (image->spelling_byte_count != 0) { ((uint8_t*)image->spelling_bytes)[0] ^= 1; } break;
++        default: break;
++    }
++}
++
++// The segment being recorded ends at `context`, before its next inclusion's directive or its file's end: an image of
++// it, under its start and its keys, unless something refuses it; a refused one whose keys are whole leaves them with
++// its reason (PPImage.refused), so that the lane's later units don't record it again. With verify, an image its key
++// already had is compared with the new one.
++static void pp_image_end(Preprocessor* pp, PPContext* context)
++{
++    PPImages* images = pp->images;
++    if (pp->image_recording)
++    {
++        pp->image_recording = false;
++        const Preprocessor* before = images->before;
++        const uint32_t first = images->before_tokens;
++        const uint32_t tokens = pp->output.count - first;
++        PPImageReason reason = (PPImageReason)images->reason;
++        uint32_t offset = 0;
++        // Nothing open, in a context that is the one it began in and is still plain, and no state changed that an image
++        // doesn't hold.
++        PPContext was = images->before_context;
++        const bool closed = images->start_valid && images->context == (uint32_t)(context - pp->contexts) && pp->context_count == before->context_count &&
++                            pp_image_plain(pp, context) && pp_image_context_same(&was, context) && pp->arguments.count == before->arguments.count &&
++                            pp->captures.count == before->captures.count && pp->expansions.count == before->expansions.count &&
++                            pp->conditional_count >= context->conditional_base && pp->conditional_count - context->conditional_base <= BUSTER_PP_IMAGE_CONDITIONALS;
++        reason = reason == PP_IMAGE_RECORDED && !closed ? PP_IMAGE_OPEN : reason;
++        if (reason == PP_IMAGE_RECORDED)
++        {
++            pp_image_readable(before, sizeof(*before));
++            pp_image_readable(pp, sizeof(*pp));
++            offset = pp_image_state_differs(before, pp, images->state_mask);
++            const bool same = offset == sizeof(Preprocessor) && pp->range_count - before->range_count == images->chunks &&
++                              pp->macro_count - images->macro_first == images->macro_count && pp->output.count >= first &&
++                              pp->eval_method_use_count - before->eval_method_use_count == images->use_count;
++            reason = same ? reason : PP_IMAGE_STATE;
++        }
++        Scratch scratch = scratch_begin(0);
++        const uint32_t events = images->event_count;
++        const uint32_t own_base = pp->ranges[context->range].base;
++        // The keys and the writes, from the log in order: a name's first lookup before any write of it is a key, and a
++        // name's last write is its write. A set of the names met, open addressing, each with its key's or write's place.
++        uint32_t slots = 64;
++        while (slots < 2 * (events + 1))
++        {
++            slots *= 2;
++        }
++        IdentId* set_names = arena_push_array(scratch.arena, slots, sizeof(IdentId), 64);
++        uint32_t* set_writes = arena_push_array(scratch.arena, slots, sizeof(uint32_t), 64);
++        uint8_t* set_flags = arena_push(scratch.arena, slots, 64);
++        PPImageKey* keys = arena_push_array(scratch.arena, (uint64_t)events + 1, sizeof(PPImageKey), _Alignof(PPImageKey));
++        PPMacroId* key_macros = arena_push_array(scratch.arena, (uint64_t)events + 1, sizeof(PPMacroId), _Alignof(PPMacroId));
++        PPImageWrite* writes = arena_push_array(scratch.arena, (uint64_t)events + 1, sizeof(PPImageWrite), _Alignof(PPImageWrite));
++        uint32_t* refs = arena_push_array(scratch.arena, (uint64_t)tokens + 1, sizeof(uint32_t), 64);
++        uint32_t* bases = arena_push_array(scratch.arena, (uint64_t)tokens + 1, sizeof(uint32_t), 64);
++        uint32_t* foreign_bases = arena_push_array(scratch.arena, BUSTER_PP_IMAGE_REFS, sizeof(uint32_t), 64);
++        uint32_t* foreign_keys = arena_push_array(scratch.arena, BUSTER_PP_IMAGE_REFS, sizeof(uint32_t), 64);
++        const bool room = set_names != 0 && set_writes != 0 && set_flags != 0 && keys != 0 && key_macros != 0 && writes != 0 && refs != 0 && bases != 0 &&
++                          foreign_bases != 0 && foreign_keys != 0;
++        reason = reason == PP_IMAGE_RECORDED && !room ? PP_IMAGE_ROOM : reason;
++        // Whether the keys are the segment's whole: the log held every lookup, and each key's macro has an identity.
++        bool keyed = room && !images->overflow;
++        uint32_t key_count = 0;
++        uint32_t write_count = 0;
++        uint32_t epoch_steps = 0;
++        if (keyed)
++        {
++            // (A name's entry is its id plus one: zero is an empty slot.)
++            memset(set_names, 0, (uint64_t)slots * sizeof(IdentId));
++            memset(set_flags, 0, slots);
++        }
++        for (uint32_t e = 0; keyed && e < events; e += 1)
++        {
++            const IdentId name = images->events[e].name;
++            const bool write = (images->events[e].macro & BUSTER_PP_IMAGE_WRITE) != 0;
++            const PPMacroId macro = images->events[e].macro & ~BUSTER_PP_IMAGE_WRITE;
++            uint32_t slot = (uint32_t)(((uint64_t)name * 0x9E3779B97F4A7C15ull) >> 40) & (slots - 1);
++            while (set_names[slot] != 0 && set_names[slot] != name + 1)
++            {
++                slot = (slot + 1) & (slots - 1);
++            }
++            set_names[slot] = name + 1;
++            if (write)
++            {
++                // A write gives the name a record the segment made, or none.
++                const bool made = macro == 0 || macro >= images->macro_first;
++                reason = reason == PP_IMAGE_RECORDED && !made ? PP_IMAGE_STATE : reason;
++                if ((set_flags[slot] & 2) == 0)
++                {
++                    set_flags[slot] |= 2;
++                    set_writes[slot] = write_count;
++                    writes[write_count] = (PPImageWrite){ .name = name };
++                    write_count += 1;
++                }
++                writes[set_writes[slot]].macro = macro != 0 && made ? macro - images->macro_first + 1 : 0;
++                epoch_steps += 1;
++            }
++            else if (set_flags[slot] == 0)
++            {
++                set_flags[slot] = 1;
++                const uint64_t identity = pp_image_identity(images, macro);
++                keyed = identity != BUSTER_PP_IMAGE_NO_IDENTITY;
++                keys[key_count] = (PPImageKey){ .identity = identity, .name = name };
++                key_macros[key_count] = macro;
++                key_count += 1;
++            }
++        }
++        reason = reason == PP_IMAGE_RECORDED && !keyed ? (images->overflow ? PP_IMAGE_ROOM : PP_IMAGE_IDENTITY) : reason;
++        // The tokens: their keywords' kinds first (a chunk's pass would give them the same later), then each one's base.
++        uint32_t foreign_count = 0;
++        if (reason == PP_IMAGE_RECORDED)
++        {
++            pp_resolve_keywords_range(pp, first, pp->output.count);
++        }
++        for (uint32_t t = 0; reason == PP_IMAGE_RECORDED && t < tokens; t += 1)
++        {
++            const uint8_t kind = pp->output.kinds[first + t];
++            const uint32_t location = pp->output.locations[first + t];
++            const uint32_t value = pp->output.values[first + t];
++            const bool spelled = kind < C_TOKEN_KIND_COUNT && kind != C_TOKEN_RAW_IDENTIFIER;
++            const bool named = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) || kind == BUSTER_PP_KIND_INTEGER;
++            uint32_t base = 0;
++            uint32_t low = 0;
++            uint32_t extent = 0;
++            const uint32_t ref = pp_image_place(pp, images, context, key_macros, key_count, foreign_bases, foreign_keys, &foreign_count, location, &base, &low, &extent);
++            // A spelled token's value is its spelling's end, in what holds its place.
++            const bool placed = ref != BUSTER_PP_NONE && (named || (spelled && value >= low && value - low <= extent));
++            reason = placed ? reason : PP_IMAGE_PLACE;
++            refs[t] = ref;
++            bases[t] = base;
++        }
++        // Where its uses of __FLT_EVAL_METHOD__ were named, as the tokens' places are.
++        uint32_t use_refs[BUSTER_PP_IMAGE_USES];
++        uint32_t use_bases[BUSTER_PP_IMAGE_USES];
++        for (uint32_t u = 0; reason == PP_IMAGE_RECORDED && u < images->use_count; u += 1)
++        {
++            uint32_t low = 0;
++            uint32_t extent = 0;
++            use_refs[u] = pp_image_place(pp, images, context, key_macros, key_count, foreign_bases, foreign_keys, &foreign_count, images->uses[u].location, &use_bases[u], &low,
++                                         &extent);
++            reason = use_refs[u] != BUSTER_PP_NONE ? reason : PP_IMAGE_PLACE;
++        }
++        // The spellings' references follow the ranges', whose count is final now.
++        const uint32_t references = 2 + foreign_count + images->spelling_count;
++        reason = reason == PP_IMAGE_RECORDED && references > BUSTER_PP_IMAGE_REFS ? PP_IMAGE_ROOM : reason;
++        // The macro records the segment made are this file's, read in this inclusion's range.
++        for (uint32_t m = 0; reason == PP_IMAGE_RECORDED && m < images->macro_count; m += 1)
++        {
++            const PPMacro* macro = images->macros + m;
++            reason = macro->data == context->data && macro->base == own_base && macro->builtin == 0 && macro->disabled == 0 && macro->unused == 0 &&
++                     (macro->flags & (BUSTER_PP_MACRO_COMPILED | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_REDEFINABLE)) == 0 ? reason : PP_IMAGE_STATE;
++        }
++        // The image, in the store: whole, or its keys alone with why it has no more.
++        const uint64_t mark = images->storage.length;
++        const uint32_t open = pp->conditional_count - context->conditional_base;
++        const bool whole = reason == PP_IMAGE_RECORDED;
++        const uint32_t held = whole ? tokens : 0;
++        PPImage* image = 0;
++        if (keyed)
++        {
++            Arena* store = &images->storage;
++            image = arena_push(store, sizeof(PPImage), _Alignof(PPImage));
++            IdentId* key_names = arena_push_array(store, (uint64_t)key_count + 8, sizeof(IdentId), 64);
++            uint64_t* key_identities = arena_push_array(store, (uint64_t)key_count + 8, sizeof(uint64_t), 64);
++            uint8_t* kinds = arena_push(store, (uint64_t)held + 64, 64);
++            uint8_t* flags = arena_push(store, (uint64_t)held + 64, 64);
++            uint32_t* values = arena_push_array(store, (uint64_t)held + 16, sizeof(uint32_t), 64);
++            uint32_t* locations = arena_push_array(store, (uint64_t)held + 16, sizeof(uint32_t), 64);
++            uint16_t* image_refs = arena_push_array(store, (uint64_t)held + 32, sizeof(uint16_t), 64);
++            uint32_t* image_foreign = arena_push_array(store, (uint64_t)foreign_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
++            PPImageSpelling* spellings = arena_push_array(store, (uint64_t)images->spelling_count + 1, sizeof(PPImageSpelling), _Alignof(PPImageSpelling));
++            uint8_t* spelling_bytes = arena_push(store, (uint64_t)images->spelling_byte_count + 1, 1);
++            PPMacro* macros = arena_push_array(store, (uint64_t)images->macro_count + 1, sizeof(PPMacro), _Alignof(PPMacro));
++            PPImageWrite* image_writes = arena_push_array(store, (uint64_t)write_count + 1, sizeof(PPImageWrite), _Alignof(PPImageWrite));
++            PPImageConditional* conditionals = arena_push_array(store, (uint64_t)open + 1, sizeof(PPImageConditional), _Alignof(PPImageConditional));
++            PPImageUse* uses = arena_push_array(store, (uint64_t)images->use_count + 1, sizeof(PPImageUse), _Alignof(PPImageUse));
++            const bool stored = image != 0 && key_names != 0 && key_identities != 0 && kinds != 0 && flags != 0 && values != 0 && locations != 0 && image_refs != 0 && image_foreign != 0 &&
++                                spellings != 0 && spelling_bytes != 0 && macros != 0 && image_writes != 0 && conditionals != 0 && uses != 0;
++            reason = stored ? reason : PP_IMAGE_ROOM;
++            image = stored ? image : 0;
++            if (stored)
++            {
++                for (uint32_t k = 0; k < key_count; k += 1)
++                {
++                    key_names[k] = keys[k].name;
++                    key_identities[k] = keys[k].identity;
++                }
++                *image = (PPImage){ .key_names = key_names, .key_identities = key_identities, .key_count = key_count, .refused = (uint8_t)reason };
++            }
++            if (stored && whole)
++            {
++                memcpy(kinds, pp->output.kinds + first, tokens);
++                memcpy(flags, pp->output.flags + first, tokens);
++                for (uint32_t t = 0; t < tokens; t += 1)
++                {
++                    const uint8_t kind = kinds[t];
++                    const bool spelled = kind < C_TOKEN_KIND_COUNT && kind != C_TOKEN_RAW_IDENTIFIER;
++                    const uint32_t ref = refs[t] >= BUSTER_PP_IMAGE_SPELLING_REF ? 2 + foreign_count + (refs[t] - BUSTER_PP_IMAGE_SPELLING_REF) : refs[t];
++                    image_refs[t] = (uint16_t)ref;
++                    locations[t] = pp->output.locations[first + t] - bases[t];
++                    values[t] = pp->output.values[first + t] - (spelled ? bases[t] : 0);
++                }
++                // (The references past the last token's, which pp_image_apply's whole loads gather by: none.)
++                memset(image_refs + tokens, 0, 32 * sizeof(uint16_t));
++                memcpy(image_foreign, foreign_keys, (uint64_t)foreign_count * sizeof(uint32_t));
++                memcpy(spellings, images->spellings, (uint64_t)images->spelling_count * sizeof(PPImageSpelling));
++                memcpy(spelling_bytes, images->spelling_bytes, images->spelling_byte_count);
++                for (uint32_t m = 0; m < images->macro_count; m += 1)
++                {
++                    macros[m] = images->macros[m];
++                    macros[m].data = 0;
++                    macros[m].base = 0;
++                    macros[m].location -= own_base;
++                }
++                memcpy(image_writes, writes, (uint64_t)write_count * sizeof(PPImageWrite));
++                bool placed = true;
++                for (uint32_t c = 0; c < open; c += 1)
++                {
++                    const PPConditional* conditional = &pp->conditionals[context->conditional_base + c];
++                    conditionals[c] = (PPImageConditional){
++                        .location = conditional->location - own_base,
++                        .taken = conditional->taken,
++                        .seen_else = conditional->seen_else,
++                        .skipping = conditional->skipping,
++                    };
++                    placed = placed && conditional->location - own_base < pp->ranges[context->range].length;
++                }
++                for (uint32_t u = 0; u < images->use_count; u += 1)
++                {
++                    uses[u] = (PPImageUse){
++                        .position = images->uses[u].position,
++                        .location = images->uses[u].location - use_bases[u],
++                        .ref = use_refs[u] >= BUSTER_PP_IMAGE_SPELLING_REF ? 2 + foreign_count + (use_refs[u] - BUSTER_PP_IMAGE_SPELLING_REF) : use_refs[u],
++                    };
++                }
++                const PPFileData* file = &pp->datas[pp->files[context->file].data];
++                *image = (PPImage){
++                    .key_names = key_names,
++                    .key_identities = key_identities,
++                    .key_count = key_count,
++                    .token_count = tokens,
++                    .kinds = kinds,
++                    .flags = flags,
++                    .values = values,
++                    .locations = locations,
++                    .refs = image_refs,
++                    .foreign_count = foreign_count,
++                    .foreign_keys = image_foreign,
++                    .spelling_count = images->spelling_count,
++                    .spellings = spellings,
++                    .spelling_bytes = spelling_bytes,
++                    .spelling_byte_count = images->spelling_byte_count,
++                    .macro_count = images->macro_count,
++                    .macros = macros,
++                    .write_count = write_count,
++                    .writes = image_writes,
++                    .epoch_steps = epoch_steps,
++                    .conditional_count = open,
++                    .conditionals = conditionals,
++                    .use_count = images->use_count,
++                    .uses = uses,
++                    .record = images->start.record,
++                    .end_position = context->position,
++                    .end_directive = context->next_directive,
++                    .end_guard_taken = context->guard_taken,
++                    .once = file->once && !images->before_once,
++                    // (A condition placed outside its file's range makes no image: its keys keep that.)
++                    .refused = placed ? PP_IMAGE_RECORDED : PP_IMAGE_PLACE,
++                };
++                reason = placed ? reason : PP_IMAGE_PLACE;
++            }
++        }
++        if (image != 0)
++        {
++            PPImage* placed = pp_image_insert(images, &images->start, image);
++            if (placed == 0)
++            {
++                reason = reason == PP_IMAGE_RECORDED ? PP_IMAGE_ORDER : reason;
++            }
++            else if (placed != image)
++            {
++                // Its key had an image: the same one (refused for the same kind of reason, or whole and equal), or with
++                // verify a difference to report.
++                const char* what = 0;
++                const bool both = placed->refused == PP_IMAGE_RECORDED && image->refused == PP_IMAGE_RECORDED;
++                const bool same = both ? pp_image_same(placed, image, &what) : (placed->refused != PP_IMAGE_RECORDED) == (image->refused != PP_IMAGE_RECORDED);
++                images->verified += both ? 1 : 0;
++                images->verified_tokens += both ? tokens : 0;
++                if (!same)
++                {
++                    images->differed += 1;
++                    if (images->mismatches == 0)
++                    {
++                        snprintf(images->mismatch, sizeof(images->mismatch), "a segment of %.*s from its token %u differs from its image in its %s",
++                                 (int)pp->files[context->file].path_length, pp->files[context->file].path, images->start.position, what != 0 ? what : "refusal");
++                    }
++                    images->mismatches += 1;
++                }
++                arena_pop_to(&images->storage, mark);
++            }
++            else if (reason == PP_IMAGE_RECORDED)
++            {
++                images->recorded += 1;
++                images->recorded_tokens += tokens;
++                // A test's fault (test-check-units): a part of the new image that isn't what its segment did, which
++                // verify must report when the lane's next unit reaches its key. Read only with verify, which no
++                // compile's own command asks for.
++                const char* dirt = images->mode == PP_IMAGES_VERIFY ? getenv("BUSTER_TEST_IMAGE_DIRT") : 0;
++                if (dirt != 0)
++                {
++                    pp_image_test_dirt(image, dirt[0]);
++                }
++            }
++        }
++        if (reason != PP_IMAGE_RECORDED)
++        {
++            pp_image_refused(images, reason, tokens, offset);
++        }
++        scratch_end(scratch);
++    }
++}
++
++// Takes `image` at `context` in the place of its segment's run: its tokens appended to the output, each value and
++// place on its base here (the inclusion's range, the ranges its key macros are defined in, the spellings made again in
++// the scratch space, in order), its macro records appended and its names' last writes made, its conditions left open,
++// and the context where the segment stopped. Returns false, with nothing changed, where the unit has no room for it:
++// the segment's own run then reports that.
++static bool pp_image_apply(Preprocessor* pp, PPContext* context, const PPImage* image)
++{
++    PPTokens* out = &pp->output;
++    const uint32_t tokens = image->token_count;
++    const uint32_t own_base = pp->ranges[context->range].base;
++    const uint32_t references = 2 + image->foreign_count + image->spelling_count;
++    Scratch scratch = scratch_begin(0);
++    uint32_t* bases = arena_push_array(scratch.arena, (uint64_t)references + 16, sizeof(uint32_t), 64);
++    bool result = bases != 0 && (uint64_t)out->count + tokens + BUSTER_PP_TOKEN_SLACK <= out->capacity &&
++                  (uint64_t)pp->macro_count + image->macro_count < (BUSTER_PP_MAX_MACROS >> pp->capacity_shift) &&
++                  (uint64_t)context->conditional_base + image->conditional_count < (BUSTER_PP_MAX_CONTEXTS >> pp->capacity_shift);
++    if (result)
++    {
++        bases[0] = 0;
++        bases[1] = own_base;
++        for (uint32_t f = 0; f < image->foreign_count; f += 1)
++        {
++            bases[2 + f] = pp->macros[pp->macro_of[image->key_names[image->foreign_keys[f]]]].base;
++        }
++        for (uint32_t s = 0; s < image->spelling_count; s += 1)
++        {
++            const PPImageSpelling* spelling = image->spellings + s;
++            bases[2 + image->foreign_count + s] = pp_scratch_in(pp, image->spelling_bytes + spelling->offset, spelling->length, spelling->clean);
++        }
++        result = !pp->fatal;
++    }
++    if (result)
++    {
++        // The tokens: kinds and flags as they are; of each sixteen, the bases gathered by their references, added to the
++        // places and to the values of the tokens that are spelled (not a name's id, nor an integer's value).
++        const uint32_t at = out->count;
++        memcpy(out->kinds + at, image->kinds, tokens);
++        memcpy(out->flags + at, image->flags, tokens);
++        for (uint32_t t = 0; t < tokens; t += 16)
++        {
++            const __m128i kinds = _mm_loadu_si128((const __m128i*)(image->kinds + t));
++            const __mmask16 spelled = _mm_cmplt_epu8_mask(kinds, _mm_set1_epi8((char)C_TOKEN_KIND_COUNT)) & _mm_cmpneq_epi8_mask(kinds, _mm_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++            const __m512i refs = _mm512_cvtepu16_epi32(_mm256_loadu_si256((const __m256i*)(image->refs + t)));
++            const __m512i based = _mm512_i32gather_epi32(refs, bases, 4);
++            const __m512i values = _mm512_loadu_si512(image->values + t);
++            _mm512_storeu_si512(out->values + at + t, _mm512_mask_add_epi32(values, spelled, values, based));
++            _mm512_storeu_si512(out->locations + at + t, _mm512_add_epi32(_mm512_loadu_si512(image->locations + t), based));
++        }
++        out->count = at + tokens;
++        // The macro records, and each name's last write.
++        const PPMacroId first = pp->macro_count;
++        for (uint32_t m = 0; m < image->macro_count; m += 1)
++        {
++            PPMacro* macro = &pp->macros[first + m];
++            *macro = image->macros[m];
++            macro->data = context->data;
++            macro->base = own_base;
++            macro->location += own_base;
++            if (first + m < BUSTER_PP_IMAGE_IDENTITIES)
++            {
++                pp->images->identities[first + m] = ((uint64_t)image->record << 32) | image->macros[m].location;
++            }
++        }
++        pp->macro_count = first + image->macro_count;
++        for (uint32_t w = 0; w < image->write_count; w += 1)
++        {
++            const IdentId name = image->writes[w].name;
++            const PPMacroId id = image->writes[w].macro != 0 ? first + image->writes[w].macro - 1 : 0;
++            pp->macro_of[name] = id;
++            const uint64_t bit = 1ull << (name % 64);
++            pp->is_macro[name / 64] = id != 0 ? pp->is_macro[name / 64] | bit : pp->is_macro[name / 64] & ~bit;
++        }
++        pp->macro_epoch += image->epoch_steps;
++        // The conditions it left open, and where it stopped.
++        for (uint32_t c = 0; c < image->conditional_count; c += 1)
++        {
++            const PPImageConditional* conditional = image->conditionals + c;
++            pp->conditionals[context->conditional_base + c] = (PPConditional){
++                .taken = conditional->taken,
++                .seen_else = conditional->seen_else,
++                .skipping = conditional->skipping,
++                .location = conditional->location + own_base,
++            };
++        }
++        pp->conditional_count = context->conditional_base + image->conditional_count;
++        context->position = image->end_position;
++        context->next_directive = image->end_directive;
++        context->guard_taken = image->end_guard_taken;
++        if (image->once)
++        {
++            pp->datas[pp->files[context->file].data].once = true;
++        }
++        for (uint32_t u = 0; u < image->use_count; u += 1)
++        {
++            pp_eval_method_record(pp, at + image->uses[u].position, image->uses[u].location + bases[image->uses[u].ref], 0);
++        }
++    }
++    scratch_end(scratch);
++    return result;
++}
++
++// The lane's images' counts, for --time-stages.
++BUSTER_PREPROCESSOR_ENTRY void pp_images_report(const PPImages* images, FILE* stream)
++{
++    static const char* const reasons[PP_IMAGE_REASONS] = { "recorded", "diagnostic", "directive", "builtin", "open", "state", "place", "identity", "room", "order" };
++    unsigned long long refused = 0;
++    unsigned long long refused_tokens = 0;
++    for (uint32_t r = 1; r < PP_IMAGE_REASONS; r += 1)
++    {
++        refused += images->refused[r];
++        refused_tokens += images->refused_tokens[r];
++    }
++    fprintf(stream, "header images: %llu segments, %llu taken (%llu tokens), %llu recorded (%llu tokens), %llu refused (%llu tokens), %llu run unrecorded, %llu not started, "
++            "%llu images, %llu names walked; verified %llu (%llu tokens), %llu differed\n",
++            (unsigned long long)images->segments, (unsigned long long)images->hits, (unsigned long long)images->hit_tokens, (unsigned long long)images->recorded,
++            (unsigned long long)images->recorded_tokens, refused, refused_tokens, (unsigned long long)images->declined, (unsigned long long)images->unstarted,
++            (unsigned long long)images->image_count, (unsigned long long)images->names_walked, (unsigned long long)images->verified,
++            (unsigned long long)images->verified_tokens, (unsigned long long)images->differed);
++    for (uint32_t r = 1; r < PP_IMAGE_REASONS; r += 1)
++    {
++        if (images->refused[r] != 0)
++        {
++            fprintf(stream, "header images: refused for %s: %llu segments, %llu tokens\n", reasons[r], (unsigned long long)images->refused[r],
++                    (unsigned long long)images->refused_tokens[r]);
++        }
++    }
++    // (The byte's field: offsetof(Preprocessor, FIELD), which pp_image_state_mask allows or doesn't.)
++    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(images->state_offsets) && images->state_counts[s] != 0; s += 1)
++    {
++        fprintf(stream, "header images: state: the byte at %llu of the preprocessor changed in %llu segments\n", (unsigned long long)images->state_offsets[s],
++                (unsigned long long)images->state_counts[s]);
++    }
++}
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // The root image (#3070): c_preprocessor.c, at PPRoot, has what it is and what a release restores.
+ 
+@@ -14474,6 +15794,7 @@ BUSTER_PREPROCESSOR_ENTRY void pp_root_release(PPRoot* root)
+             }
+             arena_release(&root->image.arrays[0]);
+         }
++        pp_images_release(root->images);
+         // The record is in the arena it describes.
+         Arena storage = root->storage;
+         arena_release(&storage);
+@@ -14483,6 +15804,10 @@ BUSTER_PREPROCESSOR_ENTRY void pp_root_release(PPRoot* root)
+ // The root's storage emptied to its record, and the root without an image.
+ static void pp_root_forget(PPRoot* root, uint8_t state)
+ {
++    if (root->images != 0)
++    {
++        pp_images_reset(root->images, 0);
++    }
+     arena_rewind(&root->storage, (uint64_t)((uint8_t*)(root + 1) - root->storage.base));
+     root->state = state;
+     root->table_count = 0;
+@@ -14544,6 +15869,16 @@ static void pp_root_capture(Preprocessor* pp)
+     }
+     if (captured)
+     {
++        // The lane's header images begin again with the root: their keys name its macros by their ids, and its ranges'
++        // locations are every unit's.
++        if (root->images != 0)
++        {
++            pp_images_reset(root->images, pp);
++        }
++        pp->images = root->images;
++        // (What the prelude did is the image's own state, in every unit: nothing of it blocks them.)
++        pp->images_blocked = false;
++        pp->image_recording = false;
+         root->image = *pp;
+         // The output is each unit's own (pp_root_resume), and a unit that starts from the image has its macros.
+         root->image.output = (PPTokens){ 0 };
+diff --git a/tests/units/header-images/a_plain.c b/tests/units/header-images/a_plain.c
+new file mode 100644
+index 00000000..48a06295
+--- /dev/null
++++ b/tests/units/header-images/a_plain.c
+@@ -0,0 +1,12 @@
++// The headers as most units read them: the lane's first images of them.
++#include "types.h"
++#include "shared.h"
++const char* a_plain_text(void)
++{
++    return hi_shared_text;
++}
++hi_word a_plain(hi_word value)
++{
++    const hi_pair pair = HI_PAIR(value, HI_VALUE);
++    return hi_pair_sum(&pair) + hi_shared_get(value) + (hi_word)sizeof(hi_word);
++}
+diff --git a/tests/units/header-images/again.h b/tests/units/header-images/again.h
+new file mode 100644
+index 00000000..ac8b1a47
+--- /dev/null
++++ b/tests/units/header-images/again.h
+@@ -0,0 +1,9 @@
++// No guard: a unit that includes it twice reads it twice, under what the first reading left.
++#ifndef HI_AGAIN_COUNT
++#define HI_AGAIN_COUNT 1
++static const int hi_again_first = HI_AGAIN_COUNT;
++#else
++#undef HI_AGAIN_COUNT
++#define HI_AGAIN_COUNT 2
++static const int hi_again_second = HI_AGAIN_COUNT;
++#endif
+diff --git a/tests/units/header-images/b_plain.c b/tests/units/header-images/b_plain.c
+new file mode 100644
+index 00000000..d3440c68
+--- /dev/null
++++ b/tests/units/header-images/b_plain.c
+@@ -0,0 +1,8 @@
++// The same headers under the same macros, with other code: every segment has an image.
++#include "types.h"
++#include "shared.h"
++static const hi_word b_plain_table[] = { HI_VALUE, HI_BITS, sizeof(hi_pair) };
++hi_word b_plain(unsigned index)
++{
++    return b_plain_table[index % 3] + hi_shared_put(HI_VALUE) + hi_shared_text[0];
++}
+diff --git a/tests/units/header-images/c_wide.c b/tests/units/header-images/c_wide.c
+new file mode 100644
+index 00000000..be5a8d73
+--- /dev/null
++++ b/tests/units/header-images/c_wide.c
+@@ -0,0 +1,9 @@
++// A macro the header reads, defined before it: other keys under the same starts.
++#define HI_WIDTH 64
++#include "shared.h"
++#include "types.h"
++hi_word c_wide(hi_word value)
++{
++    const hi_pair pair = HI_PAIR(value, HI_VALUE);
++    return hi_pair_sum(&pair) + (hi_word)sizeof(hi_word) + hi_shared_text[1];
++}
+diff --git a/tests/units/header-images/d_paste.c b/tests/units/header-images/d_paste.c
+new file mode 100644
+index 00000000..f7544433
+--- /dev/null
++++ b/tests/units/header-images/d_paste.c
+@@ -0,0 +1,7 @@
++// Pasted names and stringized text.
++#define HI_PASTE_DIGITS 6
++#include "paste.h"
++int d_paste(void)
++{
++    return hi_paste_first() + hi_paste_second() + hi_paste_HI_PASTE_EXTRA() + hi_paste_number + hi_paste_wide + hi_paste_name_first[0];
++}
+diff --git a/tests/units/header-images/e_paste.c b/tests/units/header-images/e_paste.c
+new file mode 100644
+index 00000000..a21e52f4
+--- /dev/null
++++ b/tests/units/header-images/e_paste.c
+@@ -0,0 +1,9 @@
++// The same, where the pasted names are macros here: other lookups' answers, and other tokens.
++#define HI_PASTE_DIGITS 7
++#define HI_PASTE_EXTRA third
++#define hi_paste_second hi_paste_renamed
++#include "paste.h"
++int e_paste(void)
++{
++    return hi_paste_first() + hi_paste_renamed() + hi_paste_third() + hi_paste_number + hi_paste_wide + hi_paste_name_second[1];
++}
+diff --git a/tests/units/header-images/f_needs.c b/tests/units/header-images/f_needs.c
+new file mode 100644
+index 00000000..f2b3f240
+--- /dev/null
++++ b/tests/units/header-images/f_needs.c
+@@ -0,0 +1,13 @@
++// A header read three times under three sets of macros.
++#define HI_NEED_small
++#include "needs.h"
++#define HI_NEED_medium
++#define HI_NEED_float
++#include "needs.h"
++#define HI_NEED_small
++#define HI_NEED_large
++#include "needs.h"
++hi_large f_needs(hi_small small, hi_medium medium, hi_float real)
++{
++    return (hi_large)small + medium + (hi_large)real + (hi_large)sizeof(hi_float);
++}
+diff --git a/tests/units/header-images/foreign.h b/tests/units/header-images/foreign.h
+new file mode 100644
+index 00000000..3d56f0ae
+--- /dev/null
++++ b/tests/units/header-images/foreign.h
+@@ -0,0 +1,8 @@
++// Tokens from macros another header defined (shared.h's), whose places are in that header's range in each unit.
++#ifndef HI_FOREIGN_H
++#define HI_FOREIGN_H
++static inline hi_word hi_foreign(hi_word value)
++{
++    return HI_CALL(get, value) + HI_CALL(put, HI_VALUE) + (hi_word)sizeof(HI_TEXT(foreign text));
++}
++#endif
+diff --git a/tests/units/header-images/g_needs.c b/tests/units/header-images/g_needs.c
+new file mode 100644
+index 00000000..f4d91c44
+--- /dev/null
++++ b/tests/units/header-images/g_needs.c
+@@ -0,0 +1,14 @@
++// The same header under the sets in another order: some of the keys are f_needs.c's, some new.
++#define HI_NEED_large
++#include "needs.h"
++#define HI_NEED_small
++#include "needs.h"
++#define HI_NEED_medium
++#define HI_NEED_float
++#include "needs.h"
++#define HI_NEED_small
++#include "needs.h"
++hi_large g_needs(hi_small small, hi_medium medium, hi_float real)
++{
++    return (hi_large)small * medium - (hi_large)real;
++}
+diff --git a/tests/units/header-images/h_open.c b/tests/units/header-images/h_open.c
+new file mode 100644
+index 00000000..2b753ace
+--- /dev/null
++++ b/tests/units/header-images/h_open.c
+@@ -0,0 +1,7 @@
++// A header whose inclusions are inside its conditions: this branch's.
++#define HI_MODE 2
++#include "open.h"
++hi_word h_open(hi_word value)
++{
++    return hi_open_two(HI_PAIR(value, hi_opened));
++}
+diff --git a/tests/units/header-images/i_open.c b/tests/units/header-images/i_open.c
+new file mode 100644
+index 00000000..977ddab8
+--- /dev/null
++++ b/tests/units/header-images/i_open.c
+@@ -0,0 +1,9 @@
++// The other branch's, and then the first's header by itself.
++#define HI_MODE 1
++#include "open.h"
++#include "types.h"
++hi_word i_open(hi_word value)
++{
++    const hi_pair pair = HI_PAIR(hi_open_one(value), hi_opened);
++    return hi_pair_sum(&pair);
++}
+diff --git a/tests/units/header-images/j_line.c b/tests/units/header-images/j_line.c
+new file mode 100644
+index 00000000..6b8f31a6
+--- /dev/null
++++ b/tests/units/header-images/j_line.c
+@@ -0,0 +1,7 @@
++// The unit's place in what it reads.
++#define HI_LINE_NAME(name) j_line_##name
++#include "line.h"
++int j_line(void)
++{
++    return j_line_line + j_line_level + j_line_counter + j_line_file[0] + j_line_base[2] + __COUNTER__;
++}
+diff --git a/tests/units/header-images/k_line.c b/tests/units/header-images/k_line.c
+new file mode 100644
+index 00000000..3a79b299
+--- /dev/null
++++ b/tests/units/header-images/k_line.c
+@@ -0,0 +1,10 @@
++// The same header at another line, after another use of the counter.
++static const int k_line_before = __COUNTER__;
++
++
++#define HI_LINE_NAME(name) k_line_##name
++#include "line.h"
++int k_line(void)
++{
++    return k_line_line + k_line_level + k_line_counter + k_line_file[1] + k_line_base[3] + k_line_before;
++}
+diff --git a/tests/units/header-images/l_warns.c b/tests/units/header-images/l_warns.c
+new file mode 100644
+index 00000000..e79cfcf3
+--- /dev/null
++++ b/tests/units/header-images/l_warns.c
+@@ -0,0 +1,6 @@
++// A header that warns as it is read.
++#include "warns.h"
++int l_warns(void)
++{
++    return hi_warns;
++}
+diff --git a/tests/units/header-images/left/identity.h b/tests/units/header-images/left/identity.h
+new file mode 100644
+index 00000000..3d369738
+--- /dev/null
++++ b/tests/units/header-images/left/identity.h
+@@ -0,0 +1,3 @@
++// One file under two names (right/identity.h is a link to it): __FILE__ is the name it was included by.
++static const char hi_identity[] = __FILE__;
++static const int hi_identity_size = sizeof(__FILE__);
+diff --git a/tests/units/header-images/line.h b/tests/units/header-images/line.h
+new file mode 100644
+index 00000000..ba235f5c
+--- /dev/null
++++ b/tests/units/header-images/line.h
+@@ -0,0 +1,6 @@
++// What a unit's place decides: no image holds these, and each unit has its own.
++static const int HI_LINE_NAME(line) = __LINE__;
++static const int HI_LINE_NAME(level) = __INCLUDE_LEVEL__;
++static const int HI_LINE_NAME(counter) = __COUNTER__;
++static const char HI_LINE_NAME(file)[] = __FILE__;
++static const char HI_LINE_NAME(base)[] = __BASE_FILE__;
+diff --git a/tests/units/header-images/m_warns.c b/tests/units/header-images/m_warns.c
+new file mode 100644
+index 00000000..ac4254a3
+--- /dev/null
++++ b/tests/units/header-images/m_warns.c
+@@ -0,0 +1,6 @@
++// And again: this unit has the warning too.
++#include "warns.h"
++int m_warns(int value)
++{
++    return hi_warns * value;
++}
+diff --git a/tests/units/header-images/mode.h b/tests/units/header-images/mode.h
+new file mode 100644
+index 00000000..7bc80c2b
+--- /dev/null
++++ b/tests/units/header-images/mode.h
+@@ -0,0 +1,3 @@
++// Pops a macro its includer pushed: what it then has is no lookup's answer.
++#pragma pop_macro("HI_MODE_VALUE")
++static const int hi_mode = HI_MODE_VALUE;
+diff --git a/tests/units/header-images/n_foreign.c b/tests/units/header-images/n_foreign.c
+new file mode 100644
+index 00000000..07149693
+--- /dev/null
++++ b/tests/units/header-images/n_foreign.c
+@@ -0,0 +1,7 @@
++// A header's tokens from another header's macros.
++#include "shared.h"
++#include "foreign.h"
++hi_word n_foreign(hi_word value)
++{
++    return hi_foreign(value);
++}
+diff --git a/tests/units/header-images/needs.h b/tests/units/header-images/needs.h
+new file mode 100644
+index 00000000..3b9d9b1e
+--- /dev/null
++++ b/tests/units/header-images/needs.h
+@@ -0,0 +1,25 @@
++// Read again and again under other macros, as musl's bits/alltypes.h is: one start, a key for each set of answers.
++#if defined(HI_NEED_small) && !defined(HI_DEFINED_small)
++typedef signed char hi_small;
++#define HI_DEFINED_small
++#endif
++#if defined(HI_NEED_medium) && !defined(HI_DEFINED_medium)
++typedef int hi_medium;
++#define HI_DEFINED_medium
++#endif
++#if defined(HI_NEED_large) && !defined(HI_DEFINED_large)
++typedef long long hi_large;
++#define HI_DEFINED_large
++#endif
++#if defined(HI_NEED_float) && !defined(HI_DEFINED_float)
++#if __FLT_EVAL_METHOD__ == 0
++typedef float hi_float;
++#else
++typedef long double hi_float;
++#endif
++#define HI_DEFINED_float
++#endif
++#undef HI_NEED_small
++#undef HI_NEED_medium
++#undef HI_NEED_large
++#undef HI_NEED_float
+diff --git a/tests/units/header-images/o_foreign.c b/tests/units/header-images/o_foreign.c
+new file mode 100644
+index 00000000..c8ddaabd
+--- /dev/null
++++ b/tests/units/header-images/o_foreign.c
+@@ -0,0 +1,8 @@
++// The same, with the other header read through one more and a line later: its range is elsewhere.
++#include "types.h"
++
++#include "foreign.h"
++hi_word o_foreign(const hi_pair* pair)
++{
++    return hi_foreign(pair->first) + hi_pair_sum(pair);
++}
+diff --git a/tests/units/header-images/open.h b/tests/units/header-images/open.h
+new file mode 100644
+index 00000000..8a3c72b5
+--- /dev/null
++++ b/tests/units/header-images/open.h
+@@ -0,0 +1,14 @@
++// Conditions left open across an inclusion: the segment before it ends inside them, and the one after begins there.
++#ifndef HI_OPEN_H
++#define HI_OPEN_H
++#if HI_MODE > 1
++#define HI_OPENED 2
++#include "types.h"
++hi_word hi_open_two(hi_pair pair);
++#else
++#define HI_OPENED 1
++#include "shared.h"
++hi_word hi_open_one(hi_word value);
++#endif
++static const int hi_opened = HI_OPENED + HI_VALUE;
++#endif
+diff --git a/tests/units/header-images/p_left.c b/tests/units/header-images/p_left.c
+new file mode 100644
+index 00000000..d434d11d
+--- /dev/null
++++ b/tests/units/header-images/p_left.c
+@@ -0,0 +1,6 @@
++// One file by its first name.
++#include "left/identity.h"
++const char* p_left(void)
++{
++    return hi_identity + hi_identity_size - 3;
++}
+diff --git a/tests/units/header-images/paste.h b/tests/units/header-images/paste.h
+new file mode 100644
+index 00000000..5577ac5d
+--- /dev/null
++++ b/tests/units/header-images/paste.h
+@@ -0,0 +1,15 @@
++// Pasted names and stringized text: spellings the segment makes, and names it looks up only once they are pasted.
++#ifndef HI_PASTE_H
++#define HI_PASTE_H
++#define HI_JOIN(a, b) a##b
++#define HI_DECLARE(name) int HI_JOIN(hi_paste_, name)(void); static const char HI_JOIN(hi_paste_name_, name)[] = #name
++#define HI_NUMBER(high, low) HI_JOIN(high, low)
++HI_DECLARE(first);
++HI_DECLARE(second);
++HI_DECLARE(HI_PASTE_EXTRA);
++enum
++{
++    hi_paste_number = HI_NUMBER(4, 2),
++    hi_paste_wide = HI_NUMBER(0x1, HI_PASTE_DIGITS),
++};
++#endif
+diff --git a/tests/units/header-images/q_right.c b/tests/units/header-images/q_right.c
+new file mode 100644
+index 00000000..c2df7191
+--- /dev/null
++++ b/tests/units/header-images/q_right.c
+@@ -0,0 +1,6 @@
++// And by its second, a link to the first: the same file, and another __FILE__.
++#include "right/identity.h"
++const char* q_right(void)
++{
++    return hi_identity + hi_identity_size - 3;
++}
+diff --git a/tests/units/header-images/r_mode.c b/tests/units/header-images/r_mode.c
+new file mode 100644
+index 00000000..d626f5b4
+--- /dev/null
++++ b/tests/units/header-images/r_mode.c
+@@ -0,0 +1,10 @@
++// A header that pops what this unit pushed.
++#define HI_MODE_VALUE 7
++#pragma push_macro("HI_MODE_VALUE")
++#undef HI_MODE_VALUE
++#include "mode.h"
++#include "shared.h"
++int r_mode(void)
++{
++    return hi_mode + HI_VALUE;
++}
+diff --git a/tests/units/header-images/right/identity.h b/tests/units/header-images/right/identity.h
+new file mode 120000
+index 00000000..8c1ca8c9
+--- /dev/null
++++ b/tests/units/header-images/right/identity.h
+@@ -0,0 +1 @@
++../left/identity.h
+\ No newline at end of file
+diff --git a/tests/units/header-images/s_mode.c b/tests/units/header-images/s_mode.c
+new file mode 100644
+index 00000000..8d50a96f
+--- /dev/null
++++ b/tests/units/header-images/s_mode.c
+@@ -0,0 +1,10 @@
++// The same lookups' answers before the header, and another value after it.
++#define HI_MODE_VALUE 9
++#pragma push_macro("HI_MODE_VALUE")
++#undef HI_MODE_VALUE
++#include "mode.h"
++#include "shared.h"
++int s_mode(void)
++{
++    return hi_mode + HI_VALUE;
++}
+diff --git a/tests/units/header-images/shared.h b/tests/units/header-images/shared.h
+new file mode 100644
+index 00000000..62669887
+--- /dev/null
++++ b/tests/units/header-images/shared.h
+@@ -0,0 +1,17 @@
++// A guarded header whose text depends on a macro of its includer's (HI_WIDTH), and whose macros other headers expand.
++#ifndef HI_SHARED_H
++#define HI_SHARED_H
++#ifdef HI_WIDTH
++#define HI_BITS HI_WIDTH
++typedef long hi_word;
++#else
++#define HI_BITS 32
++typedef int hi_word;
++#endif
++#define HI_VALUE (HI_BITS + 1)
++#define HI_CALL(name, argument) hi_shared_##name(argument)
++#define HI_TEXT(text) #text
++hi_word hi_shared_get(hi_word value);
++hi_word hi_shared_put(hi_word value);
++static const char hi_shared_text[] = HI_TEXT(HI_BITS bits);
++#endif
+diff --git a/tests/units/header-images/t_again.c b/tests/units/header-images/t_again.c
+new file mode 100644
+index 00000000..04226f4c
+--- /dev/null
++++ b/tests/units/header-images/t_again.c
+@@ -0,0 +1,7 @@
++// A header without a guard, twice in one unit.
++#include "again.h"
++#include "again.h"
++int t_again(void)
++{
++    return hi_again_first + hi_again_second + HI_AGAIN_COUNT;
++}
+diff --git a/tests/units/header-images/types.h b/tests/units/header-images/types.h
+new file mode 100644
+index 00000000..8f331f9c
+--- /dev/null
++++ b/tests/units/header-images/types.h
+@@ -0,0 +1,11 @@
++// Read once, with an inclusion of its own: a segment before it and one after.
++#pragma once
++typedef struct hi_pair hi_pair;
++#include "shared.h"
++struct hi_pair
++{
++    hi_word first;
++    hi_word second;
++};
++#define HI_PAIR(a, b) ((hi_pair){ (a), (b) })
++hi_word hi_pair_sum(const hi_pair* pair);
+diff --git a/tests/units/header-images/u_again.c b/tests/units/header-images/u_again.c
+new file mode 100644
+index 00000000..19e1e469
+--- /dev/null
++++ b/tests/units/header-images/u_again.c
+@@ -0,0 +1,9 @@
++// Its second reading first, and its macro undefined before its first.
++#define HI_AGAIN_COUNT 5
++#include "again.h"
++#undef HI_AGAIN_COUNT
++#include "again.h"
++int u_again(void)
++{
++    return hi_again_first + hi_again_second + HI_AGAIN_COUNT;
++}
+diff --git a/tests/units/header-images/v_computed.c b/tests/units/header-images/v_computed.c
+new file mode 100644
+index 00000000..4b0198ee
+--- /dev/null
++++ b/tests/units/header-images/v_computed.c
+@@ -0,0 +1,9 @@
++// A header named by a macro, and one read after a definition of a name its text spells.
++#define HI_HEADER "shared.h"
++#define hi_shared_put hi_shared_other
++#include HI_HEADER
++#include "types.h"
++hi_word v_computed(hi_word value)
++{
++    return hi_shared_other(value) + hi_shared_get(HI_VALUE);
++}
+diff --git a/tests/units/header-images/warns.h b/tests/units/header-images/warns.h
+new file mode 100644
+index 00000000..297793b6
+--- /dev/null
++++ b/tests/units/header-images/warns.h
+@@ -0,0 +1,7 @@
++// A header whose reading warns: read in every unit, so that each has the warning.
++#ifndef HI_WARNS_H
++#define HI_WARNS_H
++#define HI_TWICE 1
++#define HI_TWICE 2
++static const int hi_warns = HI_TWICE;
++#endif
+diff --git a/tools/ci/correctness.tests b/tools/ci/correctness.tests
+index a64643b6..ca1e4ef9 100644
+--- a/tools/ci/correctness.tests
++++ b/tools/ci/correctness.tests
+@@ -149,6 +149,16 @@ tcl=$(bash tools/ci/tcl-config.sh) || exit $?
+ # declarations, whose second reading of such a unit prints no parser's error.
+ "$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image --option --lanes --option 1
+ "$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image/errors --option --lanes --option 1 --option --attested=off
++# #3070 step 2: the header images' units, which read a few headers under the same macros and under others (a macro a
++# header reads, pasted names that are macros in one unit, a header read again and again under other macros, conditions
++# left open across an inclusion, a header named by a macro) and what no image holds (__LINE__, __FILE__ through a
++# link, a popped macro, a header that warns), each after the others on one lane: every object its own alone with the
++# images taken, and with each segment compared with the image its key has. Then the c-testsuite's programs so, and the
++# root image's units, whose predefined macros change under the images' keys.
++"$BUSTER_COMPILER" test-check-units --corpus tests/units/header-images --option --lanes --option 1 --option --header-images=on
++"$BUSTER_COMPILER" test-check-units --corpus tests/units/header-images --option --lanes --option 1 --option --header-images=verify
++"$BUSTER_COMPILER" test-check-units --corpus build/c-testsuite/tests/single-exec --option --header-images=on
++"$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image --option --lanes --option 1 --option --header-images=verify
+ == Test the driver's commands of several source files [8 CPUs]
+ # #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
+ # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
