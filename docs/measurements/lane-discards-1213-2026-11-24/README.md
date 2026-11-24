@@ -4,6 +4,21 @@
 
 The base is `7515714d05caa655e8c2e1e2776e07aa9b8058df`. The candidate is `6209173bc4d93a99ff9f5db14d42b8c945141716`. The PR head, `888f2533d61a8279fa0e7d825660995ed5dc942b`, then reformatted five initializers. Both measured revisions include the writable-prefix query from #3289 and the preprocessor root image. The candidate batches writable ranges during unit teardown, borrows base pages for small type tables and retains up to 8 MiB of scratch within each lane's unused admission credit.
 
+## Ryzen 7 9700X
+
+The full workflow ran the candidate at `6209173bc` under the benchmark host's lock. The workload was 64 translation units of 200 functions compiled to objects. Each row is the median of five processes after warm-up. [Native job, translation-unit benchmark](https://github.com/buster14a/buster/actions/runs/45370239542/job/138379620329#step:70:1) · [Individual samples and instruction-gate output](9700x-candidate.txt)
+
+| Lanes | Wall ms | Speedup | User ms | System ms | Minor faults |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 180.006 | 1.00× | 162.686 | 16.946 | 33,280 |
+| 2 | 102.679 | 1.75× | 178.428 | 26.390 | 37,111 |
+| 4 | 66.401 | 2.71× | 186.720 | 68.303 | 38,453 |
+| 8 | 58.975 | 3.05× | 302.872 | 131.947 | 47,485 |
+
+Eight lanes used 7.79 times the system CPU time of one lane. The run measures scaling within this build. Quantifying the change in eight-lane kernel time against its parent would require a matching hardware run for `7515714d0`.
+
+Hosted correctness, sanitizers, fuzzing, native correctness and the lane benchmark passed. The full workflow subsequently failed at its single-source SQLite instruction-count gate. The median was 1,272,928,497 user instructions, 0.530% below the stored 1,279,713,338. The band is ±0.500%. The stored count comes from main `90bb2d83`. This run cannot attribute the difference to a particular commit. [Instruction-count gate](https://github.com/buster14a/buster/actions/runs/45370239542/job/138379620329#step:92:1)
+
 ## VM counters and output comparison
 
 The host was an AMD EPYC 9V74 VM running Linux 6.18.57. Both Release executables were built with Buster's pinned Clang 23.1.4, native target and debug information disabled, then copied to the same tmpfs directory. All commands used CPUs 0–3 with a four-CPU quota. The kernel reported seccomp mode 0. Strace 6.13 traced system calls in one process tree per row. The fault and peak RSS columns are medians of five separate, untraced runs for each build. The first build in the pair alternated each round. Four lanes can assign different units to a given lane on different runs.
