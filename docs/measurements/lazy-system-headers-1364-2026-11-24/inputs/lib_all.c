@@ -1,0 +1,17 @@
+#include <Python.h>
+#include <archive.h>
+#include <curl/curl.h>
+#include <curses.h>
+#include <elfutils/libdw.h>
+#include <gio/gio.h>
+#include <glib.h>
+#include <libxml/parser.h>
+#include <libxml/xmlschemas.h>
+#include <libxml/xpath.h>
+#include <llvm-c/Core.h>
+#include <llvm-c/ExecutionEngine.h>
+#include <llvm-c/Target.h>
+#include <openssl/evp.h>
+#include <openssl/ssl.h>
+#include <openssl/x509v3.h>
+int x;
