@@ -16,6 +16,20 @@ Median wall time and retired user instructions per compile across 24 rotated run
 
 The largest instruction reduction comes from the wide record repeated four times. For the single 16-field control, the instruction medians differ by only 1,051. Process startup and binary placement limit what the small-input timings say about the cost of lookup itself.
 
+## Counter cross-check
+
+Six additional alternating pairs per input, each using `perf stat -r 3`, gave the following median within-pair changes. Task clock measures CPU time during compilation. The 16-field controls straddled zero across pairs.
+
+| Fields × initializers | Task clock, paired change (range) | Retired user instructions, paired change |
+| --- | ---: | ---: |
+| 16 × 1 | +1.4% (−5.4% to +30.6%) | −0.1% |
+| 16 × 128 | +3.1% (−3.8% to +10.8%) | −1.0% |
+| 4,096 × 1 | −46.2% (−46.6% to −43.1%) | −68.7% |
+| 4,096 × 4 | −60.2% (−60.9% to −58.9%) | −76.6% |
+| 1,024 promoted names × 4 | −7.8% (−9.6% to −5.2%) | −16.6% |
+
+Perf reported zero for its additional `duration_time` event on this host. Wall times in this record come from Buster's `time-runs` driver. The task clock and hardware counters were populated in all 60 observations. A second 24-run latency comparison gave 6.553 → 3.732 ms for the wide input and 20.509 → 8.633 ms for its repeated form. All 240 processes in that repeat exited successfully. [Paired summaries](summary.tsv) · [Per-round observations](raw/samples.tsv) · [Raw perf output](raw/perf-stat.txt) · [Load and process snapshots](raw/process-snapshots.txt) · [Lock diagnostics](raw/lock-busy.txt) · [Repeated latency comparison](raw/time-runs-repeat.txt)
+
 ## Revisions and workload
 
 | Build | Buster commit | Lookup |
@@ -42,6 +56,7 @@ mkdir -p raw
 ./build-pair.sh
 ./measure.sh
 ./time-runs.sh
+./repeat-latency.sh
 ```
 
 The harness generates the original inputs and expected bytes with `fixture.c` and `shapes.txt`. It warms both compilers on each file and checks their bytes. For each workload it measures six pairs, alternating which build goes first. Each observation is one `perf stat -r 3` invocation. The repetitions measure run-to-run variation for one binary layout per revision. The fixtures model the issue's input shape and do not estimate its frequency in other programs.
