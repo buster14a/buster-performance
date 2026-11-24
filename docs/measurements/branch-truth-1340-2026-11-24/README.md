@@ -56,6 +56,19 @@ and 7.2 M cycles. Instructions: 1,265.38 M to 1,252.78 M, 12.6 M as before. Why 
 cycles on this base than on `188cef80` I haven't traced; main's new pass (#3553) sits between the two bases, and base
 itself is 3.2 ms slower here than `188cef80`'s was.
 
+### A compile without warnings
+
+The delegating session's own hold of `0c6ae9dd` found the pass's cost where nothing reads the bits: with `-w`,
++0.57 ms and +5.14 M instructions, since `check_program_begin` made the bits on every compile. `2c503ffb` makes them
+only where the program's options name a reader of a branch's truth. `9700x/merged/ab12`: main `5cd20eff` against
+`2c503ffb` (`55accf6e` with `head-2c503ffb-on-55accf6e.patch`, the commit's diff), both settings in one hold
+(`scripts/queue9.sh`), every run exit 0 with base's object.
+
+| | base | head | by round | instructions |
+| --- | ---: | ---: | --- | ---: |
+| default warnings | 114.73 ms | 113.36 ms | -1.28, -1.33, -1.52 ms | 1,265.38 M to 1,252.68 M |
+| `-w` | 100.82 ms | 100.68 ms | -0.32, -0.01, -0.09 ms | 1,113.22 M to 1,113.11 M |
+
 ## What the profile showed
 
 `9700x/prof8/report-base.txt` and `report-head.txt`: cycles of 20 compiles, percent of the compile.
