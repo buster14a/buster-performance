@@ -34,5 +34,11 @@ Every variant matched main exactly. Measured in the cloud container:
   which four masked loads and a reduction, or a displacement update in every mark, cost more than.
 - **The growth scan:** only from about 32 links up do 16 lanes at a time win.
 
-No variant is at least as fast at every size, so the worklist stays as it is, under the owner's rule for #2924. The
-9700X was not used: every variant lost at some size in the container by more than its noise.
+**The 9700X confirms the closest variant's loss.** `run.sh` ran the growth scan alone under `exclusive.sh` on CPU 2
+(`logs/scan-9700x.log`):
+- **Short chains:** 1.025 to 1.046 at 5 to 16 links, both directions.
+- **24 links:** 1.003 to 1.008.
+- **32 links and more:** 0.986 to 0.999.
+- **Correctness:** 0 mismatches.
+
+No variant is at least as fast at every size, so the worklist stays as it is, under the owner's rule for #2924.
