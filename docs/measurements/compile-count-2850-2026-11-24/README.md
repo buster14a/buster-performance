@@ -220,6 +220,7 @@ reverse, forward) of 11 runs, in one hold; `scripts/ab-patch.sh` does the same f
 | `ab-fix-3553-pr` | main `31fd25ce8` | buster14a/buster#3564's head `eb000ae5d` | 122.99 to **114.71** | -8.33, -8.53, -7.98 | 100.72 to 100.72 |
 | `ab-pr3569` (an independent run of a child session's pull request) | main `5cd20effd` | buster14a/buster#3569's head `0c6ae9dd8` | 115.50 to 113.71 | -2.91, -0.95, -1.53 | 100.93 to **101.50** (+0.37, +0.59, +0.74) |
 | `ab-pr3568` (the same for another) | `188cef807`, its base then | buster14a/buster#3568's commit `e02c2cb9a` | 112.38 to 111.13 | -0.63, -0.70, -2.40 | 100.27 to 100.87 (+1.06, +0.41, +0.31), no instruction added |
+| `ab-pr3572` (and the third) | main `5cd20effd` | buster14a/buster#3572's head `2bbb637e2` | 114.60 to 114.11 | -0.42, -0.44, -0.61 | 100.61 to 100.85 (+0.22, +0.25, +0.27), no instruction added |
 
 #3553's pass put 10.82 ms on the default compile of a file with no diagnostics; the warnings went from 11.80 to
 22.32 ms. `count/added-by-3553.txt` has the counts it added by function, in a cloud container: 44.07 M (+14.40%), of
@@ -253,3 +254,10 @@ asks no branch's truth: 0.57 ms slower there. Its session was asked to build the
 `ab-pr3568` ran with the load average between 1.4 and 2.2. Its `-w` row adds no instruction (0.00 M), so the 0.59 ms
 it reads there is the hold's noise or the code's placement, not work; with the default warnings it takes 16.55 M
 instructions out, as its own record (`root-loop-1340-2026-11-24`) says.
+
+`ab-pr3572` ran on a quiet host (load average 0.06 at its start). The reach scan's filter takes 24.37 M instructions
+and 3.00 M cycles out for 0.49 ms; its session's record (`reach-scan-1340-2026-11-24`) says why it isn't the 2 ms the
+plan asked for: a tenth of the visits cost four times as much each, because the cost is the cold lines of the
+conversions' rows, which the filter has to read too. That record also corrects this one: leaving the reach scan out
+(the 2.92 ms above) left the roots without reach as well, so it counted some of the root walks' work; by profile the
+scan itself was 2.0 to 2.5% of the compile's user cycles.
