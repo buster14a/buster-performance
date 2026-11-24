@@ -1,6 +1,6 @@
 # Deep shapes for #2995 and #1355
 
-The Ryzen 7 9700X record for #1355 includes the original return-chain curve and its lifetimes-disabled control. [9700X results for #1355](9700x-1355/README.md)
+The Ryzen 7 9700X record for #1355 includes the return, goto and break scaling curves and ordinary-code controls. [9700X results for #1355](9700x-1355/README.md)
 
 The generators below reproduce the inputs for the two compiler changes. [GNU break targets and variable-length array statements (#3244)](https://github.com/buster14a/buster/pull/3244) · [Tier 1 lifetime walks (#3245)](https://github.com/buster14a/buster/pull/3245)
 
