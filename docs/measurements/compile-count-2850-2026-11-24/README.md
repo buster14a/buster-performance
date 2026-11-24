@@ -108,3 +108,34 @@ again with `-w`, it says what the warnings that are on by default add, on a unit
   time, 238 regions) and 37% below that. So what is left is mostly work a candidate at a time, not whole-unit scans.
 - A compile with `-Wno-return-type` was to give that group's share. It failed: the option makes the compiler reject
   every array's decay to a pointer (buster14a/buster#3559).
+
+## Where the default warnings' time is (`9700x/warn-prof-e347ec526/`, `9700x/warn-skip-e347ec526/`)
+
+Main `e347ec526` (after buster14a/buster#3543), built on the 9700X as its job builds it.
+
+**By function** (`scripts/warn-prof.sh`: eight `perf record` runs of each, alternating; `by-function-diff.txt`): the
+warnings add 66.5 M user cycles a run. `check_common_graph_warnings` 8.2 M, `check_driver_common_warnings` (its
+inlined token passes) 8.0 M, `check_common_own_reach` 4.5 M, `check_common_edges_reach` 4.1 M, `check_cfg_try` 3.3 M,
+`check_common_parents` 3.1 M, `check_common_body_reached` 2.6 M, `check_common_facts` 2.2 M,
+`check_program_branch_truth` 1.9 M lead. The counters (`stat-*.csv`): 2.1 M more L1 data misses, 0.4 M more cache
+misses and 0.5 M more branch misses than `-w`.
+
+**By pass** (`scripts/warn-skip.sh`, with `scripts/experiment-skip.patch`, a switch that leaves one pass out, not for
+merge; `passes.txt`). Nothing left out: 111.69 ms.
+
+| left out | ms saved | M cycles | M instructions |
+| --- | ---: | ---: | ---: |
+| `-w` | 11.62 | 63.9 | 129.4 |
+| all of `check_driver_common_warnings` | 11.20 | 62.1 | 125.7 |
+| the facts and the walks that need them | 9.49 | 52.4 | 105.1 |
+| the root walk alone (`check_common_graph_warnings`) | 3.00 | 16.7 | 32.8 |
+| every token pass together | 1.47 | 8.2 | 21.2 |
+| one token pass at a time | within 0.4 of nothing each | | |
+| the return facts (`-Wreturn-type`) | 0.05 | | |
+
+So the facts are about 6.5 ms (the reach of the candidates about 3.0, which nodes are evaluated about 2.5, the
+parents 0.6), the root walk 3.0 and the token passes 1.5.
+
+**Counts don't measure this code.** buster14a/buster#3543 took 11.9 M instructions out of the reach's edge test and
+saved 0.13 ms: the test's row of conversions is still loaded, and the load is what costs. By the counters above about
+seven tenths of the warnings' cycles are cache misses. A step here is judged by its 9700X reading alone.
