@@ -26,6 +26,9 @@ with step 1's root image ([buster#3475](https://github.com/buster14a/buster/pull
 - **The reduced units take 1,745 M cycles on the 9700X where the units take 3,160 M** (section 4), and what they don't
   spend is in four places (section 3, container samples): the preprocessor 31%, the
   reader and the passes after it 30%, the parser and the attested passes 16%, memory and the kernel 21%.
+- **Without the header function definitions its code doesn't reach, a unit's compile is the reduced unit's** (section
+  5, added 2026-11-24): musl's units as preprocessed text take 2,536 M cycles, 1,849 M without those definitions and
+  with every diagnostic as it is.
 - **With `-w` musl's command takes a sixth fewer samples in the container** (section 3). Its 321 warnings are each in
   a header's function definition; a unit with one preprocesses again for its history (the preprocessor's samples fall
   from 2,211 to 1,614), and the warnings' own passes are 397 more.
@@ -117,6 +120,40 @@ Each round a hold of the lock, the four in an order that rotates by round; media
   2,700 M). Step 2's gate, set from the first emulation before the root image, is 2,230 M.
 - **`-w` alone takes 461 M cycles off musl's command (14.6%)**, 356 M of them user: its 321 warnings, each in a header's
   function definition. The reduced units keep fewer of those definitions, so their `-w` is worth 179 M.
+
+## 5. Without the header function definitions a unit doesn't reach (2026-11-24; `scripts/reduce2.py`, `scripts/emul3.sh`, `results/emul3-pr`)
+
+Section 2's definitions, emulated as section 4's reduced units are: from each unit's `-E` output `reduce2.py` writes
+the unit as preprocessed text with every top-level item (`all`); without the header function definitions of internal
+linkage or `inline` that the unit's kept items don't reach by their function's name, through the definitions they do
+reach (`defs`); and the same with the two definitions whose reading warns (`__bswap64`, `__bswap_64`) kept in every
+unit that has them (`kept`), which is what attesting header definitions could skip with every diagnostic as it is. Of
+the 1,362,537 tokens in header function definitions, `defs` drops 1,320,457 and `kept` 1,307,017. `red` is section 4's
+reduced units.
+
+On the 9700X, the compiler of [buster#3475](https://github.com/buster14a/buster/pull/3475) on main `3723f1f6`, one
+lane, 5 rounds (each a hold of the lock, the eight commands in an order that rotates by round), medians, M cycles:
+
+| musl's 1,336 units as preprocessed text | user | kernel | all | user instructions | faults |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| every item (`all`) | 1,990.2 | 547.2 | 2,535.6 | 4,794.5 | 172,431 |
+| without the unreached header definitions (`defs`) | 1,299.8 | 449.1 | 1,748.9 | 2,601.0 | 131,510 |
+| the same, the two that warn kept (`kept`) | 1,353.7 | 497.7 | 1,849.1 | 2,711.4 | 143,529 |
+| section 4's reduced units (`red`) | 1,276.1 | 472.4 | 1,748.3 | 2,607.8 | 105,215 |
+| every item, `-w` | 1,729.5 | 466.5 | 2,194.2 | 4,266.6 | 154,047 |
+| without the unreached header definitions, `-w` | 1,161.0 | 418.6 | 1,579.8 | 2,422.8 | 125,992 |
+| the two that warn kept, `-w` | 1,170.1 | 419.9 | 1,590.0 | 2,444.6 | 126,845 |
+| the reduced units, `-w` | 1,127.4 | 437.7 | 1,566.0 | 2,400.8 | 99,808 |
+
+- **The unreached header function definitions are what the reduced units save after the preprocessor:** without them
+  alone the command takes 1,748.9 M cycles, the reduced units' 1,748.3 M. The declarations the reduced units also drop
+  are the ones [#2531](https://github.com/buster14a/buster/issues/2531) already skips.
+- **With every diagnostic kept it is 686 M cycles of 2,536 M (27%)**: `kept` against `all`. The two definitions that warn
+  cost 100 M in the 236 units that have them (`kept` against `defs`), 10 M of it under `-w`.
+- **The units' preprocessing is 643 M of the command's 3,178 M** (section 4's units against `all`).
+- By the container's samples (`results/container/stages-definitions.txt`, `all` and `kept`): the reader 2,560 to 1,703,
+  the checker's later passes 1,702 to 1,117, the parser 871 to 620, the attested passes 515 to 437. The emulation
+  doesn't parse the dropped definitions; a skip in the reader's view still would.
 
 ## Reproducing
 
