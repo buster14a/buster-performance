@@ -164,3 +164,58 @@ So a compiler that stays (several units a command, or a server a build) is worth
 keeps anything, and what it could keep is most of the rest: the predefines' state (16% of the loop), the arenas'
 pages (the 12 ms of start and release, and 126 faults a unit), and the headers' files or tokens (most of the 108 ms
 of preprocessing that is not the predefines). None of that is built.
+
+## What a unit that leaves the direct path costs (`bail/`)
+
+`scripts/bail.sh` splits musl's 1,336 units by `-std=gnu99` into the 663 the direct path takes and the 673 that leave
+it, and times each group's build by default and by `--no-direct`, a process a unit, 5 rotated rounds on CPU 2 (step 1's
+code, `s1i`):
+
+| | wall ms | user cycles | kernel cycles | user instructions |
+| --- | ---: | ---: | ---: | ---: |
+| the 663 taken, direct | 304.4 | 824.0 M | 847.2 M | 2,244 M |
+| the 663 taken, `--no-direct` | 654.7 | 1,991.9 M | 1,618.0 M | 4,246 M |
+| the 673 that leave, by default | 1,186.8 | 4,050.4 M | 2,496.0 M | 10,040 M |
+| the 673 that leave, `--no-direct` | 902.9 | 3,038.8 M | 1,945.2 M | 7,130 M |
+| all 1,336 by `-std=c99` (none taken) | 1,557.9 | 5,026.3 M | 3,567.0 M | 11,378 M |
+| all 1,336 by `-std=gnu99` | 1,489.4 | 4,875.6 M | 3,340.5 M | 12,282 M |
+
+- **A unit that leaves costs 0.42 ms more than one that never tried**, 284 ms over the 673: 1.5 M user and 0.8 M
+  kernel cycles and 4.3 M instructions a unit. That is as much as the whole direct compile of a unit it takes (0.46 ms).
+- **So the 673 take back 284 of the 350 ms the 663 save,** and musl's build is 4.4% faster by `gnu99` than by `c99`
+  where it could be 22.5% faster (304 + 903 = 1,207 ms) if leaving cost nothing.
+- **Leaving can't be made early:** the direct path preprocesses the whole unit before it compiles any of it, and
+  preprocessing is 82% of its time on these units (the one-process loop above). 366 of the 657 bails in the compile
+  come at 90% or more of the unit's tokens, and the 260 for inline assembly in a header's `static inline` function
+  come when the function is compiled, after the unit's own functions. What would pay is fewer units that leave.
+
+**What they leave for** (`bail/musl-gnu99-bails.tsv`, `scripts/experiment-bail-trace.patch`, `scripts/bail-census-one.sh`):
+
+| construct | units |
+| --- | ---: |
+| inline assembly: `__syscallN` in `arch/x86_64/syscall_arch.h` (214), `__get_tp` (21), others (25) | 260 |
+| `weak_alias(old, new)`: `extern __typeof(old) new __attribute__((__weak__, __alias__(#old)))` | 180 |
+| a type: `long double`, `_Complex`, `__int128` in a definition, a call's argument or an initializer | 187 |
+| a pragma | 13 |
+| other | 33 |
+
+## What the constructs are worth: an emulation (`emul/`)
+
+Before building any of them: musl's headers with the constructs replaced by what the direct path already compiles
+(`scripts/emul-overlays.py` writes the overlays from the frozen corpus; `scripts/emul.sh` times musl's 1,336 units by its
+own `-std=c99`, a process a unit, 5 rotated rounds, with step 4's compiler `s4b`, which takes `-std=c99`):
+
+| overlay | units direct | wall ms | user cycles | kernel cycles |
+| --- | ---: | ---: | ---: | ---: |
+| none | 663 | 1,509.6 | 4,959 M | 3,350 M |
+| `weak_alias` a plain declaration | 783 | 1,415.9 (-6.2%) | 4,625 M | 3,177 M |
+| `__syscallN` and `__get_tp` calls, not inline assembly | 889 | 1,268.5 (-16.0%) | 4,046 M | 2,933 M |
+| both | 1,040 | 1,126.6 (-25.4%) | 3,547 M | 2,654 M |
+
+Three units fail to compile with the `weak_alias` overlay (1,333 objects): its declaration conflicts with theirs. The
+local census (`scripts/emul-census.sh`) agrees: 663, 783, 889 and 1,040 units direct; with both, 296 still leave, 187
+of them for a type.
+
+So inline assembly of the syscall wrappers' shape (a fixed template, register constraints, `register ... __asm__("r10")`
+variables) and `weak_alias` (`__typeof` of a declared name, the `alias` attribute) would take musl's build from
+1,559.5 ms at main to about 1,127: 28%, most of it from units that stop paying for both paths.
