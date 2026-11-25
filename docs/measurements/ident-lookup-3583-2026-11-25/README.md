@@ -2,7 +2,9 @@
 
 buster#3583 asked what the direct path's identifier lookups cost and what perfect ones would save, before building
 any of its three directions (the macro's flag in the cache's slot, probes that overlap, smaller slots). This record
-has the ceiling, the profile behind it, ten designs measured against it, and the change that was kept.
+has the ceiling, the profile behind it and the designs measured against it. **None was kept:** the one that measured
+faster on main `20f3573e` measures the same as main `09c3b79b`, whose own hash change (buster#3592's `d58cf20b`) took
+out the same instructions.
 
 - **Host:** `benchpress` (Ryzen 7 9700X), every run under `~/buster-fast-bench/exclusive.sh`, pinned to CPU 2.
 - **Unit:** the frozen `sqlite3.c` with the corpus's headers and predefines, as
@@ -31,9 +33,27 @@ Variant names in `results/` and the patches against main in `patches/`:
 | `c5` | `v7-flag-only.diff` | v5 with the multiply hash back |
 | `c6` | `v8-crc32-only.diff` | v5 with the macro bit read from `macro_bits` again |
 | `e1` | `v9-lazy-window-probe.diff` | v5, and a block's names probed once a window, branch-free, the emitter taking the answers |
-| `final` | buster#3583's pull request | v5 with a test and its comments: the change kept |
+| `final` | | v5 with a test and its comments |
+| `B` | `v10-flag-on-main-09c3b79b.diff` | v5's macro flag and columns on main `09c3b79b`, its hash kept (the test included) |
+| `A` | `v10b-crc32-on-flag.diff` (on v10) | `B` with v5's CRC32 hash |
+| `main2` | | main `09c3b79b` |
 
-## Result: the change kept
+## Result: nothing to keep on main `09c3b79b`
+
+On main `09c3b79b` (`results/main2-wide.txt`, 7 placements each, 5 rotated rounds), the lexing stage in ms:
+
+| | median | mean | range | user instructions |
+| --- | ---: | ---: | --- | ---: |
+| main `09c3b79b` | 6.911 | 6.912 | 6.890 to 6.943 | 220.44 M |
+| `B`: the slot's macro flag, main's hash | 6.915 | 6.913 | 6.890 to 6.931 | 220.58 M |
+| `A`: the slot's macro flag, the CRC32 hash | 6.926 | 6.910 | 6.861 to 6.943 | 221.76 M |
+
+Main moved under this work: `d58cf20b` (buster#3592) mixes a name's last word and length into the hash only past eight
+bytes, which took 1.36 M instructions out of the compile. That is where v5's gain on `20f3573e`, below, came from:
+v5 read 220.44 M instructions there, as main `09c3b79b` does now. The slot's macro flag, the part `d58cf20b` did not
+do, saves nothing measurable, with either hash; so does reading the bit from the record in the ceiling (below).
+
+### v5 on main `20f3573e`
 
 The cache's slot holds the name's macro flag beside its kind, `fast_ident_set_macro_bit` keeps it, the key's hash is
 two CRC32 instructions, and the emitter holds the window's three columns in registers. Two holds of 7 placements each
@@ -42,17 +62,17 @@ two CRC32 instructions, and the emitter holds the window's three columns in regi
 | | median | mean | range |
 | --- | ---: | ---: | --- |
 | main, first hold | 6.955 | 6.949 | 6.909 to 6.977 |
-| the change, first hold | 6.899 | 6.903 | 6.832 to 6.958 |
+| v5 (`final`), first hold | 6.899 | 6.903 | 6.832 to 6.958 |
 | main, second hold | 6.949 | 6.937 | 6.894 to 6.955 |
-| the change, second hold | 6.906 | 6.897 | 6.824 to 6.947 |
+| v5 (`final`), second hold | 6.906 | 6.897 | 6.824 to 6.947 |
 
 That is 0.04 to 0.05 ms (0.6 to 0.7%) of the stage, and 0.24 to 0.26 M of 80 M user cycles a compile (mean). User
 instructions fall from 220.96 M to 220.44 M. Neither half pays alone (second hold, means): the slot's flag with the
 multiply hash 6.948 ms, the CRC32 hash with the bit read from `macro_bits` 6.956. The object is the same in every
 variant (`f558aaf503fcb186`).
 
-This is a ninth of the ceiling. The rest is not reachable by the directions measured here; "Where the time goes" says
-why.
+That was a ninth of the ceiling, and main has it now by another way. The rest is not reachable by the directions
+measured here; "Where the time goes" says why, and "What is left" what might.
 
 ## The ceiling (`results/ceiling-1.txt`)
 
@@ -92,7 +112,7 @@ hit's: they resolve only once the slot is loaded, and a mispredicted one drops t
 `len <= 8` branch also mispredicts, but resolves as soon as the length is loaded: v2 removed 36 K of those
 mispredictions and gained nothing.
 
-## Designs measured and not kept
+## The other designs
 
 Lexing stage, the variant against main in the same hold (ms):
 
@@ -120,19 +140,31 @@ Lexing stage, the variant against main in the same hold (ms):
 
 ## Placement
 
-The kept change's first build (v5) read 6.84 ms in three placements of 0, 16 and 48 nops, against main's 6.91. Its
+v5's first build read 6.84 ms in three placements of 0, 16 and 48 nops, against main's 6.91. Its
 final build differs from v5 only by a test and comments; the test, in the same unity file, moved the lexer's code
 6,416 bytes later, and three placements of 0, 16 and 48 nops read 6.93 (`results/final-pad.txt`). The two builds'
 `fast_pp_drain` are the same instructions. A move of a few kilobytes is worth 1.3% of this stage on its own, and
 paddings of 16 and 48 bytes do not span it; seven placements up to 6,000 bytes do (`results/final-wide.txt`: main's
-range 0.068 ms, the change's 0.126 ms).
+range 0.068 ms, v5's 0.126 ms).
 
 ## Checks
 
 - **Objects.** `scripts/equiv/run.sh` of the earlier record (6,201 units; 1,196 take the direct path) gives the same
-  status, diagnostics and object for every unit with main `20f3573e` and with the change, native builds.
+  status, diagnostics and object for every unit with main `20f3573e` and with v5's `final`, native builds.
 - **`test-direct`:** 20 passed, among them a new test of the slots' macro flags (a #define, an #undef, a keyword made a
   macro, a name made a macro before its first lookup, two names sharing a slot, the cache's growth).
-- **The compile's count** (`tools/ci/compile-count.sh check`): 46,561,450 at main, 46,570,841 with the change, +0.020%.
+- **The compile's count** (`tools/ci/compile-count.sh check`): 46,561,450 at main `20f3573e`, 46,570,841 with v5's `final`, +0.020%.
 - **Sanitizers.** `c_direct.c` built with `-fsanitize=address,undefined` passes `test-direct`'s 20 tests and compiles
   `sqlite3.c` to the same object without a report.
+
+These checks are of v5's `final` on `20f3573e`; `B` and `A` compile `sqlite3.c` to the same object.
+
+## What is left
+
+The ceiling's 0.47 ms is a lookup's answer deciding the emitter's control flow: a macro's name (27,752 a compile)
+stops the block, and its branch, like a miss's, resolves only after the slot's load. Every design here either probed
+on the same path (and kept the late branch) or moved the probe ahead of the emitter (and paid for passes over blocks
+that a macro cuts every 22 tokens). What could reach it is an emitter whose block does not end at a macro's name: the
+names' answers for a whole window first, branch-free, and the macros' expansions spliced into the output afterwards,
+so that the only branch on a macro is one a window rather than one a name. That is a redesign of how
+`fast_pp_window_macro` interleaves with the emitter, not of the lookup.
