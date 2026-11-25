@@ -390,3 +390,39 @@ the second. The objects are the same in every variant.
 | Lua's 34 units | 79.85 ms | 79.42 ms |
 
 `results/ab-pr3599.txt` and `results/builds-*-pr3599.txt` are the first form's own run, against `main20f` and `a6`.
+
+## buster#3607: raw string literals, a directive's literals, and step 6b (`pr3607/`)
+
+buster#3607 carries the fix of buster#3600 and buster#3603 (raw string literals leave the direct path, and the rest of
+a directive's line is lexed for its literals) and #3592's step 6b (musl's `syscall` and thread-pointer asm). The
+variants are built as #3602's section says, each against `pr3599v2` (#3602's head):
+- `pr3600`, `pr3600b`, `pr3600c`, `pr3600d`: the fix's four forms. `pr3600` scans for raw prefixes in every block
+  of a skipped group; `pr3600b` tests the mode inside that loop; `pr3600c` compiles the loop once for each mode;
+  `pr3600d`, buster a29b4d2a, also splits `fast_pp_skip_to_eol` into an inline test of a directive's newline and an
+  out-of-line rest;
+- `asm6b`, `asm6c`, `asm6d`: step 6b on the second, third and fourth forms. `asm6d` is buster#3607's head, 1c221b32.
+
+**The fix's forms** (musl's 1,336 units by `-std=c99`, a mode without raw strings, 5 rounds; `sqlite3.c` 21 rounds):
+
+| | `pr3599v2` | `pr3600` | `pr3600b` | `pr3600c` | `pr3600d` |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| musl `c99`, user instructions | 11,639 M | 11,691 M | 11,697 M | 11,664 M | 11,581 M |
+| `sqlite3.c`, user instructions | 220.55 M | 221.62 M | 222.14 M | 222.09 M | 221.51 M |
+
+Each form's column is against its own run's `pr3599v2`, within 0.01% of each other. Testing the mode in the loop
+(`pr3600b`) saved nothing. Compiling the loop once for each mode (`pr3600c`) took half the cost out. Splitting the
+line's skip (`pr3600d`) took the rest: its literals had made `fast_pp_skip_to_eol` save seven registers on every call,
+after nearly every directive, and most directives now pay an inline test of their newline. `sqlite3.c`, in a GNU
+mode, keeps 0.43% of its instructions for the raw strings its skipped groups are scanned for, at the same wall time.
+
+**The pull request** (`results/ab-pr3600d.txt`, `results/builds-*-pr3600d.txt`):
+
+| | `pr3599v2` | `pr3600d` | `asm6d` |
+| --- | ---: | ---: | ---: |
+| musl's units by `-std=c99` | 1,398.49 ms, 784 direct | 1,404.68 ms | 1,104.23 ms, 1,042 direct |
+| musl's units by `gnu99` | 1,393.98 ms | 1,399.81 ms | 1,099.05 ms |
+| Lua's 34 units | 79.57 ms | 80.15 ms | 79.63 ms |
+| `sqlite3.c` | 16.73 ms | 16.72 ms | 16.69 ms |
+
+Step 6b's 258 more direct units in each mode take musl's build from 11,639 M user instructions to 9,028 M by `c99`.
+Its objects are the same as `pr3599v2`'s except those 258 units', and Lua's and `sqlite3.c`'s are the same throughout.
