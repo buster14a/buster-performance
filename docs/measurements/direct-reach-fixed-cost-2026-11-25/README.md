@@ -429,7 +429,7 @@ Its objects are the same as `pr3599v2`'s except those 258 units', and Lua's and 
 
 ## #3592's dependency files: `-MD` and its kin on the direct path, and `-H` off it (`pr-md/`)
 
-The change (buster `ec374d4e` and `4db3a75d`, on #3607's head `ecb3d69a`) lets `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`
+The change (buster `ec374d4e` and `4db3a75d`, on #3607's head `ecb3d69a`; rebased on `main` as `def779dd` and `235f5a11`, in buster#3615) lets `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`
 and `-MP` take the direct path, with the full pipeline's rule, and keeps `-H` off it (buster#3612). The variants are
 built as #3602's section says:
 - `asm6d`: #3607's head before its MemorySanitizer fix (`1c221b32`, which `ecb3d69a` changes only in a test's `#if`);
@@ -478,7 +478,7 @@ A placement change alone (`pad48`) moves musl's build as much as the change does
 5.7 M more instructions (0.06%), the tests it adds where files are opened, skipped and probed. `sqlite3.c`'s 0.5% is its
 0.18% more instructions, the headers clang reads too, and their pages. With `-MD`, `md2` against `md1`: musl
 1,142.56 ms against 1,145.13 ms, `sqlite3.c` 16.91 against 16.86 ms (`results/*-md2-deps.txt`). The pull request has
-`md2`'s attributes (buster `ec374d4e`).
+`md2`'s attributes (buster `ec374d4e`, rebased as `def779dd`).
 
 **Correctness, outside the 9700X** (`corpus/`, `faults/`, `compile-count.log`):
 - `corpus/run.sh` compiles each unit of the 7,556-unit corpus by the default driver and by `--no-direct` in five option
@@ -493,3 +493,35 @@ A placement change alone (`pad48`) moves musl's build as much as the change does
   the 2 left equivalent (the device compare, with one device under the test's files; a bail for a guard entry without
   a record, which no reading makes).
 - `compile-count.log`: CI's compile count, +0.125% against #3607's head.
+
+## #3592's step 6c: musl's atomics' inline asm (`pr-md/`, `atom1`)
+
+Step 6c (buster `f467f06b`, in buster#3615 after the `-MD` step) takes the thirteen asm shapes of musl's
+`arch/x86_64/atomic_arch.h` and the empty templates of `explicit_bzero` and `__libc_start_main`. `atom1.patch` is the
+diff from `main` `f74b0b28` to it, built on the host as the other variants are.
+
+**The census** (`atomics/`): `bails-c99-md.tsv` is each of musl's units that leave the direct path by `-std=c99` at
+the `-MD` step's head, with its first bail (`experiment-bail-trace.patch`'s trace): 294, of which 59 leave at an asm
+statement (31 at `a_cas`). `bails-c99-asm-skipped.tsv` is the same census by a build whose asm parser skips every
+statement: 235 leave, so the 59 leave for asm alone. 58 take the direct path with step 6c; `__unmapself.c` leaves at
+`CRTJMP`'s jump.
+
+**Against `md2`** (`results/*-atom1.txt`; musl and Lua 7 rounds, the units 21):
+
+| | `md2` | `atom1` |
+| --- | ---: | ---: |
+| musl's 1,336 units by `-std=c99` | 1,117.77 ms, 1,042 direct | 1,009.81 ms, 1,100 direct (-9.7%) |
+| their user instructions | 9,033.9 M | 8,098.8 M |
+| musl's units by `gnu99` | 1,100.53 ms | 998.16 ms (-9.3%) |
+| Lua's 34 units | 79.46 ms | 79.61 ms |
+| `sqlite3.c` | 16.92 ms, 221.81 M instructions | 16.98 ms, 221.73 M |
+
+Lua's and `sqlite3.c`'s objects are the same. The 58 units save 1.86 ms of build each, more than step 6b's 1.14: they
+are larger (thread functions).
+
+**Correctness:** `atomics/objects.summary` and `objects-vs-md.txt` are the corpus's objects by step 6c against the
+`-MD` step's (`equiv/run.sh`): 117 units change path, full to direct, with the same status (58 of musl's in each mode
+and `asm-hlt-body.c`); `pthread_cancel.c` loses a `-Wdeprecated-non-prototype` warning, as #3577 has the direct path
+do. `faults-round1.py` and `faults-round2.py` seed 46 faults in step 6c, each built with `test-direct` alone: the second
+round reruns the first's survivors after the test was extended; 44 of 45 found, one equivalent, and one that the code
+became.
