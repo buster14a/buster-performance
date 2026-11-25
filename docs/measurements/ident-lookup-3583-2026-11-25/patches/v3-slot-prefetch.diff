@@ -1,0 +1,496 @@
+diff --git a/src/buster/compiler/c_direct.c b/src/buster/compiler/c_direct.c
+index d69bca16..b7f4a388 100644
+--- a/src/buster/compiler/c_direct.c
++++ b/src/buster/compiler/c_direct.c
+@@ -700,8 +700,8 @@ static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kin
+     return c_direct_test_tokens_sized(text, length, kinds, data, capacity, out_count, false);
+ }
+ 
+-// Whether every used slot of the cache is where its key's hash puts it, names an interned name of its key's length
+-// and kind, and the cache has `bits`.
++// Whether every used slot of the cache is where its key's hash puts it, names an interned name of its key's length,
++// kind and macro bit, and the cache has `bits`.
+ static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bits)
+ {
+     bool ok = t->cache_bits == bits && t->cache_shift == 64u - bits;
+@@ -712,7 +712,7 @@ static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bit
+         {
+             const FastIdentEntry* entry = t->entries + slot->id;
+             ok = slot->id <= t->count && entry->length == slot->len && slot->tok_kind == (entry->kw_kind != 0 ? entry->kw_kind : FTOK_IDENT) &&
+-                 (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
++                 slot->macro == (uint8_t)fast_ident_is_macro(t, slot->id) && (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
+         }
+     }
+     return ok;
+@@ -754,6 +754,7 @@ static bool c_direct_test_ident_growth(void)
+                 const uint32_t name_kind = (i + phase) % 3u;
+                 const uint32_t length = c_direct_test_growth_name(name, name_kind, i);
+                 uint8_t kind = 0;
++                uint8_t macro = 0;
+                 const uint32_t before_bits = table.cache_bits;
+                 const bool grows = table.count + 1u == table.cache_grow_at;
+                 uint32_t held = 0;
+@@ -761,8 +762,8 @@ static bool c_direct_test_ident_growth(void)
+                 {
+                     memcpy(before, table.cache, ((size_t)1 << before_bits) * sizeof(FastIdentCacheSlot));
+                 }
+-                ids[i] = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind);
+-                ok = ids[i] == seeded + i + 1u && kind == FTOK_IDENT;
++                ids[i] = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro);
++                ok = ids[i] == seeded + i + 1u && kind == FTOK_IDENT && macro == 0;
+                 if (grows)
+                 {
+                     // The cache grows as the names reach four times its slots, by two bits, and keeps every slot it had:
+@@ -806,8 +807,9 @@ static bool c_direct_test_ident_growth(void)
+                 char name[80] = { 0 };
+                 const uint32_t length = c_direct_test_growth_name(name, (i + phase) % 3u, i);
+                 uint8_t kind = 0;
+-                const uint32_t id = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind);
+-                ok = id == ids[i] && kind == FTOK_IDENT;
++                uint8_t macro = 0;
++                const uint32_t id = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro);
++                ok = id == ids[i] && kind == FTOK_IDENT && macro == 0;
+             }
+             ok = ok && table.count == seeded + names && c_direct_test_cache_consistent(&table, BUSTER_FIDENT_CACHE_BITS);
+             // And the lookup finds them where the growth put them: with the table's control bytes cleared, a name its
+@@ -819,19 +821,25 @@ static bool c_direct_test_ident_growth(void)
+             {
+                 char name[80] = { 0 };
+                 const uint32_t length = c_direct_test_growth_name(name, (i + phase) % 3u, i);
++                // The key by hand: the first sixteen bytes, zero past the name, and a longer name's last eight.
++                uint8_t bytes[16] = { 0 };
+                 uint64_t first = 0;
+                 uint64_t last = 0;
+-                memcpy(&first, name, sizeof(first));
+-                first = length <= 8u ? _bzhi_u64(first, length * 8u) : first;
+-                if (length > 8u)
++                uint64_t tail = 0;
++                memcpy(bytes, name, length < 16u ? length : 16u);
++                memcpy(&first, bytes, sizeof(first));
++                memcpy(&last, bytes + 8, sizeof(last));
++                if (length > 16u)
+                 {
+-                    memcpy(&last, name + length - 8u, sizeof(last));
++                    memcpy(&tail, name + length - 8u, sizeof(tail));
+                 }
++                last ^= tail;
+                 if (table.cache[BUSTER_FIDENT_CACHE_HASH(first, last, length) >> table.cache_shift].id == ids[i])
+                 {
+                     uint8_t kind = 0;
++                    uint8_t macro = 0;
+                     cached += 1u;
+-                    ok = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind) == ids[i];
++                    ok = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) == ids[i];
+                 }
+             }
+             ok = ok && cached > (1u << BUSTER_FIDENT_CACHE_BITS) / 2u;
+@@ -887,6 +895,162 @@ static bool c_direct_test_ident_growth(void)
+     return ok;
+ }
+ 
++// The cache's keys and its slots' macro flags (buster#3583). A name of every length up to 40 and each of its prefixes
++// are looked up where the name's last byte is the last readable one (a page without access after it): the key's loads
++// read no byte past a name. Each has its own id, the same from another copy with other bytes after it, and two long
++// names that differ only in their last bytes are told apart. A slot's flag follows fast_ident_set_macro_bit, for the
++// name the slot holds and not for another with the same slot, and a name whose bit was set before its first lookup has
++// the flag from the bit; the cache stays consistent through all of it, and through a #define and an #undef.
++static bool c_direct_test_ident_keys(void)
++{
++    FastArena arena = { 0 };
++    bool ok = fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, true);
++    FastIdentTable table;
++    ok = ok && fast_ident_init(&table, &arena, true);
++    const size_t page = (size_t)sysconf(_SC_PAGESIZE);
++    uint8_t* const pages = ok ? (uint8_t*)mmap(NULL, page * 2u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : (uint8_t*)MAP_FAILED;
++    ok = ok && pages != (uint8_t*)MAP_FAILED && mprotect(pages + page, page, PROT_NONE) == 0;
++    enum { longest = 40 };
++    uint32_t ids[longest + 1][longest + 1] = { { 0 } };
++    for (uint32_t length = 1; ok && length <= longest; length += 1)
++    {
++        char name[longest + 1] = { 0 };
++        for (uint32_t j = 0; j < length; j += 1)
++        {
++            name[j] = (char)('a' + (j * 7u + length) % 26u);
++        }
++        uint8_t* const at_end = pages + page - length;
++        memcpy(at_end, name, length);
++        for (uint32_t prefix = 1; ok && prefix <= length; prefix += 1)
++        {
++            // From the page's end, then from a copy with other bytes after it.
++            char copy[longest + 16];
++            memset(copy, 'z', sizeof(copy));
++            memcpy(copy, name, prefix);
++            uint8_t kind = 0;
++            uint8_t macro = 1;
++            const uint32_t id = fast_ident_lookup(&table, prefix == length ? at_end : (const uint8_t*)copy, prefix, &kind, &macro);
++            ids[length][prefix] = id;
++            ok = id != 0 && kind == FTOK_IDENT && macro == 0 && fast_ident_lookup(&table, (const uint8_t*)copy, prefix, &kind, &macro) == id &&
++                 table.entries[id].length == prefix && memcmp(table.strings + table.entries[id].str_offset, name, prefix) == 0;
++            if (prefix == length)
++            {
++                ok = ok && fast_ident_lookup(&table, at_end, prefix, &kind, &macro) == id;
++            }
++        }
++    }
++    // Two names of 24 bytes with the same first sixteen: different ids, each found again.
++    const char* const twins[2] = { "SQLITE_ENABLE_SOMETHING3", "SQLITE_ENABLE_SOMETHING5" };
++    uint32_t twin_ids[2] = { 0 };
++    for (uint32_t round = 0; ok && round < 3u; round += 1)
++    {
++        for (uint32_t i = 0; ok && i < 2u; i += 1)
++        {
++            uint8_t kind = 0;
++            uint8_t macro = 0;
++            const uint32_t id = fast_ident_lookup(&table, (const uint8_t*)twins[i], 24u, &kind, &macro);
++            ok = id != 0 && (round == 0 || id == twin_ids[i]);
++            twin_ids[i] = id;
++        }
++        ok = ok && twin_ids[0] != twin_ids[1];
++    }
++    // The macro flag of a name the slot holds, both ways.
++    for (uint32_t length = 1; ok && length <= longest; length += 1)
++    {
++        char name[longest + 1] = { 0 };
++        for (uint32_t j = 0; j < length; j += 1)
++        {
++            name[j] = (char)('a' + (j * 7u + length) % 26u);
++        }
++        const uint32_t id = ids[length][length];
++        uint8_t kind = 0;
++        uint8_t macro = 0;
++        fast_ident_set_macro_bit(&table, id, true);
++        ok = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) == id && macro == 1u && c_direct_test_cache_consistent(&table, table.cache_bits);
++        fast_ident_set_macro_bit(&table, id, false);
++        ok = ok && fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) == id && macro == 0;
++    }
++    // A name interned without a lookup and made a macro: its first lookup fills its slot with the flag.
++    uint32_t fresh = ok ? fast_ident_intern_cstr(&table, "a_fresh_macro") : 0;
++    if (fresh != 0)
++    {
++        uint8_t kind = 0;
++        uint8_t macro = 0;
++        fast_ident_set_macro_bit(&table, fresh, true);
++        ok = fast_ident_lookup(&table, (const uint8_t*)"a_fresh_macro", 13u, &kind, &macro) == fresh && macro == 1u;
++    }
++    else
++    {
++        ok = false;
++    }
++    // Two names with the same slot: the second's lookup takes the slot, and the first's bit leaves the second's flag.
++    uint32_t pair[2] = { 0 };
++    char pair_names[2][16] = { { 0 } };
++    uint32_t pair_lengths[2] = { 0 };
++    uint32_t seen = 0;
++    uint64_t seen_slots[512] = { 0 };
++    char seen_names[512][16];
++    for (uint32_t i = 0; ok && pair[1] == 0 && i < 512u; i += 1)
++    {
++        char name[16] = { 0 };
++        const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "c%u", i);
++        uint8_t bytes[16] = { 0 };
++        uint64_t first = 0;
++        uint64_t last = 0;
++        memcpy(bytes, name, length);
++        memcpy(&first, bytes, sizeof(first));
++        memcpy(&last, bytes + 8, sizeof(last));
++        const uint64_t slot = BUSTER_FIDENT_CACHE_HASH(first, last, length) >> table.cache_shift;
++        for (uint32_t j = 0; j < seen && pair[1] == 0; j += 1)
++        {
++            if (seen_slots[j] == slot)
++            {
++                uint8_t kind = 0;
++                uint8_t macro = 0;
++                memcpy(pair_names[0], seen_names[j], 16);
++                memcpy(pair_names[1], name, 16);
++                pair_lengths[0] = (uint32_t)strlen(seen_names[j]);
++                pair_lengths[1] = length;
++                pair[0] = fast_ident_lookup(&table, (const uint8_t*)pair_names[0], pair_lengths[0], &kind, &macro);
++                pair[1] = fast_ident_lookup(&table, (const uint8_t*)pair_names[1], pair_lengths[1], &kind, &macro);
++            }
++        }
++        seen_slots[seen] = slot;
++        memcpy(seen_names[seen], name, 16);
++        seen += 1u;
++    }
++    if (ok && pair[0] != 0 && pair[1] != 0 && pair[0] != pair[1])
++    {
++        uint8_t kind = 0;
++        uint8_t macro = 0;
++        fast_ident_set_macro_bit(&table, pair[0], true);
++        ok = fast_ident_lookup(&table, (const uint8_t*)pair_names[1], pair_lengths[1], &kind, &macro) == pair[1] && macro == 0 &&
++             fast_ident_lookup(&table, (const uint8_t*)pair_names[0], pair_lengths[0], &kind, &macro) == pair[0] && macro == 1u &&
++             c_direct_test_cache_consistent(&table, table.cache_bits);
++    }
++    else
++    {
++        ok = false;
++    }
++    if (pages != (uint8_t*)MAP_FAILED)
++    {
++        munmap(pages, page * 2u);
++    }
++    fast_arena_destroy(&arena);
++
++    // Through the preprocessor: a name that is a macro, then not, then a macro again, read where a window emits it.
++    static const char text[] =
++        "int a_name_that_changes;\n#define a_name_that_changes 1\nx = a_name_that_changes;\n#undef a_name_that_changes\n"
++        "y = a_name_that_changes;\n#define a_name_that_changes 2\nz = a_name_that_changes;\n";
++    uint8_t kinds[64] = { 0 };
++    uint32_t data[64] = { 0 };
++    uint32_t count = 0;
++    ok = ok && c_direct_test_tokens(text, sizeof(text) - 1u, kinds, data, 64u, &count) && count == 15u &&
++         kinds[1] == FTOK_IDENT && c_direct_test_kind_is_number(kinds[5]) && data[5] == 1u && kinds[9] == FTOK_IDENT && data[9] == data[1] &&
++         c_direct_test_kind_is_number(kinds[13]) && data[13] == 2u;
++    return ok;
++}
++
+ // The kilobytes of this process's mappings that are advised against huge pages (`nh` in /proc/self/smaps), and its
+ // resident pages that are no file's (/proc/self/statm: a child's code pages become resident as it runs them).
+ static uint64_t c_direct_test_base_page_kilobytes(void)
+@@ -1634,6 +1798,16 @@ int run_c_direct_tests(int argc, char** argv)
+         failed += 1u;
+     }
+ 
++    if (c_direct_test_ident_keys())
++    {
++        passed += 1u;
++    }
++    else
++    {
++        fprintf(stderr, "test-direct: FAIL identifier keys and macro flags\n");
++        failed += 1u;
++    }
++
+     if (c_direct_test_overwrite(obj_path))
+     {
+         passed += 1u;
+diff --git a/src/buster/compiler/c_direct_lex.c b/src/buster/compiler/c_direct_lex.c
+index eb50683f..d75a689c 100644
+--- a/src/buster/compiler/c_direct_lex.c
++++ b/src/buster/compiler/c_direct_lex.c
+@@ -311,7 +311,8 @@ struct FastIdentCacheSlot
+     uint32_t id;
+     uint8_t len;
+     uint8_t tok_kind;   // FTOK_IDENT or FTOK_KW_*
+-    uint16_t pad;
++    uint8_t macro;      // the name's bit in macro_bits (fast_ident_set_macro_bit keeps it)
++    uint8_t pad;
+ };
+ 
+ 
+@@ -584,11 +585,23 @@ static uint32_t fast_ident_intern_cstr(FastIdentTable* t, const char* s)
+     return fast_ident_intern(t, (const uint8_t*)s, (uint32_t)strlen(s));
+ }
+ 
+-// The cache's key hash, of a name's first eight bytes (masked to its length), its last eight (0 up to eight bytes) and
+-// its length: fast_ident_lookup's, and fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits are the
+-// slot. A macro rather than a function so that the compile's count has no call a lookup in it (#3592).
++// The cache's key hash, of a name's key words (BUSTER_FIDENT_KEY_BYTES) and its length: fast_ident_lookup's, and
++// fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits are the slot. A macro rather than a function
++// so that the compile's count has no call a lookup in it (#3592).
+ #define BUSTER_FIDENT_CACHE_HASH(first, last, len) \
+     (((first) ^ ((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56)) * UINT64_C(0xbf58476d1ce4e5b9))
++// A name's key is two words: its first sixteen bytes, those past its length zero, and a name of more than sixteen
++// bytes has its last eight bytes mixed into the second word (BUSTER_FIDENT_KEY_TAIL), so that names that differ only
++// at their end have different slots; its slot is compared with its interned text too. The masked loads read no byte
++// past the name, so a lookup needs no readable bytes after it, and the key has no branch on the length: one on whether
++// a name had eight bytes mispredicted at about a lookup in five on sqlite3.c, and dropped the probes after it
++// (buster#3583). `len` may be more than 255, which _bzhi_u32 would read as its low byte: a name of sixteen bytes or more
++// takes all sixteen.
++#define BUSTER_FIDENT_KEY_BYTES(p, len) \
++    _mm_maskz_loadu_epi8((__mmask16)(_bzhi_u32(0xffffu, (len)) | (0u - (uint32_t)((len) > 15u))), (p))
++// A name's last eight bytes where it has more than sixteen, else 0: a masked load that reads nothing for a shorter one.
++#define BUSTER_FIDENT_KEY_TAIL(p, len) \
++    ((uint64_t)_mm_cvtsi128_si64(_mm_maskz_loadu_epi64((__mmask8)((len) > 16u), (p) + ((len) - 8u) * (uint32_t)((len) > 16u))))
+ 
+ static void fast_ident_cache_set(FastIdentTable* t, FastIdentCacheSlot* cache, uint32_t bits)
+ {
+@@ -806,25 +819,18 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
+     return ok;
+ }
+ 
+-// An identifier is fully determined by its first and last words up to 16 bytes.
+-// Only the short spelling needs a mask. Its caller guarantees eight readable bytes.
+-static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
++// An identifier of up to 16 bytes is fully determined by its key's two words; a longer one's slot is compared with its
++// interned text too. `*out_macro` is whether the name is a macro: its slot's flag, or its bit where it missed.
++static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind, uint8_t* out_macro)
+ {
+-    uint64_t first;
+-    memcpy(&first, p, sizeof(first));
+-    uint64_t last = 0;
+-    if (len <= 8u)
+-    {
+-        first = _bzhi_u64(first, len * 8u);
+-    }
+-    else
+-    {
+-        memcpy(&last, p + len - 8u, sizeof(last));
+-    }
++    const __m128i key = BUSTER_FIDENT_KEY_BYTES(p, len);
++    const uint64_t first = (uint64_t)_mm_cvtsi128_si64(key);
++    const uint64_t last = (uint64_t)_mm_extract_epi64(key, 1) ^ BUSTER_FIDENT_KEY_TAIL(p, len);
+     const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, last, len);
+     FastIdentCacheSlot* slot = t->cache + (hash >> t->cache_shift);
+     uint32_t id = 0;
+     uint8_t kind = FTOK_IDENT;
++    uint8_t macro = 0;
+     if (__builtin_expect(slot->len == len && slot->w0 == first && slot->w1 == last, 1))
+     {
+         bool equal = true;
+@@ -839,6 +845,7 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
+         {
+             id = slot->id;
+             kind = slot->tok_kind;
++            macro = slot->macro;
+         }
+     }
+     if (__builtin_expect(id == 0, 0))
+@@ -848,6 +855,7 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
+         {
+             const uint8_t kw = t->entries[id].kw_kind;
+             kind = kw != 0 ? kw : FTOK_IDENT;
++            macro = (uint8_t)((t->macro_bits[id >> 6] >> (id & 63u)) & 1u);
+             if (len <= 64u)
+             {
+                 if (__builtin_expect(t->count >= t->cache_grow_at, 0) && fast_ident_cache_grow(t))
+@@ -859,10 +867,12 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
+                 slot->id = id;
+                 slot->len = (uint8_t)len;
+                 slot->tok_kind = kind;
++                slot->macro = macro;
+             }
+         }
+     }
+     *out_kind = kind;
++    *out_macro = macro;
+     return id;
+ }
+ 
+@@ -871,6 +881,8 @@ static inline bool fast_ident_is_macro(const FastIdentTable* t, uint32_t id)
+     return (t->macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0;
+ }
+ 
++// A name's macro bit, and its cache slot's flag where the slot holds the name: the slot is where a lookup of its
++// interned text would find it.
+ static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool active)
+ {
+     const uint64_t mask = UINT64_C(1) << (id & 63u);
+@@ -882,6 +894,16 @@ static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool
+     {
+         t->macro_bits[id >> 6] &= ~mask;
+     }
++    const FastIdentEntry* const entry = t->entries + id;
++    const uint8_t* const text = (const uint8_t*)(t->strings + entry->str_offset);
++    const uint32_t length = entry->length;
++    const __m128i key = BUSTER_FIDENT_KEY_BYTES(text, length);
++    const uint64_t last = (uint64_t)_mm_extract_epi64(key, 1) ^ BUSTER_FIDENT_KEY_TAIL(text, length);
++    FastIdentCacheSlot* const slot = t->cache + (BUSTER_FIDENT_CACHE_HASH((uint64_t)_mm_cvtsi128_si64(key), last, length) >> t->cache_shift);
++    if (slot->id == id)
++    {
++        slot->macro = active ? 1u : 0u;
++    }
+ }
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
+@@ -1928,21 +1950,16 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t*
+                 p = end;
+                 break;
+             }
++            // The lookup reads no byte past the name, so the file's last bytes take it too.
+             uint8_t kw_resolved = FTOK_IDENT;
+-            const uint32_t id = ((size_t)(end - p) >= 8u) ?
+-                                fast_ident_lookup(&pp->idents, p, len, &kw_resolved) :
+-                                fast_ident_intern(&pp->idents, p, len);
++            uint8_t unused_macro = 0;
++            const uint32_t id = fast_ident_lookup(&pp->idents, p, len, &kw_resolved, &unused_macro);
+             if (__builtin_expect(id == 0, 0))
+             {
+                 fast_pp_bail(pp, "ident table full");
+                 p = end;
+                 break;
+             }
+-            if ((size_t)(end - p) < 8u)
+-            {
+-                const uint8_t kw = pp->idents.entries[id].kw_kind;
+-                kw_resolved = kw != 0 ? kw : FTOK_IDENT;
+-            }
+             tok_kind = kw_resolved;
+             tok_data = id;
+             p += len;
+@@ -5091,7 +5108,8 @@ static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t
+     if (kind == FTOK_IDENT)
+     {
+         uint8_t ident_kind = FTOK_IDENT;
+-        const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
++        uint8_t unused_macro = 0;
++        const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind, &unused_macro);
+         if (__builtin_expect(id == 0, 0))
+         {
+             fast_pp_bail(pp, "ident table full");
+@@ -5501,6 +5519,11 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
+ {
+     FastWindow* const w = &pp->win;
+     const uint8_t* const base = f->base;
++    // The window's columns, in registers: the stores to out_kind may alias anything, and with the columns read through
++    // w each token loaded their three addresses again.
++    const uint8_t* const win_kinds = w->kinds;
++    const uint32_t* const win_starts = w->starts;
++    const uint8_t* const win_lens = w->lens;
+     uint8_t* const out_kind = pp->out_kind;
+     uint32_t* const out_data = pp->out_data;
+     const uint32_t out_limit = pp->out_cap - 64u;
+@@ -5520,22 +5543,39 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
+     while (i < n && out_count < out_limit && !leave)
+     {
+         const uint32_t cnt = n - i < 64u ? n - i : 64u;
+-        const __m512i kv = _mm512_loadu_si512((const void*)(w->kinds + i));
++        const __m512i kv = _mm512_loadu_si512((const void*)(win_kinds + i));
+         _mm512_storeu_si512((void*)(out_kind + out_count), kv);
+         uint64_t work = (uint64_t)_mm512_cmple_epu8_mask(kv, v_work_max) & _bzhi_u64(~UINT64_C(0), cnt);
+         uint32_t taken = cnt;
++        {
++            uint64_t names_pf = (uint64_t)_mm512_cmpeq_epi8_mask(kv, _mm512_set1_epi8(FTOK_IDENT)) & work;
++            const FastIdentCacheSlot* const pf_cache = pp->idents.cache;
++            const uint32_t pf_shift = pp->idents.cache_shift;
++            while (names_pf != 0)
++            {
++                const uint32_t pk = (uint32_t)__builtin_ctzll(names_pf);
++                names_pf &= names_pf - 1u;
++                const uint8_t* const ps = base + win_starts[i + pk];
++                const uint32_t plen = win_lens[i + pk];
++                const __m128i pkey = _mm_maskz_mov_epi8((__mmask16)_bzhi_u32(0xffffu, plen), _mm_loadu_si128((const __m128i*)(const void*)ps));
++                const uint64_t ph = BUSTER_FIDENT_CACHE_HASH((uint64_t)_mm_cvtsi128_si64(pkey), (uint64_t)_mm_extract_epi64(pkey, 1), plen);
++                _mm_prefetch((const char*)(pf_cache + (ph >> pf_shift)), _MM_HINT_T0);
++            }
++        }
+         while (work != 0)
+         {
+             const uint32_t k = (uint32_t)__builtin_ctzll(work);
+             work &= work - 1u;
+             const uint32_t t = i + k;
+-            const uint32_t kind = w->kinds[t];
+-            const uint8_t* const s = base + w->starts[t];
+-            const uint32_t len = w->lens[t];
++            const uint32_t kind = win_kinds[t];
++            const uint8_t* const s = base + win_starts[t];
++            const uint32_t len = win_lens[t];
+             if (__builtin_expect(kind == FTOK_IDENT, 1))
+             {
++                // Whether the name is a macro comes with its slot: no second load for its bit.
+                 uint8_t ident_kind = FTOK_IDENT;
+-                const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
++                uint8_t is_macro = 0;
++                const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind, &is_macro);
+                 if (__builtin_expect(id == 0, 0))
+                 {
+                     fast_pp_bail(pp, "ident table full");
+@@ -5545,7 +5585,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
+                 }
+                 out_data[out_count + k] = id;
+                 out_kind[out_count + k] = ident_kind;
+-                if (__builtin_expect((macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
++                if (__builtin_expect(is_macro != 0, 0))
+                 {
+                     // A one-token object macro (SQLITE_OK, OP_*) is replaced where it stands.
+                     const uint32_t midx = pp->idents.entries[id].macro_idx;

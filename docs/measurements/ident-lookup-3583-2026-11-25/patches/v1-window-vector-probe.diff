@@ -1,0 +1,212 @@
+diff --git a/src/buster/compiler/c_direct_lex.c b/src/buster/compiler/c_direct_lex.c
+index eb50683f..2097dc82 100644
+--- a/src/buster/compiler/c_direct_lex.c
++++ b/src/buster/compiler/c_direct_lex.c
+@@ -385,6 +385,7 @@ struct FastIdentTable
+     uint32_t capacity;
+ 
+     uint64_t* macro_bits;      // 1 bit per IdentId (L1-resident fast check!)
++    uint32_t macro_changes;    // counts the changes of macro_bits: a window's probe holds the count it was made at
+ 
+     char* strings;             // contiguous NUL-terminated identifier text buffer
+     uint64_t str_used;
+@@ -874,6 +875,7 @@ static inline bool fast_ident_is_macro(const FastIdentTable* t, uint32_t id)
+ static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool active)
+ {
+     const uint64_t mask = UINT64_C(1) << (id & 63u);
++    t->macro_changes += 1u;
+     if (active)
+     {
+         t->macro_bits[id >> 6] |= mask;
+@@ -1146,8 +1148,10 @@ struct FastWindow
+     uint8_t* kinds;          // capacity + 64 each: the loop stores whole vectors
+     uint32_t* starts;
+     uint8_t* lens;
++    uint32_t* names;         // an identifier's id where fast_pp_probe_window found it in the cache and no macro, else 0
+     uint32_t count;
+     uint32_t pos;            // the next token to take: every one before it starts before the file's ptr
++    uint32_t probed;         // the identifier table's macro_changes when the probe was made
+     uint32_t serial;         // the file's, or 0 for no window
+     uint32_t generation;     // counts the windows lexed, for a reader that takes a token back
+     const uint8_t* lex_ptr;  // the first byte past what the window covers
+@@ -4418,11 +4422,12 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool
+         pp->win.kinds = (uint8_t*)fast_arena_alloc(scratch, BUSTER_FWIN_CAPACITY + 64u, 64);
+         pp->win.starts = (uint32_t*)fast_arena_alloc(scratch, (BUSTER_FWIN_CAPACITY + 64u) * sizeof(uint32_t), 64);
+         pp->win.lens = (uint8_t*)fast_arena_alloc(scratch, BUSTER_FWIN_CAPACITY + 64u, 64);
++        pp->win.names = (uint32_t*)fast_arena_alloc(scratch, (BUSTER_FWIN_CAPACITY + 64u) * sizeof(uint32_t), 64);
+ 
+         ok = pp->out_kind != NULL && pp->out_data != NULL && pp->num_pool != NULL && pp->lit_bytes != NULL &&
+              pp->lit_slices != NULL && pp->lit_coded != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
+              pp->exp_buf != NULL && pp->arg_buf != NULL && pp->call_stack != NULL &&
+-             pp->win.kinds != NULL && pp->win.starts != NULL && pp->win.lens != NULL;
++             pp->win.kinds != NULL && pp->win.starts != NULL && pp->win.lens != NULL && pp->win.names != NULL;
+     }
+     return ok;
+ }
+@@ -4727,6 +4732,94 @@ _Alignas(64) static const uint8_t fast_iota64_plus1[64] = {
+     49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
+ };
+ 
++// The cache's answers for eight identifiers in lanes (buster#3583): each lane's token's first byte's offset in the
++// file and its length, `lanes` the lanes that hold one. A lane is answered where its slot holds its key, its name is of
++// 16 bytes or less (fast_ident_lookup compares a longer one's middle bytes) and it names no macro: its id in
++// `*out_ids`, and its kind in the low byte of `*out_kinds`' lane (FTOK_IDENT where unanswered). The key and the slot
++// are fast_ident_lookup's: the first eight bytes masked to the length, the last eight of a longer name, the length.
++static inline __mmask8 fast_ident_probe8(const FastIdentTable* t, const uint8_t* base, __m512i starts, __m512i lengths, __mmask8 lanes,
++                                         __m512i* out_ids, __m512i* out_kinds)
++{
++    const __m512i v_zero = _mm512_setzero_si512();
++    const __m512i v_eight = _mm512_set1_epi64(8);
++    const __mmask8 probed = _mm512_mask_cmple_epu64_mask(lanes, lengths, _mm512_set1_epi64(16));
++    const __mmask8 longer = _mm512_mask_cmpgt_epu64_mask(probed, lengths, v_eight);
++    // A window token's first byte has 16 readable bytes after it.
++    const __m512i head = _mm512_mask_i64gather_epi64(v_zero, probed, starts, base, 1);
++    const __m512i last = _mm512_mask_i64gather_epi64(v_zero, longer, _mm512_add_epi64(starts, _mm512_sub_epi64(lengths, v_eight)), base, 1);
++    // A name of fewer than eight bytes keeps its own: all ones shifted right by the bits past them.
++    const __m512i dropped = _mm512_slli_epi64(_mm512_sub_epi64(v_eight, _mm512_min_epu64(lengths, v_eight)), 3);
++    const __m512i first = _mm512_and_si512(head, _mm512_srlv_epi64(_mm512_set1_epi64(-1), dropped));
++    const __m512i mixed = _mm512_xor_si512(_mm512_xor_si512(first, _mm512_mullo_epi64(last, _mm512_set1_epi64((long long)UINT64_C(0x9e3779b97f4a7c15)))),
++                                           _mm512_slli_epi64(lengths, 56));
++    const __m512i hash = _mm512_mullo_epi64(mixed, _mm512_set1_epi64((long long)UINT64_C(0xbf58476d1ce4e5b9)));
++    // A slot is three words: its index times three, in words.
++    const __m512i slot = _mm512_srl_epi64(hash, _mm_cvtsi32_si128((int)t->cache_shift));
++    const __m512i words = _mm512_add_epi64(slot, _mm512_slli_epi64(slot, 1));
++    const long long* const cache = (const long long*)(const void*)t->cache;
++    const __m512i w0 = _mm512_mask_i64gather_epi64(v_zero, probed, words, cache, 8);
++    const __m512i w1 = _mm512_mask_i64gather_epi64(v_zero, probed, words, cache + 1, 8);
++    // The slot's third word: the id, then the length's and the kind's bytes.
++    const __m512i meta = _mm512_mask_i64gather_epi64(v_zero, probed, words, cache + 2, 8);
++    const __mmask8 found = _mm512_mask_cmpeq_epi64_mask(probed, w0, first) & _mm512_cmpeq_epi64_mask(w1, last) &
++                           _mm512_cmpeq_epi64_mask(_mm512_and_si512(meta, _mm512_set1_epi64(INT64_C(0xff00000000))), _mm512_slli_epi64(lengths, 32));
++    const __m512i ids = _mm512_and_si512(meta, _mm512_set1_epi64(UINT32_MAX));
++    const __m512i macro_words = _mm512_mask_i64gather_epi64(v_zero, found, _mm512_srli_epi64(ids, 6), (const long long*)(const void*)t->macro_bits, 8);
++    const __mmask8 macros = _mm512_test_epi64_mask(_mm512_srlv_epi64(macro_words, _mm512_and_si512(ids, _mm512_set1_epi64(63))), _mm512_set1_epi64(1));
++    const __mmask8 answered = found & ~macros;
++    *out_ids = _mm512_maskz_mov_epi64(answered, ids);
++    *out_kinds = _mm512_mask_blend_epi64(answered, _mm512_set1_epi64(FTOK_IDENT), _mm512_srli_epi64(meta, 40));
++    return answered;
++}
++
++// The window's identifiers looked up in the cache, sixteen tokens at a time (buster#3583). The emitter looked a name up
++// where it took it, a probe at a time: the hash waited for the name's bytes, the slot's load (the cache is the second
++// level's, 384 KB) for the hash, and a branch on the name's length or its macro's bit, which mispredicted, dropped the
++// probes after it. Here the names of sixteen tokens are packed and probed in two passes of eight lanes, every slot's
++// load issued before any is compared. An answered identifier's id is in `names` and a keyword's kind in the window's
++// kinds; the others keep FTOK_IDENT and 0, for fast_ident_lookup where they are read: a miss, a name of more than 16
++// bytes, a macro's. The answers are the macros' as they were (`probed`): a directive ends a window, so its tokens are
++// read before another macro is defined, and the emitter probes the window again where the count has moved.
++static BUSTER_DIRECT_HOT void fast_pp_probe_window(FastPP* pp, const FastIncludeFile* f)
++{
++    FastWindow* const w = &pp->win;
++    const FastIdentTable* const t = &pp->idents;
++    const uint8_t* const base = f->base;
++    const uint32_t count = w->count;
++    const __m128i v_ident = _mm_set1_epi8(FTOK_IDENT);
++    const __m128i v_keyword = _mm_set1_epi8(64);
++    for (uint32_t b = 0; b < count; b += 16u)
++    {
++        const uint32_t left = count - b;
++        const __mmask16 live = left >= 16u ? (__mmask16)0xffffu : (__mmask16)_bzhi_u32(0xffffu, left);
++        const __m128i kinds = _mm_loadu_si128((const __m128i*)(const void*)(w->kinds + b));
++        // A keyword's kind is an earlier probe's answer: probed again, it is an identifier.
++        const __mmask16 names = (_mm_cmpeq_epi8_mask(kinds, v_ident) | _mm_cmpge_epu8_mask(kinds, v_keyword)) & live;
++        const uint32_t name_count = (uint32_t)__builtin_popcount(names);
++        __m512i ids_low = _mm512_setzero_si512();
++        __m512i kinds_low = _mm512_set1_epi64(FTOK_IDENT);
++        __m512i ids_high = _mm512_setzero_si512();
++        __m512i kinds_high = _mm512_set1_epi64(FTOK_IDENT);
++        if (name_count != 0)
++        {
++            const __m512i starts = _mm512_maskz_compress_epi32(names, _mm512_loadu_si512((const void*)(w->starts + b)));
++            const __m128i lengths = _mm_maskz_compress_epi8(names, _mm_loadu_si128((const __m128i*)(const void*)(w->lens + b)));
++            fast_ident_probe8(t, base, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(starts)), _mm512_cvtepu8_epi64(lengths),
++                              (__mmask8)_bzhi_u32(0xffu, name_count), &ids_low, &kinds_low);
++            if (name_count > 8u)
++            {
++                fast_ident_probe8(t, base, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(starts, 1)), _mm512_cvtepu8_epi64(_mm_srli_si128(lengths, 8)),
++                                  (__mmask8)_bzhi_u32(0xffu, name_count - 8u), &ids_high, &kinds_high);
++            }
++        }
++        const __m512i ids = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(ids_low)), _mm512_cvtepi64_epi32(ids_high), 1);
++        const __m128i name_kinds = _mm_unpacklo_epi64(_mm512_cvtepi64_epi8(kinds_low), _mm512_cvtepi64_epi8(kinds_high));
++        _mm512_store_si512((void*)(w->names + b), _mm512_maskz_expand_epi32(names, ids));
++        _mm_store_si128((__m128i*)(void*)(w->kinds + b), _mm_mask_expand_epi8(kinds, names, name_kinds));
++    }
++    w->probed = t->macro_changes;
++}
++
+ // Lexes a window of f's text from `p`, where a line starts if `bol`. A line's window (`line_mode`) ends at the newline
+ // that ends the line, as fast_lex_one's stop_at_eol does. Its tokens are fast_lex_one's tokens of the same text, byte
+ // for byte, or are marked as fast_lex_one's (BUSTER_FWIN_SCALAR), which the readers lex there:
+@@ -5031,6 +5124,7 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
+     w->stop = (uint8_t)stop;
+     w->lex_bol = bol;
+     w->line_mode = line_mode;
++    fast_pp_probe_window(pp, f);
+ }
+ 
+ // Passes the window's tokens that start before the file's byte `offset`. False where the last of them goes on past it:
+@@ -5088,10 +5182,15 @@ static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t
+     const uint32_t len = w->lens[t];
+     FastTok tok;
+     const uint8_t* text_end = s + len;
+-    if (kind == FTOK_IDENT)
++    if (kind == FTOK_IDENT || kind >= 64u)
+     {
+-        uint8_t ident_kind = FTOK_IDENT;
+-        const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
++        // The probe's id and kind, or the lookup's. Whether the name is a macro is the reader's question.
++        uint8_t ident_kind = (uint8_t)kind;
++        uint32_t id = w->names[t];
++        if (id == 0)
++        {
++            id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
++        }
+         if (__builtin_expect(id == 0, 0))
+         {
+             fast_pp_bail(pp, "ident table full");
+@@ -5494,9 +5593,10 @@ static inline bool fast_pp_decimal_pairs(const FastWindow* w, uint32_t t, const
+     return decoded;
+ }
+ 
+-// Emits the window's tokens from its place on: 64 kinds a store, and a loop over the identifiers, numbers and
+-// literals among them, which are the tokens with something to look up or convert. A macro's name stops the block: the
+-// tokens before it stay, and fast_pp_window_macro says where the window goes on.
++// Emits the window's tokens from its place on: 64 kinds and 64 data a block, the identifiers' ids and keywords' kinds
++// as fast_pp_probe_window found them, and a loop over the numbers, the literals and the identifiers it left, which are
++// the tokens with something to look up or convert. A macro's name stops the block: the tokens before it stay, and
++// fast_pp_window_macro says where the window goes on.
+ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f)
+ {
+     FastWindow* const w = &pp->win;
+@@ -5516,13 +5616,29 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
+     {
+         f->guard_state = 3u;
+     }
++    // The probe answered for the macros as they were.
++    if (__builtin_expect(w->probed != pp->idents.macro_changes, 0))
++    {
++        fast_pp_probe_window(pp, f);
++    }
+ 
+     while (i < n && out_count < out_limit && !leave)
+     {
+         const uint32_t cnt = n - i < 64u ? n - i : 64u;
+         const __m512i kv = _mm512_loadu_si512((const void*)(w->kinds + i));
+         _mm512_storeu_si512((void*)(out_kind + out_count), kv);
+-        uint64_t work = (uint64_t)_mm512_cmple_epu8_mask(kv, v_work_max) & _bzhi_u64(~UINT64_C(0), cnt);
++        // The probe's ids, and 0 for every other token, whose data the loop below writes if it has any.
++        const __m512i names0 = _mm512_loadu_si512((const void*)(w->names + i));
++        const __m512i names1 = _mm512_loadu_si512((const void*)(w->names + i + 16u));
++        const __m512i names2 = _mm512_loadu_si512((const void*)(w->names + i + 32u));
++        const __m512i names3 = _mm512_loadu_si512((const void*)(w->names + i + 48u));
++        _mm512_storeu_si512((void*)(out_data + out_count), names0);
++        _mm512_storeu_si512((void*)(out_data + out_count + 16u), names1);
++        _mm512_storeu_si512((void*)(out_data + out_count + 32u), names2);
++        _mm512_storeu_si512((void*)(out_data + out_count + 48u), names3);
++        const uint64_t answered = (uint64_t)_mm512_test_epi32_mask(names0, names0) | ((uint64_t)_mm512_test_epi32_mask(names1, names1) << 16) |
++                                  ((uint64_t)_mm512_test_epi32_mask(names2, names2) << 32) | ((uint64_t)_mm512_test_epi32_mask(names3, names3) << 48);
++        uint64_t work = (uint64_t)_mm512_cmple_epu8_mask(kv, v_work_max) & _bzhi_u64(~UINT64_C(0), cnt) & ~answered;
+         uint32_t taken = cnt;
+         while (work != 0)
+         {
