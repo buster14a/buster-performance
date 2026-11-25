@@ -10,7 +10,7 @@ compiles, and the direct path (`c_direct.c`, the compiler a plain `-c` of one fi
   host, with its CI toolchain (clang 23.1.4), one build a hold of the lock.
   - `plain-main`: main, no profile.
   - `pgo-main`: main with `BUSTER_PGO=1` (213 s, the instrumented compiles and the training included).
-  - `pgo-head-none`: the change (`scripts/head-as-measured.patch`, buster#3582's pull request) with `BUSTER_PGO=1`: the
+  - `pgo-head-none`: the change (`scripts/head-as-measured.patch`, [buster#3605](https://github.com/buster14a/buster/pull/3605), whose commit differs in comments alone) with `BUSTER_PGO=1`: the
     direct path's unit compiles without a profile, the others with the same profile as `pgo-main`.
   - `pgo-head-sqlite`: the same with `BUSTER_PGO_CORPUS=/var/lib/buster-9700x/corpora/preprocessor-391e729af658`:
     the direct path's unit compiles with a profile of the instrumented executable's plain `-c` of the corpus's
@@ -21,7 +21,7 @@ compiles, and the direct path (`c_direct.c`, the compiler a plain `-c` of one fi
   the variants in an order that rotates by round, medians of 9 rounds (`results/ab-2.txt`; `results/ab-1.txt` is an
   earlier hold of 7 rounds with the two main builds alone, which reads the same).
 
-## Which compiles reach the direct path (`scripts/eligible.sh`, `results/bail-trace.txt`)
+## Which compiles reach the direct path (`scripts/eligible.sh`, `results/eligible.txt`, `results/bail-trace.txt`)
 
 A cloud container's Release build of main, each of the build's 44 sources compiled `-c` with the units' flags as the
 training gives them (no `-g`, no `-ffunction-sections`):
