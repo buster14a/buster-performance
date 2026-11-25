@@ -309,3 +309,49 @@ full pipeline's symbols. The other 18, and `sqlite3.c` by `-w`, differ only in t
 - `memset` and `memmove`;
 - `.data` rather than `.bss`;
 - `fabs`.
+
+## Step 6a: GNU's alias attribute, musl's `weak_alias` (`alias6a/`)
+
+A file-scope declaration with `alias("target")` is defined at the unit's end where its target is, as `weak_alias(old, new)`
+writes it: `extern __typeof(old) new __attribute__((__weak__, __alias__("old")))`. `typeof(name)` of a declared name is its
+type. Measured at `a2d8e3087`, on step 4; the final commit `390a1a986` removes three redundant checks and adds tests,
+with the same status, diagnostics and object for every corpus unit. `compiler-s4r` and `compiler-a6` were both built on
+the host:
+
+| | step 4 | 6a |
+| --- | ---: | ---: |
+| musl by `-std=c99`, 5 rounds | 1,501.73 ms, 663 direct | 1,398.24 ms, 784 direct (-6.9%) |
+| musl by `gnu99`, 5 rounds | 1,495.85 ms | 1,393.60 ms (-6.8%) |
+| Lua's 34 units | 79.78 ms | 79.35 ms |
+| `sqlite3.c`, 11 rounds | 16.79 ms, 219.71 M instructions | 16.72 ms, 220.28 M |
+
+**Objects:** Lua's and `sqlite3.c`'s are the same.
+
+**The corpus against step 4** (`equiv-against-step4.txt`, `equiv-changed-units.tsv`): 121 musl units become direct in
+each mode, and two test sources (`attributes/0053.c` and `weak-alias-common/attribute.c`). 8 of the musl units (4 in
+each mode) lose the full pipeline's warnings, which the direct path drops in every mode (buster#3577):
+- `-Wshift-op-parentheses` from `endian.h`;
+- `-Wstring-plus-int` in `syslog.c`.
+
+**Caught on the way:** the first build took three test sources the full pipeline rejects:
+- `attributes/0054.c` and `0055.c`: an alias, then a definition of its name;
+- `0057.c`: two aliases of one name.
+
+It also took `programs/alias-late-attributes/source-text.c`, an attribute after an alias, which the full pipeline warns
+of. An alias is a definition, so any later declaration of its name now leaves the direct path (`FastSym.is_alias`).
+
+**The symbols against `--no-direct`** (`symbols-summary.txt`, `symbols-kinds-new-direct.txt`): of the 242 new direct
+musl units, 206 have the full pipeline's symbols, and the two test sources do too. The other 36 differ only as
+buster#3595 leaves:
+- `.data` rather than `.bss`, the alias with its target;
+- a dead `isdigit`;
+- `memset`.
+
+**Seeded faults** (`faults.py`, `faults-1.txt`, `faults-2.txt`): 31 single-line faults in the new code, each run
+against `test-direct`.
+- **26 found at once.**
+- **One more found** once the count of alias attributes, which refuses an alias anywhere a declaration doesn't record
+  it, had tests of its own: a member, a parameter, a block's `static` and automatic objects, a typedef.
+- **Three survived because their checks were redundant with that count,** and are gone: the explicit bails for an
+  alias on a definition and on an initialized object, and an object-symbol test that repeats `target->defined`.
+- **One is equivalent:** an empty operand, which the target's lookup refuses as it refuses any name no declaration has.
