@@ -219,3 +219,32 @@ of them for a type.
 So inline assembly of the syscall wrappers' shape (a fixed template, register constraints, `register ... __asm__("r10")`
 variables) and `weak_alias` (`__typeof` of a declared name, the `alias` attribute) would take musl's build from
 1,559.5 ms at main to about 1,127: 28%, most of it from units that stop paying for both paths.
+
+## Step 4: strict `-std=`, `-w` and the comma rule ([buster#3592](https://github.com/buster14a/buster/issues/3592))
+
+`-std=c99`, `c11`, `c17` and `c23` (and `-trigraphs`, `-fno-asm`) and `-w` alone take the direct path. What the strict
+modes change for it, as clang and the full pipeline have them: a unit with a trigraph leaves (any `??` and one of
+`= ( / ) ' < ! > -` in any file it reads, scanned 64 bytes a step); `asm`, and `typeof` before C23, are identifiers; `G()`
+of `#define G(...) g(0, ## __VA_ARGS__)` keeps its comma; and a `main` that doesn't return `int` leaves. Two changes for
+every mode came with the comma rule: `F(x,)` keeps the comma of `, ## __VA_ARGS__` (the direct path dropped it, so
+`f(x,)` compiled as `f(x)`), and a comma before a variadic argument with tokens pastes nothing (the direct path left the
+unit as an invalid paste). That last one let `__VA_ARGS__ ## __VA_ARGS__` of a comma reach a parser that took `, ,` at
+file scope, so a declarator without a name (`int , x;`, `int x, ;`, `int (*)(void);`, `[1]`) now leaves too, as the full
+pipeline's error.
+
+**Musl's own build** (`strict/builds-c99-s4b.txt`, 5 rotated rounds, `-std=c99`, a process a unit): main 1,559.5 ms,
+step 1's code 1,560.6 (no unit taken), step 4's 1,517.3 (663 taken, -2.7%). The objects of the 663 are those the same
+compiler writes by `-std=gnu99` (the build's hash `c220221770db` in both). By `gnu99` and for Lua nothing moved
+(`strict/builds-gnu-s4b.txt`).
+
+**The corpus against main** (`step4/equiv`: the 7,556 units of the first record's corpus): the same status, diagnostics
+and object for every unit but 666: musl's 664 units by `-std=c99` now direct (each object the one `gnu99` writes),
+`sqlite3.c` by `-w` now direct, and `tests/preprocessor/cases/0306.c` (`[1]` at file scope) now the full pipeline's
+error where main's direct path compiled it.
+
+**The preprocessor against the full one** (`scripts/ppeq-run.sh`, `step4/ppeq`): each unit compiled as written and as
+the full preprocessor's `-E -P` text under the same name, by `-std=gnu17`, `-std=c17` and `-std=c23` (musl by `gnu99` and
+`c99`). Where both are the direct path's, the objects are the same for every unit but four or five preprocessor cases
+in each mode: `#if` arithmetic and queries where the direct path disagrees with clang in every mode, on main too
+(`tests/preprocessor/cases/0202.c` a `char16_t` literal's sign, `0308.c` shifts by 64 or more, `0359.c`
+`__has_attribute(ext_vector_type)`, `0126.c` raw strings in `__has_warning` under GNU's modes, `0203.c` `u8''` in C23).
