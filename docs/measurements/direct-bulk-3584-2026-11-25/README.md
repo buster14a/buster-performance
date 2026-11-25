@@ -61,6 +61,11 @@ Merged with main `dced4e6b` (#3607's raw strings and musl's asm, `results/ab-pro
 (-1.6%), instructions 220.05 -> 210.74 M (-4.2%); `measure-compile` 219,877,340 -> **210,562,407**, the count the change
 writes in `tools/ci/compile-instructions.txt` now; the compile's count 46,447,075 -> 44,339,530 (-4.54%).
 
+Merged with main `67a1324a` (#3615, #3612, #3592's dependency files; `results/ab-product-merged-67a1324a.txt`,
+`measure-compile-merged-67a1324a.txt`): the product's `-c` 16.440 -> 16.300 ms (-0.9%), user cycles 81.16 -> 80.40 M
+(-0.9%), instructions 220.23 -> 210.92 M (-4.2%); `measure-compile` 220,052,047 -> 210,731,045, 0.08% from the count the
+file holds (its band is 0.5%); the compile's count 46,505,158 -> 44,396,837 (-4.53%).
+
 ## Where the time was (`results/profile-main`, by function, share of user cycles)
 
 | function | main | after the change's first steps (`s4`) |
