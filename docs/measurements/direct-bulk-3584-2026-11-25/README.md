@@ -39,6 +39,18 @@ was measured and not kept. The change is on buster's branch `claude/relaxed-rama
 `measure-compile-final.txt`. Main's own count was already 4.3% under `tools/ci/compile-instructions.txt`'s
 230,887,792 (earlier merges moved it); the change writes its count there.
 
+Merged with main `3f1bfb5a` (the pull request's head, whose compiler sources are main's and the change's two files),
+both built on the 9700X (`results/ab-product-merged.txt`, `measure-compile-merged.txt`):
+
+| | main `3f1bfb5a` | merged | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.400 ms | **16.230 ms** | -1.0% |
+| user cycles | 81.48 M | **80.38 M** | -1.3% |
+| user instructions | 220.55 M | **211.49 M** | -4.1% |
+| `measure-compile`'s instructions | 220,380,383 | **211,305,483** | -4.1% |
+| the compile's count (against main `09c3b79b`) | 46,313,221 | **44,266,098** | -4.42% |
+| the object | `f558aaf503fcb186` | the same | |
+
 ## Where the time was (`results/profile-main`, by function, share of user cycles)
 
 | function | main | after the change's first steps (`s4`) |
