@@ -635,3 +635,40 @@ What keeps it off, in order: glibc's `assert` (a statement expression in GNU mod
 mode), `__builtin_ceil` and `__builtin_floor` (`seriesCeil`, `seriesFloor`), and the statement stack's 64 frames, which
 `do_meta_command`'s `else if` chain outgrows. The full pipeline computes `__builtin_ceil` and `__builtin_floor` in a
 helper of its own, with no `ceil` or `floor` reference; clang calls them.
+
+## glibc's `assert`, `__PRETTY_FUNCTION__`, `ceil` and `floor` on the direct path (`pr-assert/`)
+
+The change (`assert-head.patch`, buster `ecca8eb2`) on main `7efd3657` (#3619 merged). `assert-measured.patch` is the
+head as measured (`aa5e0f01`): the head since moves one test table under MemorySanitizer's `#if`, nothing else.
+`build-assert.sh` and `build-assert2.sh` built `compiler-m7e` (main), `compiler-as` (the change), and each with 1,500
+bytes of nops ahead of the code generator (`padu1500.patch`, one line of context so that it applies to both trees).
+
+**9700X, `measure-assert.sh 11`** (`measure-assert.txt`): a process a compile on CPU 2, the four variants rotated by
+round, medians of 11:
+
+| | main | main, padded | the change | the change, padded |
+| --- | ---: | ---: | ---: | ---: |
+| `shell.c` by `-I` alone | 36.86 ms, full pipeline | 36.78 | **7.07 ms, direct** | 7.04 |
+| its user instructions | 409.71 M | 409.69 | 72.92 M | 72.92 |
+| `sqlite3.c` by the pinned options | 17.17 ms | 17.06 | 16.99 ms | 16.96 |
+| its user instructions | 212.063 M | 212.063 | 212.116 M (+0.025%) | 212.116 |
+
+**The corpus** (`corpus-vs-3619.txt`): of 7,556 units, only `shell.c` in its two configurations changes, from the full
+pipeline to the direct path, with the same status and diagnostics. Its 764 symbols are `--no-direct`'s in both. SQLite's
+shell built from the direct path's `sqlite3.c` and `shell.c` (with its asserts) and from clang's gives the same 112
+lines for `shell-cli.sql`'s statements and dot-commands (`shell-cli.direct.txt`).
+
+**`__PRETTY_FUNCTION__`**: `pretty-signatures.txt`'s 49 definitions, one unit each, compared with clang 23 and
+`--no-direct`: every one the direct path takes prints both's string (42 by default, 45 by `-std=c99` and `gnu11`); it
+leaves on the two (redundant parentheses, `()` after a declaration) where clang and the full pipeline differ.
+`pretty-fixture.c` is test-direct's unit of 32 strings.
+
+**CI's compile count** (`compile-count.log`): +0.006%; a one-function unit 112,886 to 112,954 regions (six names interned
+at the start).
+
+**Seeded faults** (`faults.py`, `faults-rounds12.txt`, `faults-round3.txt`): 43 mutants of the printer, the rewrite,
+`ceil` and `floor` and the frame limit. After the tests the first rounds called for (C23's `()` and `bool`, a local that
+shadows a signature's typedef, a value live across `ceil`, a variadic function pointer, two levels of qualified pointers,
+the leave cases after a comma, where glibc's assert has its statement expression), every one is found but two: dropping
+the check of `}))` after `__assert_fail`'s `;` (valid C with another statement there then fails to parse and leaves anyway)
+and dropping the frame limit's check in `if` (a stack overrun that AddressSanitizer, not a test's answer, sees).
