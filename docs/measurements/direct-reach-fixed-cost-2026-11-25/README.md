@@ -581,3 +581,25 @@ differ, against 70 at step 6c, in #3595's kinds and Lua's `luaM_toobig` behind a
 found 32, and after the test was extended round 2 found 5 of the 11 left; the 6 left are equivalent (a void arm's
 release, a constant `if` in a dead branch, an unreachable jump, the statement-expression test, the per-function reset,
 the XMM release). `compile-count.log` and `compile-count-dead2.log`: CI's compile count, -0.008% against step 6c.
+
+## What is left after step 6d (`after-6d/`)
+
+**`long double`'s ceiling.** A scratch build that types `long double` as `double` (its three parsers' types, its two
+unsupported flags, and the `L` literal's token: wrong values, the right count) takes 66 more of musl's units by
+`-std=c99` (`musl-c99-paths-long-double-as-double.txt`). Typing alone, without the flags, took 4
+(`musl-c99-bails-long-double-type-only.tsv`). What the 133 left leave for (`musl-c99-bails-long-double-as-double.tsv`,
+`trace-one.sh`): `_Complex` in a definition (54), x87 inline asm (17), `#pragma STDC FENV_ACCESS` (15), nested
+designators (11), VLAs (8), a union's compound literal (6), wide strings (3) and others.
+
+**Debug builds.** glibc's `assert` in GNU modes is a statement expression,
+`({ if (e) ; else __assert_fail(#e, __FILE__, __LINE__, __extension__ __PRETTY_FUNCTION__); })`, which the direct
+path doesn't take: `sqlite3.c` with `-DSQLITE_DEBUG` has 6,006 and leaves (the full pipeline's 111 ms against the
+release build's 17 on the direct path), and `shell.c` has 88. With `assert-emulation.h` (musl's form: a ternary with
+`__func__`) ahead of the system's, `sqlite3.c`'s debug build overflows the object's 256 KB string section; with larger
+buffers and a 64 MiB arena it fills the complex type table, which takes an array type a string literal. The direct
+path had written `__PRETTY_FUNCTION__` as the function's name (buster#3618).
+
+**A tiny unit's cost** (`prof-small.sh`, `prof-small-dead2.*`): 500 compiles of musl's `src/ctype/isdigit.c` by the
+default driver (no `--predefines`) on the 9700X's CPU 2: 1.48 M user instructions, 0.75 M user cycles and 1.40 M
+kernel cycles a compile. The user side's leaders are the predefines' `#define`s, the lexer and interning; the
+driver's options and predefines are 3 to 4% of it, and `strtod`'s float literals 1.3%.
