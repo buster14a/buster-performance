@@ -54,7 +54,12 @@ both built on the 9700X (`results/ab-product-merged.txt`, `measure-compile-merge
 Merged with main `7344577f`, after #3610 (#3585) gave the window 16-bit starts (`results/ab-product-merged-7344577f.txt`,
 `measure-compile-merged-7344577f.txt`): the product's `-c` 16.400 -> 16.280 ms (-0.7%), user cycles 81.23 -> 80.50 M
 (-0.9%), instructions 219.45 -> 209.87 M (-4.4%); `measure-compile` 219,275,145 -> **209,685,270**, the count the change
-writes in `tools/ci/compile-instructions.txt`; the compile's count 46,304,069 -> 44,196,524 (-4.55%).
+writes in `tools/ci/compile-instructions.txt` at that merge; the compile's count 46,304,069 -> 44,196,524 (-4.55%).
+
+Merged with main `dced4e6b` (#3607's raw strings and musl's asm, `results/ab-product-merged-dced4e6b.txt`,
+`measure-compile-merged-dced4e6b.txt`): the product's `-c` 16.450 -> 16.210 ms (-1.5%), user cycles 81.33 -> 80.03 M
+(-1.6%), instructions 220.05 -> 210.74 M (-4.2%); `measure-compile` 219,877,340 -> **210,562,407**, the count the change
+writes in `tools/ci/compile-instructions.txt` now; the compile's count 46,447,075 -> 44,339,530 (-4.54%).
 
 ## Where the time was (`results/profile-main`, by function, share of user cycles)
 
