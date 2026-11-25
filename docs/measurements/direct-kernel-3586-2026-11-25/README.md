@@ -94,3 +94,14 @@ After the change the process's kernel cycles on `sqlite3.c` are 32% huge pages' 
 - The corpus (`scripts/equiv`, the 7,556 units of buster-performance `direct-speed-2850-2026-11-24`'s list, inputs
   where this host keeps them, plus musl by `-std=gnu99`): main and the change give each unit the same status,
   diagnostics, object and path (`results/equiv`: 1,860 of them the direct path's; `change.tsv` is both builds' rows).
+
+## After main `67a1324ac` (the merge with #3592's -MD)
+
+Main's -MD keeps a file's dependency record on its guard entry; the change makes the entry as the file is opened, so the
+merge sets the record there and records a reading from a kept mapping as one a guard skips
+(`patches/change-on-67a1324ac.patch`). `scripts/remerge.sh` built main and the merge on the host; `test-direct` 29 and
+30 of 30. `results/ab-5-on-67a1324ac.txt` (15 rounds): `sqlite3.c` 16.96 to 16.42 ms, the CPU's kernel cycles 11.93 M
+to 10.22 M; seven headers 1.67 to 1.44 ms. `scripts/mdcheck.sh` (with `MD_ONLY=1` it skips the corpus pass): the
+7,556 corpus units the same (3,316 by the direct path), and `-MD -MF` of `sqlite3.c`, the seven-header unit and musl's
+1,337 units by `-std=gnu99` give the same rule files, objects, statuses and diagnostics (1,103 by the direct path).
+Both builds must write the same object and rule paths, which the rules name.
