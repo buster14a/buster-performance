@@ -62,6 +62,14 @@ The branch merged main once #3602 (strict `-std=` modes, the specifiers' storage
 The corpus's 6,201 units give the same status, stderr and object again, 1,900 of them now through the direct path
 (musl's units take it since #3602); `test-direct` passes 25 of 25 and `check-call-graph` finds no cycle.
 
+### On main `67a1324a`
+
+Merged again after #3585's window lexer, #3592's `-MD` and inline asm and #3605's profile-guided build option
+(`results/product-merged2.txt`): the product's `-c` 16.490 → 15.780 ms (-4.3%), user cycles 81.33 → 77.50 M (-4.7%),
+instructions 220.23 → 205.60 M (-6.6%), the same object. The job's instruction step on the branch's build stays
+inside `tools/ci/compile-instructions.txt`'s band; the compile's count moves -10.486% (stated as -10.49). The corpus
+gives the same 6,201 rows, 2,215 of them through the direct path; `test-direct` passes 29 of 29.
+
 ## The census
 
 Counters in a copy of the sources (`scripts/census/`), one compile of `sqlite3.c`; the object is unchanged.
