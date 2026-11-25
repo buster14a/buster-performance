@@ -44,6 +44,24 @@ a 16- and a 48-byte function of `nop`s ahead of `FastArena` in `c_direct_lex.c`.
   build): main reads 220,903,319, already 4.3% under `tools/ci/compile-instructions.txt`'s 230,887,792 (merges since
   #2850 moved it without writing it); the branch reads 206,648,848 and writes it there.
 
+## On main `09c3b79b` (after #3602)
+
+The branch merged main once #3602 (strict `-std=` modes, the specifiers' storage classes) landed, as `c6ca557b`;
+`results/product-merged.txt` has the rows. The products built on the 9700X again:
+
+| 9700X, `sqlite3.c` | main `09c3b79b` | the branch `c6ca557b` | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.440 ms | **15.570 ms** | -5.3% |
+| user cycles | 81.28 M | **76.58 M** | -5.8% |
+| user instructions | 220.55 M | **205.52 M** | -6.8% |
+| mispredicted branches | 976 K | 952 K | |
+| the job's instruction step | 220,382,957 | **205,348,345** (written in `tools/ci/compile-instructions.txt`) | |
+| the compile's count | 46.3 M | 41.4 M (-10.526%, stated as -10.53) | |
+| the object | `f558aaf503fcb186` | the same | |
+
+The corpus's 6,201 units give the same status, stderr and object again, 1,900 of them now through the direct path
+(musl's units take it since #3602); `test-direct` passes 25 of 25 and `check-call-graph` finds no cycle.
+
 ## The census
 
 Counters in a copy of the sources (`scripts/census/`), one compile of `sqlite3.c`; the object is unchanged.
