@@ -269,3 +269,43 @@ mixes a short name's length in, which #3594's skipped: 3.5 M instructions on `sq
 keeps #3594's hash up to eight bytes (+1.96 M against main); it follows in the next pull request, since the queue held
 the branch. Step 4 on top of it differs from main `f74b0b28` on the same 666 units as before
 (`step4/equiv/next.paths`, `next.nonmusl`, `next.musl`); `sqlite3.c` by `-w` writes the object it writes without.
+
+## Step 4 on #3595's fix (`step4r/`)
+
+Step 4 was rebased onto buster#3598, the fix for buster#3595's symbols. It is now `3b9a11794` (the short-name hash) and
+`cbc28ee2e` (the language modes). `compiler-sym2` (the fix) and `compiler-s4r` (step 4 on it) were both built on the
+host. Each line below is one hold, rotated by round:
+- `builds-c99-s4r.txt`: musl by `-std=c99`, 5 rounds;
+- `builds-gnu-s4r.txt`: Lua and musl by `gnu99`, 5 rounds;
+- `ab-s4r.txt`: the small units and `sqlite3.c`, 11 rounds;
+- `stages-s4r.txt`: `sqlite3.c`'s stages, 11 rounds.
+
+| | the fix | step 4 |
+| --- | ---: | ---: |
+| musl's 1,336 units by `-std=c99` | 1,559.19 ms, 0 direct | 1,502.18 ms, 663 direct (-3.7%) |
+| musl's 1,336 units by `gnu99` | 1,495.73 ms | 1,495.52 ms |
+| Lua's 34 units | 79.44 ms | 79.71 ms |
+| `sqlite3.c` | 16.87 ms, 221.07 M instructions | 16.78 ms, 219.71 M |
+| one function, `stdio.h` and a `printf` | 0.24, 0.62 ms | 0.24, 0.63 ms |
+
+- **musl by `-std=c99`:** its 663 direct objects are those `gnu99` writes (the build's hash `c220221770db` in both).
+- **The `-std=c99` gain is small.** The units that try the direct path and leave pay for it: 673 of them, at
+  ~0.42 ms each (`bail/`), against the 663 that gain. Steps 6a and 6b turn leavers into direct units.
+- **`sqlite3.c`'s instructions drop by 1.36 M.** That is the short-name hash, against the one hash of every length.
+- **Faults:** the step's two seeded faults that had failed to build were rewritten and are found
+  (`faults-rerun.txt`); the other 29 are in `faults-round.txt`.
+
+**The corpus against the fix** (`equiv-against-fix.txt`, `equiv-changed-units.tsv`):
+- the same 666 units change as against main before:
+  - musl's 664 by `-std=c99` become direct;
+  - `sqlite3.c` by `-w` becomes direct;
+  - `tests/preprocessor/cases/0306.c` becomes the full pipeline's error;
+- 74 of the 664 lose the full pipeline's `-Wshift-op-parentheses` from musl's `endian.h`, which the direct path drops
+  in every mode, `gnu99` included (buster#3577).
+
+**The symbols against `--no-direct`** (`symbols-summary.txt`, `symbols-kinds-new-direct.txt`): 646 of the 664 have the
+full pipeline's symbols. The other 18, and `sqlite3.c` by `-w`, differ only in the kinds buster#3595 leaves:
+- a dead `isdigit`;
+- `memset` and `memmove`;
+- `.data` rather than `.bss`;
+- `fabs`.
