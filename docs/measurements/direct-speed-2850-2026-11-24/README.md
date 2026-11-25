@@ -18,6 +18,9 @@ The direct path is the fused lexer-to-ELF compiler of buster#3566 (`src/buster/c
 
 ## Result: buster#3580 against main `1c5287c3`
 
+Merged into buster's main as `4beb4177` on 2026-11-25. The scratch directory on the host that these scripts name
+(`~/buster-fast-bench/2850-direct-tx5wvj`) is deleted; `scripts/` has what it held.
+
 Both built on the 9700X by `scripts/build-tree.sh`; `steps/ab.txt` has the rows.
 
 | | main `1c5287c3` | the branch `5b7cf291` | |
