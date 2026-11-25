@@ -248,3 +248,24 @@ the full preprocessor's `-E -P` text under the same name, by `-std=gnu17`, `-std
 in each mode: `#if` arithmetic and queries where the direct path disagrees with clang in every mode, on main too
 (`tests/preprocessor/cases/0202.c` a `char16_t` literal's sign, `0308.c` shifts by 64 or more, `0359.c`
 `__has_attribute(ext_vector_type)`, `0126.c` raw strings in `__has_warning` under GNU's modes, `0203.c` `u8''` in C23).
+
+## Step 1 after #3594 (`merge/`)
+
+[buster#3594](https://github.com/buster14a/buster/pull/3594) merged first and replaced the two identifier lookups with
+one. Step 1's pull request was merged with it (`8d15cd21`): the growing cache read by that lookup, one hash for every
+name length as a macro. Against the new main `f74b0b28`, built on the host (`merge/ab-merge.txt`, 21 rounds;
+`merge/builds-ab-merge.txt`, 7 rounds):
+
+| | main `f74b0b28` | the merge `s1m` | `s1n` (main's short-name hash) |
+| --- | ---: | ---: | ---: |
+| one function | 0.77 ms | 0.27 ms | 0.27 ms |
+| musl's `wcwidth.c` | 0.92 ms | 0.40 ms | 0.39 ms |
+| `sqlite3.c` | 16.78 ms, 217.18 M instructions | 16.73 ms, 220.69 M | 16.57 ms, 219.14 M (`ab-s1n.txt`, its own hold) |
+| musl's 1,336 units by `gnu99` | 1,753.6 ms | 1,493.5 ms (-14.8%) | |
+| Lua's 34 units | 83.41 ms | 79.61 ms (-4.6%) | |
+
+The merge's objects are main's for every unit of the 7,556-unit corpus (`merge/equiv-merge.verdict`). Its one hash
+mixes a short name's length in, which #3594's skipped: 3.5 M instructions on `sqlite3.c` for the same time. `s1n`
+keeps #3594's hash up to eight bytes (+1.96 M against main); it follows in the next pull request, since the queue held
+the branch. Step 4 on top of it differs from main `f74b0b28` on the same 666 units as before
+(`step4/equiv/next.paths`, `next.nonmusl`, `next.musl`); `sqlite3.c` by `-w` writes the object it writes without.
