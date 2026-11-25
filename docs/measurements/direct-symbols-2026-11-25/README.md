@@ -33,7 +33,7 @@ over `scripts/diff1.sh`'s whole diffs). The kinds the fix removes:
 - **visibility, Lua's 429 symbols in 20 units:** `LUAI_FUNC` is `visibility("internal")`;
 - **`fopen`, `tmpfile`, `fcntl`, `fstat`, `lstat`, `stat`, `ftruncate`, `open`, `pread`, `pwrite` and `mmap` rather
   than their `64` names (Lua, SQLite), and `signal` rather than `__sysv_signal` (Lua's `lua.c`):** `__REDIRECT`;
-- **17 of glibc's inline functions (`atoi` to `vprintf`) defined by `sqlite3.c` at `-O2`:** `gnu_inline`;
+- **20 of glibc's inline functions (`atof` to `vprintf`) defined by `sqlite3.c` at `-O2`:** `gnu_inline`;
 - **`f` defined by `tests/driver/programs/inline-modes/direct-source.c`:** a C99 inline definition;
 - **`f` both defined and undefined, or an undefined `f` beside a local one:** a block's `int f(void);`.
 
