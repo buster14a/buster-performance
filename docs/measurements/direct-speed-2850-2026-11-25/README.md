@@ -1,7 +1,7 @@
 # The direct path's speed, second profile (`c_direct`, buster#2850): branch records on the 9700X
 
 Work of 2026-11-25 on buster's branch `claude/exciting-carson-r9uggb` (commits `f1339089`, `44b21d0f`,
-`e9779107` on main `56490ed9`), after [the first record](../direct-speed-2850-2026-11-24/README.md). Its summary is in
+`e9779107` on main `56490ed9`; [buster#3589](https://github.com/buster14a/buster/pull/3589)), after [the first record](../direct-speed-2850-2026-11-24/README.md). Its summary is in
 buster's `docs/one-core-path.md`, "The second profile".
 
 - **Host:** `benchpress` (Ryzen 7 9700X), every run under `~/buster-fast-bench/exclusive.sh`, CPU 2, the object on
