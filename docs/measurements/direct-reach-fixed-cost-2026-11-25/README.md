@@ -603,3 +603,35 @@ path had written `__PRETTY_FUNCTION__` as the function's name (buster#3618).
 default driver (no `--predefines`) on the 9700X's CPU 2: 1.48 M user instructions, 0.75 M user cycles and 1.40 M
 kernel cycles a compile. The user side's leaders are the predefines' `#define`s, the lexer and interning; the
 driver's options and predefines are 3 to 4% of it, and `strtod`'s float literals 1.3%.
+
+**The predefines' ceiling** (`after-6d/predefines/`, `ceil.sh`, `ceil.txt`): an empty unit (`int x;`) by
+`compiler-dead2` on CPU 2, five rounds of 200 processes a variant, the averages a process:
+
+| predefines | user instructions | user cycles | kernel cycles | faults |
+| --- | ---: | ---: | ---: | ---: |
+| the driver's (414 macros) | 857.5 K | 522 K | 912 K | 204 |
+| the same 414 from a file (`full.h`, `-dM`'s order) | 847.5 K | 515 K | 917 K | 201 |
+| the 76 outside `pp_predefines_base` (`tail.h`) | 358.2 K | 390 K | 890 K | 195 |
+| none | 249.4 K | 337 K | 841 K | 162 |
+
+`pp_predefines_base`'s 338 macros (`base-names.txt`), the part every option set shares, cost 489 K instructions but
+125 K user cycles (about four instructions a cycle) and 6 faults. An image of their state could save at most about
+9% of an empty unit's 1.43 M cycles, about 2.5% of musl's `-std=c99` build. Even no predefines at all leave an empty
+unit at 337 K user and 841 K kernel cycles: process start, the driver, the tables' first pages.
+
+**SQLite's `shell.c`** (`after-6d/shell/`): it leaves the direct path at its first `assert` (`qrfColumnar`).
+`compiler-deep` is main `38483c5b` with a 1,024-frame statement stack (`deep.patch`); `build-shell.sh` builds both on the
+host. `shell.sh`: `-I` alone, CPU 2, five rounds of three compiles a variant (`shell.txt`):
+
+| `shell.c` | task-clock ms | user cycles | path |
+| --- | ---: | ---: | --- |
+| main | 36.7 | 160.6 M | the direct path, leaving at the first `assert`, then the full pipeline |
+| main, `--no-direct` | 32.6 | 145.3 M | the full pipeline |
+| main, `-DNDEBUG -D__builtin_ceil=ceil -D__builtin_floor=floor` | 36.6 | 160.8 M | leaves at "stmt nesting depth" |
+| `compiler-deep`, the same | 6.5 | 26.0 M | the direct path |
+| `sqlite3.c` by main, for scale | 16.4 | 79.7 M | the direct path |
+
+What keeps it off, in order: glibc's `assert` (a statement expression in GNU modes, and `__PRETTY_FUNCTION__` in every
+mode), `__builtin_ceil` and `__builtin_floor` (`seriesCeil`, `seriesFloor`), and the statement stack's 64 frames, which
+`do_meta_command`'s `else if` chain outgrows. The full pipeline computes `__builtin_ceil` and `__builtin_floor` in a
+helper of its own, with no `ceil` or `floor` reference; clang calls them.
