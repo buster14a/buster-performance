@@ -91,3 +91,39 @@ For one large unit the direct path is 6.3 times the full pipeline. For a build o
    hashed places (0.8 M), then the predefines (about 0.4 M).
 2. **Reach by options:** `-MD`, `-Wall`, `-g` and a strict `-std=` are what builds pass.
 3. **Reach by constructs:** a unit that leaves the direct path pays for both paths.
+
+## Step 1: a small unit's start ([buster#3592](https://github.com/buster14a/buster/issues/3592))
+
+A unit whose main file is under 1 MiB takes base pages for both arenas, and its identifier tables start small (the
+hash table at 16 groups, the cache at 2,048 slots) and grow with the names. `step1/` has the readings; the builds
+are `scripts/build-variant.sh`'s (main `56490ed9` and patches from `step1/patches`, built on the host in one tree).
+
+| a process a unit, CPU 2, 21 rotated runs (`scripts/ab.sh`, `step1/results/ab-s1g.txt`) | main | `s1g` | |
+| --- | ---: | ---: | ---: |
+| an empty unit | 0.74 ms, 3.37 M kernel cycles | 0.28 ms, 0.88 M | 2.6 times |
+| one function | 0.76 ms, 3.54 M | 0.27 ms, 0.79 M | 2.8 times |
+| `stdio.h` and a `printf` | 1.19 ms, 4.45 M | 0.68 ms, 1.71 M | 1.75 times |
+| six standard headers and a `main` | 1.83 ms, 5.96 M | 1.35 ms, 3.33 M | 1.36 times |
+| musl's `wcwidth.c` | 0.99 ms, 3.95 M | 0.47 ms, 1.10 M | 2.1 times |
+| `sqlite3.c` | 17.61 ms | 17.62 ms | |
+
+| a build, a process a unit, 7 rotated rounds (`scripts/builds-ab.sh`, `step1/results/builds-ab-s1g.txt`) | main | `s1g` | |
+| --- | ---: | ---: | ---: |
+| musl's 1,336 units by `-std=gnu99` (663 direct) | 1,764.4 ms, 5,106 M user, 4,621 M kernel | 1,521.2 ms, 4,983 M, 3,408 M | -13.8% |
+| Lua's 34 units without `-Wall -Wextra` (29 direct) | 85.49 ms, 284.7 M, 186.9 M | 81.66 ms, 293.0 M, 157.8 M | -4.5% |
+
+- **Objects:** each unit's hash is the same in both columns, the two builds' objects hash the same together, and a
+  7,556-unit corpus (the tests, the c-testsuite, Lua, musl by `c99` and by `gnu99`, SQLite in fourteen option sets;
+  1,892 units the direct path's) gives the same status, diagnostics and object for every unit (`step1/equiv`).
+- **`sqlite3.c`'s stages** (`scripts/stages.sh`, `step1/results/stages-pad.txt`, 21 rounds of `--time-stages`): the
+  preprocess stage reads 7.351, 7.328 and 7.325 ms for main and two copies of it with 16 and 48 bytes of padding
+  ahead of the lexer's code, and 7.340, 7.333 and 7.328 for the change and its two padded copies. `s1f`, the same
+  code as `s1g` before its tests were added, read 7.453 there: one placement moves the stage 1.6%, the change none.
+- **The cache's growth point** (`step1/results/ab-load.txt`, `builds-ab-load.txt`): grown at as many names as slots
+  (`s1`), at twice (`s1l2`) and at four times (`s1l4`, the choice). The six-header unit: 4.14 M user and 3.27 M
+  kernel cycles, 4.08 M and 3.10 M, 4.04 M and 3.03 M.
+- **What is left of a one-function unit** (`step1/results/faults-by-s1-add.txt`): the process's own start is 0.10 to
+  0.13 ms and 42 page faults (`--version`); the compile adds 108 faults, a fifth of them the predefines' tokens.
+  The six-header unit makes 992 system calls, most of them the include search's (`faults-by-s1-six.txt`).
+- **Lua's user cycles rise** (284.7 M to 293.0 M) with base pages, and its kernel cycles fall more.
+- **Seeded faults:** 22 of 22 found by `test-direct` (`step1/faults`).
