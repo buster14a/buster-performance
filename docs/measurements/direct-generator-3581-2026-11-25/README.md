@@ -70,6 +70,14 @@ instructions 220.23 → 205.60 M (-6.6%), the same object. The job's instruction
 inside `tools/ci/compile-instructions.txt`'s band; the compile's count moves -10.486% (stated as -10.49). The corpus
 gives the same 6,201 rows, 2,215 of them through the direct path; `test-direct` passes 29 of 29.
 
+### On main `00ef70b2` (after #3584's bulk macro calls)
+
+`results/product-merged3.txt`: the product's `-c` 16.300 → 15.460 ms (-5.2%), user cycles 80.44 → 75.88 M (-5.7%),
+instructions 210.92 → 196.29 M (-6.9%), the same object. The job's instruction step reads 196,108,037 for the
+branch (main is within its own 210,562,407), written in `tools/ci/compile-instructions.txt`; the compile's count
+moves -10.984% (stated as -10.98). The corpus gives the same 6,201 rows, 2,215 of them through the direct path;
+`test-direct` passes 30 of 30.
+
 ## The census
 
 Counters in a copy of the sources (`scripts/census/`), one compile of `sqlite3.c`; the object is unchanged.
