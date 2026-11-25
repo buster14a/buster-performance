@@ -525,3 +525,59 @@ and `asm-hlt-body.c`); `pthread_cancel.c` loses a `-Wdeprecated-non-prototype` w
 do. `faults-round1.py` and `faults-round2.py` seed 46 faults in step 6c, each built with `test-direct` alone: the second
 round reruns the first's survivors after the test was extended; 44 of 45 found, one equivalent, and one that the code
 became.
+
+## #3592's step 6d: dead arms of constant conditions, and buster#3616 (`pr-dead/`)
+
+Step 6d (buster `93407648`, after buster#3616's fix `47e46688`) checks the dead side of a constant `?:`, a decided `&&`
+or `||`, and a constant `if` (when its branch is blocks, `if`s and expression statements) without code, as a `sizeof`
+operand is. `dead1.patch` is its first form and `dead2.patch` its final one, each the diff from `main` `f74b0b28`,
+built on the host as the other variants are; `atom1` is step 6c's head (buster `f467f06b`).
+
+**The census** (`corpus/musl-c99-paths-*.txt`, `census.sh`: each of musl's units by `-std=c99` and the path its
+object's `.comment` names): 51 units move from the full pipeline to the direct path, all in `math/`. They left at the
+`long double` side of musl's `isnan`, `signbit` and `fpclassify` (23) or of its `FORCE_EVAL` (28), dead for a `float`
+or a `double`.
+
+**Against `atom1`** (`results/builds-*-dead2.txt`, `results/ab-dead2.txt`; musl and Lua 7 rounds, the units 21):
+
+| | `atom1` | `dead2` |
+| --- | ---: | ---: |
+| musl's 1,336 units by `-std=c99` | 1,014.42 ms, 1,100 direct | 961.10 ms, 1,151 direct (-5.3%) |
+| their user instructions | 8,098.8 M | 7,558.4 M |
+| musl's units by `gnu99` | 1,000.67 ms | 948.42 ms (-5.2%) |
+| Lua's 34 units | 79.99 ms | 80.05 ms |
+| `sqlite3.c` | 16.78 ms, 221.73 M instructions | 16.79 ms, 221.21 M |
+
+**`sqlite3.c`'s code generator.** The first form (`dead1`) ran `sqlite3.c` 0.5 to 1.2% slower than `atom1` with 0.24%
+fewer instructions, all of it in the code generator's stage (`results/stages-dead1.txt`: 8.73 to 8.86 ms).
+- **Not placement** (`job-pads.sh`, `results/ab-pads.txt`, `results/stages-pads.txt`): with 64, 1,500 and 4,000 bytes
+  of nops ahead of the code generator (`pad*.patch`), `atom1` read 16.56 to 16.59 ms and `dead1` 16.66 to 16.78.
+- **Not buster#3616's fix** (`job-split.sh`, `results/ab-split.txt`): `atom1-fix` (step 6c with `fval_release`'s change
+  alone) read 16.58 against `atom1`'s 16.60 ms; `dead1-nofix` 16.64 against `dead1`'s 16.68. Keeping the registers
+  where code stops instead (`alt-registers.patch`, `dead1-alt`) read 16.91 ms, its code generator 9.08 ms.
+- **What recovered it:** the new paths out of the hot functions, `cold` and `noinline` (the constant `?:`'s join, the
+  decided `&&` and `||`, a call's checks without code, the dead branch's scan). `dead2` reads 16.79 against `atom1`'s
+  16.78 ms, and 16.83 against 16.77 with 1,500 bytes of nops (`results/ab-dead2.txt`); its code generator 8.78 against
+  8.74 ms.
+- `results/counters-dead1.txt` (seven events on six counters, multiplexed) and `results/prof-dead1-*.txt` (sampled
+  cycles and instructions by function) were too noisy to tell the cause: functions step 6d doesn't touch moved by
+  millions of samples.
+
+**Correctness** (`corpus/`): `units-6d-vs-6c.txt` is each corpus unit whose status, diagnostics, object or path
+differs between step 6c's head and step 6d's (`equiv/run.sh`, 7,556 units):
+- 102 of musl's units (51 in each mode) move to the direct path. 35 in each mode lose musl's `<endian.h>`
+  `-Wshift-op-parentheses` warning (an unused inline body); the direct path drops it already in 86 of the musl units it
+  took at step 6c (`musl-direct-units-with-full-pipeline-warnings-6c.txt`, buster#3577).
+- Two test sources take the direct path with the same status and diagnostics; one
+  (`call-count/an-unevaluated-operand-s-call.c`) leaves it and gets the full pipeline's error, as its catalog expects.
+- 110 units keep their path and lose code (`changed-objects.txt`: no object grows or gains a symbol): musl's ctype
+  macros' calls (`0 ? isdigit(a) : ...`), `a_ctz_32`, and 128 bytes of `sqlite3.c`.
+- `dead2` compiles every unit as `dead1` did (the same status, diagnostics and object).
+
+`symbols/differences-6d.txt` is #3595's comparison (`syms.py`) of those units' objects against `--no-direct`'s: 16
+differ, against 70 at step 6c, in #3595's kinds and Lua's `luaM_toobig` behind a decided `&&`.
+
+`faults/`: 43 faults seeded in buster#3616's fix and step 6d, each built with `test-direct` alone (`run.py`); round 1
+found 32, and after the test was extended round 2 found 5 of the 11 left; the 6 left are equivalent (a void arm's
+release, a constant `if` in a dead branch, an unreachable jump, the statement-expression test, the per-function reset,
+the XMM release). `compile-count.log` and `compile-count-dead2.log`: CI's compile count, -0.008% against step 6c.
