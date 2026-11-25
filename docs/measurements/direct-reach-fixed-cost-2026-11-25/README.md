@@ -355,3 +355,38 @@ against `test-direct`.
 - **Three survived because their checks were redundant with that count,** and are gone: the explicit bails for an
   alias on a definition and on an initialized object, and an object-symbol test that repeats `target->defined`.
 - **One is equivalent:** an empty operand, which the target's lookup refuses as it refuses any name no declaration has.
+
+## buster#3602's head: #3599's fix, and the pull request against `main` (`pr3602/`)
+
+buster#3602 carries step 4, step 6a and the fix of buster#3599 (a declaration without a type specifier, or with
+misplaced storage classes, leaves the direct path), on `main` 20f3573e. Each variant is `main`'s tree and one patch,
+built on the host by `build-variant.sh` (Release, znver5); `job-*.sh` are the runs, each measurement under the lock on
+its own:
+- `main20f`: `main` at 20f3573e;
+- `a6`: step 4 and step 6a, as their section above;
+- `pr3599`: with the fix's first form, buster 659019c7, which asks every token of a declaration's specifiers for a
+  storage class by one test of a bit ahead of the loop's comparisons;
+- `pr3599v2`: with its second form, buster 13afbd97, a branch of its own for each storage class's keyword and a byte
+  of bits for what the specifiers wrote. buster#3602's head, d8b2c301, adds only a test's bound.
+
+**The first form's cost** (`results/ab-pr3599v2.txt`, 21 rounds of `sqlite3.c`, a process each, CPU 2):
+
+| | `main20f` | `a6` | `pr3599` | `pr3599v2` |
+| --- | ---: | ---: | ---: | ---: |
+| wall | 16.76 ms | 16.60 ms | 16.80 ms | 16.66 ms |
+| user instructions | 221.07 M | 220.28 M | 222.05 M | 220.55 M |
+
+The first form put a test of every token ahead of a chain of comparisons of one token, and clang's Release build no
+longer compiled that chain as it had; its checks also read seven fields a declaration. musl's `-std=c99` build
+(`results/builds-c99-pr3599v2.txt`): 11,630.8 M instructions at `a6`, 11,669.3 M with the first form, 11,639.2 M with
+the second. The objects are the same in every variant.
+
+**The pull request against `main`** (`results/builds-c99-final.txt`, `results/builds-gnu-pr3599v2.txt`; 5 rounds):
+
+| | `main20f` | `pr3599v2` |
+| --- | ---: | ---: |
+| musl's 1,336 units by `-std=c99` | 1,572.04 ms, 0 direct | 1,413.30 ms, 784 direct |
+| musl's 1,336 units by `gnu99` | 1,497.44 ms, 663 direct | 1,393.75 ms, 784 direct |
+| Lua's 34 units | 79.85 ms | 79.42 ms |
+
+`results/ab-pr3599.txt` and `results/builds-*-pr3599.txt` are the first form's own run, against `main20f` and `a6`.
