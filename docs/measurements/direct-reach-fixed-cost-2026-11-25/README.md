@@ -131,6 +131,12 @@ are `scripts/build-variant.sh`'s (main `56490ed9` and patches from `step1/patche
   4,000 names). From 64 groups (`s1g64`, the choice) the six-header unit takes 3.79 M user cycles where it took 3.89 M
   (`s1h`, the pull request's first head), and musl's build 1,532.5 ms where it took 1,543.7; 128 groups read the same.
 - **Seeded faults:** 22 of 22 found by `test-direct` (`step1/faults`), on the first head and on the 64 groups' head.
+- **The pull request's final head** (`s1i`, [buster#3593](https://github.com/buster14a/buster/pull/3593) at
+  `4a563c27`; `step1/results/ab-s1i.txt`, `builds-ab-s1i.txt`, `stages-s1i.txt`), against main in the same holds: one
+  function 0.76 to 0.27 ms (3.49 M to 0.79 M kernel cycles), `stdio.h` and a `printf` 1.19 to 0.68, the six-header
+  unit 1.82 to 1.33, `wcwidth.c` 0.99 to 0.47, `sqlite3.c` 17.58 and 17.61 (its preprocess stage 7.324 against main's
+  7.346, 7.319 and 7.334); musl's build 1,789.3 to 1,534.9 ms, Lua's 85.61 to 80.91. The corpus's 7,556 units are the
+  same again (`step1/equiv/s1i.verdict`).
 
 ## The ceiling of a compiler that stays (`resident/`)
 
