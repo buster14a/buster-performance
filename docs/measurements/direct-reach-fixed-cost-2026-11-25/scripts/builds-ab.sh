@@ -2,7 +2,8 @@
 # builds-ab.sh ROUNDS NAME...: Lua's 34 units (its Makefile's flags without -Wall -Wextra, the host's headers) and musl's
 # 1,336 (-std=gnu99), a process a unit on CPU 2, objects on /dev/shm, by bin/compiler-NAME, the variants rotated by
 # round: a build's wall time, cycles, instructions and faults (perf stat around the loop), medians. One hold.
-# BUILDS="lua musl" picks the builds; LUA_FLAGS and MUSL_STD replace the flags.
+# BUILDS="lua musl" picks the builds; LUA_FLAGS and MUSL_STD replace the flags; DEP_FLAGS="-MD" adds options to every
+# unit (a dependency file then lands beside each object).
 set -uo pipefail
 here=$HOME/buster-fast-bench/direct-designs-np4nn5
 rounds=$1; shift
@@ -14,6 +15,7 @@ tmp=$(mktemp -d /dev/shm/builds-np4nn5.XXXXXX)
 muslinc=(-nostdinc -ffreestanding -D_XOPEN_SOURCE=700 -I "$M/arch/x86_64" -I "$M/arch/generic" -I "$C/musl-generated/obj/src/internal" -I "$M/src/include" -I "$M/src/internal" -I "$C/musl-generated/obj/include" -I "$M/include")
 luaflags=(${LUA_FLAGS:--std=gnu99 -O2 -DLUA_COMPAT_5_3 -DLUA_USE_LINUX})
 muslstd=${MUSL_STD:--std=gnu99}
+depflags=(${DEP_FLAGS:-})
 builds=(${BUILDS:-lua musl})
 export LC_ALL=C
 declare -A seen; mfiles=()
@@ -22,14 +24,14 @@ lfiles=("$L"/*.c)
 mkdir -p "$tmp/o"
 for n in "${names[@]}"; do
     bin=$here/bin/compiler-$n
-    { echo '#!/bin/bash'; for f in "${lfiles[@]}"; do printf '%q ' "$bin" --lanes 1 "${luaflags[@]}" -c "$f" -o "$tmp/o/$(basename "$f" .c).o"; echo; done; } > "$tmp/lua.$n.sh"
-    { echo '#!/bin/bash'; for f in "${mfiles[@]}"; do printf '%q ' "$bin" --lanes 1 "${muslinc[@]}" "$muslstd" -c "$f" -o "$tmp/o/$(basename "$f" .c).o"; echo; done; } > "$tmp/musl.$n.sh"
+    { echo '#!/bin/bash'; for f in "${lfiles[@]}"; do printf '%q ' "$bin" --lanes 1 "${luaflags[@]}" "${depflags[@]}" -c "$f" -o "$tmp/o/$(basename "$f" .c).o"; echo; done; } > "$tmp/lua.$n.sh"
+    { echo '#!/bin/bash'; for f in "${mfiles[@]}"; do printf '%q ' "$bin" --lanes 1 "${muslinc[@]}" "$muslstd" "${depflags[@]}" -c "$f" -o "$tmp/o/$(basename "$f" .c).o"; echo; done; } > "$tmp/musl.$n.sh"
     chmod +x "$tmp"/*.sh
 done
 cat /proc/loadavg >&2
 for b in "${builds[@]}"; do for n in "${names[@]}"; do
-    rm -f "$tmp"/o/*.o; "$tmp/$b.$n.sh" > /dev/null 2>&1
-    echo "$b $n: objects $(ls "$tmp"/o/*.o | wc -l), direct $(grep -la 'buster direct' "$tmp"/o/*.o | wc -l), hash $(cat "$tmp"/o/*.o | sha256sum | cut -c1-12)"
+    rm -f "$tmp"/o/*.o "$tmp"/o/*.d; "$tmp/$b.$n.sh" > /dev/null 2>&1
+    echo "$b $n: objects $(ls "$tmp"/o/*.o | wc -l), direct $(grep -la 'buster direct' "$tmp"/o/*.o | wc -l), hash $(cat "$tmp"/o/*.o | sha256sum | cut -c1-12), rules $(ls "$tmp"/o/ | grep -c '\.d$'), hash $(cat /dev/null "$tmp"/o/*.d 2>/dev/null | sha256sum | cut -c1-12)"
 done; done
 count=${#names[@]}
 for ((r = 0; r < rounds; r++)); do

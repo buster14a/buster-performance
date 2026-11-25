@@ -2,7 +2,7 @@
 # ab.sh ROUNDS NAME...: bin/compiler-NAME's -c of small units and of sqlite3.c, a process each, CPU 2, the object on
 # /dev/shm, the variants in an order that rotates by round: medians of task-clock, user and kernel cycles, user
 # instructions and page faults, and each object's hash. One hold. AB_ENV="VAR=1" sets a variable for every run;
-# AB_UNITS="add six" picks the units.
+# AB_UNITS="add six" picks the units; AB_FLAGS="-MD" adds options to every compile.
 set -uo pipefail
 here=$HOME/buster-fast-bench/direct-designs-np4nn5
 rounds=$1; shift
@@ -27,11 +27,12 @@ args_of() {
     esac
 }
 envs=(${AB_ENV:-AB_NONE=1})
+flags=(${AB_FLAGS:-})
 cat /proc/loadavg >&2
 for n in "${names[@]}"; do
     chmod +x "$here/bin/compiler-$n"; "$here/bin/compiler-$n" --version > /dev/null 2>&1 || { echo "cannot run compiler-$n" >&2; exit 1; }
     for u in "${units[@]}"; do
-        env "${envs[@]}" taskset -c 2 "$here/bin/compiler-$n" $(args_of "$u") -o "$tmp/$n.$u.o" 2>/dev/null || echo "FAILED $n $u" >&2
+        env "${envs[@]}" taskset -c 2 "$here/bin/compiler-$n" $(args_of "$u") "${flags[@]}" -o "$tmp/$n.$u.o" 2>/dev/null || echo "FAILED $n $u" >&2
         echo "$(sha256sum "$tmp/$n.$u.o" | cut -c1-12) $(grep -ca 'buster direct' "$tmp/$n.$u.o")" > "$tmp/$n.$u.sha"
     done
 done
@@ -41,7 +42,7 @@ for ((r = 0; r < rounds; r++)); do
         for ((k = 0; k < count; k++)); do
             n=${names[$(((k + r) % count))]}
             env "${envs[@]}" taskset -c 2 perf stat -x ';' --no-big-num -e cycles:u,cycles:k,instructions:u,page-faults,task-clock -o "$tmp/$n.$u.$r.csv" -- \
-                "$here/bin/compiler-$n" $(args_of "$u") -o "$tmp/out.o" > /dev/null 2>&1 || echo "run failed: $n $u $r" >&2
+                "$here/bin/compiler-$n" $(args_of "$u") "${flags[@]}" -o "$tmp/out.o" > /dev/null 2>&1 || echo "run failed: $n $u $r" >&2
         done
     done
 done

@@ -426,3 +426,70 @@ mode, keeps 0.43% of its instructions for the raw strings its skipped groups are
 
 Step 6b's 258 more direct units in each mode take musl's build from 11,639 M user instructions to 9,028 M by `c99`.
 Its objects are the same as `pr3599v2`'s except those 258 units', and Lua's and `sqlite3.c`'s are the same throughout.
+
+## #3592's dependency files: `-MD` and its kin on the direct path, and `-H` off it (`pr-md/`)
+
+The change (buster `ec374d4e` and `4db3a75d`, on #3607's head `ecb3d69a`) lets `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ`
+and `-MP` take the direct path, with the full pipeline's rule, and keeps `-H` off it (buster#3612). The variants are
+built as #3602's section says:
+- `asm6d`: #3607's head before its MemorySanitizer fix (`1c221b32`, which `ecb3d69a` changes only in a test's `#if`);
+- `md1`: the change (`md1.patch`, the diff from `main` `f74b0b28` to buster `5f9d07fd`, the change before its rebase
+  on `ecb3d69a`);
+- `md2`: `md1` with the functions that only a unit collecting records runs marked `cold, noinline` (`md2.patch`, the
+  pull request's code);
+- `pad48`: `asm6d` with a function of 48 nops ahead of the lexer's code (`pad48.patch`): a placement change alone.
+
+**With `-MD`** (`results/ab-md1-deps.txt`, `results/builds-*-md1-deps.txt`; `ab.sh` takes `AB_FLAGS` and
+`builds-ab.sh` `DEP_FLAGS` for it, each unit's rule beside its object):
+
+| | `asm6d` | `md1` |
+| --- | ---: | ---: |
+| musl's 1,336 units by `-std=c99` | 1,593.87 ms, 0 direct | 1,144.46 ms, 1,042 direct (-28.2%) |
+| their user instructions | 11,392 M | 9,059 M |
+| Lua's 34 units | 128.55 ms, 0 direct | 81.03 ms, 29 direct (-37.0%) |
+| `sqlite3.c` | 111.73 ms | 16.99 ms (6.6 times) |
+| `six.c` (six libc headers) | 3.20 ms | 1.44 ms |
+
+The 1,336 rules of musl's build hash alike in both columns (`33f84b352492`), and so do Lua's 34 (`0c2de19b395e`).
+
+**Without** (`results/ab-md1.txt`, `results/builds-*-md1.txt`): the objects are the same.
+
+| | `asm6d` | `md1` |
+| --- | ---: | ---: |
+| musl's units by `-std=c99` | 1,104.93 ms, 9,028.3 M instructions, 473,543 faults | 1,115.13 ms, 9,034.0 M, 478,042 |
+| Lua's 34 units | 79.78 ms | 79.78 ms |
+| `sqlite3.c` | 16.82 ms, 221.41 M instructions | 16.90 ms, 221.81 M |
+
+`sqlite3.c`'s 0.18% more instructions are the headers it now reads (glibc's `<bits/statx.h>` and
+`<bits/unistd_ext.h>` include `<linux/stat.h>` and `<linux/close_range.h>` once `__has_include` is defined). The
+musl build's 0.9% is mostly kernel cycles: page faults, 3.4 more a unit by these medians. `faults-by-map.sh`, a
+`hello.c` compile under `perf trace -F all` three times each, counts 183 to 185 faults for `asm6d` and 185 to 186
+for `md1`, the one more in the executable's code (30 pages to 31). `md2` and `pad48` tell the change's cost from its
+code's placement (`results/*-md2.txt`; musl 7 rounds, the units 21):
+
+| without `-MD` | `asm6d` | `pad48` | `md1` | `md2` |
+| --- | ---: | ---: | ---: | ---: |
+| musl's units by `-std=c99` | 1,103.79 ms | 1,107.47 ms | 1,107.95 ms | 1,107.11 ms |
+| their page faults | 473,903 | 474,465 | 476,560 | 475,401 |
+| Lua's 34 units | 79.67 ms | 79.86 ms | 79.86 ms | 79.61 ms |
+| `sqlite3.c` | 16.70 ms | 16.72 ms | 16.79 ms | 16.80 ms |
+
+A placement change alone (`pad48`) moves musl's build as much as the change does: the change's own cost there is its
+5.7 M more instructions (0.06%), the tests it adds where files are opened, skipped and probed. `sqlite3.c`'s 0.5% is its
+0.18% more instructions, the headers clang reads too, and their pages. With `-MD`, `md2` against `md1`: musl
+1,142.56 ms against 1,145.13 ms, `sqlite3.c` 16.91 against 16.86 ms (`results/*-md2-deps.txt`). The pull request has
+`md2`'s attributes (buster `ec374d4e`).
+
+**Correctness, outside the 9700X** (`corpus/`, `faults/`, `compile-count.log`):
+- `corpus/run.sh` compiles each unit of the 7,556-unit corpus by the default driver and by `--no-direct` in five option
+  sets (`-MD`; `-MMD`; `-MD -MP` with `-MF`, `-MT` and `-MQ`; `-MMD -MP -MF`; `-MD -MP -MF` from the source's own
+  directory). Every rule is the same, byte for byte, wherever both compile (`rules.summary`, `rules.tsv.xz`). 190 test
+  sources have another status by the two paths in every set, and in plain `-c` (`plain.sh`) the same at #3607's head
+  as at the change (`status-plain-*.txt`): #3577's. Before `__has_include` was defined, 12 test sources and `sqlite3.c`'s
+  `-MD` rules missed glibc's `<linux/stat.h>` and its headers (`run1-before-has-include.summary`).
+- Plain `-c` of the corpus by the change: every unit's status, diagnostics and object are #3607's head's
+  (`objects.summary`, `objects.tsv.xz`, against `final2` of that head).
+- `faults/`: 39 faults seeded in the change, each built with `test-direct` alone (`round1.py`, `round2.py`); 37 found,
+  the 2 left equivalent (the device compare, with one device under the test's files; a bail for a guard entry without
+  a record, which no reading makes).
+- `compile-count.log`: CI's compile count, +0.125% against #3607's head.
