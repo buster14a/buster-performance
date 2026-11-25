@@ -78,6 +78,14 @@ branch (main is within its own 210,562,407), written in `tools/ci/compile-instru
 moves -10.984% (stated as -10.98). The corpus gives the same 6,201 rows, 2,215 of them through the direct path;
 `test-direct` passes 30 of 30.
 
+### On main `38483c5b` (after #3617's dead arms)
+
+#3617 changed `sqlite3.c`'s object to `9aa009558f6096bf`; the branch gives the same. `results/product-merged4.txt`:
+the product's `-c` 16.390 → 15.660 ms (-4.5%), user cycles 80.90 → 76.89 M (-5.0%), instructions 211.90 → 196.95 M
+(-7.1%). The job's instruction step reads 196,761,445 for the branch, written in `tools/ci/compile-instructions.txt`
+(main's own reads 211,718,894, 0.55% over the file's 210,562,407). The compile's count moves -10.983%. The corpus
+gives the same 6,201 rows, 2,267 of them through the direct path; `test-direct` passes 32 of 32.
+
 ## The census
 
 Counters in a copy of the sources (`scripts/census/`), one compile of `sqlite3.c`; the object is unchanged.
