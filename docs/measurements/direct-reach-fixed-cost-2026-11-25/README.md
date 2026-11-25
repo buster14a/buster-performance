@@ -126,4 +126,35 @@ are `scripts/build-variant.sh`'s (main `56490ed9` and patches from `step1/patche
   0.13 ms and 42 page faults (`--version`); the compile adds 108 faults, a fifth of them the predefines' tokens.
   The six-header unit makes 992 system calls, most of them the include search's (`faults-by-s1-six.txt`).
 - **Lua's user cycles rise** (284.7 M to 293.0 M) with base pages, and its kernel cycles fall more.
-- **Seeded faults:** 22 of 22 found by `test-direct` (`step1/faults`).
+- **The hash table's start** (`step1/results/ab-groups.txt`, `builds-ab-groups.txt`): the one-process loop below
+  showed `fast_ident_grow` at 2.1% of musl's units' cycles from 16 groups (three growths under a unit's 3,000 to
+  4,000 names). From 64 groups (`s1g64`, the choice) the six-header unit takes 3.79 M user cycles where it took 3.89 M
+  (`s1h`, the pull request's first head), and musl's build 1,532.5 ms where it took 1,543.7; 128 groups read the same.
+- **Seeded faults:** 22 of 22 found by `test-direct` (`step1/faults`), on the first head and on the 64 groups' head.
+
+## The ceiling of a compiler that stays (`resident/`)
+
+What a process a unit costs the direct path, measured without building anything: `scripts/resident.c` is a harness
+around `c_direct_try_compile` that compiles a list of units in one process, each with fresh arenas as the driver
+would call it (`scripts/resident.sh`, `resident-prof.sh`; step 1's code in both columns). musl's 663 units that the
+direct path takes, CPU 2:
+
+| | wall ms | a unit | user cycles | kernel cycles | page faults |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| a process a unit (the product) | 312.6 | 0.471 ms | 849.9 M | 867.1 M | 168,039 |
+| one process, nothing kept between units | 163.9 | 0.247 ms | 572.0 M | 335.4 M | 83,842 |
+| one process, 663 empty units | 39.9 | 0.060 ms | 119 M | 101 M | 43,808 |
+
+- **The process is half of a unit's cost** after step 1: 1.9 times from one process alone.
+- **Inside the one process, a unit is its preprocessing:** 135 of the 166 ms are the preprocess stage, 16 ms the
+  parse and code generation (1,880,204 tokens, 2,836 a unit), 6 ms the arenas' start and 6 ms their release.
+- **A fifth of that is before the unit's first byte:** an empty unit costs 0.060 ms, 0.041 of it the predefines' 413
+  lines lexed and defined again, the rest two mappings made and released and 66 page faults.
+- **A header is system calls:** a unit makes 65 `access` calls, 51 of which fail (the include search asks each
+  directory in turn), and opens, maps and unmaps 17 files; `lock_vma_under_rcu`, `__d_lookup_rcu` and the page
+  fault's entry lead the kernel's symbols. The kernel is 37% of the loop's cycles.
+
+So a compiler that stays (several units a command, or a server a build) is worth 1.9 times on such a build before it
+keeps anything, and what it could keep is most of the rest: the predefines' state (16% of the loop), the arenas'
+pages (the 12 ms of start and release, and 126 faults a unit), and the headers' files or tokens (most of the 108 ms
+of preprocessing that is not the predefines). None of that is built.
