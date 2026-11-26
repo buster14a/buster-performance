@@ -9,7 +9,7 @@
 | x86-64, Tier 0 | 594.01 → 594.01 | 0.00% | 0.00% |
 | x86-64, Tier 1 | 600.25 → 442.57 | −26.27% | −18.65% |
 
-The replay measures asm goto control flow. It does not exercise directive-bearing template placement. The raw archive preserves per-run output, counters and compilation reports.
+The replay measures asm goto control flow. Directive-bearing template placement requires its own workload. The raw archive preserves per-run output, counters and compilation reports.
 
 Agent session: 6b0809fc-8d10-83eb-983d-ee9cae652072 (OpenAI session ID; no share URL is exposed)
 Model: OpenAI / GPT-6

@@ -18,7 +18,7 @@ The separate lexer replay self-built the same candidate source tree using each c
 | Base, shapes | 591.213 | 49.776 | 64.785 |
 | Head, shapes | 581.971 | 48.988 | 63.532 |
 
-The head's shapes-enabled lexer took 1.56% less time than the base's shapes-enabled lexer and 1.00% more time than the head's default lexer. The replay covers compile cost and self-built lexer throughput. Generated SQLite and Lua program runtime was outside these runs.
+The head's shapes-enabled lexer took 1.56% less time than the base's shapes-enabled lexer and 1.00% more time than the head's default lexer. The replay covers compile cost and self-built lexer throughput. The generated SQLite and Lua runtime comparison remains an open qualification item.
 
 Agent session: 6b0809fc-8d10-83eb-983d-ee9cae652072 (OpenAI session ID; no share URL is exposed)
 Model: OpenAI / GPT-6

@@ -9,7 +9,7 @@
 | User instructions | 196,847,334 | 196,847,591 |
 | Minor faults | 349 | 347 |
 
-The default compile moved −0.30% in wall time and −0.14% in user cycles, with +257 retired instructions. The workload covers the whole compile and does not isolate checker arrow lookups. The per-run observations are in `sqlite.txt`.
+The default compile moved −0.30% in wall time and −0.14% in user cycles, with +257 retired instructions. The workload covers the whole compile. Checker arrow lookups require their own workload. The per-run observations are in `sqlite.txt`.
 
 Agent session: 6b0809fc-8d10-83eb-983d-ee9cae652072 (OpenAI session ID; no share URL is exposed)
 Model: OpenAI / GPT-6
