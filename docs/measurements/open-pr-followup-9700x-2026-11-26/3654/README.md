@@ -9,6 +9,6 @@
 
 The base and head each passed 90,698 checks in one native `test-checker --part 6/8` sample. Task-clock was 35.277 s on the base and 35.203 s on the head, and user cycles were 168.814B and 168.582B.
 
-The head's black-box runtime fixture contract passed all 128 checks. Its one sample took 10.969 s of task-clock and 32.653B user cycles, including child compilers and the private fixture trees.
+The head's black-box runtime fixture contract passed all 128 checks. Its one sample took 10.969 s of task-clock and 32.553B user cycles, including child compilers and the private fixture trees.
 
 [Measurement protocol](../README.md) · [Raw data and logs](raw.tar.gz)
