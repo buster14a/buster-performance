@@ -196,7 +196,9 @@ not multiplied together or presented as a current-main speed ratio.
 ## Attribution
 
 Agent session: `6b07efae-73e4-83ed-af93-f13051120044` (OpenAI session ID;
-no share URL exposed). Model: OpenAI / GPT-6 Astra Pro. Contributing agents
-within that session: `/root/implementation_audit`, `/root/followup_audit`,
-and `/root/acceptance_audit`, using the same model; no separate session UUIDs
-or share URLs were exposed.
+no share URL exposed). Model: OpenAI / GPT-6 Astra Pro. All contributing
+agents share that session and model. Their child thread identifiers are:
+
+- `/root/implementation_audit`: `6b07f0c3-e05c-83ed-926c-5a5b81d3b043`.
+- `/root/followup_audit`: `6b07f0d1-ade0-83ed-a8dd-212e47183054`.
+- `/root/acceptance_audit`: `6b07f0b0-2520-83ed-8afc-6972fca00040`.
