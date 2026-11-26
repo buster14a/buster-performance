@@ -48,7 +48,9 @@ over those four page offsets.
 
 q5 read 0.5 M cycles worse than p8, and q6, one byte load more, 1.0 M better than q5 at the same instructions: the
 alignment q6's size moved, not the load. The third sweep (`scripts/bp-alignq.sh`, `results/bp-alignq.out`) moves the
-code by 0, 528, 1056, ... 3696 bytes, 16-byte steps within 64 bytes across the pages, with main in the same hold:
+code by 0, 528, 1056, ... 3696 bytes, 16-byte steps within 64 bytes across the pages, with main in the same hold. The
+skip moves the direct path's code by exactly the offset (`nm` on q7's builds at 0 and 3696: `fast_cc_expr` at 3392 and
+2992 mod 4096, `fast_pp_drain` at 304 and 4000; the input sections between are 16-byte aligned):
 
 | offset | main | p8 | q7 |
 | ---: | ---: | ---: | ---: |
