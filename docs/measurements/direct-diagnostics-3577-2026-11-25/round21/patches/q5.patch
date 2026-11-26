@@ -1,0 +1,96 @@
+From 3e20301fef17751f4d1929199ebf4492f9d53775 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 26 Nov 2026 16:19:46 +0000
+Subject: [PATCH] WIP q5: call arguments stay on the value stack (#3577)
+
+---
+ src/buster/compiler/c_direct_cc.c | 35 +++++++++++++++++--------------
+ 1 file changed, 19 insertions(+), 16 deletions(-)
+
+diff --git a/src/buster/compiler/c_direct_cc.c b/src/buster/compiler/c_direct_cc.c
+index 56ea53122..aafa6b012 100644
+--- a/src/buster/compiler/c_direct_cc.c
++++ b/src/buster/compiler/c_direct_cc.c
+@@ -6716,8 +6716,9 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
+         return;
+     }
+ 
+-    // Spill ALL live values below this call (both vstack and outer call_args!)
+-    fval_spill_all(ex, ex->vsp, outer_arg_sp);
++    // Spill ALL live values below this call (both vstack and outer call_args!): the stack below the callee, which
++    // stands below its arguments (fast_expr_finish_call).
++    fval_spill_all(ex, (uint32_t)(callee - ex->vstack), outer_arg_sp);
+ 
+     // Also spill callee if it's in a register, and spill all args that live in registers so ABI reg loading has ZERO conflicts!
+     if (callee->kind != FVAL_GLOBAL || !callee->is_func_sym)
+@@ -7017,14 +7018,16 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
+                               (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0)));
+ }
+ 
+-// While the call is emitted, its callee sits just outside the live value stack.
+-// The returned value occupies that same slot.
++// The callee stands on the value stack with its arguments above it (FIRST_ARG is the first's place, the stack's top
++// past the last), all live while the call is emitted, as call_args held them before: the scans for flags and for a
++// register to spill find the arguments after the values below the callee, which fval_emit_call spills first, and the
++// arguments before the last, which each `,` spilled. The returned value occupies the callee's slot. An argument stays
++// where it was computed (#3577): moving it to a stack of its own copied a value just written a field at a time, and
++// the copy waited for its stores (1.0 M cycles a compile of sqlite3.c on the 9700X, main's too).
+ static inline void fast_expr_finish_call(FastExprCtx* ex, uint32_t first_arg, uint32_t argc)
+ {
+-    FastVal* callee = &ex->vstack[--ex->vsp];
+-    fval_emit_call(ex, callee, ex->call_args + first_arg, argc, first_arg);
+-    ex->arg_sp = first_arg;
+-    ex->vsp += 1u;
++    fval_emit_call(ex, ex->vstack + (first_arg - 1u), ex->vstack + first_arg, argc, ex->arg_sp);
++    ex->vsp = first_arg;
+ }
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
+@@ -8811,6 +8814,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
+             {
+                 const FastExprOp cop = ops[--osp];
+                 cc->pos += 1u;
++                if (cop.lbl0 == 0u || ex.vsp != cop.lbl0) { fast_cc_bail(cc, "call arg stack"); break; }
+                 ex.call_open = cop.lbl2;
+                 fast_expr_finish_call(&ex, cop.lbl0, 0u);
+                 expect_val = false;
+@@ -8928,7 +8932,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
+         if (k == FTOK_LPAREN)
+         {
+             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
+-            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
++            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.vsp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
+             cc->pos += 1u;
+             expect_val = true;
+             continue;
+@@ -9095,10 +9099,9 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
+             {
+                 const FastExprOp cop = ops[--osp];
+                 cc->pos += 1u;
+-                // Push final argument
+-                if (ex.vsp < 2u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg stack"); break; }
+-                ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
+-                const uint32_t argc = ex.arg_sp - cop.lbl0;
++                // The arguments, one value each, from the first's place up.
++                const uint32_t argc = (uint32_t)cop.extra + 1u;
++                if (cop.lbl0 == 0u || ex.vsp != cop.lbl0 + argc) { fast_cc_bail(cc, "call arg stack"); break; }
+                 ex.call_open = cop.lbl2;
+                 fast_expr_finish_call(&ex, cop.lbl0, argc);
+                 continue;
+@@ -9239,10 +9242,10 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
+             const uint16_t top = ops[osp - 1u].op;
+             if (top == FEOP_CALL)
+             {
+-                if (ex.vsp < 1u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg overflow"); break; }
+-                // Spill argument if it holds a register so subsequent args can use all scratch regs!
++                if (ops[osp - 1u].lbl0 == 0u || ex.vsp != ops[osp - 1u].lbl0 + (uint32_t)ops[osp - 1u].extra + 1u) { fast_cc_bail(cc, "call arg overflow"); break; }
++                // Spill argument if it holds a register so subsequent args can use all scratch regs! It stays on the
++                // value stack, below the next one (fast_expr_finish_call).
+                 fval_spill_one(&ex, &ex.vstack[ex.vsp - 1u]);
+-                ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
+                 ops[osp - 1u].extra += 1u;
+                 ops[osp - 1u].seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging);
+                 cc->pos += 1u;
+-- 
+2.43.0
+
