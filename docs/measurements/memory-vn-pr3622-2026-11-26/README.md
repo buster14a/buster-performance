@@ -1,6 +1,6 @@
 # Memory value numbering compile cost on the Ryzen 7 9700X
 
-[PR 3622](https://github.com/buster14a/buster/pull/3622) head `e5cff9f6` compared with merge base `8e4d3287`. Both compilers were built as Release for `znver5) using official Clang 23.1.4. The frozen SQLite amalgamation was compiled with `--tier1-passes=+memory` on CPU 2 under the shared Benchpress lock. The 21 interleaved runs completed successfully. The compilers emitted byte-identical objects.
+[PR 3622](https://github.com/buster14a/buster/pull/3622) head `e5cff9f6` compared with merge base `8e4d3287`. Both compilers were built as Release for `znver5` using official Clang 23.1.4. The frozen SQLite amalgamation was compiled with `--tier1-passes=+memory` on CPU 2 under the shared Benchpress lock. The 21 interleaved runs completed successfully. The compilers emitted byte-identical objects.
 
 | Median | Base | Head |
 | --- | ---: | ---: |
