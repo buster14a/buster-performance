@@ -15,5 +15,7 @@ At `znver5`, `sum_i32` used 59.65% fewer user cycles per element. `i32_to_f32` u
 
 `kernels.txt` contains all rows. `raw-run.zip` retains the perf counter files and metadata.
 
+The [compile replay](compile/) compares SQLite and compiler main.c throughput and output size with opt-in unrolling enabled in both revisions.
+
 Agent session: 6b0809fc-8d10-83eb-983d-ee9cae652072 (OpenAI session ID; no share URL is exposed)
 Model: OpenAI / GPT-6
