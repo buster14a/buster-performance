@@ -16,8 +16,10 @@ job's instructions' baseline step on each, then 41 interleaved runs (`scripts/m1
 | 42eb39945 | 17.666 ms (+8.1%) | 87.8 M (+8.7%) | 232.6 M (+9.8%) | 232,609,710 |
 | 90b98b4fa (the fix) | 17.607 ms (+7.7%) | 87.5 M (+8.3%) | 232.6 M (+9.8%) | 232,622,865 |
 
-The fix costs 13,155 instructions (+0.006%), one store at each macro name the window stops at, and no measurable
-time: 0.059 ms less than 42eb39945, inside both arms' spread (17.459 to 17.791 ms against 17.539 to 17.907 ms).
+The fix costs 13,155 instructions (+0.006%), a store at each macro name the window stops at: CI's count profile (the
+corpus's headers, not the host's) has 15,140 calls of `fast_pp_window_macro` in a compile of sqlite3.c. It costs no
+measurable time: 0.059 ms less than 42eb39945, inside both arms' spread (17.459 to 17.791 ms against 17.539 to
+17.907 ms).
 sqlite3.c's object is byte-identical between 42eb39945 and the fix (aef0e35896a7e863); main's differs by the atomic
 intrinsics (round 7).
 
