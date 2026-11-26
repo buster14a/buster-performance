@@ -20,6 +20,8 @@ Evidence for [buster#2553](https://github.com/buster14a/buster/issues/2553) and
 
 [The final late-definition v2 record](experiments/definition-v2/README.md) preserves final call-register preferences before adding the new hint. It contains full dynamic counts, all-function spill checks, source/build identity, actual-input replay parity, and integrated validation: 107,778 O3 checks and 269 focused ASan/UBSan checks, all passing. Total edge moves/stores/reloads fall by 870,916 in SQLite and 12,742,604 in Lua. The remaining local instruction tradeoffs and unchanged main SQLite latch are explicit.
 
+[Final production verification](experiments/definition-v2/production/README.md) records successful normal hosted CI, both PR commits' DCO audit, and exact generated-program hash identity from the uninstrumented production compiler after merging newer main. The native Benchpress job was skipped; the issue's placement qualification remains unmeasured.
+
 ## Earlier correctness evidence
 
 [The validation record](validation/README.md) includes the original C driver, exact commands, hashes and retained logs for 107,813 full-suite checks and 304 focused checks, including sanitizer and negative-control runs.

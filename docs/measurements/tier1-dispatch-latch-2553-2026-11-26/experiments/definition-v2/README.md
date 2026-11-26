@@ -70,6 +70,10 @@ Every fresh v2 snapshot is byte-identical to baseline except bytes 48–55, the 
 
 The helper operates over 16 value rows, performs masked bounded searches, and gathers physical-register bytes only through in-bounds four-byte windows or a masked load for shorter columns. It adds no scratch column. The existing allocator still enforces legal registers and required uses. The large CFG replay audit finds no added register-to-spill transitions; additional fragments concern constant recipes being evicted or recomputed.
 
+## Final production verification
+
+[The final production CI and parity record](production/README.md) ties this evidence to PR head `171b5cddb405beef37cfba0489d729584703fc8f`, including the normal hosted merge with newer main. CI passed with 22 successful and 17 skipped jobs; native Benchpress work was skipped. The uninstrumented production compiler emits both workload programs with exactly the measured SHA-256 identities. The record discloses the resource-header fallback used after a transient execution-environment reset.
+
 ## Reproduce and inspect
 
 [receipt.tsv](receipt.tsv) pins programs, tools, inputs, hashes and run identity; [canonical workload totals](canonical-workload-totals.tsv) and [analysis.txt](analysis.txt) retain the generated-program count accounting. The parent record's pinned scripts build SQLite 3.53.2 speedtest1 and Lua 5.4.8, and run SQLite mix1 at size 5 plus the same five Lua scripts. The SQLite verification hash is `1248168 a7fa3957840af6d608d53fcdd57a125b35385b9d1e813739`.
