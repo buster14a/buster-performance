@@ -50,8 +50,10 @@ all 128 runtime controls, the actual Buster dependency graph and self-hosting fo
 that head. Its separate Build workflow was superseded when fresh main advanced.
 `hosted-424417e/` separately records the fresh-main integration's completed
 Release correctness, all 128 runtime controls, actual dependency probes and
-self-hosting. Its broader Build regression workflow is still running at this
-checkpoint. The older hosted results remain tied to their stated source tree.
+self-hosting. `build-424417e/` records the subsequent successful broader Build
+regression workflow, including all 169 reported pass records. All three primary
+workflows now pass for the fresh-main head. The older hosted results remain tied
+to their stated source tree.
 The PR remains a draft under the cloud-only scope. `dco-audit-424417e.log` records three signed commits with no
 missing trailer or finding, and `costs-fresh-main-self-test.log` records 161 checks
 with no failure after the merge.
@@ -135,7 +137,8 @@ Source head `424417e5c33d0aa9c671ec0e530a75f2c6529cf5` and its CI merge
 - [Self-host qualification](https://github.com/buster14a/buster/actions/runs/45803637310),
   static analysis, CI glue, DCO/storage and integration qualification passed.
 - [Separate Build regressions](https://github.com/buster14a/buster/actions/runs/45803637355):
-  still in progress at this checkpoint.
+  passed, with 169 explicit successful-check records. The complete regression
+  command/output block and completion metadata are in `build-424417e/`.
 
 The hosted configuration is vector-g0 Release O3 with pinned Clang 23.1.4 and
 sanitizer `none`. The 9700X job was skipped. The raw sections, per-shard counts,
@@ -283,8 +286,10 @@ it does not qualify another compiler revision.
 
 The compiler build logs include the successful earlier Debug build and later
 Release/Debug attempts terminated with status 137 under the shared environment's
-memory pressure. They provide the limitation behind the pending hosted run and are
-not evidence that final-head compilation succeeded locally.
+memory pressure. They explain why final qualification used hosted builds and are
+not evidence that final-head compilation succeeded locally. The successful
+fresh-main Release, self-host and broad build-regression records are in the hosted
+supplements above.
 
 ## Session provenance
 
