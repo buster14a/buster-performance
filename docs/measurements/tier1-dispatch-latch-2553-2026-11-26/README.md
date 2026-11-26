@@ -1,14 +1,14 @@
 # Tier 1 dispatch-latch convention investigation (#2553), 2026-11-26
 
-Work in progress for [buster#2553](https://github.com/buster14a/buster/issues/2553) and
+Evidence for [buster#2553](https://github.com/buster14a/buster/issues/2553) and
 [draft PR #3631](https://github.com/buster14a/buster/pull/3631).
 
 - Baseline: `8e4d32879e17b7d9548cad54257a2f8461328366`, tree `8bf0a22e6067a7698ca6257d3e6cbe40f49b108a`.
 - Initial candidate: `d3d8ad3bc7373a58e62b3eb3ecb32a0001c61167`, tree `0a158931bbb8bc34e2c951870bd83ca1cdfaa9f8`.
 - Initial hypothesis: a loop latch phi whose inputs mostly carry the successor/header phi unchanged;
   use an earlier matching predecessor's exit convention instead of a cold nearest-layout operand.
-- Status: **the initial candidate is rejected by actual workload evidence**. It leaves both hot dispatchers unchanged and adds spill stores in another function. The structural corridor experiment is also rejected. A smaller late-definition convention is under measurement.
-  This record does not establish the issue's hardware acceptance criteria.
+- Status: **the final late-definition v2 candidate reduces tagged edge traffic in both pinned workloads without increasing spill, reload, call-save or call-restore counts in any function**. Lua executes 12,742,604 fewer instructions and SQLite 979,244 fewer. The initial majority-latch and structural corridor candidates were rejected by actual workload evidence. The final candidate is proposed in draft PR #3631; it leaves SQLite's main dispatch latch unchanged.
+  This record does not establish the issue's 9700X/code-placement acceptance criteria. Native hardware remains excluded by the session constraint.
 
 ## Actual workload evidence
 
@@ -16,9 +16,11 @@ Work in progress for [buster#2553](https://github.com/buster14a/buster/issues/25
 
 [The bounded corridor experiment](experiments/corridor/README.md) captures the next hypothesis. Its [frozen validation](experiments/corridor/validation/README.md) passes 107,813 full-suite checks and 731 focused checks at O3 and with ASan/UBSan. Fresh dynamic counts reject it: SQLite adds 21,681,726 instructions and 8,735,266 spill stores. Correctness alone did not accept that experiment.
 
-[The late-definition experiment](experiments/definition/README.md) starts from clean baseline and follows an otherwise unhinted definition's own earlier body convention. Its vector formulation and real replay parity are pinned before dynamic measurement.
+[The first late-definition experiment](experiments/definition/README.md) follows an otherwise unhinted definition's own earlier body convention. Controlled measurements remove 12,742,604 Lua edge instructions, but its hint ordering interrupts an existing call-argument convention in SQLite.
 
-## Correctness evidence
+[The final late-definition v2 record](experiments/definition-v2/README.md) preserves final call-register preferences before adding the new hint. It contains full dynamic counts, all-function spill checks, source/build identity, actual-input replay parity, and integrated validation: 107,778 O3 checks and 269 focused ASan/UBSan checks, all passing. Total edge moves/stores/reloads fall by 870,916 in SQLite and 12,742,604 in Lua. The remaining local instruction tradeoffs and unchanged main SQLite latch are explicit.
+
+## Earlier correctness evidence
 
 [The validation record](validation/README.md) includes the original C driver, exact commands, hashes and retained logs for 107,813 full-suite checks and 304 focused checks, including sanitizer and negative-control runs.
 
