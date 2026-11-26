@@ -62,6 +62,44 @@ The packet distinguishes compiler source commits from GitHub test merges and doc
 
 These are deterministic generated-program instruction counts and correctness checks on the cloud Xeon host. **No timing or 9700X qualification is claimed; Benchpress/9700X was not accessed.** An executor restart cleared the original temporary raw captures after compact results were saved; those older raw files remain unavailable. After restoring the pinned tools, all six baseline workloads were recaptured and compared to mask 256 for SQLite and arithmetic. All eight new raw captures and compressed native/counted outputs are included in this archive. Four baseline totals match the historical results; calls and tables each execute two fewer ordinary-node instructions, with all transport totals unchanged. No cause is asserted. Candidate 256 is compared to the fresh baseline. A later acceptable policy still needs its own complete paired qualification.
 
+
+## Frozen regional interval result — bit 512 rejected
+
+[REGIONAL-512.md](REGIONAL-512.md) records the complete hosted source/product identities,
+0/256 whole-ELF and sidecar controls, correctness gates, target trace, dynamic protocol,
+and limitations. The candidate is head `b3c0232157bcaaa1621216c8c599afe9a26eae13`,
+actual pinned-base test merge `ebcfa4950065c2b72b4a178cfee917a1cd2f50fa`.
+
+SQLite changes from 2,250,814,969 to 2,250,878,521 target instructions (**+63,552**).
+Its C/R decreases by 3,069,821, but edge copies increase by 2,963,883 and argument
+copies by 170,638. The primary `yy_reduce` C/R result is **3,809,328**, above the
+660,000 acceptance limit; its total instructions decrease by 29,235. Arithmetic
+decreases by 296 instructions. No additional 512 dynamic Lua captures were run
+after rejection; all five native output oracles passed.
+
+The search reaches its structural-work limit after 31 RDI intervals, before RSI
+or R9. Repeated global scoring/reconstruction is a measured search-coverage limit.
+The corpus also demonstrates that a positive uniform-CFG estimate, even with the
+cold exact-tie guard, does not prevent path-dependent regressions.
+
+[evidence-regional-512.tar.gz](evidence-regional-512.tar.gz) preserves 171 hashed
+files plus its manifest, including both new compressed raw Callgrind captures,
+program outputs, disassemblies, complete joins/audits, source and artifact
+receipts, generated candidate programs, and frozen focused proof packets.
+The archive is 9,165,646 bytes with SHA256
+`9a06db88fe167ecb6604c391d5ac3b4ae5702e36a5c3ded76df4bc2984b904ee`;
+all manifest members and both raw-capture gzip roundtrips were verified.
+[regional-512-vs-fresh-baseline.tsv](regional-512-vs-fresh-baseline.tsv) records
+every measured origin/derived-count delta.
+
+The temporary measurement PR remains a draft and now targets the previously
+verified main revision through a pinned base branch; its source conflicts with
+subsequent main are not part of this experiment. No CI gate or hardware dispatch
+changed. The separate contained-exchange proof included in the archive is
+unmeasured and is not the policy responsible for these numbers. **Issue #2610
+remains unsolved.** The prior evidence archives and restart limitations remain
+unchanged.
+
 ---
 Agent session: 6b07eef1-3474-83ed-9c43-8fe10b12d07a (OpenAI session ID; no share URL is exposed)
 Model: OpenAI / GPT-6 Astra Pro
