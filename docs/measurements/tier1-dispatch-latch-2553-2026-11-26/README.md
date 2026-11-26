@@ -16,9 +16,9 @@ Work in progress for [buster#2553](https://github.com/buster14a/buster/issues/25
 
 ## Input snapshots
 
-`scripts/snapshot-after-tags.patch` adds a temporary CFG-input snapshot writer after the tag patch. It records every input column, the borrowed dominator analysis and an allocation fingerprint. This is a same-ABI trusted-input debugging format tied to the source revisions above. Set `BUSTER_TIER1_CFG_SNAPSHOT` to an existing directory plus a filename prefix; the existing minimum block count controls capture. It is measurement-only code and is not proposed for the compiler.
+`scripts/snapshot-after-tags.patch` adds a temporary CFG-input snapshot writer after the tag patch. It records every input column, the borrowed dominator analysis and an allocation fingerprint. The private snapshot copy takes adopted clobbers from the allocation's intervals, because the emitter's final CFG input does not retain the preferred problem's clobbers. This is a same-ABI trusted-input debugging format tied to the source revisions above. Set `BUSTER_TIER1_CFG_SNAPSHOT` to an existing directory plus a filename prefix; the existing minimum block count controls capture. It is measurement-only code and is not proposed for the compiler.
 
-Snapshot patch SHA-256: `656418dbd5638bbd47ccf7a7f8e4f54a20018b8227c59aba212626f240f98889`.
+Snapshot patch SHA-256: `3b452cf9c9040e3acf1aaa15889e43d8b26ae96b7687062b6fa367a79bd3fe24`.
 
 ## Instrumentation provenance
 
