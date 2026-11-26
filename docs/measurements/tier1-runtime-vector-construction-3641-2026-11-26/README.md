@@ -10,7 +10,7 @@ This record supports [buster#3641](https://github.com/buster14a/buster/issues/36
 - Local host: Linux/x86-64 cloud container, Intel Xeon Platinum 8370C.
 - Official pinned Clang 23.1.4, LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`; CMake 4.4.3 and Ninja 1.13.2, staged through the repository's toolchain script.
 - Host build: `BUSTER_HOST_ARCH=vector BUSTER_DEBUG_INFO=0 BUSTER_BUILD_DEFINES=-g0 ./build.sh --config Debug --jobs 1`. The new constructor unit's **output** target is `-march=znver5`; the older scalar-pattern unit keeps its original output target.
-- Final hosted PR run: [45815176903](https://github.com/buster14a/buster/actions/runs/45815176903), testing merge `684d208a15e2c3b682c93274458ffda5d2b2aecc`. Its completed result is recorded separately after qualification.
+- Final hosted PR run: [45815176903](https://github.com/buster14a/buster/actions/runs/45815176903), testing merge `684d208a15e2c3b682c93274458ffda5d2b2aecc`, completed successfully. The four selected vector shards, Clang Static Analyzer, CI glue, row verdict and Integration qualification passed; Benchpress was explicitly skipped. See `hosted-validation.txt` for the actual selected test output and `hosted-jobs.json` for all job conclusions.
 
 This is correctness and generated-code evidence. No timing benchmark, 9700X access, benchpress job, or hardware dispatch was requested or started. Build-log durations are bookkeeping, with head builds incremental; they are not performance measurements.
 
@@ -53,6 +53,7 @@ The exact baseline passes the independent byte/effect oracle and strict Tier 1 r
 | Target gate probe | Four runtime forms at x86-64-v3; 256 byte comparisons each with Clang, baseline and head; baseline/head objects byte-identical |
 | Shape matcher mutations | Original assembly accepted; wrong saved register, wrong restore slot and EVEX-prefixed stack lane insertion all rejected |
 | DCO | Three commits signed; no missing trailers or findings |
+| Hosted release CI | Four selected shards: 166 commands passed, zero failed, one duplicate ownership check skipped after passing on the shared build tree; overall success |
 
 The 168-case matrix covers zero tails, alternating and distinct values, mixed constants, reversed store order, whole-lane overwrite, source mutation across calls, volatile reads, torn stores, incomplete definitions, volatile construction accesses, escapes and predecessor-only definitions. Original, reconstructed and promoted functions are compared with an independent byte oracle. Disabled construction preserves the constant/splat cases and refuses the new mixed/distinct path. Output/scratch shortages check rollback and an unchanged result descriptor.
 
@@ -77,6 +78,9 @@ The **full** constructor unit does not pass at x86-64-v3: both baseline and head
 - `target-gate.c`, reports, logs and assembly: lower-target compatibility.
 - `shape-check.c`, original/mutated assembly and logs: checks that the narrow pointer exception and encoding-prefix parsing fail closed.
 - `dco-audit.log` and API input snapshots: complete three-commit sign-off audit.
+- `hosted-validation.txt`, `hosted-jobs.json` and `ci-admission.txt`: successful release qualification, actual execution of the new cases, and explicit hardware exclusion.
+
+The evidence repository's three qualification workflows filter other measurement directories (`microarchitecture-2026-10-29/scripts`, `multicore-149` and `tier1-cfg-1356`). This record matches none of those filters; no evidence-repository workflow was expected or observed for its publication.
 
 The native pattern fixture and IR regressions are committed in the compiler repository at the final source head. The small supplementary target-gate and shape-check probes are original C, retained here. No third-party implementation was imported; Clang is an external oracle.
 
