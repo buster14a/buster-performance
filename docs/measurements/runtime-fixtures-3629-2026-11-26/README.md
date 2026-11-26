@@ -18,6 +18,11 @@ logs, not benchmark results.
 - Follow-up PR head: `1eb198ebff9458c04bf299d12dd52401f7b32eee`, tree
   `3ea42159196ff7d8ab65bc80811a30c2b60b6837`. It adds the suppress-recovery
   path repair, hosted dependency gate and generated CI cost-table entries.
+- Fresh-main integration head: `424417e5c33d0aa9c671ec0e530a75f2c6529cf5`,
+  tree `44d0938f11936a12161fa7e28bb5fd609f6c1f61`, merges main
+  `74eacd4744a8131ba4c1a5bd8ad87b89ec0f7dbe`. The only conflicts were generated
+  cost tables; all incoming measurements are preserved, and each of the eight
+  tables differs from fresh main only by the new test's two generated lines.
 - Pinned literal compiler and external oracle: LLVM/Clang **23.1.4**, revision
   `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`.
 
@@ -40,9 +45,16 @@ The first published head's hosted selector found a missing generated cost-table 
 for the new correctness heading. The follow-up head uses the documented
 `costs refresh` operation to repair the eight tables without inventing measurements;
 `costs-self-test.log` records the successful local check, and the follow-up head's
-hosted selector passed. Exact-head hosted correctness remains pending at packaging
-time. The PR remains a draft. Consult the PR's checks for later results; do not infer
-a final Release pass from this package.
+hosted selector passed. `hosted-1eb198e/` records completed Release correctness,
+all 128 runtime controls, the actual Buster dependency graph and self-hosting for
+that head. Its separate Build workflow was superseded when fresh main advanced.
+`hosted-424417e/` separately records the fresh-main integration's completed
+Release correctness, all 128 runtime controls, actual dependency probes and
+self-hosting. Its broader Build regression workflow is still running at this
+checkpoint. The older hosted results remain tied to their stated source tree.
+The PR remains a draft under the cloud-only scope. `dco-audit-424417e.log` records three signed commits with no
+missing trailer or finding, and `costs-fresh-main-self-test.log` records 161 checks
+with no failure after the merge.
 
 ## What the extraction establishes
 
@@ -65,6 +77,72 @@ metadata, order and any staging constraints.
 The original IR aggregate expectation remains `4aa02a17eaaa7b67`. Four driver
 branch-truth sources remain references to canonical checker CFG inputs. The seven
 pre-existing checker source moves also compared byte for byte to the base revision.
+
+### Exact inventory disposition
+
+| Inventory item | Before | After |
+| --- | --- | --- |
+| Default warning programs | 21 call + 8 expression + 13 syntax C literals | The same 42 source files and ordered policy rows in three runtime catalogs |
+| Setjmp-held programs | 3 source literals and their policies | 3 source/expectation pairs, 3 catalog rows |
+| Static-label programs | 4 source literals and their policies | 4 source/expectation pairs, 4 catalog rows |
+| Stack-protector programs | 4 source literals and two ordinary frozen expectation lists | 4 sources, 2 expectation files, 1 row retaining the program roles |
+| CET programs | 2 source literals | 2 sources, 1 row retaining both program roles |
+| CET refusal/policy cases | 7 source/policy records | 7 source/expectation pairs, 7 catalog rows |
+| Branch-truth fixed cases | 2 embedded sources + 4 existing checker CFG files; 6 frozen records | 2 local sources + 4 explicit shared-root references; 6 expectation files and rows |
+| Quiet-root fixed data | 1 embedded source, four count values and 12 diagnostic messages | 1 source, 2 expectation files, 1 catalog row |
+| Named UCN diagnostics | 15 source/expected/policy records | 15 sources, 15 expected files, 15 policy rows |
+| IR parser records | 53 invalid + 5 overflow + 4 reachable + 6 syntax-diagnostic inputs | The same 68 IR files and ordered metadata; unchanged aggregate digest |
+| Implicit-int native programs | 3 bodies exercised under 6 dialect configurations | 3 source files retaining all 6 configurations |
+
+The pre-existing custom catalogs retain their coverage while making dialects
+explicit: auto qualifiers expand 22 policy records into 42 dialect rows, record
+extensions expand 22 into 44, imaginary diagnostics remain 8, and malformed calls
+remain 87. The three separate GNU-empty controls are unchanged. Required named
+constant-conversion and branch-condition cases remain mandatory; their former
+compiled totals of 3 and 4 no longer reject additional ordinary catalog rows.
+
+### Execution logic retained in C
+
+The branch-truth and quiet-root generators remain executable code because they
+construct families of programs and vary generated work. Their fixed seed programs
+and ordinary recorded expectations are now data. The runners still perform the
+original instruction, frame, symbol, count and diagnostic checks because those
+checks interpret compiler output and determine whether a case passes.
+
+Mode, dialect, feature and shard selection, temporary-file staging, native runs,
+and independent Clang comparisons remain in C because they control execution.
+The IR parser's structural assertions and generated stress inputs also remain
+executable tests. Catalog readers add bounded parsing, required-name and companion
+validation around the migrated data; they do not replace the independent oracles
+or the original generated-input algorithms. This is the inventory in #3629, not an
+assertion that every test string throughout the repository was migrated.
+
+## Completed hosted qualification on fresh main
+
+Source head `424417e5c33d0aa9c671ec0e530a75f2c6529cf5` and its CI merge
+`fd50d1860b30332987d0add3df40df8ec5e9df24` have identical tree
+`44d0938f11936a12161fa7e28bb5fd609f6c1f61`. The base is main
+`74eacd4744a8131ba4c1a5bd8ad87b89ec0f7dbe`.
+
+- [Hosted Release correctness](https://github.com/buster14a/buster/actions/runs/45803637857):
+  167 groups passed, 0 failed, 0 not started; one duplicate ownership group was
+  skipped after the producer had already performed it successfully.
+- Runtime fixture contracts: 128 checks, 0 failures, including negative controls,
+  restoration and additions consumed by the unchanged compiler.
+- Actual Buster build graph: source, expectation, catalog and added-case changes
+  schedule zero compile/link/bake work. The C runner edit selects BACKEND plus
+  link/bake, and all original data and timestamps are restored.
+- [Self-host qualification](https://github.com/buster14a/buster/actions/runs/45803637310),
+  static analysis, CI glue, DCO/storage and integration qualification passed.
+- [Separate Build regressions](https://github.com/buster14a/buster/actions/runs/45803637355):
+  still in progress at this checkpoint.
+
+The hosted configuration is vector-g0 Release O3 with pinned Clang 23.1.4 and
+sanitizer `none`. The 9700X job was skipped. The raw sections, per-shard counts,
+CPU records, permanent job links and GitHub source/job metadata are in
+`hosted-424417e/`. These completed runs supersede the older development binary
+for qualification of this submitted source tree. No full-compiler sanitizer or
+hardware performance result is claimed.
 
 ## Completed local runtime results
 
@@ -190,6 +268,11 @@ absolute include of `test_paths.h` to the bundled relative header. The header it
 is unchanged. These adjustments change packaged source hashes, not fixture bytes or
 test behavior; historical hashes in the raw manifests refer to the original files.
 `SHA256SUMS` identifies the packaged files. No binary is included.
+
+The hosted subdirectories are separate evidence supplements with their own
+source identity, extraction notes and checksums. The original packaging manifest
+and `packaging.tsv` describe the initial development package; the root checksum
+list also covers subsequently added hosted evidence and integration records.
 
 The annotated copies were replayed with pinned Clang after packaging. All migrated
 source/catalog/expectation outputs still compare byte for byte with the repository,
