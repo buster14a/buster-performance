@@ -64,8 +64,9 @@ code by 0, 528, 1056, ... 3696 bytes, 16-byte steps within 64 bytes across the p
 | instructions | 195.79 M | 213.84 M | 212.53 M |
 
 q7 is lower at seven of the eight placements: 0.35 M cycles and 1.31 M instructions less than p8, of which the
-argument stack's scans (q7 against q6) were 0.83 M instructions. The line profile had put 0.94 + 0.41 + 0.38 M cycles
-on the head's three stalls and 1.1 M on main's argument copies; what came back is about a fifth. The head now runs
+argument stack's scans (q7 against q6) were 0.83 M instructions. The line profile had put 0.94 + 0.29 + 0.41 + 0.38 M
+cycles on the head's stalls and 1.1 M on main's argument copies, 3.1 M in all; about a tenth came back (q2's alone,
+about a quarter). The head now runs
 +6.51 M cycles (+8.6%) and +16.74 M instructions (+8.5%) over main.
 
 ## What it leaves
@@ -74,11 +75,11 @@ on the head's three stalls and 1.1 M on main's argument copies; what came back i
   stage, and ten designs of the lookup saved nothing.
 - The expression's final value copied to the caller (0.48 M at its line, main's too), a static constant returned by
   copy (0.3 M), the redeclaration check's random load of the previous symbol's record (0.27 M), the attribute names'
-  `memcmp` (0.14 M): at a fifth of their line excess, about 0.2 M together.
+  `memcmp` (0.14 M): at a tenth of their line excess, about 0.1 M together.
 - The expression-side checks at an ideal gate's cost (round 20's A1) were 4.2 M instructions and about 2.2 M cycles at
   one placement; a redesign recovers some fraction of that, and the declarations', statements' and directives' checks
   (about 2.5 M cycles by function deltas, their instructions mostly hidden: the declarator's +1.3 M ops cost no
   cycles) less.
 
 Parity needs about 6.5 M cycles. At their ceilings, A1's 2.2 M and these stalls' 1.2 M of line excess are half of it;
-at what this round's fixes returned of their lines' excess, about a fifth, the stalls give about 0.2 M.
+at what this round's fixes returned of their lines' excess, about a tenth, the stalls give about 0.1 M.
