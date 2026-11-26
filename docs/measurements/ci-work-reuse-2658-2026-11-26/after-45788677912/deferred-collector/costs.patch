@@ -1,0 +1,225 @@
+diff --git a/tools/ci/costs.c b/tools/ci/costs.c
+index e1be39521..0e3ceb9da 100644
+--- a/tools/ci/costs.c
++++ b/tools/ci/costs.c
+@@ -514,6 +514,14 @@ struct CostsLog
+     // The log's first and last lines' times, in milliseconds since the epoch; -1 without them.
+     int64_t first;
+     int64_t last;
++    // The suite's summary, the item's successful qualification and the runner's cleanup marker, for work after a
++    // vector draw's suite: setup, builds and product waits precede it. Missing or repeated completion is unavailable.
++    int64_t summary;
++    int64_t qualified;
++    int64_t completed;
++    bool completion_seen;
++    bool summary_passed;
++    bool post_failed;
+     bool reported;
+     bool summarized;
+     // The runner's own time for the shard's commands, its summary's `N commands in X s`, in tenths of a second.
+@@ -896,7 +904,7 @@ static void costs_log_heading(CostsLog* log, const CostsList* list, CostsSlice h
+ // A job's log, its lines each after GitHub's timestamp. `list` may be null (the report's), which reads no samples.
+ static CostsLog costs_log_parse(const CostsList* list, CostsText text)
+ {
+-    CostsLog log = { .first = -1, .last = -1 };
++    CostsLog log = { .first = -1, .last = -1, .summary = -1, .qualified = -1, .completed = -1 };
+     const uint32_t commands = list != NULL ? list->count : 0;
+     log.samples = costs_allocate(commands + 1, sizeof(CostsSample));
+     bool* seen = costs_allocate(commands + 1, sizeof(bool));
+@@ -968,8 +976,30 @@ static CostsLog costs_log_parse(const CostsList* list, CostsText text)
+             const char* in = memmem(content.data, content.length, " commands in ", 13);
+             const CostsSlice time = { .data = in + 13, .length = content.length - (size_t)(in + 13 - content.data) };
+             log.error = costs_seconds(time, &log.step_tenths) != 0 ? NULL : "a summary without its time";
++            log.summary = skip != 0 ? stamp : -1;
++            const CostsSlice failed = BUSTER_COSTS_SLICE(", 0 failed, ");
++            const CostsSlice unstarted = BUSTER_COSTS_SLICE(", 0 not started");
++            log.summary_passed = memmem(content.data, content.length, failed.data, failed.length) != NULL && content.length >= unstarted.length &&
++                                 costs_equal(costs_after(content, content.length - unstarted.length), unstarted);
+             log.summarized = true;
+         }
++        else if (costs_equal(content, BUSTER_COSTS_SLICE("Cleaning up orphan processes")))
++        {
++            log.completed = !log.completion_seen && log.summarized && skip != 0 ? stamp : -1;
++            log.completion_seen = true;
++        }
++        else if (log.summarized && costs_equal(content, BUSTER_COSTS_SLICE("suite\tpassed")))
++        {
++            // The workflow emits this only after every suite and later check passed. Cancellation can otherwise
++            // skip those later checks and still print cleanup, without an explicit runner error.
++            log.qualified = skip != 0 && !log.completion_seen ? stamp : -1;
++        }
++        else if (log.summarized && costs_starts(content, "##[error]"))
++        {
++            // Failed and cancelled jobs clean up too. A later step's failure makes its elapsed time incomplete,
++            // including errors after cleanup; keep reading the tail rather than stopping at the completion marker.
++            log.post_failed = true;
++        }
+         else if (log.reported && !log.summarized && list != NULL && (costs_starts(content, "##[group]") || costs_starts(content, "::group::")))
+         {
+             costs_log_heading(&log, list, costs_after(content, 9), seen);
+@@ -1315,7 +1345,14 @@ static void costs_table_write(const CostsTable* table, const CostsList* list, Co
+     }
+     if (table->first_given)
+     {
+-        costs_append(output, "# `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference\n");
++        if (table->row / BUSTER_COSTS_SANITIZERS == BUSTER_COSTS_VECTOR)
++        {
++            costs_append(output, "# `first-shard` is how much longer shard 1 ran after its suite than the others, the medians' difference\n");
++        }
++        else
++        {
++            costs_append(output, "# `first-shard` is how much longer shard 1's job ran than the others' besides their commands, the medians' difference\n");
++        }
+         costs_append(output, "# with each job scaled as its samples are: the steps the row runs once, which the deal adds to shard 1's schedule.\n");
+     }
+     bool peaked = table->runner_memory != 0;
+@@ -1867,16 +1904,21 @@ static bool costs_collect_rows(const CostsList* list, const CostsLog* logs, cons
+                 row_logs += 1;
+                 revision_count = costs_tally(revisions, revision_count, logs[i].revision, logs[i].first);
+                 cpu_count = costs_tally(cpus, cpu_count, logs[i].cpu, 0);
+-                // A shard's time besides its commands: its job's (the log's first line to its last) less its step's.
+-                // Only a job whose commands all passed ran its later steps; a vector row's draw also waited for its
+-                // collector, so draws are left out.
+-                bool passed = logs[i].summarized && !logs[i].draw && logs[i].shards > 1 && logs[i].first >= 0 && logs[i].last >= logs[i].first;
++                // Vector draws wait for their collector and products before the suite; only its summary through
++                // genuine job completion measures their later steps. Native jobs keep their whole-job difference.
++                // A failed suite or later step skips work, and a partial log cannot measure completion.
++                const bool vector = row / BUSTER_COSTS_SANITIZERS == BUSTER_COSTS_VECTOR;
++                const bool interval = vector ? logs[i].summary_passed && !logs[i].post_failed && logs[i].summary >= 0 && logs[i].qualified >= logs[i].summary && logs[i].completed >= logs[i].qualified
++                                             : !logs[i].draw && logs[i].first >= 0 && logs[i].last >= logs[i].first;
++                bool passed = logs[i].summarized && logs[i].shards > 1 && interval;
+                 for (uint32_t s = 0; s < logs[i].sample_count; s += 1)
+                 {
+                     passed = passed && logs[i].samples[s].complete;
+                 }
+-                const uint64_t job_tenths = passed ? (uint64_t)(logs[i].last - logs[i].first) / 100 : 0;
+-                const uint64_t outside = costs_normalize(&speeds, i, job_tenths > logs[i].step_tenths ? job_tenths - logs[i].step_tenths : 0);
++                const uint64_t job_tenths = passed && !vector ? (uint64_t)(logs[i].last - logs[i].first) / 100 : 0;
++                const uint64_t outside_tenths = vector ? (passed ? (uint64_t)(logs[i].completed - logs[i].summary) / 100 : 0)
++                                                      : (job_tenths > logs[i].step_tenths ? job_tenths - logs[i].step_tenths : 0);
++                const uint64_t outside = costs_normalize(&speeds, i, outside_tenths);
+                 if (passed && logs[i].shard == 1)
+                 {
+                     first_outside[first_count] = outside;
+@@ -2280,6 +2322,10 @@ static CostsText costs_test_log_ending(const char* name, const char* cpu, const
+     }
+     costs_append(&buffer, "2026-11-11T01:%s:08.0000000Z parallel: 3 commands in 42.5 s, 50.0 s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n", minute);
+     costs_append(&buffer, "2026-11-11T01:%s:09.0000000Z ##[group]After the report: passed in 1.0 s, 1.0 s of CPU\n", minute);
++    if (strstr(name, "Vector draw") != NULL)
++    {
++        costs_append(&buffer, "2026-11-11T01:%s:09.5000000Z suite\tpassed\n", minute);
++    }
+     costs_append(&buffer, "2026-11-11T01:%s.0000000Z Cleaning up orphan processes\n", ending);
+     return (CostsText){ .data = buffer.data, .length = buffer.length };
+ }
+@@ -2572,6 +2618,102 @@ static void costs_test_first(CostsTest* test, const CostsList* list)
+     }
+ }
+ 
++// Vector draws' once-only work starts after their suite, independent of product waits. Five overlapping commands
++// establish that Fast takes half Slow's time. First tails 30/80 s normalize to 60/80; other tails 10/20 to 20/20:
++// the nearest-rank medians' difference is 40 s. Pre-suite delays and post-cleanup warnings must not enter it.
++static void costs_test_first_draw(CostsTest* test)
++{
++    CostsText inventory = costs_text_of("== C1\nx\n== C2\nx\n== C3\nx\n== C4\nx\n== C5\nx\n== C6\nx\n");
++    const CostsList list = costs_list_parse(inventory);
++    static const char name[] = "Tests on Ubuntu 26.04 (vector, thread, O3) / Vector draw 1, candidate 1 (Clang 23, thread, O3)";
++    static const char fast[] = "C1: passed in 10.0 s, 10.0 s of CPU\nC2: passed in 10.0 s, 10.0 s of CPU\nC3: passed in 10.0 s, 10.0 s of CPU\nC4: passed in 10.0 s, 10.0 s of CPU\nC5: passed in 10.0 s, 10.0 s of CPU\n";
++    static const char slow[] = "C1: passed in 20.0 s, 20.0 s of CPU\nC2: passed in 20.0 s, 20.0 s of CPU\nC3: passed in 20.0 s, 20.0 s of CPU\nC4: passed in 20.0 s, 20.0 s of CPU\nC5: passed in 20.0 s, 20.0 s of CPU\n";
++    CostsText texts[4] = {
++        costs_test_log_ending(name, "Fast CPU", BUSTER_COSTS_TEST_SHA_A, "1 of 2, 5 of 6 commands", fast, "14", "14:38"),
++        costs_test_log_ending(name, "Fast CPU", BUSTER_COSTS_TEST_SHA_A, "2 of 2, 1 of 6 commands", "C6: passed in 10.0 s, 10.0 s of CPU\n", "14", "14:18"),
++        costs_test_log_ending(name, "Slow CPU", BUSTER_COSTS_TEST_SHA_B, "1 of 2, 5 of 6 commands", slow, "40", "41:28"),
++        costs_test_log_ending(name, "Slow CPU", BUSTER_COSTS_TEST_SHA_B, "2 of 2, 1 of 6 commands", "C6: passed in 20.0 s, 20.0 s of CPU\n", "40", "40:28"),
++    };
++    CostsLog logs[4];
++    const char* names[4] = { "fast-first", "fast-other", "slow-first", "slow-other" };
++    bool parsed = true;
++    for (uint32_t i = 0; i < 4; i += 1)
++    {
++        if (i % 2 == 0)
++        {
++            const char* start = i == 0 ? "2026-11-11T01:14:00.1000000Z" : "2026-11-11T01:40:00.1000000Z";
++            CostsText delayed = costs_test_replace(&(CostsBuffer){ .data = texts[i].data, .length = texts[i].length }, start, "2026-11-11T00:00:00.1000000Z");
++            free(texts[i].data);
++            CostsBuffer tail = { .data = delayed.data, .length = delayed.length, .capacity = delayed.length + 1 };
++            costs_append(&tail, "2026-11-11T02:00:00.0000000Z ##[warning]A runner notice after cleanup\n");
++            texts[i] = (CostsText){ .data = tail.data, .length = tail.length };
++        }
++        logs[i] = costs_log_parse(&list, texts[i]);
++        parsed = parsed && logs[i].error == NULL;
++    }
++    const uint32_t row = BUSTER_COSTS_VECTOR * BUSTER_COSTS_SANITIZERS + 2;
++    CostsBuffer tables[BUSTER_COSTS_ROWS] = { 0 };
++    CostsBuffer report = { 0 };
++    const bool collected = parsed && costs_collect_rows(&list, logs, names, 4, tables, &report);
++    costs_expect(test, collected && costs_test_contains(&tables[row], "\n#: first-shard 40.0\n"), "a vector draw's first-shard offset uses normalized post-suite medians, without setup waits or trailing warnings");
++    CostsBuffer problems = { 0 };
++    costs_expect(test, collected && costs_check_text(&list, row, (CostsText){ .data = tables[row].data, .length = tables[row].length }, &problems) == 0, "the collected vector offset checks without changing its commands");
++    free(problems.data);
++    free(report.data);
++    for (uint32_t r = 0; r < BUSTER_COSTS_ROWS; r += 1)
++    {
++        free(tables[r].data);
++    }
++    static const struct
++    {
++        const char* before;
++        const char* after;
++        const char* why;
++    } incomplete[] = {
++        { "2026-11-11T01:14:08.0000000Z parallel:", "parallel:", "an untimestamped summary" },
++        { "2026-11-11T01:14:38.0000000Z Cleaning", "Cleaning", "an untimestamped completion" },
++        { "Cleaning up orphan processes", "Tail truncated", "a missing completion" },
++        { "Cleaning up orphan processes", "Cleaning up orphan processes eventually", "a completion with extra text" },
++        { "01:14:38.0000000Z Cleaning", "01:14:07.0000000Z Cleaning", "a completion before the summary" },
++        { "Cleaning up orphan processes\n", "Cleaning up orphan processes\n2026-11-11T01:14:39.0000000Z Cleaning up orphan processes\n", "two completions" },
++        { "3 passed, 0 failed", "2 passed, 1 failed", "a failed command absent from the current inventory" },
++        { "3 passed, 0 failed", "3 passed, 10 failed", "a failure count ending in zero" },
++        { "0 not started", "1 not started", "a command not started" },
++        { "suite\tpassed", "suite\tmissing", "missing successful qualification after cancellation" },
++        { "2026-11-11T01:14:09.5000000Z suite", "suite", "an untimestamped qualification" },
++        { "01:14:09.5000000Z suite", "01:14:07.5000000Z suite", "qualification before the summary" },
++        { "01:14:09.5000000Z suite", "01:14:39.5000000Z suite", "qualification after completion" },
++        { "suite\tpassed\n", "suite\tpassed\n2026-11-11T01:14:10.0000000Z ##[error]Process completed with exit code 1.\n", "a failed step after the suite" },
++        { "Cleaning up orphan processes\n", "Cleaning up orphan processes\n2026-11-11T01:14:39.0000000Z ##[error]The operation was canceled.\n", "a cancellation error after cleanup" },
++        { "C1: passed in 10.0 s", "C1: failed (exit status 1) in 10.0 s", "a failed command with a misleading summary" },
++    };
++    for (uint32_t i = 0; i < sizeof(incomplete) / sizeof(incomplete[0]); i += 1)
++    {
++        CostsText changed = costs_test_replace(&(CostsBuffer){ .data = texts[0].data, .length = texts[0].length }, incomplete[i].before, incomplete[i].after);
++        CostsLog pair[2] = { costs_log_parse(&list, changed), logs[1] };
++        CostsBuffer partial[BUSTER_COSTS_ROWS] = { 0 };
++        CostsBuffer detail = { 0 };
++        const bool kept = pair[0].error == NULL && costs_collect_rows(&list, pair, names, 2, partial, &detail);
++        char what[160];
++        snprintf(what, sizeof(what), "%s keeps command samples but supplies no vector first-shard offset", incomplete[i].why);
++        costs_expect(test, kept && pair[0].sample_count == 5 && costs_test_contains(&partial[row], "\n#: samples 1 1\n") && !costs_test_contains(&partial[row], "#: first-shard"), what);
++        for (uint32_t r = 0; r < BUSTER_COSTS_ROWS; r += 1)
++        {
++            free(partial[r].data);
++        }
++        free(detail.data);
++        free(pair[0].samples);
++        free(changed.data);
++    }
++    for (uint32_t i = 0; i < 4; i += 1)
++    {
++        free(logs[i].samples);
++        free(texts[i].data);
++    }
++    free(list.commands);
++    free(inventory.data);
++}
++
+ static void costs_test_tables(CostsTest* test, const CostsList* list)
+ {
+     static const uint32_t forward[] = { 0, 1, 2, 3 };
+@@ -3108,6 +3250,7 @@ static int costs_self_test(const char* root)
+     costs_test_logs(&test, &list);
+     costs_test_tables(&test, &list);
+     costs_test_first(&test, &list);
++    costs_test_first_draw(&test);
+     costs_test_collect_rejects(&test, &list);
+     costs_test_speeds(&test);
+     costs_test_plan(&test);

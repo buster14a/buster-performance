@@ -1,5 +1,32 @@
 # Hosted CI costs for #2658, 26 November 2026
 
+## Final scope and subsequent evidence
+
+The final proposed compiler revision is
+[e8746a798795c8e5e6702442a56f6d6ccc7a5b5d](https://github.com/buster14a/buster/commit/e8746a798795c8e5e6702442a56f6d6ccc7a5b5d),
+tree 191d46ae8381b89d8d9107ed5d0752d75fd6c06d. It retains the five cost tables
+documented below and the [per-file reference reuse](files-reuse/README.md).
+The final-head normal PR workflow is
+[45795512701](https://github.com/buster14a/buster/actions/runs/45795512701).
+
+The [hosted after record](after-45788677912/README.md) and
+[local runtime record](runtime/README.md) preserve the earlier candidate
+4d1f2024095f233cba19e8f8135dd99b17b9e264. That candidate also contained a
+sanitizer arena-policy experiment which was later removed. Its sixteen vector
+suites passed, but these measurements do not describe the final PR revision.
+Selected vector-job occupancy increased from 271.63 to 276.87 runner-minutes;
+same-model comparisons were mixed, and the local A/B/A sequence showed large
+drift. No causal source-speedup or whole-candidate target attainment is claimed.
+
+The tested [arena-policy patch](after-45788677912/deferred-arena-policy/README.md)
+and [post-suite cost-collector patch](after-45788677912/deferred-collector/README.md)
+are preserved as deferred experiments. Offset-aware schedule forecasts
+regressed held-out observations. Neither experiment is part of the final
+compiler tree. The original three-run measurements, generated tables and
+held-out schedules below remain unchanged.
+
+## Original three-run collection
+
 This record recalibrates the five active hosted cost tables from three passing
 merge-queue candidates. The current table generator and scheduler are unchanged.
 The inventory still contains 167 headings, every row still has four shards,

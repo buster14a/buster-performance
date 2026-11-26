@@ -1,0 +1,116 @@
+diff --git a/docs/commands/checker.md b/docs/commands/checker.md
+index 59f5b3c2c..1dd3597c4 100644
+--- a/docs/commands/checker.md
++++ b/docs/commands/checker.md
+@@ -116,6 +116,15 @@ unused-warning fixtures also check exact scope-completion tokens.
+   `--in-process` runs buster's source commands as this process's
+   `main_source_command_reusable` (main.c's routing by the commands that
+   release what they map), with the captured stream in a `memfd`;
++  sanitizer builds snapshot the current address-space and commit limits for
++  each command, as the production source command does, and restore the caller's
++  limit policy when it returns. This avoids querying unchanged limits for each
++  arena reservation and uses production's larger commit increments when commit
++  is unbounded. Plain tests retain their original allocation policy:
++  fixing their limits would also enable a process-wide address-space reservation
++  that later forked resource-limit tests would inherit. `--run-modes-only`
++  checks fresh-child results, stale snapshots, successful and rejected commands,
++  and restoration when a response-file command is left to a child;
+   `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
+   `tools/clang-server` (`oracle_cache.c`'s client, `OracleServer`; built by
+   `tools/clang-server/build.sh` against that clang's libraries with one copy
+diff --git a/src/buster/compiler/c_check_run_modes_driver_test.c b/src/buster/compiler/c_check_run_modes_driver_test.c
+index 049a3aa5c..586a88244 100644
+--- a/src/buster/compiler/c_check_run_modes_driver_test.c
++++ b/src/buster/compiler/c_check_run_modes_driver_test.c
+@@ -90,6 +90,55 @@ static bool check_test_run_mode_peer(CheckRunModeReply reply, int32_t status, co
+     return child > 0;
+ }
+ 
++// A reusable source command gets the same current-limit snapshot as a new compiler process. It must not inherit a
++// prior command's snapshot or leave its own behind: resource-limit tests also run in this process and its children.
++#if !BUSTER_ARENA_REGIONS
++static void check_test_run_mode_limits(CheckTest* test, const char* source)
++{
++    const ArenaLimits saved = arena_limits;
++    for (uint32_t rejected = 0; rejected < 2; rejected += 1)
++    {
++        char* const arguments[] = { "/proc/self/exe", "-fsyntax-only", "-fno-caret-diagnostics", (char*)source,
++                                    rejected != 0 ? "-DBUSTER_RUN_MODE_REJECT" : NULL, NULL };
++        char* expected = NULL;
++        const int expected_status = check_test_driver_child(arguments, &expected, false, true);
++        const bool ready = expected_status == (int)rejected && expected != NULL;
++        check_test_expect(test, ready, "run modes: the fresh compiler supplies the current-limit result");
++        for (uint32_t fixed = 0; ready && fixed < 2; fixed += 1)
++        {
++            // The deliberately stale one-page share cannot compile this unit. Each command must read the live
++            // process limits before reserving, even where the caller already had a fixed snapshot.
++            const ArenaLimits prior = {
++                .fixed = fixed != 0,
++                .address_share = BUSTER_ARENA_PAGE_BYTES,
++                .commit_unbounded = false,
++            };
++            arena_limits = prior;
++            char* actual = NULL;
++            int status = -1;
++            const bool taken = check_test_driver_run_in_process(arguments, &actual, false, &status);
++            check_test_expect(test, taken && status == expected_status && actual != NULL && strcmp(actual, expected) == 0,
++                              "run modes: each reusable command reads current limits, as its fresh child does");
++            check_test_expect(test, arena_limits.fixed == prior.fixed && arena_limits.address_share == prior.address_share &&
++                                   arena_limits.commit_unbounded == prior.commit_unbounded,
++                              "run modes: a successful or rejected command restores the caller's limit policy");
++            arena_limits = saved;
++            free(actual);
++        }
++        free(expected);
++    }
++    char* const response[] = { "/proc/self/exe", "@run-mode-response", NULL };
++    char* text = NULL;
++    int status = -1;
++    const bool taken = check_test_driver_run_in_process(response, &text, false, &status);
++    check_test_expect(test, !taken && text == NULL && arena_limits.fixed == saved.fixed && arena_limits.address_share == saved.address_share &&
++                           arena_limits.commit_unbounded == saved.commit_unbounded,
++                      "run modes: a response-file command left to a child restores the caller's limit policy");
++    free(text);
++    arena_limits = saved;
++}
++#endif
++
+ static void check_test_driver_run_modes(CheckTest* test, const char* clang, const char* directory)
+ {
+     const CheckDriverRunModes saved = check_driver_run_modes;
+@@ -98,6 +147,12 @@ static void check_test_driver_run_modes(CheckTest* test, const char* clang, cons
+     snprintf(missing, sizeof(missing), "%s/no-clang-server", directory);
+     const bool available = access(source, R_OK) == 0;
+     check_test_expect(test, available, "run modes: runtime fixture is available");
++#if !BUSTER_ARENA_REGIONS
++    if (available)
++    {
++        check_test_run_mode_limits(test, source);
++    }
++#endif
+     for (uint32_t rejected = 0; available && rejected < 2; rejected += 1)
+     {
+         for (uint32_t stream = 0; stream < 2; stream += 1)
+diff --git a/src/buster/compiler/c_checker_driver_test.c b/src/buster/compiler/c_checker_driver_test.c
+index d1fe784a4..faea901ee 100644
+--- a/src/buster/compiler/c_checker_driver_test.c
++++ b/src/buster/compiler/c_checker_driver_test.c
+@@ -326,7 +326,18 @@ static bool check_test_driver_run_in_process(char* const* arguments, char** text
+                             dup2(stdout_capture ? capture : discard, STDOUT_FILENO) >= 0 && dup2(stdout_capture ? discard : capture, STDERR_FILENO) >= 0;
+     if (redirected)
+     {
++#if !BUSTER_ARENA_REGIONS
++        // The production source command snapshots these unchanged limits once before it reserves any arena.
++        // Match that setup for this command alone: later tests may change a limit before their next run or fork.
++        // Plain tests keep their unfixed policy: fixing it also enables a process-wide address-space reservation,
++        // which a later fork would inherit even after these fields were restored. Sanitizers disable that region.
++        const ArenaLimits saved_limits = arena_limits;
++        arena_limits_fix();
++#endif
+         result = main_source_command_reusable(count, (char**)arguments);
++#if !BUSTER_ARENA_REGIONS
++        arena_limits = saved_limits;
++#endif
+     }
+     fflush(NULL);
+     const bool restored = saved_output >= 0 && saved_errors >= 0 && dup2(saved_output, STDOUT_FILENO) >= 0 && dup2(saved_errors, STDERR_FILENO) >= 0;
