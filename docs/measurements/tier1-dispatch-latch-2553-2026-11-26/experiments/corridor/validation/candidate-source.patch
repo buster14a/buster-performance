@@ -1,0 +1,162 @@
+--- a/src/buster/compiler/tier1_cfg.c
++++ b/src/buster/compiler/tier1_cfg.c
+@@ -1312,7 +1312,7 @@
+ // its predecessors) takes the dispatch's convention for its phis too: each takes its operand along the branch's edge
+ // where that operand enters the block's sibling (`siblings`, the branch's first successor), the register every handler
+ // takes it in, so that the dispatch's edge moves nothing (#2782: Lua's OP_TFORCALL took OP_TFORPREP's registers).
+-static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chosen, const uint32_t* ups, const uint32_t* firsts, const uint32_t* dispatchers, const uint32_t* offsets, Tier1CfgPieces* pieces)
++static void tier1_cfg_phi_exits(const Tier1CfgInput* input, const uint32_t* chosen, const uint32_t* ups, const uint32_t* firsts, const uint32_t* dispatchers, const uint32_t* latch_models, const uint32_t* offsets, Tier1CfgPieces* pieces)
+ {
+     for (uint32_t b = 0; b < input->block_count; b += 1)
+     {
+@@ -1343,15 +1343,17 @@
+                 pieces->hint_intervals[own] = convention;
+             }
+             const uint32_t operand = predecessor != BUSTER_TIER1_CFG_NONE ? input->phi_operands[input->phi_operand_offsets[k] + j] : BUSTER_TIER1_CFG_NONE;
+-            // The latch and header carry each other's phis. Preserve the header's convention where most incoming
+-            // edges pass it unchanged, without changing the block's anchor or overriding a sibling's convention.
+-            const bool carried = along && next > b && degree >= 3 && operand != up && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
++            // The latch and header carry each other's phis. Most incoming edges must pass the header's value
++            // unchanged. Its place at a handler's entry is the convention, even when the nearest cold predecessor
++            // carries the same SSA value in another register. Keep existing sibling and other interval hints.
++            const uint32_t model = latch_models[b];
++            const bool carried = along && next > b && degree >= 3 && model != BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE;
+             const uint32_t from = carried ? tier1_cfg_phi_carried_predecessor(input->phi_operands + input->phi_operand_offsets[k], input->predecessors + input->predecessor_offsets[b], degree, up, b) : BUSTER_TIER1_CFG_NONE;
+-            const uint32_t kept = from != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[up], offsets[up + 1], input->block_starts[from + 1] - 1) : BUSTER_TIER1_CFG_NONE;
+-            if (kept != BUSTER_TIER1_CFG_NONE && pieces->classes[kept] == pieces->classes[own] && pieces->ends[kept] <= pieces->starts[own])
++            const uint32_t kept = from != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[up], offsets[up + 1], input->block_starts[model]) : BUSTER_TIER1_CFG_NONE;
++            if (kept != BUSTER_TIER1_CFG_NONE && pieces->classes[kept] == pieces->classes[own] && pieces->starts[kept] == input->block_starts[model] && pieces->starts[kept] < pieces->starts[own])
+             {
+                 pieces->hints[own] = up;
+-                pieces->hint_intervals[own] = kept | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
++                pieces->hint_intervals[own] = kept;
+             }
+             const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
+             if (own != BUSTER_TIER1_CFG_NONE && taken != BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[own] == BUSTER_TIER1_CFG_NONE && pieces->classes[taken] == pieces->classes[own] &&
+@@ -1370,6 +1372,71 @@
+ 
+ #define BUSTER_TIER1_CFG_TARGET_STEPS 8u
+ 
++// A late latch's handler convention. Its one successor is a later header, whose forward path reaches a multiway
++// branch back to earlier handlers. A guard may also return straight to the latch; every other step has one forward
++// successor. The layout order and step cap bound the search, and firsts remains the graph's actual first successor.
++static uint32_t tier1_cfg_latch_model(const Tier1CfgInput* input, const uint32_t* firsts, uint32_t latch, uint32_t* models)
++{
++    const uint32_t degree = input->predecessor_offsets[latch + 1] - input->predecessor_offsets[latch];
++    const uint32_t successors = input->successor_offsets[latch + 1] - input->successor_offsets[latch];
++    uint32_t block = degree >= BUSTER_TIER1_CFG_MULTIWAY && successors == 1 ? input->successors[input->successor_offsets[latch]] : BUSTER_TIER1_CFG_NONE;
++    uint32_t model = BUSTER_TIER1_CFG_NONE;
++    const __m512i back_to = _mm512_set1_epi32((int)latch);
++    __m512i route = _mm512_setzero_si512();
++    __mmask16 visited = 0;
++    for (uint32_t step = 0; step < BUSTER_TIER1_CFG_TARGET_STEPS && block != BUSTER_TIER1_CFG_NONE && block > latch; step += 1)
++    {
++        const __mmask16 place = (__mmask16)(1u << step);
++        route = _mm512_mask_mov_epi32(route, place, _mm512_set1_epi32((int)block));
++        visited |= place;
++        const uint32_t first = input->successor_offsets[block];
++        const uint32_t count = input->successor_offsets[block + 1] - first;
++        if (count >= BUSTER_TIER1_CFG_MULTIWAY)
++        {
++            model = firsts[block] < latch ? firsts[block] : BUSTER_TIER1_CFG_NONE;
++            block = BUSTER_TIER1_CFG_NONE;
++        }
++        else
++        {
++            const __mmask16 lanes = (__mmask16)((1u << count) - 1);
++            const __m512i targets = _mm512_maskz_loadu_epi32(lanes, input->successors + first);
++            const __mmask16 forward = _mm512_mask_cmpgt_epu32_mask(lanes, targets, _mm512_set1_epi32((int)block));
++            __mmask16 back = _mm512_mask_cmpeq_epi32_mask(lanes, targets, back_to);
++            const bool unique = forward != 0 && (forward & (forward - 1)) == 0;
++            const __mmask16 indirect = (__mmask16)(lanes & ~(forward | back));
++            if (unique && indirect != 0)
++            {
++                // A switch's default can reach the latch through a shared unconditional block. It defines no
++                // phis; following that one edge preserves the guard's loop-back destination.
++                const __m512i after = _mm512_add_epi32(targets, _mm512_set1_epi32(1));
++                const __m512i starts = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), indirect, targets, input->successor_offsets, 4);
++                const __m512i ends = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), indirect, after, input->successor_offsets, 4);
++                const __m512i phi_starts = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), indirect, targets, input->phi_offsets, 4);
++                const __m512i phi_ends = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), indirect, after, input->phi_offsets, 4);
++                const __mmask16 single = _mm512_mask_cmpeq_epi32_mask(indirect, ends, _mm512_add_epi32(starts, _mm512_set1_epi32(1)));
++                const __mmask16 plain = _mm512_mask_cmpeq_epi32_mask(single, phi_starts, phi_ends);
++                const __m512i following = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), plain, starts, input->successors, 4);
++                const __mmask16 via = _mm512_mask_cmpeq_epi32_mask(plain, following, back_to);
++                back |= via;
++                if (via != 0)
++                {
++                    const __mmask16 bridge = (__mmask16)(1u << (step + BUSTER_TIER1_CFG_TARGET_STEPS));
++                    route = _mm512_mask_mov_epi32(route, bridge, _mm512_set1_epi32((int)_mm512_mask_reduce_max_epu32(via, targets)));
++                    visited |= bridge;
++                }
++            }
++            const bool directed = unique && (forward | back) == lanes;
++            block = directed ? _mm512_mask_reduce_max_epu32(forward, targets) : BUSTER_TIER1_CFG_NONE;
++        }
++    }
++    if (model != BUSTER_TIER1_CFG_NONE && models != 0)
++    {
++        models[latch] = model;
++        _mm512_mask_i32scatter_epi32(models, visited, route, _mm512_set1_epi32((int)model), 4);
++    }
++    return model;
++}
++
+ // A value that a phi takes along an edge, and that nothing else hints, is hinted to that phi (`targets`, from the phi
+ // hints). Where the phi has no interval before the value's definition, no register of it is known there: the hint goes on
+ // along the phis that take the phi in turn (`ups`, each value's first such phi), to the first with an interval before
+@@ -2852,13 +2919,14 @@
+         uint32_t* firsts = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         uint32_t* siblings = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         uint32_t* dispatchers = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
++        uint32_t* latch_models = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         // Per block, the interval the value being built has at its entry, where entry_stamps says it is that value's; and the
+         // one it has at its exit, where it is live out of the block (#2553).
+         uint32_t* entry_pieces = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         uint32_t* entry_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         uint32_t* exit_pieces = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+         uint32_t* exit_stamps = ready ? arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+-        ready = ready && firsts != 0 && siblings != 0 && dispatchers != 0 && entry_pieces != 0 && entry_stamps != 0 && exit_pieces != 0 && exit_stamps != 0;
++        ready = ready && firsts != 0 && siblings != 0 && dispatchers != 0 && latch_models != 0 && entry_pieces != 0 && entry_stamps != 0 && exit_pieces != 0 && exit_stamps != 0;
+         for (uint32_t b = 0; ready && b < blocks; b += 1)
+         {
+             uint32_t first = BUSTER_TIER1_CFG_NONE;
+@@ -2885,6 +2953,17 @@
+             siblings[b] = reached ? BUSTER_TIER1_CFG_NONE : sibling;
+             dispatchers[b] = reached && dispatched != BUSTER_TIER1_CFG_NONE ? dispatcher : BUSTER_TIER1_CFG_NONE;
+         }
++        if (ready)
++        {
++            memset(latch_models, 0xff, (uint64_t)blocks * sizeof(uint32_t));
++        }
++        for (uint32_t b = 0; ready && b < blocks; b += 1)
++        {
++            if (siblings[b] == BUSTER_TIER1_CFG_NONE)
++            {
++                tier1_cfg_latch_model(input, firsts, b, latch_models);
++            }
++        }
+         // Each value's blocks, ascending: its definition's and those it is live into. Counted per value, with the values
+         // each block defines, then filled block by block.
+         uint32_t* list_offsets = ready ? arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+@@ -3113,8 +3192,9 @@
+                                     // A block laid out after its first successor (a dispatch loop's join) takes that
+                                     // successor's convention for the values the two share, as its phis do (#2553).
+                                     const uint32_t joined = firsts[b] < b ? firsts[b] : BUSTER_TIER1_CFG_NONE;
+-                                    const uint32_t model = !entry ? BUSTER_TIER1_CFG_NONE : !defined_here && siblings[b] != BUSTER_TIER1_CFG_NONE ? siblings[b] : joined;
+-                                    const bool modeled = model != BUSTER_TIER1_CFG_NONE && entry_stamps[model] == v + 1 && (!pieces.fill || pieces.starts[entry_pieces[model]] < from);
++                                    const uint32_t model = !entry ? BUSTER_TIER1_CFG_NONE : (!defined_here || phis[v] != 0) && latch_models[b] != BUSTER_TIER1_CFG_NONE ? latch_models[b] : !defined_here && siblings[b] != BUSTER_TIER1_CFG_NONE ? siblings[b] : joined;
++                                    const bool modeled = model != BUSTER_TIER1_CFG_NONE && entry_stamps[model] == v + 1 &&
++                                                         (!pieces.fill || (pieces.starts[entry_pieces[model]] < from && (latch_models[b] == BUSTER_TIER1_CFG_NONE || pieces.starts[entry_pieces[model]] == input->block_starts[model])));
+                                     // Else a value the block takes from before it, its place at the anchor's exit (#2553): a
+                                     // phi's, its operand's at a predecessor's, comes once every value has its intervals.
+                                     const uint32_t anchor = entry && !defined_here ? anchors[b] : BUSTER_TIER1_CFG_NONE;
+@@ -3190,7 +3270,7 @@
+                     const bool used = end > use_offsets[i] && input->use_positions[end - 1] + 1 == pieces.ends[i];
+                     register_hints[i] = used ? input->use_registers[end - 1] : UINT8_MAX;
+                 }
+-                tier1_cfg_phi_exits(input, chosen, ups, firsts, dispatchers, candidate.value_interval_offsets, &pieces);
++                tier1_cfg_phi_exits(input, chosen, ups, firsts, dispatchers, latch_models, candidate.value_interval_offsets, &pieces);
+                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
+                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
+                 tier1_cfg_body_hints(input, candidate.value_interval_offsets, &pieces);

@@ -5,10 +5,16 @@ Work in progress for [buster#2553](https://github.com/buster14a/buster/issues/25
 
 - Baseline: `8e4d32879e17b7d9548cad54257a2f8461328366`, tree `8bf0a22e6067a7698ca6257d3e6cbe40f49b108a`.
 - Initial candidate: `d3d8ad3bc7373a58e62b3eb3ecb32a0001c61167`, tree `0a158931bbb8bc34e2c951870bd83ca1cdfaa9f8`.
-- Scope: a loop latch phi whose inputs mostly carry the successor/header phi unchanged;
+- Initial hypothesis: a loop latch phi whose inputs mostly carry the successor/header phi unchanged;
   use an earlier matching predecessor's exit convention instead of a cold nearest-layout operand.
-- Status: focused and full allocator regression checks pass. Workload measurements and investigation remain in progress.
+- Status: **the initial candidate is rejected by actual workload evidence**. It leaves both hot dispatchers unchanged and adds spill stores in another function. A structural corridor experiment is under measurement.
   This record does not establish the issue's hardware acceptance criteria.
+
+## Actual workload evidence
+
+[The initial tagged-count record](counts-initial/README.md) contains exact before/after counts, executable parity, native-output checks, actual SQLite CFG snapshots, the reader, and compressed raw traces. The initial candidate changes SQLite by only -28,721 instructions while leaving `sqlite3VdbeExec` and the entire Lua executable unchanged; it does not satisfy #2553.
+
+[The bounded corridor experiment](experiments/corridor/README.md) captures the next hypothesis. Its [frozen validation](experiments/corridor/validation/README.md) passes 107,813 full-suite checks and 731 focused checks at O3 and with ASan/UBSan. Actual replay exposes shifted traffic under pressure; correctness alone does not accept that experiment.
 
 ## Correctness evidence
 
@@ -36,8 +42,7 @@ The historical tags are `e/T/U` for phi edge moves/stores/reloads,
 `h/t/u` for live-in edge moves/stores/reloads, `x` for scratch moves,
 `S/L` for spills, and `C/R` for call saves/restores.
 
-No native hardware has been accessed or queued by this session. Hosted/Linux instruction counts, when recorded,
-will be identified separately from hardware timing. The 9700X is excluded by the session's constraint.
+No native hardware has been accessed or queued by this session. Hosted/Linux instruction counts are recorded separately from hardware timing. The 9700X is excluded by the session's constraint.
 
 Original additions use Apache-2.0 WITH LLVM-exception; the instrumentation's existing notices and provenance are retained.
 
