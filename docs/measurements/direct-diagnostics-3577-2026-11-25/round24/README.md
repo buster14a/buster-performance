@@ -53,3 +53,43 @@ in all three rounds, but its profile puts the difference elsewhere, spread over 
 (`fast_cc_expr` +0.36 M, `fast_pp_drain` +0.27 M, `fval_to_gp_full` -0.22 M): the placement's. The PR takes g
 (969573021, the same tree); CI's instruction check reads 211,970,371 on it (`results/ucn-base.txt`), now
 `tools/ci/compile-instructions.txt`, and sqlite3.c's object is the merge's (`aef0e35896a7e863`).
+
+## The lines next to the rule (`probes/lines/`, `probes/c23-numbers/`)
+
+Probes of the directive lines beside the skipped group's rule found more the full pipeline's lexer reads and the direct
+path didn't, 9 of 23 differing:
+- an `#elif`'s operands after a taken group (#3655's inactive directive operands): `fast_pp_skip_rest_of_line` passed
+  them unread;
+- main's direct path's own gaps, which the full pipeline reported before #3655: a pragma nothing acts on (passed unread
+  the same way), a definition and an argument nothing uses (`fast_lex_one` made the stray backslash an other token);
+- in C23, a digit separator after a `.` (`1.'5`) and after an exponent's sign (`1e+'5`, `0x1p-'5`).
+
+The follow-up (b753417b4) leaves at a backslash that starts a UCN past any splices in the line's walk and the lexer's
+default case (`fast_pp_stray_backslash`), and takes the two separators (`fast_quote_may_separate`). Written inline
+(1ac2a5652), the walk lengthened `fast_lex_one`'s hot paths (647 to 695 instructions, its registers and its branches'
+order reshuffled) and the C23 test the skip loop's (1528 to 1577): CI's instruction check read 212,267,040, 0.30 M over
+the gated fix. In cold, never-inlined helpers the lexer has 649 instructions, the skip loop 1506 and the line's walk 295
+(306 before), and the check reads 211,927,404: 43 K under the gated fix, 0.091 M over the merge (`results/v2.txt`).
+
+## The pushed head's checks (`scripts/v2-checks.sh`, `results/v2-checks.log`)
+
+On the tree pushed as b753417b4 (and 97a900f5d, which writes 211,927,404 into `tools/ci/compile-instructions.txt`),
+in this container: sqlite3.c's object identical to f8c4f8e1e's in both configurations; every C file under `tests/`
+alike (310 direct of r2's list, 322 of today's 4,789), c-testsuite 192 and musl 1,002 direct and alike; eight `tests/`
+files leave at the new rules, none of them direct before; the probe sets alike but for the two known loops' empty bodies;
+`./build.sh check-call-graph` without a new cycle; `test-direct` (246), the differential and the newer probe sets under
+ASan with UBSan and under MSan; CI's count unchanged at -0.788% (37,297,211 against 37,593,648).
+
+## Eight placements (`scripts/bp-vsweep.sh`, `results/vsweep.txt`)
+
+Main a62529650 and the head b753417b4, each built at the eight `BUSTER_CHECKER_OFFSET`s 0 to 3696 in steps of 528
+(they move the code's alignment within 64 bytes too), measured in one hold in rotation, 3 rounds of 5 (rounds 2 and 3):
+
+| arm | cycles | instructions |
+| --- | ---: | ---: |
+| main a62529650 | 76.00 M | 195.780 M |
+| the head b753417b4 | 81.85 M | 211.928 M |
+
++5.85 M cycles (+7.7%) and +16.15 M instructions (+8.25%). Round 23's sweep (another hold, main 1e1ca2dd6) read +6.30 M
+(+8.4%); this round's own changes add 0.09 M instructions, so the difference between the two sweeps is the holds' and
+main's, not a gain of this round.
