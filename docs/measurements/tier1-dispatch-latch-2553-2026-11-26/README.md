@@ -10,6 +10,16 @@ Work in progress for [buster#2553](https://github.com/buster14a/buster/issues/25
 - Status: focused and full allocator regression checks pass. Workload measurements and investigation remain in progress.
   This record does not establish the issue's hardware acceptance criteria.
 
+## Correctness evidence
+
+[The validation record](validation/README.md) includes the original C driver, exact commands, hashes and retained logs for 107,813 full-suite checks and 304 focused checks, including sanitizer and negative-control runs.
+
+## Input snapshots
+
+`scripts/snapshot-after-tags.patch` adds a temporary CFG-input snapshot writer after the tag patch. It records every input column, the borrowed dominator analysis and an allocation fingerprint. This is a same-ABI trusted-input debugging format tied to the source revisions above. Set `BUSTER_TIER1_CFG_SNAPSHOT` to an existing directory plus a filename prefix; the existing minimum block count controls capture. It is measurement-only code and is not proposed for the compiler.
+
+Snapshot patch SHA-256: `656418dbd5638bbd47ccf7a7f8e4f54a20018b8227c59aba212626f240f98889`.
+
 ## Instrumentation provenance
 
 `scripts/kinds-main-8e4d3287.patch` ports the existing origin tags and CFG dump from

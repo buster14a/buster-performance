@@ -1,0 +1,237 @@
+--- a/src/buster/compiler/tier1_emit_cfg.c
++++ b/src/buster/compiler/tier1_emit_cfg.c
+@@ -5314,6 +5314,8 @@
+ }
+ 
+ #if defined(BUSTER_TIER1_MEASURE_KINDS)
++#include "tier1_cfg_snapshot.c"
++
+ // #2553's diagnosis: with BUSTER_TIER1_DUMP_BLOCKS=N, a function of N blocks or more prints its blocks, intervals and
+ // edge moves to BUSTER_TIER1_DUMP_FILE.
+ static void tier1_emit_cfg_dump(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+@@ -5321,6 +5323,7 @@
+     const char* setting = getenv("BUSTER_TIER1_DUMP_BLOCKS");
+     const Tier1CfgInput* in = &emitted->cfg_input;
+     const Tier1CfgAllocation* cfg = &emitted->cfg;
++    tier1_cfg_snapshot_emit(in, cfg, plan->function->instruction_count);
+     const char* path = getenv("BUSTER_TIER1_DUMP_FILE");
+     FILE* out = setting != NULL && path != NULL && in->block_count >= (uint32_t)atoi(setting) ? fopen(path, "a") : NULL;
+     if (out != NULL)
+--- /dev/null
++++ b/src/buster/compiler/tier1_cfg_snapshot.c
+@@ -0,0 +1,215 @@
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
++//
++// Temporary #2553 measurement support. Include after tier1_cfg.c. This is a same-ABI, trusted-input snapshot,
++// not a public interchange format. Every input column, including the borrowed dominator analysis, is preserved.
++// Raw pointer fields are zeroed on disk; the explicit column table records nullness and payload sizes.
++
++#include <stddef.h>
++#include <stdio.h>
++#include <unistd.h>
++
++#define BUSTER_CFG_SNAPSHOT_VERSION 1u
++#define BUSTER_CFG_SNAPSHOT_COLUMNS 64u
++#define BUSTER_CFG_SNAPSHOT_LIMIT (8ull << 30)
++
++typedef struct Tier1CfgSnapshotColumn Tier1CfgSnapshotColumn;
++struct Tier1CfgSnapshotColumn
++{
++    uint32_t owner;
++    uint32_t offset;
++    uint32_t width;
++    uint32_t present;
++    uint64_t count;
++};
++
++typedef struct Tier1CfgSnapshotHeader Tier1CfgSnapshotHeader;
++struct Tier1CfgSnapshotHeader
++{
++    char magic[8];
++    uint32_t version;
++    uint32_t endian;
++    uint32_t header_size;
++    uint32_t input_size;
++    uint32_t dominators_size;
++    uint32_t column_size;
++    uint32_t column_count;
++    uint32_t has_dominators;
++    uint32_t phi_operand_count;
++    uint32_t instruction_count;
++    uint64_t allocation_hash;
++    uint64_t payload_bytes;
++    Tier1CfgInput input;
++    Dominators dominators;
++};
++
++// The schema is shared by the writer and reader. n and d are scalar-only copies; no pointer is read for a length.
++#define BUSTER_CFG_SNAPSHOT_INPUT_COLUMNS(X) \
++    X(block_starts, uint32_t, (uint64_t)n->block_count + 1) \
++    X(successor_offsets, uint32_t, (uint64_t)n->block_count + 1) \
++    X(successors, uint32_t, n->edge_count) \
++    X(predecessor_offsets, uint32_t, (uint64_t)n->block_count + 1) \
++    X(predecessors, uint32_t, n->edge_count) \
++    X(classes, uint8_t, n->value_count) \
++    X(allowed_registers, uint32_t, n->value_count) \
++    X(definitions, uint32_t, n->value_count) \
++    X(definition_registers, uint32_t, n->value_count) \
++    X(rematerializable, uint8_t, n->value_count) \
++    X(use_offsets, uint32_t, (uint64_t)n->value_count + 1) \
++    X(use_positions, uint32_t, n->use_count) \
++    X(use_required, uint8_t, n->use_count) \
++    X(use_registers, uint8_t, n->use_count) \
++    X(phi_offsets, uint32_t, (uint64_t)n->block_count + 1) \
++    X(phi_values, uint32_t, n->phi_count) \
++    X(phi_operand_offsets, uint32_t, (uint64_t)n->phi_count + 1) \
++    X(phi_operands, uint32_t, header->phi_operand_count) \
++    X(edge_copies, uint8_t, n->edge_count) \
++    X(slot_widths, uint8_t, n->value_count) \
++    X(clobbers, uint32_t, n->clobber_count) \
++    X(ties, uint32_t, (uint64_t)n->value_count * 2) \
++    X(sequences, uint32_t, n->sequence_count) \
++    X(sequence_registers, uint32_t, n->sequence_count) \
++    X(sequence_readers, uint32_t, n->sequence_count) \
++    X(sequence_operands, uint32_t, n->sequence_count) \
++    X(sequence_results, uint32_t, n->sequence_count) \
++    X(fixed.starts, uint32_t, n->fixed.count) \
++    X(fixed.ends, uint32_t, n->fixed.count) \
++    X(fixed.registers, uint32_t, n->fixed.count) \
++    X(fixed.classes, uint8_t, n->fixed.count)
++
++#define BUSTER_CFG_SNAPSHOT_DOMINATOR_COLUMNS(X) \
++    X(idom, uint32_t, d->block_count) \
++    X(rpo, uint32_t, d->block_count) \
++    X(rpo_index, uint32_t, d->block_count) \
++    X(tree_offsets, uint32_t, (uint64_t)d->block_count + 1) \
++    X(tree_children, uint32_t, d->block_count) \
++    X(preorder, uint32_t, d->block_count) \
++    X(subtree_end, uint32_t, d->block_count) \
++    X(frontiers, uint64_t, (uint64_t)d->block_count * d->row_words) \
++    X(loop_header, uint32_t, d->loop_count) \
++    X(loop_parent, uint32_t, d->loop_count) \
++    X(loop_size, uint32_t, d->loop_count) \
++    X(loop_bodies, uint64_t, (uint64_t)d->loop_count * d->row_words) \
++    X(loop_depth, uint32_t, d->block_count) \
++    X(block_loop, uint32_t, d->block_count) \
++    X(irreducible, uint8_t, d->block_count) \
++    X(loop_irreducible, uint8_t, d->loop_count)
++
++static uint32_t tier1_cfg_snapshot_schema(const Tier1CfgSnapshotHeader* header, Tier1CfgSnapshotColumn* columns)
++{
++    const Tier1CfgInput* n = &header->input;
++    const Dominators* d = &header->dominators;
++    uint32_t count = 0;
++#define BUSTER_CFG_SNAPSHOT_INPUT(field, type, length) columns[count++] = (Tier1CfgSnapshotColumn){ 0, offsetof(Tier1CfgInput, field), sizeof(type), 0, length };
++    BUSTER_CFG_SNAPSHOT_INPUT_COLUMNS(BUSTER_CFG_SNAPSHOT_INPUT)
++#undef BUSTER_CFG_SNAPSHOT_INPUT
++#define BUSTER_CFG_SNAPSHOT_DOMINATOR(field, type, length) columns[count++] = (Tier1CfgSnapshotColumn){ 1, offsetof(Dominators, field), sizeof(type), 0, length };
++    BUSTER_CFG_SNAPSHOT_DOMINATOR_COLUMNS(BUSTER_CFG_SNAPSHOT_DOMINATOR)
++#undef BUSTER_CFG_SNAPSHOT_DOMINATOR
++    return count;
++}
++
++static uint64_t tier1_cfg_snapshot_hash_bytes(uint64_t hash, const void* data, uint64_t bytes)
++{
++    const uint8_t* input = data;
++    for (uint64_t i = 0; i < bytes; i += 1)
++    {
++        hash = (hash ^ input[i]) * 1099511628211ull;
++    }
++    return hash;
++}
++
++// A reproducibility fingerprint of allocated fragments, spill ownership and the resolved edge/split moves.
++static uint64_t tier1_cfg_snapshot_allocation_hash(const Tier1CfgInput* input, const Tier1CfgAllocation* cfg)
++{
++    const Tier1Allocation* a = &cfg->allocation;
++    uint64_t hash = 14695981039346656037ull;
++#define BUSTER_CFG_SNAPSHOT_HASH(pointer, count) hash = tier1_cfg_snapshot_hash_bytes(hash, pointer, (uint64_t)(count) * sizeof(*(pointer)))
++    BUSTER_CFG_SNAPSHOT_HASH(&cfg->intervals.count, 1);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->intervals.starts, cfg->intervals.count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->intervals.ends, cfg->intervals.count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->intervals.values, cfg->intervals.count);
++    BUSTER_CFG_SNAPSHOT_HASH(a->fragment_offsets, (uint64_t)a->interval_count + 1);
++    BUSTER_CFG_SNAPSHOT_HASH(a->starts, a->fragment_count);
++    BUSTER_CFG_SNAPSHOT_HASH(a->ends, a->fragment_count);
++    BUSTER_CFG_SNAPSHOT_HASH(a->kinds, a->fragment_count);
++    BUSTER_CFG_SNAPSHOT_HASH(a->registers, a->fragment_count);
++    BUSTER_CFG_SNAPSHOT_HASH(a->spill_ids, input->value_count);
++    BUSTER_CFG_SNAPSHOT_HASH(a->spill_values, a->spill_count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->edge_placements, input->edge_count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->edge_move_offsets, (uint64_t)input->edge_count + 1);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->move_sources, cfg->move_count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->move_destinations, cfg->move_count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->move_values, cfg->move_count);
++    BUSTER_CFG_SNAPSHOT_HASH(cfg->split_positions, cfg->split_count);
++    if (cfg->split_move_offsets != NULL)
++    {
++        BUSTER_CFG_SNAPSHOT_HASH(cfg->split_move_offsets, (uint64_t)cfg->split_count + 1);
++    }
++    if (cfg->current_slot_offsets != NULL)
++    {
++        BUSTER_CFG_SNAPSHOT_HASH(cfg->current_slot_offsets, (uint64_t)input->block_count + 1);
++        BUSTER_CFG_SNAPSHOT_HASH(cfg->current_slots, cfg->current_slot_offsets[input->block_count]);
++    }
++#undef BUSTER_CFG_SNAPSHOT_HASH
++    return hash;
++}
++
++static bool tier1_cfg_snapshot_write(const char* path, const Tier1CfgInput* input, const Tier1CfgAllocation* cfg, uint32_t instructions)
++{
++    Tier1CfgSnapshotHeader storage = { .magic = "BCFG2553", .version = BUSTER_CFG_SNAPSHOT_VERSION, .endian = 0x01020304u,
++        .header_size = sizeof(Tier1CfgSnapshotHeader), .input_size = sizeof(Tier1CfgInput), .dominators_size = sizeof(Dominators),
++        .column_size = sizeof(Tier1CfgSnapshotColumn), .has_dominators = input->dominators != NULL,
++        .phi_operand_count = input->phi_operand_offsets != NULL ? input->phi_operand_offsets[input->phi_count] : 0,
++        .instruction_count = instructions, .allocation_hash = tier1_cfg_snapshot_allocation_hash(input, cfg), .input = *input };
++    Tier1CfgSnapshotHeader* header = &storage;
++    if (input->dominators != NULL)
++    {
++        header->dominators = *input->dominators;
++    }
++    header->input.dominators = NULL;
++    Tier1CfgSnapshotColumn columns[BUSTER_CFG_SNAPSHOT_COLUMNS] = { 0 };
++    const void* payloads[BUSTER_CFG_SNAPSHOT_COLUMNS] = { 0 };
++    header->column_count = tier1_cfg_snapshot_schema(header, columns);
++    bool okay = header->column_count <= BUSTER_CFG_SNAPSHOT_COLUMNS;
++    for (uint32_t i = 0; okay && i < header->column_count; i += 1)
++    {
++        Tier1CfgSnapshotColumn* column = &columns[i];
++        uint8_t* owner = column->owner == 0 ? (uint8_t*)&header->input : (uint8_t*)&header->dominators;
++        memcpy(&payloads[i], owner + column->offset, sizeof(void*));
++        memset(owner + column->offset, 0, sizeof(void*));
++        column->present = payloads[i] != NULL;
++        const uint64_t bytes = column->present ? column->count * column->width : 0;
++        okay = bytes <= BUSTER_CFG_SNAPSHOT_LIMIT && header->payload_bytes <= BUSTER_CFG_SNAPSHOT_LIMIT - bytes;
++        header->payload_bytes += bytes;
++    }
++    FILE* out = okay ? fopen(path, "wbx") : NULL;
++    okay = out != NULL;
++    if (okay)
++    {
++        okay = fwrite(header, sizeof(*header), 1, out) == 1 && fwrite(columns, sizeof(columns[0]), header->column_count, out) == header->column_count;
++        for (uint32_t i = 0; okay && i < header->column_count; i += 1)
++        {
++            const uint64_t bytes = columns[i].present ? columns[i].count * columns[i].width : 0;
++            okay = bytes == 0 || fwrite(payloads[i], 1, bytes, out) == bytes;
++        }
++        okay = fclose(out) == 0 && okay;
++    }
++    return okay;
++}
++
++static void tier1_cfg_snapshot_emit(const Tier1CfgInput* input, const Tier1CfgAllocation* cfg, uint32_t instructions)
++{
++    const char* prefix = getenv("BUSTER_TIER1_CFG_SNAPSHOT");
++    const char* setting = getenv("BUSTER_TIER1_DUMP_BLOCKS");
++    const uint64_t minimum = setting != NULL ? strtoull(setting, NULL, 10) : 0;
++    if (prefix != NULL && prefix[0] != 0 && input->block_count >= minimum)
++    {
++        static uint64_t serial;
++        const uint64_t number = __atomic_fetch_add(&serial, 1, __ATOMIC_RELAXED);
++        char path[4096];
++        const int length = snprintf(path, sizeof(path), "%s-p%ld-f%llu-b%u-v%u.cfgsnap", prefix, (long)getpid(), (unsigned long long)number, input->block_count, input->value_count);
++        const bool okay = length >= 0 && (size_t)length < sizeof(path) && tier1_cfg_snapshot_write(path, input, cfg, instructions);
++        fprintf(stderr, "CFG snapshot %s: %s\n", okay ? "written" : "failed", path);
++    }
++}
