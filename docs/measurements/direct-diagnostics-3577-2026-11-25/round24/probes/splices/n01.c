@@ -1,0 +1,8 @@
+#if 0
+#el\
+se
+#define Y 1
+#endif
+int a[Y];
+int f(void) { return 0; }
+/* A window lexes the tokens before this comment: more than eighty bytes of the file follow them. */

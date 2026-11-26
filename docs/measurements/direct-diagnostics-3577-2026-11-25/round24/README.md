@@ -19,7 +19,8 @@ The merge is 3be61f2a6 (the tables are `costs refresh`'s output again); the fix 
 
 ## Gate (`scripts/u-checks.sh`, `results/u-checks.log`)
 
-Against r2's binary (472cc48a3's code, before the merge), in this container:
+On f8c4f8e1e (the ungated fix; the later trees' checks are below), against r2's binary (472cc48a3's code, before the
+merge), in this container:
 
 - sqlite3.c's object (the host's headers, and the count's corpus configuration): identical, direct;
 - every C file under `tests/` (r2's list of 4,637): alike, 310 direct (r2 310); all 4,789 of today's: alike, 322 direct;
@@ -51,8 +52,9 @@ has a byte after a backslash. h's single test sends each block with any event (a
 the compares too, which costs more than g's second test. g's cycles at this placement are 0.4 to 0.9 M over the merge's
 in all three rounds, but its profile puts the difference elsewhere, spread over functions it doesn't change
 (`fast_cc_expr` +0.36 M, `fast_pp_drain` +0.27 M, `fval_to_gp_full` -0.22 M): the placement's. The PR takes g
-(969573021, the same tree); CI's instruction check reads 211,970,371 on it (`results/ucn-base.txt`), now
-`tools/ci/compile-instructions.txt`, and sqlite3.c's object is the merge's (`aef0e35896a7e863`).
+(969573021, the same tree); CI's instruction check reads 211,970,371 on it (`results/ucn-base.txt`), which
+984886188 wrote in `tools/ci/compile-instructions.txt` (97a900f5d later 211,927,404, below), and sqlite3.c's object is
+the merge's (`aef0e35896a7e863`).
 
 ## The lines next to the rule (`probes/lines/`, `probes/c23-numbers/`)
 
@@ -93,3 +95,30 @@ Main a62529650 and the head b753417b4, each built at the eight `BUSTER_CHECKER_O
 +5.85 M cycles (+7.7%) and +16.15 M instructions (+8.25%). Round 23's sweep (another hold, main 1e1ca2dd6) read +6.30 M
 (+8.4%); this round's own changes add 0.09 M instructions, so the difference between the two sweeps is the holds' and
 main's, not a gain of this round.
+
+## A gap left: a conditional on a spliced line (`probes/splices/`, `results/splice-*.txt`)
+
+The skip of an inactive group takes a '#' after any newline as a line's first character, an escaped one too, so a
+conditional on a line a backslash joins to the one before it ends or opens a group where the full pipeline reads no
+directive. Two of 18 probes differ, both compiling where the full pipeline errs: `int x \` then `#else` (the #else
+taken, `#define Y 1` and `int a[Y]` compiled) and `int x \` then `#if 1` (the nesting miscounted). Main's direct path
+does the same. Every fix tried costs sqlite3.c's compile in the skip loop, whose blocks carry state already spilled to
+the stack (CI's instruction check on the 9700X, against 211,928 K for b753417b4):
+
+| form | skip function | instructions |
+| --- | ---: | ---: |
+| b753417b4 | 1506 | 211.928 M |
+| a flag the loop carries, a comment's line checked in the comment branch (d95424e1e) | 2020 | 212.913 M |
+| the same, bailing in place (c8fd7bf2f) | 2199 | 213.260 M |
+| splice masks in the backslash branch, the conditional's cold walk (a8e9e2a1d) | 2160 | 212.825 M |
+| the conditional's cold walk alone (25fd00783) | 2054 | 212.889 M |
+| the splice masks alone (5b292b1da) | 1582 | 212.320 M |
+
+A directive event in skipped text is frequent (each `#define` of a skipped header, tens of thousands a compile), so
+a dozen instructions at each cost about 1 M; and about a fifth of skipped blocks hold a macro continuation's backslash,
+so even a branch on the backslash mask isn't rare enough for a second lead-run carry. a8e9e2a1d (kept on the local
+branch `splice-fix-attempt`) passes test-direct, the differential and all 58 probes, and handles every form exactly
+but blanks between a backslash and its newline (which leave); it was not pushed for its +0.90 M instructions. A design
+that costs nothing here would decide a conditional's line in the directive table's walk that main's skip loop doesn't
+have yet, or keep the escaped newlines out of the line starts in a pass over the group that only blocks with both a
+backslash and a '#' take.
