@@ -1,0 +1,81 @@
+name: Measure startup-data locality for PR 3632
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  startup-locality:
+    if: github.repository_id == '1421805693'
+    runs-on:
+      group: buster-9700x-service-dispatch
+      labels: [self-hosted, Linux, X64, buster-zen5, ryzen-9700x]
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    env:
+      BUSTER_HOST_ARCH: znver5
+      BUSTER_DEBUG_INFO: '0'
+      HEAD_SHA: 170b82def21a488f903a48ab6484a30b4030022e
+      BASE_SHA: 8e4d32879e17b7d9548cad54257a2f8461328366
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.BASE_SHA }}
+          path: base
+          persist-credentials: false
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: ${{ env.HEAD_SHA }}
+          path: candidate
+          persist-credentials: false
+      - name: Stage official toolchain and verify frozen SQLite source
+        run: |
+          grep -Em1 '^model name[[:space:]]*:[[:space:]]*AMD Ryzen 7 9700X([[:space:]]|$)' /proc/cpuinfo
+          test "$(git -C base rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$HEAD_SHA"
+          bash tools/ci/setup-benchpress.sh
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+      - name: Compare whole-process startup and SQLite compilation
+        run: |
+          evidence="$RUNNER_TEMP/startup-locality-$GITHUB_RUN_ID"
+          mkdir -p "$evidence"
+          printf '%s\n' "base=$BASE_SHA" "head=$HEAD_SHA" "workflow=$GITHUB_SHA" > "$evidence/identity.txt"
+          clang --version >> "$evidence/identity.txt"
+          for side in base candidate; do
+              (cd "$side" && taskset -c 0-7 ./build.sh --config Release --jobs 8)
+              sha256sum "$side/build/compiler" >> "$evidence/identity.txt"
+          done
+          ps -eo psr,pcpu,pid,etimes,user,comm --sort=-pcpu | sed -n '1,10p' > "$evidence/load-before.txt"
+          cat /proc/loadavg >> "$evidence/load-before.txt"
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          sqlite_flags=(-DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite")
+          printf 'int add_one(int x) { return x + 1; }\n' > "$evidence/tiny.c"
+          for workload in tiny sqlite; do
+              flags=(-c "$evidence/tiny.c")
+              if [[ "$workload" == sqlite ]]; then
+                  flags=(-c "${sqlite_flags[@]}" "$sqlite/sqlite3.c")
+              fi
+              for mode in default full; do
+                  mode_flags=()
+                  if [[ "$mode" == full ]]; then mode_flags=(--no-direct); fi
+                  for side in base candidate; do
+                      taskset -c 2 "$side/build/compiler" "${flags[@]}" "${mode_flags[@]}" -o "$RUNNER_TEMP/$side-$workload-$mode.o"
+                  done
+                  cmp "$RUNNER_TEMP/base-$workload-$mode.o" "$RUNNER_TEMP/candidate-$workload-$mode.o"
+                  sha256sum "$RUNNER_TEMP/base-$workload-$mode.o" >> "$evidence/identity.txt"
+                  (cd candidate && taskset -c 2 ./build/compiler measure-compile --runs 41 --reference ../base/build/compiler -- "${flags[@]}" "${mode_flags[@]}") | tee "$evidence/$workload-$mode.txt"
+              done
+          done
+          ps -eo psr,pcpu,pid,etimes,user,comm --sort=-pcpu | sed -n '1,10p' > "$evidence/load-after.txt"
+          cat /proc/loadavg >> "$evidence/load-after.txt"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: startup-locality-pr3632
+          path: ${{ runner.temp }}/startup-locality-${{ github.run_id }}
