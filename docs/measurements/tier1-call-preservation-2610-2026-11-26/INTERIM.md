@@ -11,6 +11,13 @@ The compiler identities, source patches and candidate labels distinguish experim
 No experiment is qualified solely by fewer call-save instructions. This is an interim record: no measured policy
 is accepted for production, and the policy investigation continues.
 
+This third checkpoint completes the weighted256 experiment's correctness and target checks and preserves
+the new raw measurements. **Mask256 fails the primary target: `yy_reduce` is unchanged**, despite reducing
+the complete SQLite workload by 14,242,179 instructions (0.632756544%). Only SQLite and Lua arithmetic
+were measured dynamically for256; all five Lua native correctness oracles passed. The paired counts use
+the freshly captured baseline, with the two-instruction historical differences for calls/tables recorded
+explicitly. The first two published checkpoint archives remain immutable.
+
 ## Recorded comparisons
 
 | Mask | Measurement behavior |
@@ -26,9 +33,10 @@ is accepted for production, and the policy investigation continues.
 | 18 | New compiler: soft avoidance with a guard against strict interior multi-entry joins |
 | 34 | New compiler: soft avoidance confined to a single basic block |
 | 128 | Later compiler: complete physical caller/callee register permutation after allocation |
+| 256 | Later compiler: complete permutation scored with exact lazy epochs and estimated uniform CFG frequencies |
 
-All eleven listed masks are built and native-verified. Masks 6/18/34 were built with the guarded compiler;
-128 uses the later exchange compiler. Their source and results must be read from their own compiler/validation
+All twelve listed masks are built and native-verified. Masks 6/18/34 were built with the guarded compiler;
+128 uses the exchange compiler and 256 uses the weighted compiler. Their source and results must be read from their own compiler/validation
 receipts. Masks 10 and 64 were not measured.
 
 The original measurement compiler's masks **0 and 1 reproduce the complete baseline and recipe-head ELF files
@@ -37,7 +45,7 @@ Every initial mask passed the frozen SQLite verification hash and all five fixed
 Each also compiled the existing frame-address fixture with `--tier1 --verify`: six functions compiled and
 code-certified, none uncertified or falling back, and native output equal to Clang -O0.
 
-Compilation coverage is unchanged throughout all eleven masks: SQLite 2709/2709 functions by Tier 1;
+Compilation coverage is unchanged throughout all twelve masks: SQLite 2709/2709 functions by Tier 1;
 Lua 1086/1087, with only the original `luaD_rawrunprotected` unsupported-lowering fallback. Internal and resource
 failure counts are zero. `local/static-summary.tsv` preserves the complete static comparison.
 
@@ -96,7 +104,7 @@ per-function and ABI/call-origin deltas; `diagnosis/` retains the selected closu
 
 The filtered diagnostic instruction counts retain their original total/unmatched headers. Those totals refer
 to the complete capture, while the file contains only selected function rows. Do not sum a filtered file as if
-it contained the complete program. This packet includes compact completed summaries/audits, not raw captures. During a later executor restart,
+it contained the complete program. The earlier measurements retain compact completed summaries/audits. During a later executor restart,
 the temporary directory containing the complete Callgrind captures and disassembly joins was cleared. Those
 original raw files are no longer retained. The recorded results, input/program identities and selected diagnostic
 rows survive; fresh baseline/candidate captures are required for the final acceptance comparison.
@@ -206,7 +214,95 @@ converged on the original 1,910-block yy_reduce CFG in 49 sweeps (230,336 bounde
 mass absorbed). Its new arena adapter tests were also pending restored tools. `investigation/` preserves
 these sources/logs with their provisional status; they are not an accepted or measured compiler policy.
 
+The post-checkpoint frequency handoff is complete in `validation/frequency/`: 1,100 semantic checks and
+17 actual-arena adapter checks pass; the same 1,100 checks pass under AddressSanitizer/UndefinedBehaviorSanitizer.
+Two private mutants fail 14 and 82 checks respectively. The actual `yy_reduce` graph again converges in
+49 sweeps with exact mass conservation. The helper's README records matching-CSR preconditions,
+scratch rollback, bounded refusal, rounding/layout limitations and the uniform-probability assumption.
+LeakSanitizer's separate ptrace-based scanning could not run in this executor; the successful address/UB
+run disables only leak scanning and preserves that runtime refusal log. `compilers/toolchain-restoration-receipt.txt`
+records the restored exact Clang 23.1.4 toolchain, verified by the repository's unchanged staging scripts.
+
+The finalized exact-epoch handoff is separately preserved in `validation/exchange-epochs/`.
+Its original-emitter and shared-transition-state versions both pass 2,017 checks with identical full logs;
+the fixtures cover 36 allocation-certified emissions, eight also machine-certified. The production
+proof-disabled syntax check passes. This validates that helper snapshot and its scratch-column API;
+integration with the frequency estimate and paired corpus measurement require their own evidence.
+
+The subsequent weighted-scorer integration fixture snapshot is in `validation/weighted/`: 113 checks
+pass, including 70 native checks and 32 hostile-call executions, with zero skips. The deliberate RDI/RBX
+allocation cases use the real complete CFG allocator directly so that an earlier allocation preference
+cannot rewrite the controlled masks; allocation and machine-code certificates check the resulting mappings.
+Separate native fixtures traverse the full production path. The subsequent hosted compiler's own mask 0/128
+controls and mask 256 corpus correctness, certification and fresh paired counts are recorded below.
+
 The restart preserved `/workspace` artifacts but cleared temporary captures and the installed compiler cache.
 The original compact measurements remain historical results from the recorded environment. A final candidate
 must be compared against a freshly captured baseline in the restored environment, with compressed raw captures
 saved immediately after each run. No Benchpress/9700X work was dispatched.
+
+## Weighted compiler follow-up
+
+The hosted weighted compiler uses requested head `3ec965d8ffea57df950aef046457c20b0efbbf99` and actual
+merge `298b9d7189127039b433a2007497e171425312e0`, built in run 45813208911. All nine staged compiler
+source blobs match that merge exactly. Its main parent is the same as the preceding exchange and trace
+products. `compilers/weighted/` retains the full identity, source overlay, manifest checks and exact commands.
+
+The weighted product's masks 0 and 128 reproduce the complete SQLite/Lua ELFs and origin sidecars of the
+original baseline and frozen128 programs respectively. All three masks pass the original frame fixture,
+SQLite native verification and five fixed-seed Lua oracles with unchanged coverage. Mask 256 passes 257194
+full emitter checks with zero failures. Its SQLite `--verify` build retains 2351 certified / 74 uncertified
+functions and exactly reproduces the ordinary mask-256 ELF and sidecar. `local/weighted/` contains those
+reports, sidecars, native outputs and parity receipts.
+
+Mask 256 still leaves the primary target unchanged. The complete `yy_reduce` tag row is byte-identical.
+Both symbols contain 50,459 bytes and 12,103 instructions at identical function-relative offsets. The linked
+symbol moves from 0x188830 to 0x181b70, so its raw bytes are not wholly identical: 814 instructions have a
+changed PC-relative disp32 (613 direct calls and 201 RIP-relative references). A strict complete-function
+comparison verifies that every changed field resolves to the same symbolic target, all other bytes match,
+and all instruction lengths, registers, widths, ordinary immediates and addressing modes match. The other
+11289 instructions have exact raw-byte equality. The comparator, actual disassembly inputs, every accepted
+relocation and byte-identical tags are in `diagnosis/weighted256/`.
+
+The weighted trace assigns negative estimated savings to all 24 eligible `yy_reduce` pairs and selects no
+exchange. The best scores are RSI/R15 -0.195837039500 and RDI/R15 -0.223028070759 records per invocation.
+Uniform successor probabilities are a heuristic, and this source makes no profile-independent performance
+guarantee. In particular, the lowered dispatch guard is not known to execute each arm equally often.
+
+Fresh restored-environment captures are separate from the earlier historical summaries. All six baseline
+workloads and the mask-256 SQLite/arithmetic pair pass complete origin fits and zero in-executable unmatched
+instructions.
+
+| Measured program or target | Fresh baseline instructions | Mask256 instructions | Delta |
+| --- | ---: | ---: | ---: |
+| SQLite speedtest1 | 2,250,814,969 | 2,236,572,790 | -14,242,179 |
+| Lua arithmetic | 865,590,587 | 865,586,335 | -4,252 |
+| SQLite `yy_reduce` target | 103,295,056 | 103,295,056 | 0 |
+
+No other mask-256 Lua workload was captured after the unchanged primary target was established.
+`yy_reduce` retains 1,851,473 C stores and 2,072,465 R reloads.
+Its first instruction executes 1227631 times; gross RSI/RDI C/R costs are about 1.239521/1.214795 records per
+invocation before any new entry copy, displaced-callee epoch or argument-shuffle cost. The actual indirect
+table-dispatch path executes on 83.265167% of invocations, versus the current uniform estimate's 50%.
+
+`measurements/restored/` contains the compact fresh counts, audits, per-function deltas, full method, and
+all eight newly captured raw Callgrind files plus their native/counted stdout/stderr, compressed immediately
+after each workload. Those actual raw captures total less than 1 MiB and are included in this packet.
+Its `comparison-vs-fresh-baseline.tsv` is the completed two-workload comparison; `comparison-all-origins.tsv`
+lists every origin/derived count; `baseline-vs-original.tsv` preserves the six fresh-versus-historical controls.
+These tables retain the earlier historical comparison unchanged. SQLite's 20,680,856 fewer C/R instructions
+and 716,572 fewer argument moves are partially offset by 7,155,249 additional entry moves; spills, edges,
+rematerializations, frame instructions, branches and ordinary nodes are unchanged.
+The separate `measurement-restored-2610.tar.gz` archive preserves every new compressed raw capture and
+native/counted output, with SHA256 `4e398ac7be4f00692555b25b4acf9133cf762312a1bd7889bcbbd947d1f3d8c1`.
+Those new captures do not recover the lost earlier raw files. Four fresh baseline workload totals equal
+their historical totals; calls and tables each differ by two ordinary-node instructions, with all transport
+and other category totals unchanged. No cause is asserted. The paired mask-256 comparison uses the fresh
+baseline. Neither the correctness gates nor the aggregate reductions establish the requested target fix.
+
+The read-only lowering audit in `diagnosis/switch-probability/` finds 348 jump-table entries, 279 distinct
+native destinations, and no entry targeting the common suffix. The final CFG nevertheless has 280 distinct
+dispatch successors, including the unused default, and loses the entry multiplicities. The complete
+weighted256 and frozen128 target CFG chunks are byte-identical. These facts explain concrete limitations
+of uniform distinct-successor probabilities; they neither prescribe a new probability constant nor establish
+that correcting the estimates would make a whole-function exchange profitable.

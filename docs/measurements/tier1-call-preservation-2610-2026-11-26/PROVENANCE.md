@@ -9,6 +9,9 @@
 | Recipe candidate with corrected fixture | `4e89739c94b77a76ccedf3c064f2ac4fbc455910` | `45105152b2c893459ddf39f446dee47a61630bdd` | 45789038744 | Not used for corpus builds |
 | Original measurement compiler | `d3889cbc8db8d1b86d3f472afcf56f8fb40a3164` | `6de749285ba89c1c8e61a454164c433809c8f96b` | 45790080564 | 15103315276 |
 | Guarded measurement compiler, actual merge | `5b0ebc02873b4ceaa9b40f7633c3c93010fd2786` | `351bd31f9825acf7945a960f09e312c2b2e4333d` | 45795326234 | 15105430135 |
+| Exchange128 compiler, actual merge | `cce0c12c9be54aff61eda65396fc5e8ecbe7d733` | `175d0a7d5b118c17d1b7bebaad0959f0f9154be9` | 45803430111 | 15108093469 |
+| Trace-only compiler, actual merge | `2996af1f442745fd0378544e09c631d31c92c834` | `51b350ec2b3808cdd669f38a9515f42b6c4655ef` | 45808576923 | 15110977240 |
+| Weighted256 compiler, actual merge | `298b9d7189127039b433a2007497e171425312e0` | `a1d20ab296ebf48ad85c12210dd089568e6fab44` | 45813208911 | 15113529524 |
 
 Recipe and original measurement product revisions are GitHub pull-request merges `043fadbaf1f76577f4ba47ce75ebe57f164a2fb8`
 and `fd3af5a633acd67ab5bf228fa7b70304a5da9ecd`; their product trees match the named source commits exactly.
@@ -22,7 +25,7 @@ documentation; no Tier 1 allocator/emitter file differs. The complete comparison
 Controls 0/2 have exact whole-ELF and origin-sidecar parity with the earlier baseline/soft-only programs. This
 establishes corpus comparability despite the source difference; it is not an exact branch-tree identity claim.
 
-All four products are row `vector none O3`, toolchain identity
+All recorded compiler products are row `vector none O3`, toolchain identity
 `eda0bc02300979a219273d969c9830eb0090c72d1fa357b24bc308ade5050259`.
 Host flags are `-march=x86-64-v4 -maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni`.
 Clang is 23.1.4, LLVM commit `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`; CMake 4.4.3 and Ninja 1.13.2.
@@ -34,7 +37,31 @@ baseline     c090b5d35a9d031afe6a37771445dff87b9541d3521175c45001352164a2b2ff
 recipe       1f5a2f93097c5ea915b76865140f5629852351d172663754216dfd17faa11fda
 measurement  6c7b35ae36b09373ffef24c4d14dfdea50ac40ed1917fdd8fdbbf2ee07a9214d
 guarded      f0f952159a819cc3ebbecdd168a7ac1bbfaf11480ad0123fb554fe26cf8bab7e
+exchange128  ea386b9649f2d00c2fde10d00bfa462bdfaf9e9a10c3e4a2c5ad00ca98e8a013
+trace-only   e68cb52724b29e601652972861090b0ff9c00a84f43f2cf1d6523467cdbd578e
+weighted256  2d194ea6fc6f62f48ac87cbb72fac8254fd5fb4526e5e5ed2e0c93680ef2c884
 ```
+
+The weighted compiler's requested source is `3ec965d8ffea57df950aef046457c20b0efbbf99`, tree
+`6d8ad37a3d09cc36736af79e371371ccffc32a07`. Its actual hosted merge has parents
+`74eacd4744a8131ba4c1a5bd8ad87b89ec0f7dbe` and that requested head. The main parent is the same
+as the preceding exchange and trace products. Every one of the nine staged compiler source blobs matches
+the actual merge tree; `compilers/weighted/merge-provenance.json` identifies those blobs and all additional
+main-side changes. There are no additional Tier1 allocator/emitter or workflow changes. This distinguishes
+source-overlay identity from whole requested-branch tree identity.
+
+The weighted archive was 84,775,539 bytes, SHA256
+`921a72fb75a67d5c6f0bfccfee066f3be686e6dc63301e4907b40eb5d293a9e3`, verified before selective extraction.
+All extracted product files pass the original product manifest. Masks 0 and 128 reproduce both entire
+program ELFs and their origin sidecars against the original baseline and frozen128 references. Mask256's
+verified SQLite build exactly reproduces its ordinary build. All compiler provenance, control receipts,
+source snapshots and executed-script hashes are retained; no compiler executable is redistributed.
+
+Before this checkpoint, the obsolete local exchange128 compiler executable was removed after its original
+checksum/manifest and all retained identity/provenance files were verified again. The weighted compiler's
+0/128 entire-ELF and sidecar controls were also compared again. `compilers/exchange/obsolete-compiler-cleanup.txt`
+and `storage-reclamation-2610.txt` retain the exact deletion receipt. All measured corpus executables and
+the latest weighted compiler remain available in the working environment.
 
 ## Frozen workload inputs
 
@@ -89,6 +116,34 @@ The program host is Linux 6.18.57, Intel Xeon Platinum 8370C, Debian glibc 2.41-
 Hosted compiler build images report Ubuntu 26.04 image `20261116.202.1`, glibc 2.43; those build-host receipts
 are separate from the program execution host.
 
-Raw Callgrind and complete disassembly accounting are maintained separately. The final merged packet should
-retain the exact executable-load-range join, foreign-object audit, stable-path controls and their helper hashes.
-This initial packet does not substitute local wall times for runtime or compiler timing evidence.
+## Restored-environment comparisons and raw preservation
+
+The executor restart cleared the earlier temporary raw captures. Their historical summaries remain intact,
+but the new mask256 comparison uses a newly captured baseline. The original mask0 executables/sidecars and
+the new compiler's mask0 controls are byte-identical. Fresh baseline totals match the original for SQLite,
+arithmetic, closures and strings; calls and tables each differ by -2 ordinary-node instructions. Every
+other origin category is identical. `measurements/restored/baseline-vs-original.tsv` records all six rows,
+without asserting a cause for those two small differences.
+
+The fresh pair covers SQLite and Lua arithmetic only. The unchanged `yy_reduce` target was established
+before the other four mask256 Lua workloads were captured, so their dynamic results are absent.
+`comparison-vs-fresh-baseline.tsv` records the two completed comparisons and
+`comparison-all-origins.tsv` records each original and derived count. Each delta is candidate minus the
+fresh baseline; the percent delta is 100 times that difference divided by the fresh baseline total.
+Neither table replaces the historical `measurements/comparison-vs-baseline.tsv`.
+
+All eight new raw Callgrind files and their compressed native/counted stdout/stderr are included under
+`measurements/restored/e000` and `e256`. They were compressed into workspace storage immediately
+after each measured workload ended. The original driver and post-restart archival extension, source hashes,
+exact stable-path commands, executable-load-range joins, foreign-object audits and origin fits are retained.
+`measurement-restored-2610.tar.gz`, 9,958,501 bytes and SHA256
+`4e398ac7be4f00692555b25b4acf9133cf762312a1bd7889bcbbd947d1f3d8c1`, separately preserves full disassemblies
+and the complete instruction-level SQLite join. Those reproducible larger files are omitted from the compact
+checkpoint; their hashes remain in `original-archive-SHA256SUMS`.
+
+The two earlier immutable checkpoints remain separate: `evidence-2610-interim.tar.gz`, SHA256
+`7dad7ee0c998a7cbefd3325063d78ff0db68c294ed61cda06027895165a02e00`, published at performance commit
+`b986defc2a872225cb673829f8668d7c601a5965`; and `evidence-2610-exchange-checkpoint.tar.gz`, SHA256
+`d88ff7ec7dcaf083ec19a6368bb27b1fec2bd45290ccbec34fbe8f96867c3084`, published at
+`c502d005bf2f261dc3b11a0058c105a412da9293`. This next checkpoint extends those records and does not alter them.
+No local wall time is presented as runtime or compiler timing evidence.

@@ -2,7 +2,7 @@
 
 **Interim checkpoint: none of the policies in this packet is accepted for production.** The investigation of [buster#2610](https://github.com/buster14a/buster/issues/2610) continues in [draft #3630](https://github.com/buster14a/buster/pull/3630). [Draft #3639](https://github.com/buster14a/buster/pull/3639) is temporary measurement instrumentation and must not be merged.
 
-This checkpoint preserves expensive, reproducible evidence from the rejected recipe, soft-preference, join-guard and global-register-exchange experiments. The complete packet is [evidence-interim.tar.gz](evidence-interim.tar.gz), SHA256 `d88ff7ec7dcaf083ec19a6368bb27b1fec2bd45290ccbec34fbe8f96867c3084`. It contains 735 files: source/build identities, compiler and input digests, exact commands, native output and certificate receipts, instrumented origin sidecars, focused regression/mutation fixtures, and compact completed dynamic accounting. It contains no executable binaries.
+This third checkpoint completes the weighted global-exchange experiment. **Mask 256 improves aggregate SQLite instruction counts but leaves `yy_reduce` unchanged, so it fails the primary target.** The complete packet is [evidence-weighted.tar.gz](evidence-weighted.tar.gz), SHA256 `5a166ec22fe2e4a0fd52ce3e77ad185b53cae21b64dfb23a23c85ae1236ce919` (6,759,591 bytes). It contains 1,031 checksummed files plus its root manifest, including all eight fresh compressed raw Callgrind captures, source/build identities, exact commands, native and certificate receipts, origin sidecars, focused proofs, and completed accounting. It contains no executable binaries. The preceding [exchange checkpoint](https://github.com/buster14a/buster-performance/tree/c502d005bf2f261dc3b11a0058c105a412da9293/docs/measurements/tier1-call-preservation-2610-2026-11-26) remains immutable; its archive is also retained here.
 
 ## Findings recorded here
 
@@ -22,6 +22,7 @@ Soft caller-register avoidance cuts `yy_reduce` C/R to 28,951, but it increases 
 | e018 | 2,322,759,489 | 71,944,520 | 306,246,912 | 1886742 |
 | e034 | 2,258,941,425 | 8,126,456 | 249,380,972 | 2759194 |
 | e128 | 2,247,566,845 | -3,248,124 | 246,014,704 | 3923938 |
+| e256 (fresh pair) | 2,236,572,790 | -14,242,179 | 233,060,363 | 3923938 |
 
 `e000` is baseline; `e002` soft avoidance; `e003` soft avoidance plus folded recipes; `e006` soft avoidance plus broader residency of existing recipes; `e011` a two-call guard plus folded recipes; `e018` an internal-join guard; `e034` a single-block guard; `e128` a global caller/callee register exchange that preserves the original fragments and edge moves. The [full comparison](comparison-vs-baseline.tsv) includes all five Lua workloads and rematerialization/frame categories. Every listed dynamic capture passed the complete target-address/origin audit with zero unmatched target instructions.
 
@@ -33,7 +34,15 @@ Mask 128 preserves ordinary spills, rematerialization and edge traffic, but fail
 
 A diagnostic-only hosted compiler at `7b6f0a5ce11496dbc74732b379a63ef204ca5bf9` reproduces the entire mask-128 SQLite executable and origin sidecar. `yy_reduce` supports all 617 calls. The RDI/RSI exchanges with R14/R15 pass the original live-mask subset condition but are vetoed because one call adds one argument shuffle. No fixed-register or unsupported-argument defect is involved. The archive retains the exact masks, call positions, trace source, build identity and parity checks.
 
-The in-progress replacement models actual lazy save/restore epochs and uniform CFG flow. Its isolated numerical and emitter checks are recorded with precise source-validation limits; the reshaped production API had not been rebuilt before the executor restarted. It is not an accepted or measured compiler policy.
+### Completed weighted exchange (mask 256)
+
+The new scorer models actual lazy save/restore epochs, exact ABI parallel copies, and bounded uniform CFG visit estimates. Its qualified helper snapshots pass 2,017 epoch checks, 1,100 frequency checks plus 17 arena-adapter checks, and 113 combined cost/native checks, including 32 hostile-call executions. Frequency address/UB checks and two mutation checks pass. Hosted run [45813208911](https://github.com/buster14a/buster/actions/runs/45813208911) built actual test merge `298b9d7189127039b433a2007497e171425312e0`; all nine staged source blobs match that merge. Masks 0 and 128 reproduce their complete original SQLite/Lua executables and origin sidecars. Mask 256 passes 257,194 emitter checks, native corpus oracles, and the paired full SQLite certificate build with unchanged coverage.
+
+The fresh SQLite pair removes 20,680,856 call-save/restore instructions and 716,572 argument moves, but adds 7,155,249 entry copies: a net reduction of 14,242,179 instructions (0.632756544%). Spills, edges, rematerialization, frame instructions and ordinary nodes are unchanged. Lua arithmetic removes 4,252 instructions. The remaining Lua workloads were not captured for 256 after target failure was established. [The fresh comparison](comparison-vs-fresh-baseline.tsv) keeps these paired counts separate from historical results.
+
+The complete `yy_reduce` symbols both contain 50,459 bytes and 12,103 instructions at identical relative offsets. Of these, 814 differ only in verified PC-relative displacement fields to the same symbolic targets; every other byte matches. Its tags are byte-identical. Thus the linked bytes are not wholly identical, but the allocation and instruction structure are unchanged. The scorer chooses no exchange: its best two estimates are RSI/R15 -0.195837039500 and RDI/R15 -0.223028070759 instructions per invocation.
+
+Actual entry frequency is 1,227,631. RSI and RDI preservation cost only 1.239521 and 1.214795 instructions per invocation before an entry copy, displaced callee epochs or argument shuffles. The switch dispatch runs on 83.265167% of invocations versus the static estimate's 50%. A read-only lowering audit finds that the CFG also loses jump-table entry multiplicities and includes an unused default edge. These are diagnosed model limitations, not evidence for a chosen replacement probability or an accepted fix.
 
 ## Reproduction and validation
 
@@ -42,7 +51,7 @@ The in-progress replacement models actual lazy save/restore epochs and uniform C
 Extract the archive at the root of a buster-performance checkout. It restores the complete directory, including the original detailed README and its file manifest:
 
 ```sh
-tar -xzf docs/measurements/tier1-call-preservation-2610-2026-11-26/evidence-interim.tar.gz
+tar -xzf docs/measurements/tier1-call-preservation-2610-2026-11-26/evidence-weighted.tar.gz
 cd docs/measurements/tier1-call-preservation-2610-2026-11-26
 sha256sum -c SHA256SUMS
 ```
@@ -51,7 +60,7 @@ The same pinned inputs and shared executable/database paths are used across vari
 
 The packet distinguishes compiler source commits from GitHub test merges and documents the baseline local pipeline's sandbox-specific failures. It does not treat those local pipeline checks as passing. Full emitter and paired SQLite certificate receipts for the join guard are included, with the unchanged emitted-code certification limitation stated explicitly.
 
-These are deterministic generated-program instruction counts and correctness checks on the cloud Xeon host. **No timing or 9700X qualification is claimed; Benchpress/9700X was not accessed.** This checkpoint contains compact completed summaries and audits. A later executor restart cleared the temporary directory containing the original raw Callgrind captures and complete joins; those original raw files are no longer retained. Input/program identities, selected diagnostic rows, and saved summaries survived. Final acceptance requires a freshly captured baseline and candidate, with compressed raw evidence saved immediately after each run.
+These are deterministic generated-program instruction counts and correctness checks on the cloud Xeon host. **No timing or 9700X qualification is claimed; Benchpress/9700X was not accessed.** An executor restart cleared the original temporary raw captures after compact results were saved; those older raw files remain unavailable. After restoring the pinned tools, all six baseline workloads were recaptured and compared to mask 256 for SQLite and arithmetic. All eight new raw captures and compressed native/counted outputs are included in this archive. Four baseline totals match the historical results; calls and tables each execute two fewer ordinary-node instructions, with all transport totals unchanged. No cause is asserted. Candidate 256 is compared to the fresh baseline. A later acceptable policy still needs its own complete paired qualification.
 
 ---
 Agent session: 6b07eef1-3474-83ed-9c43-8fe10b12d07a (OpenAI session ID; no share URL is exposed)
