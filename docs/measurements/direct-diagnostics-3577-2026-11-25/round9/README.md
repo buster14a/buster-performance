@@ -51,6 +51,8 @@ per-declarator work itself. A structural lever (the checks in a pass of
 their own over the tokens, or a vector pre-pass that rules out most names and operators at once) would need its
 ceiling measured by emulation before it is built.
 
-The cycles follow round 2's finding (`round2/README.md`, "What the rest waits on"): 7.3 M cycles more, with the
-added code's footprint past the 32 KB L1I. The peak RSS difference is the same as round 1's, file-backed pages the
+The cycles: 7.3 M more, at the compile's own rate (231.9 M instructions in 88.0 M cycles, 2.64 a cycle, against
+main's 211.8 M in 80.7 M, 2.62), so they follow the instruction count. (Corrected 2026-11-26: this paragraph first
+gave round 2's reading, the added code's footprint past the 32 KB L1I, which shows in the instruction cache's misses
+but not in the rate; see round 2's correction.) The peak RSS difference is the same as round 1's, file-backed pages the
 checks' code and tables touch, at the same 421 minor faults.

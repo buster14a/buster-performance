@@ -66,6 +66,11 @@ fast_pp_drain, fast_pp_read_tok) too. The direct path's compiler functions are 2
 (`scripts/fnbytes.py` attributes a function's bytes to source functions): the checks' conditions inline in the hot
 functions, not their bail blocks, which are out of line. The remaining cost is code footprint.
 
+Correction (2026-11-26, round 10): the instructions a cycle are the same on both sides (main 09c3b79b 220.4 M in
+80.9 M, 2.72; ffa96d65a 238.9 M in 87.0 M, 2.75, the PR's Cost table), so the added instructions run at the compile's
+own rate and the cycles follow the instruction count. The footprint shows in the instruction cache's misses above, but
+not in the rate: the remaining cost is the checks' instructions, not their layout.
+
 `results/cyc7-*.txt` and `results/cyc8-*.txt` are IBS cycle profiles (`cnt_ctl=0`) of step4-spec and ffa96d65a
 against main; `results/ibs3-*`, `ibs5-*` IBS op profiles of 19e85f76b and step3-all. `scripts/linedelta.py` maps
 their lines through `git diff` (its BASE, R and file names are edited per comparison).
