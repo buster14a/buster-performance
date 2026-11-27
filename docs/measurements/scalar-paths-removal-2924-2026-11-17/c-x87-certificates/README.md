@@ -79,3 +79,20 @@ The same-path balanced trial compared two copies of the baseline and two copies 
 | Tier 1 | −0.030% | −0.065% | −0.057% | −0.596% |
 
 Each tier produced 1,372 byte-identical objects. Standard output and error also matched in every group. The counts include SQLite, 34 Lua units, 1,336 musl units and the long-double fixture. The full suites and per-size gate above used the same compiler source. [Four-way timings, independent object comparisons and suite summaries](cached-whole.tar.xz)
+
+### Three-round whole-driver cross-check
+
+The additional three-round comparison used three runs per binary in each round. Each row reports the middle of the three round ratios. The balanced 16-repeat timings above remain the higher-repetition experiment.
+
+| Tier | Input | Candidate | Baseline repeat |
+| --- | --- | ---: | ---: |
+| tier0 | long-double | -1.445% | -0.574% |
+| tier0 | lua | -0.314% | -0.159% |
+| tier0 | musl | -0.071% | -0.038% |
+| tier0 | sqlite | +0.302% | +1.143% |
+| tier1 | long-double | -0.534% | -0.224% |
+| tier1 | lua | +0.052% | -0.061% |
+| tier1 | musl | +0.008% | +0.054% |
+| tier1 | sqlite | -0.095% | -0.030% |
+
+[Whole-driver round medians](cached-driver-crosscheck.tar.xz)
