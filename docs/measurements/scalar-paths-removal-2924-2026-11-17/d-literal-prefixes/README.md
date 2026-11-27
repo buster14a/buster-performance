@@ -36,3 +36,15 @@ The timed cells cover two old-language policies and 87 sizes, with three indepen
 | -1.350% | +0.078% | -0.112% | -0.418% |
 
 Both versions still lose on individual sizes. [Patches, drivers, results and test receipts](producer-prefixes.tar.xz)
+
+## Classifying padding and checking unusual raw strings
+
+Classifying the known newline padding at the end of a lexer chunk avoids running the character classifier on masked-off bytes. Combining this with direct prefix emission passed the fixed 31,320 guarded comparisons and improved 2,434 of 2,610 timed cells. An additional randomized oracle found a discrepancy on the three bytes `uR"` when raw UTF string handling and a language policy that excludes the prefix were both selected. The revised implementation retains the prefix identifier and the physical quote offset, including on malformed raw strings. It passed 240,000 guarded randomized comparisons across five ASan/UBSan seeds, including mixed translations, punctuation, arbitrary lexer flags and protected file ends.
+
+The corrected version reached parity or better in 2,466 of 2,610 cells across three native runs. Its median candidate/baseline ratio was 0.708 and its worst was 1.093. The remaining losses include trigraph splices and raw literals. The full Release preprocessor passed 419 fixtures and 4,795 Clang children. Output and diagnostics matched on the four complete preprocessing commands.
+
+| Old-mode fixture | Lua | SQLite | musl |
+| ---: | ---: | ---: | ---: |
+| -3.231% | +0.081% | -0.579% | +0.214% |
+
+Values give the median paired change in user cycles from five rounds of six processes. [Patches, native timings and oracle drivers](padded-prefixes.tar.xz)

@@ -33,9 +33,9 @@ The first two columns summarize five rounds of five runs for two production buil
 | ordinary | +0.885% | +0.260% | -1.717% | -5.372% |
 | mixed | -6.250% | +0.877% | -9.084% | -11.813% |
 | wide | -59.880% | -0.433% | -60.341% | -60.800% |
-| lua | +0.432% | +0.267% | pending | +0.155% |
-| sqlite | +0.064% | +0.033% | pending | -0.075% |
-| musl | -0.323% | +0.020% | pending | -0.091% |
+| lua | +0.432% | +0.267% | -0.152% | +0.155% |
+| sqlite | +0.064% | +0.033% | -0.383% | -0.075% |
+| musl | -0.323% | +0.020% | -0.270% | -0.091% |
 
 Running one copy of each production build for seven rounds of eight runs favors the candidate on all seven inputs, including the three quiet controls. The first three-build diagnostic run assigned two entries to the baseline executable. Reversing that choice assigns two entries to the candidate. The single-warning result changes sign with the duplicated executable. The four-copy same-path measurements balance both implementations, as does the direct A/B comparison below. The reverse control was also run for the 512 ordinary warnings. Each entry reports the median ratio of paired user cycles from the seven rounds.
 
