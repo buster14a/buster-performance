@@ -21,7 +21,10 @@ median, user instructions:
 | main `6ac6c1d5` (four holds: 211,930,142, 211,930,117, 211,930,105, 211,930,102) | 211,930,102 | |
 | the pull request | 211,238,120 | −691,982 (−0.33%) |
 
-`results/measure-final.log` and `results/measure-base.log` are the last two holds' logs. The pull request writes
+`results/measure-final.log` and `results/measure-base.log` are the last two holds' logs. After main merged
+buster14a/buster#3667 (`0a2c3034`, the baseline 211,972,302), the branch merged it (`3499ec32`): main read 211,972,608
+and the merge 211,270,258 (−702,350, −0.331%), `results/measure-main2.log` and `measure-merge2.log`; the merge writes
+211270258. The pull request writes
 211238120 into `tools/ci/compile-instructions.txt`, a cut's gain.
 
 ## Why earlier fixes cost 0.4 to 1.3 M, and what costs nothing
