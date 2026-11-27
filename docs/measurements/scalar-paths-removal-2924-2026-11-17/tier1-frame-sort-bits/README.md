@@ -24,3 +24,11 @@ Use native Release with Clang 23.1.4 on the 9700X under the shared exclusive loc
 `gate.c` and `side.c` come from the preceding frame-sort experiment. `stress.c` extends that gate with every count through 512 and nine counts around each later sampled power of two. `boundary.c` fixes the class distribution. The standard and small boundary tests take medians of 21 alternating passes in a single process. The dense sweep uses 11 passes.
 
 Build each compiler with `./build.sh --config Release`. The shared-host `driver` records the compiler options, corpus selection, output comparisons and three 3-run rounds. The 16-repeat `same-driver` holds the launch path, output directory and build label fixed and rotates the candidate and baseline with one duplicate of each. The paired change is the median across repeats of the ratio of the sum of candidate user cycles to the sum of baseline user cycles. Run `bash run` from the mutations directory with `HEAD_TREE` set to exercise the independent permutation test.
+
+## Sparse index checks and cold placement
+
+The original draft also enters the radix when an indexed request lacks room for a column of uniqueness stamps. A bounded-scratch fixture forces this arm with 1–65, 96, 128 and 256 objects and two class distributions. At one object the draft exceeded baseline in four of six comparisons. Two or more objects passed every comparison.
+
+The follow-up skips uniqueness sorting for a single index, whose range is already checked by the header, and places the large radix in its own cold text section. All 408 sparse comparisons beat baseline, including the singleton. The 66 standard, 144 forced small-class and 1,086 dense comparisons at or above 33 objects also passed. Every captured plan matched, the four seeds of the frame suite and execution tests passed, and all 1,371 object files and both diagnostic streams matched.
+
+Across 16 balanced same-path whole-driver repeats, Tier 1 took 0.154% more user cycles on Lua, 0.185% more on SQLite and 0.028% fewer on musl. The two baseline copies differed by +0.016%, −0.031% and −0.037% respectively. Lua and SQLite continue to hold the whole-compiler gate. [Patch, forced-scratch fixture and timing samples](cold-placement.tar.xz)

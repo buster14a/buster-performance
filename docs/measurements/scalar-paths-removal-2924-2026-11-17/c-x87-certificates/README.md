@@ -43,3 +43,16 @@ Totals sum the median per function. Grouping those medians by emitted record cou
 Tier 0 musl took 0.10–0.16% more cycles than the first baseline in all six balanced rounds. SQLite Tier 0 was also above its first baseline in all six rounds. The median differences from the second baseline are small. The earlier fixed-order measurements also showed a Tier 0 SQLite increase. The whole-driver no-regression gate remains under investigation.
 
 `qbalanced` and `qcorpora` contain the exact benchmark commands and frozen input paths on the shared host. `proof-driver` ran under the encompassing lock for the output comparisons. In these scripts `base` is the output-comparison base, `fresh` and `fresh-control` are timing baselines, and `correct-head` is the exact candidate executable. `results/` contains the timing tables with command-line and lock chatter removed, all per-function adapter samples, official suite results, the focused mutation log and object digests. Run `python3 report.py` to regenerate the numeric summaries.
+
+## Outlined Tier 0 adapter and sparse proposals
+
+Compiler `c5524b066e13b504d996ca1cc109920bdaa5c31f` outlines the Tier 0 adapter. The full Tier 0 suite passed 21,779,895 checks and Tier 1 wide passed 36,477. Both tiers reproduced all 1,372 objects and diagnostics. A balanced 16-repeat whole-driver comparison kept the launch name, output path and build label fixed and rotated two copies each of the candidate and baseline.
+
+| Tier | Lua | SQLite | musl | Long double |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | +0.094% | −0.134% | +0.122% | −1.185% |
+| 1 | −0.038% | +0.005% | −0.037% | −0.908% |
+
+The actual adapter fixture starts five processes per arm and tier, each compiling 260 functions. Take the median for each function and sum by emitted record count. The outlined revision took 2.77% fewer adapter ticks than scalar overall in Tier 0 and 7.97% fewer in Tier 1. In Tier 0, 110/113 observed lengths met parity. Ratios for 18, 91 and 212 records were 1.403, 1.015 and 1.011. Tier 1 met parity in 80/81 lengths, with 1.139 at 36 records. Both 18 and 36 were the first adapter invocation in their respective compiler processes.
+
+A second experiment shares scratch reservations and carries a mask of proposed edits through replay and publication. That version met scalar in 108/113 Tier 0 lengths and 81/81 Tier 1 lengths. Both tiers produced identical fixture objects in the scalar, gather and candidate arms. Neither experiment clears both tiers' size gates. [Raw samples, compiler patch and reproduction](outlined-adapters.tar.xz)
