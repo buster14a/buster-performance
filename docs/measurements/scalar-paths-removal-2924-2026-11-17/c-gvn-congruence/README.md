@@ -102,3 +102,26 @@ The three compiler callers that consume only the rewritten function may use a di
 | Pressure | 6742 | 1.0105 | 0.9676 | 0.9604 | 0.9713 | 1.0086 | 1.0395 |
 
 Each of the three configurations reproduced all 1,371 baseline-vector objects. The independent cyclic-phi fixture and the official IR suites passed. All-pass whole-driver changes versus main from the three rounds were -7.57% to -7.32% on SQLite, -6.37% to -6.29% on Lua, -3.33% to -2.73% on musl. The largest all-pass and pressure size bins still exceed same-build scalar. [Pass ticks, production-driver tables, object counts and sanitizer results](ordered-phi.tar.xz)
+
+## Compacting the seven IR columns
+
+Tier 1 compacts reachable instructions in batches of sixteen, remaps operand IDs and reconstructs the auxiliary slices of calls, phis and switches in instruction order. Six additional fixtures exercise those rewrites, unreachable blocks, metadata and debug assignments. [Compiler revision](https://github.com/buster14a/buster/tree/29f09802905fabab69dc5fedade2e85a5e21f9b8)
+
+Five cold-process rounds compare both implementations inside the same instrumented Release executable on the 9700X. Each row sums the per-function median ticks. Sizes are measured at the scalar entry. Sources with different optimized IR can produce different downstream instruction counts. The caller policies and call sequence matched in each pair.
+
+| Policy | Corpus | Calls | Vector/scalar | 0–15 | 16–63 | 64–255 | 256–1,023 | 1,024+ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default | Combined | 40 | 0.8306 | — | 0.9957 | 0.8725 | 0.7990 | 0.8300 |
+| Default | SQLite | 18 | 0.8247 | — | 0.9044 | 0.9197 | 0.7897 | 0.8258 |
+| Default | Lua | 2 | 0.8763 | — | — | 0.8407 | 0.8922 | — |
+| Default | musl | 20 | 0.8703 | — | 1.0146 | 0.8691 | 0.7872 | 0.8787 |
+| All passes | Combined | 16654 | 0.8065 | 0.9195 | 0.7975 | 0.7703 | 0.7936 | 0.8354 |
+| All passes | SQLite | 7195 | 0.8072 | 0.8884 | 0.7764 | 0.7680 | 0.7927 | 0.8336 |
+| All passes | Lua | 2820 | 0.7894 | 0.8713 | 0.7867 | 0.7772 | 0.7819 | 0.8303 |
+| All passes | musl | 6639 | 0.8154 | 0.9269 | 0.8159 | 0.7692 | 0.8070 | 0.8500 |
+| Pressure | Combined | 6742 | 0.8313 | 0.9837 | 0.7899 | 0.7770 | 0.8133 | 0.8665 |
+| Pressure | SQLite | 2688 | 0.8345 | 0.9364 | 0.7751 | 0.7760 | 0.8093 | 0.8638 |
+| Pressure | Lua | 1097 | 0.8068 | 0.9440 | 0.7971 | 0.7863 | 0.8009 | 0.8423 |
+| Pressure | musl | 2957 | 0.8355 | 0.9912 | 0.7952 | 0.7734 | 0.8311 | 0.8997 |
+
+Each of the three policies reproduced 1,371 baseline-vector objects. All four IR suites passed, and ASan/UBSan passed 2,195,474 checks at each of four seeds. All populated pooled size bins favored vector. In the default musl sample, five calls in the 16–63 bin took more ticks than the walk. The retained raw rows also give the small-sample sizes and run-to-run variation. [Pass ticks, byte comparisons and test receipts](compact-rows.tar.xz)
