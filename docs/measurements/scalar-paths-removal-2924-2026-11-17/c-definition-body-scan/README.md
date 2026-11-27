@@ -36,3 +36,13 @@ The first five columns count body sizes at which the candidate matched or beat s
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | cached | 37/75 | 43/74 | 72/73 | 34/72 | 68/71 | -0.380% | -0.123% | -0.007% |
 | facts | 0/75 | 1/74 | 53/73 | 0/72 | 49/71 | -0.804% | +0.033% | +0.006% |
+
+## Preparing body marks with directive records
+
+This candidate computes the paste, stringize and optional-identifier marks when preparing each directive, alongside its kind. Macro definition processing reads the resulting byte. The benchmark uses separate production builds and charges the candidate for preparing the marks. Each cell compares five whole-preprocessor runs on 256 generated definitions, including 16 expansions. The three complete application comparisons each use five balanced rounds of five processes. All 365 output and stderr comparisons and all 419 Clang-backed fixtures passed.
+
+| Candidate | Literal | Parameter | Stringize | Paste | Optional | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| directives | 0/75 | 0/74 | 54/73 | 0/72 | 49/71 | +2.239% | +0.692% | +1.707% |
+
+Individual sizes still lose to the scalar definition scan. [Patches, exact timings, digests and tests](directive-body-marks.tar.xz)
