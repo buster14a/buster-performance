@@ -46,3 +46,15 @@ The 16-repeat, balanced whole-compiler comparison with a separately rebuilt base
 The first variant enumerates the saved-register bits for pushes, pops and stack offsets. The second also bounds-checks packed indices with a masked unsigned comparison and ranks 17–24 objects in six vectors. All 4,505 captured plans matched. Every populated size band on SQLite, Lua and musl favored the second variant. Total planner ticks fell 13.4%, 7.6% and 11.4%, respectively. All 66 standard, 144 forced-boundary and 1,150 dense comparisons favored it. In the sparse experiment 407 of 408 individual timings and all 136 of 136 size/distribution medians favored the candidate. The four frame-suite seeds and 14,646 execution checks passed. ASan and UBSan passed 2,948 permutation checks and rejected ten mutations.
 
 The production cross-check reproduced 1,371 Tier 1 objects. Sixteen balanced repeats swapped two baseline binaries and two candidate copies through the same path. The saved-register variant measured +0.092% user cycles on Lua, +0.109% on SQLite and −0.138% on musl. Adding indexed bounds and the six-vector rank measured −0.088%, +0.057% and −0.138%, respectively. The SQLite whole-compiler comparison keeps the draft open. [Implementations, captured and synthetic size results, native controls and test receipts](indexed-plans.tar.xz)
+
+## Frame output storage and 32-bit validation
+
+All three variants retain one ordering implementation. The first allocates output indices and offsets together. The second also writes checked layout results directly to output and reuses the end of the vector prefix sum. The third adds 32-bit per-alignment overflow checks. Direct layout matched every captured plan and improved all 66 standard timings, 144 boundary timings, 1,150 dense cells and 408 sparse timings. Its captured planner totals fell 10.4% for SQLite, 6.0% for Lua and 12.2% for musl.
+
+Sixteen balanced same-path repeats gave these whole-compiler changes in user cycles. Each repeat compares the sum of two candidate copies with the sum of two baseline copies. All three experiments still lost on SQLite. [Implementations, size sweeps, sample cycles and validation](frame-output.tar.xz)
+
+| Candidate | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: |
+| pooled | +0.213% | +0.112% | -0.028% |
+| direct | +0.176% | +0.232% | -0.091% |
+| dwords | +0.335% | +0.245% | -0.081% |

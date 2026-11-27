@@ -20,6 +20,7 @@ The 9700X gate covers ten spelling shapes at 117 lengths. At each shape and leng
 | First block and continuation | 650/650 | 637/650 | 308/650 | 322/650 | 2080/2080 |
 | Specialized first block | 650/650 | 649/650 | 569/650 | 375/650 | 1861/2080 |
 | Shared byte categories | 650/650 | 10/650 | 203/650 | 114/650 | 2080/2080 |
+| Flag-specialized marker scans | 650/650 | 1/650 | 312/650 | 136/650 | 1924/2080 |
 
 The bounded-block implementation passed 50 aggregate assertions under ASan and UBSan, covering the frozen matrix and protected-page tails. Eight independent mutations were detected, including late exponents, radix and separator handling, rounding cutoffs, splice priority and an unmasked tail. The compiler's checker suite passed 838,221 checks before the final cutoff assertions. The short-size losses keep the replacement under investigation. [Candidate implementations, native timings, fixture and mutation evidence](long-table-numbers.tar.xz)
 
