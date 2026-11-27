@@ -46,3 +46,13 @@ This candidate computes the paste, stringize and optional-identifier marks when 
 | directives | 0/75 | 0/74 | 54/73 | 0/72 | 49/71 | +2.239% | +0.692% | +1.707% |
 
 Individual sizes still lose to the scalar definition scan. [Patches, exact timings, digests and tests](directive-body-marks.tar.xz)
+
+## Proving the optional macro spelling absent
+
+The cached event implementation also checked whether the token source could contain the literal spelling of the optional-argument operator and whether escapes or trigraphs might synthesize it. A file without either possibility can skip reading the full token identity column for that operator. The native sweep retained the independent output and stderr comparisons at all 365 shapes and sizes. The complete Clang-backed preprocessor suite passed 419 fixtures. Each corpus timing uses five paired rounds of five processes per build.
+
+| Candidate | Literal | Parameter | Stringize | Paste | Optional | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| spelling | 0/75 | 0/74 | 37/73 | 0/72 | 40/71 | +1.719% | +0.329% | +3.302% |
+
+The remaining losses keep the definition-body scalar path in place. [Sources, exact size timings, output digests and checks](spelling-body-marks.tar.xz)
