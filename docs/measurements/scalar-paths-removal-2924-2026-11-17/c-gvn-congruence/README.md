@@ -125,3 +125,42 @@ Five cold-process rounds compare both implementations inside the same instrument
 | Pressure | musl | 2957 | 0.8355 | 0.9912 | 0.7952 | 0.7734 | 0.8311 | 0.8997 |
 
 Each of the three policies reproduced 1,371 baseline-vector objects. All four IR suites passed, and ASan/UBSan passed 2,195,474 checks at each of four seeds. All populated pooled size bins favored vector. In the default musl sample, five calls in the 16–63 bin took more ticks than the walk. The retained raw rows also give the small-sample sizes and run-to-run variation. [Pass ticks, byte comparisons and test receipts](compact-rows.tar.xz)
+
+## Single implementation and final comparison
+
+The compiler now uses vector congruence numbering for all three Tier 1 policies. An apply-only invocation reserves the graph and dominance work it uses, and verified input can skip a second verification. The old scoped walk and its runtime and benchmark selectors have been removed. [Compiler revision](https://github.com/buster14a/buster/tree/ed6304cd20b027d98b53d4a5de5f3cceea82d979)
+
+Two Release binaries used the same counter around the pass. The scalar reference was the walk in revision `29f098029`. The candidate used the final production pass sources. Each of five cold-process rounds compiled SQLite, Lua and musl on one pinned 9700X core under the hardware lock. The order of the two executables alternated by round. The table sums the per-function median ticks for each side, grouped by instruction count at entry to the scalar walk. A ratio below one favors vector.
+
+| Policy | Corpus | Calls | Overall | 0–15 | 16–63 | 64–255 | 256–1,023 | 1,024+ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default | Combined | 40 | 0.8142 | — | 0.8134 | 0.8504 | 0.7781 | 0.8156 |
+| Default | SQLite | 18 | 0.8111 | — | 0.8523 | 0.9068 | 0.7878 | 0.8117 |
+| Default | Lua | 2 | 0.8298 | — | — | 0.8377 | 0.8262 | — |
+| Default | musl | 20 | 0.8361 | — | 0.8053 | 0.8435 | 0.7397 | 0.8609 |
+| All passes | Combined | 16654 | 0.7467 | 0.8186 | 0.7266 | 0.7142 | 0.7402 | 0.7721 |
+| All passes | SQLite | 7195 | 0.7493 | 0.7806 | 0.7079 | 0.7143 | 0.7411 | 0.7710 |
+| All passes | Lua | 2820 | 0.7257 | 0.7672 | 0.7188 | 0.7182 | 0.7231 | 0.7498 |
+| All passes | musl | 6639 | 0.7523 | 0.8273 | 0.7421 | 0.7107 | 0.7523 | 0.7904 |
+| Pressure | Combined | 6742 | 0.8114 | 0.8754 | 0.7566 | 0.7575 | 0.7954 | 0.8516 |
+| Pressure | SQLite | 2688 | 0.8228 | 0.8635 | 0.7491 | 0.7600 | 0.7986 | 0.8539 |
+| Pressure | Lua | 1097 | 0.7789 | 0.8629 | 0.7704 | 0.7699 | 0.7787 | 0.7919 |
+| Pressure | musl | 2957 | 0.7985 | 0.8774 | 0.7558 | 0.7476 | 0.7980 | 0.8717 |
+
+Every populated per-corpus size bin favored vector. The five short default musl calls measured 0.805 times the walk's ticks. All three policies reproduced the baseline vector compiler's 1,371 objects. In the default fixture set the walk and solver produced identical IR on 206 of 308 inputs. All 102 differences arose on recurrent inputs where the solver removed more phis. The archive lists every fixture's two digests, phi counts and instruction removals. Its independent full-refinement oracle and the frozen vector digest `0x1a6c715c7d33b026` guard the intended behavior.
+
+Whole-driver measurements compared uninstrumented binaries against baseline `0a2c3034c`. Each value is the median change over three rounds of three runs, with a second copy of the baseline as a control. These percentages measure user cycles for the entire compile.
+
+| Policy | Corpus | Candidate | Baseline repeat |
+| --- | --- | ---: | ---: |
+| Default | sqlite | -1.159% | -0.069% |
+| Default | lua | -0.434% | +0.056% |
+| Default | musl | -0.385% | +0.042% |
+| All passes | sqlite | -9.471% | +0.018% |
+| All passes | lua | -7.987% | +0.035% |
+| All passes | musl | -4.104% | +0.099% |
+| Pressure | sqlite | -6.970% | +0.037% |
+| Pressure | lua | -5.428% | +0.042% |
+| Pressure | musl | -2.345% | +0.120% |
+
+The four release IR suites and the source and benchmark entry points passed. ASan and UBSan passed 2,189,930 checks at the frozen seed and 2,189,929 at each of four further seeds. Seven deliberate mutations were detected, including stale call arguments, wrong phi edges, and changes to the two numbering policies. [Raw pass ticks, whole-driver controls, per-fixture comparison and test evidence](single-path.tar.xz)
