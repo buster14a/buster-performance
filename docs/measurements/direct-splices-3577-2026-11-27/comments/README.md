@@ -17,9 +17,9 @@ asks it is the cost. The skip's instructions on one `sqlite3.c` compile (the cou
 | F1b: `else if (next < end && *next == '/')` | 7,494,453 | +50,816 |
 | F2 (the commit): '/' given class 16 in `fast_char_class`, the name test `& 18u`, the check where the scanned name is empty | 7,434,275 | −9,362 |
 
-The branch of its own never runs on sqlite3.c, and still cost 51 K by the decision's register allocation; F2's test
-rides the one each skipped directive already makes (`test $imm, (table)` with another immediate), and its length test
-sits on a path that only the class-16 byte reaches.
+The branch of its own never runs on sqlite3.c, and still cost 51 K by the decision's register allocation. F2's class
+test rides the one each skipped directive already makes (`test $imm, (table)` with another immediate); its length test
+is a compare at each named directive (9,164 on sqlite3.c), and the decision's allocation came out 9 K cheaper with it.
 
 CI's check on the 9700X (`measure-compile --runs 3`, the 9700X job's build): main 211,270,235, the commit 211,260,865
 (−9,370, −0.004%), `measure-main3.log` and `measure-final3.log`. `tools/ci/compile-instructions.txt` keeps its count.
