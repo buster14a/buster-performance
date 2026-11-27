@@ -1,0 +1,113 @@
+diff --git a/src/buster/compiler/c_direct.c b/src/buster/compiler/c_direct.c
+index 88c13019..f990c2ea 100644
+--- a/src/buster/compiler/c_direct.c
++++ b/src/buster/compiler/c_direct.c
+@@ -324,6 +324,12 @@ int c_direct_try_compile(const CDirectRequest* request)
+         }
+         *request->out_bail_reason = reason;
+     }
++    if (getenv("BUSTER_DIRECT_ARENA_MAP") != NULL)
++    {
++        fprintf(stderr, "arena-map status %d tokens %u\n", status, pp != NULL ? (unsigned)pp->out_count : 0u);
++        fast_arena_report(&arena, "arena");
++        fast_arena_report(&scratch, "scratch");
++    }
+     // Always release on bailout (caller will run full pipeline) or when caller requests cleanup
+     if (status != 0 || request->release)
+     {
+diff --git a/src/buster/compiler/c_direct_lex.c b/src/buster/compiler/c_direct_lex.c
+index 079e0727..9ba8fb31 100644
+--- a/src/buster/compiler/c_direct_lex.c
++++ b/src/buster/compiler/c_direct_lex.c
+@@ -291,7 +291,19 @@ static void fast_arena_destroy(FastArena* a)
+     }
+ }
+ 
+-static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
++typedef struct FastArenaTrace FastArenaTrace;
++struct FastArenaTrace
++{
++    const FastArena* arena;
++    uint64_t offset;
++    uint64_t size;
++    const char* file;
++    int line;
++};
++static FastArenaTrace fast_arena_traces[65536];
++static uint32_t fast_arena_trace_count;
++
++static void* fast_arena_alloc_at(FastArena* a, uint64_t size, uint64_t align, const char* file, int line)
+ {
+     void* result = NULL;
+     const uint64_t mask = align - 1u;
+@@ -300,9 +312,70 @@ static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
+     {
+         result = a->base + aligned;
+         a->used = aligned + size;
++        if (fast_arena_trace_count < 65536u)
++        {
++            fast_arena_traces[fast_arena_trace_count++] = (FastArenaTrace){ a, aligned, size, file, line };
++        }
+     }
+     return result;
+ }
++#define fast_arena_alloc(a, s, al) fast_arena_alloc_at((a), (s), (al), __FILE__, __LINE__)
++
++// Throwaway page map (#3586): which 4 KB pages of an arena are resident, by 2 MB region and by allocation site; a
++// page is charged to every site whose allocation overlaps it.
++static void fast_arena_report(const FastArena* a, const char* name)
++{
++    if (a->base != NULL && a->used != 0)
++    {
++        const uint64_t pages = (a->used + 4095u) / 4096u;
++        unsigned char* vec = (unsigned char*)malloc(pages);
++        if (vec != NULL && mincore(a->base, pages * 4096u, vec) == 0)
++        {
++            uint64_t total = 0;
++            for (uint64_t i = 0; i < pages; i += 1) { total += vec[i] & 1u; }
++            fprintf(stderr, "arena %s used %llu pages %llu resident-4k %llu (%.2f MB)\n", name, (unsigned long long)a->used, (unsigned long long)pages, (unsigned long long)total, (double)total * 4096.0 / 1e6);
++            for (uint64_t r = 0; r < (pages + 511u) / 512u; r += 1)
++            {
++                uint64_t n = 0;
++                for (uint64_t i = r * 512u; i < pages && i < (r + 1u) * 512u; i += 1) { n += vec[i] & 1u; }
++                fprintf(stderr, "  region %s %2llu: %3llu of 512 pages\n", name, (unsigned long long)r, (unsigned long long)n);
++            }
++            // Sites in first-allocation order.
++            for (uint32_t t = 0; t < fast_arena_trace_count; t += 1)
++            {
++                const FastArenaTrace* tr = fast_arena_traces + t;
++                bool first = tr->arena == a;
++                for (uint32_t u = 0; first && u < t; u += 1)
++                {
++                    first = !(fast_arena_traces[u].arena == a && fast_arena_traces[u].line == tr->line && strcmp(fast_arena_traces[u].file, tr->file) == 0);
++                }
++                if (first)
++                {
++                    uint64_t count = 0, bytes = 0, span = 0, resident = 0, lo = UINT64_MAX, hi = 0;
++                    for (uint32_t u = t; u < fast_arena_trace_count; u += 1)
++                    {
++                        const FastArenaTrace* x = fast_arena_traces + u;
++                        if (x->arena == a && x->line == tr->line && strcmp(x->file, tr->file) == 0)
++                        {
++                            count += 1;
++                            bytes += x->size;
++                            const uint64_t f = x->offset / 4096u;
++                            const uint64_t l = (x->offset + x->size + 4095u) / 4096u;
++                            if (f < lo) { lo = f; }
++                            if (l > hi) { hi = l; }
++                            span += l - f;
++                            for (uint64_t i = f; i < l && i < pages; i += 1) { resident += vec[i] & 1u; }
++                        }
++                    }
++                    const char* f = strrchr(tr->file, '/');
++                    fprintf(stderr, "  alloc %s %-18s:%-5d n %5llu off %9llu bytes %9llu pages %5llu resident %5llu\n", name, f != NULL ? f + 1 : tr->file, tr->line,
++                            (unsigned long long)count, (unsigned long long)tr->offset, (unsigned long long)bytes, (unsigned long long)span, (unsigned long long)resident);
++                }
++            }
++        }
++        free(vec);
++    }
++}
+ 
+ // ---------------------------------------------------------------------------------------------------------------------
+ // 64-Way AVX-512 SwissTable Identifier Interner

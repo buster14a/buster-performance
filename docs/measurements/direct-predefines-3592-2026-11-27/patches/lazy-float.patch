@@ -1,0 +1,120 @@
+diff --git a/src/buster/compiler/c_direct_lex.c b/src/buster/compiler/c_direct_lex.c
+index 079e0727..6d58de19 100644
+--- a/src/buster/compiler/c_direct_lex.c
++++ b/src/buster/compiler/c_direct_lex.c
+@@ -1648,6 +1648,40 @@ static __attribute__((cold, noinline)) bool fast_float_mantissa_nonzero(const ch
+     return nonzero;
+ }
+ 
++// A floating literal whose value isn't read yet (#3586): its data until fast_float_read reads it from the literal's text,
++// which its extra names. The predefines' floating literals are made so: their macros (DBL_MAX's __DBL_MAX__ and its
++// kin) are seldom used, and reading each value took glibc's strtod about 5,000 instructions, a fifth of a one-function
++// unit's on the 9700X. A num_pool index never reaches it.
++#define BUSTER_FFLOAT_UNREAD UINT32_MAX
++
++// A floating literal's value from its text (the literal pool's copy, which ends in a NUL): its double in num_pool, and
++// its kind, FTOK_BAD_LITERAL where the full pipeline diagnoses it.
++static __attribute__((noinline)) FastTok fast_float_read(FastPP* pp, FastTok tok)
++{
++    const FastLitSlice sl = pp->lit_slices[tok.extra];
++    const char* const text = pp->lit_bytes + sl.offset;
++    char* ep = NULL;
++    double d = strtod(text, &ep);
++    // #3577: the literal is read whole but for an f or F suffix (another, a long double's l or L included, is
++    // refused: the full pipeline reads them as it does), and its magnitude is in its type's range and doesn't
++    // round to 0 (-Wliteral-range); a float's value is read as a float, as the full pipeline rounds it once.
++    const uint32_t rest = (uint32_t)(text + sl.length - ep);
++    const bool single = rest == 1u && (ep[0] == 'f' || ep[0] == 'F');
++    const bool extended = rest == 1u && (ep[0] == 'l' || ep[0] == 'L');
++    if (single)
++    {
++        d = (double)strtof(text, NULL);
++    }
++    if ((rest != 0 && !single && !extended) || (!extended && (isinf(d) || (d == 0.0 && fast_float_mantissa_nonzero(text, sl.length)))))
++    {
++        tok.kind = FTOK_BAD_LITERAL;
++    }
++    uint64_t bits = 0;
++    memcpy(&bits, &d, 8);
++    tok.data = fast_pp_add_num(pp, bits);
++    return tok;
++}
++
+ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in)
+ {
+     const uint8_t* const start = p;
+@@ -1722,9 +1756,6 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
+     if (is_float)
+     {
+         uint32_t float_flags = flags_in;
+-        uint32_t float_data = 0;
+-        uint32_t float_extra = 0;
+-        uint32_t float_kind = FTOK_FLOAT_LIT;
+         // Check suffix f/F/l/L
+         const uint8_t last = p[-1];
+         if (last == 'f' || last == 'F')
+@@ -1735,38 +1766,22 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
+         {
+             float_flags |= BUSTER_FTOK_LONGLONG; // f80 (long double)
+         }
+-        // Parse double immediately via strtod on small stack copy
+-        char buf[128];
+-        if (len < sizeof(buf))
++        // The text in the literal pool, and the value read from it there: where the token is emitted for a predefined
++        // macro's (#3586), now for any other.
++        FastTok tok = fast_tok_make(FTOK_FLOAT_LIT, float_flags, 0, BUSTER_FFLOAT_UNREAD);
++        if (len < 128u)
+         {
+-            memcpy(buf, start, len);
+-            buf[len] = '\0';
+-            char* ep = NULL;
+-            double d = strtod(buf, &ep);
+-            // #3577: the literal is read whole but for an f or F suffix (another, a long double's l or L included, is
+-            // refused: the full pipeline reads them as it does), and its magnitude is in its type's range and doesn't
+-            // round to 0 (-Wliteral-range); a float's value is read as a float, as the full pipeline rounds it once.
+-            const uint32_t rest = (uint32_t)(buf + len - ep);
+-            const bool single = rest == 1u && (ep[0] == 'f' || ep[0] == 'F');
+-            const bool extended = rest == 1u && (ep[0] == 'l' || ep[0] == 'L');
+-            if (single)
+-            {
+-                d = (double)strtof(buf, NULL);
+-            }
+-            if ((rest != 0 && !single && !extended) || (!extended && (isinf(d) || (d == 0.0 && fast_float_mantissa_nonzero(buf, len)))))
++            tok.extra = (uint16_t)fast_pp_add_lit(pp, (const char*)start, len);
++            if (!pp->in_predefines && !pp->bailout)
+             {
+-                float_kind = FTOK_BAD_LITERAL;
++                tok = fast_float_read(pp, tok);
+             }
+-            uint64_t bits = 0;
+-            memcpy(&bits, &d, 8);
+-            float_data = fast_pp_add_num(pp, bits);
+-            float_extra = (uint16_t)fast_pp_add_lit(pp, buf, len);
+         }
+         else
+         {
+             fast_pp_bail(pp, "long float literal");
+         }
+-        return (FastLexed){ .p = p, .tok = fast_tok_make(float_kind, float_flags, float_extra, float_data) };
++        return (FastLexed){ .p = p, .tok = tok };
+     }
+ 
+     // Integer literal
+@@ -6365,6 +6380,17 @@ static inline void fast_pp_emit_soa(FastPP* pp, FastTok tok)
+     }
+     else if (kind == FTOK_FLOAT_LIT)
+     {
++        if (__builtin_expect(data == BUSTER_FFLOAT_UNREAD, 0))
++        {
++            // A predefined macro's floating literal, read where it is first used (#3586).
++            const FastTok read = fast_float_read(pp, tok);
++            kind = read.kind;
++            data = read.data;
++            if (kind == FTOK_BAD_LITERAL)
++            {
++                fast_pp_bail(pp, "literal the full pipeline diagnoses");
++            }
++        }
+         if ((tok.flags & BUSTER_FTOK_LONG) != 0)
+         {
+             kind = FTOK_FLOAT32;
