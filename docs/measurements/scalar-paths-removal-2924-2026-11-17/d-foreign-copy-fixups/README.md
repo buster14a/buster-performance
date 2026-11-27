@@ -22,3 +22,18 @@ The first three candidates measure fixup marking alone. The last three time the 
 | Count first marks | Aligned | 135/135 | 135/135 | 102/135 | 107/135 | 135/135 |
 
 Masked loads that span into a protected page were especially slow at one fixup. Aligning the loaded address and reading the symbol source directly removed this penalty. Direct lookup beat the original at all mixed-input sizes but regressed when the input had no imports. Counting first marks with the producer hint covered all empty, mixed and indirect sizes in both layouts. Dense and duplicate-heavy groups still missed the gate at several sizes. The existing compiler route remains in use. [Implementations, raw data, reach and correctness receipts](copy-fixups.tar.xz)
+
+## Alternative stores for repeated target symbols
+
+Three implementations use the import-presence bit from the previous trials. The split variant records direct references and calls in separate byte columns. The clear variant checks symbol type before marking one byte. The binary variant builds the output bitset on its first useful mark and counts it with vector population counts. All three matched the independent bitmap on all 675 fixtures, with guarded and aligned source columns. Each cell counts sizes at parity or better against the shipping vector-plus-tail stage, out of 135.
+
+| Variant | Placement | No imports | Mixed | All direct | Repeated calls | Indirect only |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| split | guarded | 135 | 127 | 132 | 132 | 135 |
+| split | aligned | 135 | 127 | 132 | 132 | 135 |
+| clear | guarded | 135 | 131 | 132 | 132 | 135 |
+| clear | aligned | 135 | 131 | 133 | 133 | 135 |
+| binary | guarded | 135 | 133 | 101 | 96 | 135 |
+| binary | aligned | 135 | 133 | 104 | 99 | 135 |
+
+The new stores recover most of the repeated-call cases. The short and mixed lists still miss parity. Full scalar comparisons are also present in every raw row. [Implementations, oracle and native samples](mark-stores.tar.xz)

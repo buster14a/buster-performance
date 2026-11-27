@@ -35,3 +35,20 @@ Moving the masked load back by the smaller of the initial cache-line offset and 
 | Paired sums | 54 | 54 | 54 |
 
 Position no longer changes the safe-window count. The candidate beats the production byte loop on 56 of 63 lengths in each placement. The missed short lengths retain the scalar loop. All three native sanitizer-independent RFC runs and the local ASan/UBSan run passed 43,680 comparisons each. [Implementation and exact size results](cache-line-loads.tar.xz)
+
+## Processing the partial block before the full blocks
+
+Processing the partial prefix first starts the checksum at one, so the prefix’s contribution does not require multiplying a running checksum by the number of bytes. Other candidates process a bounded window in 16- or 32-byte tiles and compute both Adler sums together. Each candidate passed the RFC checksum oracle. Each entry counts short lengths at parity or better out of 63, using the median ratio of three independent 9700X runs.
+
+| Variant | Page start | Page end | Offset 17 |
+| --- | ---: | ---: | ---: |
+| Rebased 64-byte control | 56 | 56 | 56 |
+| 16-byte tiles | 51 | 51 | 50 |
+| 32-byte pairs | 52 | 52 | 47 |
+| Plain 16-byte tiles | 51 | 3 | 51 |
+| Prefix, 64-byte fold | 60 | 60 | 60 |
+| Prefix, 16-byte tiles | 59 | 59 | 59 |
+| Prefix, 32-byte pairs | 57 | 57 | 57 |
+| Prefix, constant modulus | 60 | 60 | 60 |
+
+The 64-byte prefix variants still lose for one, two and three bytes in each placement. [Sources, three sets of timings and independent correctness receipts](prefix-and-word-reductions.tar.xz)

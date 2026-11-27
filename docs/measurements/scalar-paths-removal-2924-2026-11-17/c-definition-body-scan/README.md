@@ -66,3 +66,9 @@ The cached replacement-word prototype used the token count remaining in the file
 A native test put an invalid paste at the start of a macro body and varied the number of following literal tokens. Clang and the production scalar path diagnosed all 26 inputs. The cached prototype silently accepted eight, for 252–255 and 508–511 padding tokens. The corrected expression uses a full mask whenever at least 64 tokens remain. [Exact inputs, both diagnostic streams, reproduction driver, fix and exit statuses](body-mask-boundaries.tar.xz)
 
 Three boundary diagnostics were checked at all 26 padding lengths on the corrected build. All 78 cases matched Clang’s exit status and the production compiler’s complete output and diagnostics. [Driver and per-case results](corrected-boundaries.tar.xz)
+
+## Sharing a bounded token-event mask between definitions
+
+Each 64-token cache word records the union of pastes, stringizes and optional-argument identifiers. The input bound uses all lanes when at least 64 tokens remain. The scalar and candidate produced identical output across five shape families and the three corpora. The patched compiler passed all 419 preprocessor fixtures and the independent boundary tests above.
+
+Against the scalar path the candidate reached parity on 300/365 individual sizes. Ordered by literal, parameter, stringize, paste and optional-argument bodies, the counts were 51/75, 63/74, 72/73, 47/72, 67/71. The medians over five pairs of five whole-compiler runs were -0.336% on Lua, -0.018% on SQLite and -0.605% on musl. The remaining losses keep this version experimental. [Patch, exact cell results, corpus samples, output digests and oracle](bounded-body-events.tar.xz)
