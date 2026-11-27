@@ -37,3 +37,37 @@ Three implementations use the import-presence bit from the previous trials. The 
 | binary | aligned | 135 | 133 | 104 | 99 | 135 |
 
 The new stores recover most of the repeated-call cases. The short and mixed lists still miss parity. Full scalar comparisons are also present in every raw row. [Implementations, oracle and native samples](mark-stores.tar.xz)
+
+## Keeping candidate targets in one packed bitmap
+
+The linker already counts names resolved from shared libraries when sizing its output tables. That count now lets both serial and parallel handoffs skip copy discovery when no name can be shared. A positive count can include a discarded name. The final bitmap intersects candidates with the actual symbol sources. All relocation kinds, including the last partial cache line, use the same masked classification. The first 64 targets fit in a register, and a reference to a higher target initializes the single packed scratch bitmap. Its population is the number of symbols that need copies.
+
+The 9700X gate covered 135 fixup counts including zero through 96 and boundary counts through 16,384, five relocation distributions and two memory placements. Three processes supplied nine interleaved measurements per cell. The output count and bits were compared with independently computed expectations. The normalized production function and the measured 32-bit bitmap version generated identical native instruction bytes. All 1,350 cells passed against both original paths. Ratios below divide candidate cycles by baseline cycles.
+
+| Placement | Shape | Sizes | Median vs vector | Slowest vs vector | Median vs scalar | Slowest vs scalar |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| guarded | No imports | 135 | 0.643 | 0.812 | 0.250 | 0.458 |
+| guarded | Mixed | 135 | 0.626 | 0.981 | 0.381 | 0.532 |
+| guarded | All direct | 135 | 0.472 | 0.666 | 0.572 | 0.789 |
+| guarded | Repeated targets | 135 | 0.530 | 0.660 | 0.557 | 0.871 |
+| guarded | All indirect | 135 | 0.290 | 0.545 | 0.056 | 0.317 |
+| aligned | No imports | 135 | 0.667 | 0.800 | 0.250 | 0.439 |
+| aligned | Mixed | 135 | 0.631 | 0.963 | 0.388 | 0.542 |
+| aligned | All direct | 135 | 0.470 | 0.674 | 0.580 | 0.788 |
+| aligned | Repeated targets | 135 | 0.529 | 0.727 | 0.607 | 0.873 |
+| aligned | All indirect | 135 | 0.299 | 0.647 | 0.063 | 0.326 |
+
+The complete linker tests exercised 64 input alignments, promotion across bit 63, the final partial batch, calls to an imported function, direct uses of data and duplicate targets. The copy-relocation suite passed 377 checks and the independent GCC/ld.lld corpus passed 110 checks. Eight mutations changed either the population or the expected marks and were rejected. At one and eight lanes, each Buster executable was byte-identical to its baseline. The Lua, SQLite and musl programs ran with the same output as ld.lld’s executables.
+
+The complete link comparisons used seven paired rounds of six links. The initial producer collected the hint during name publication. Reusing the capacity count removed that work. The last column includes the final packed bitmap and the new regression tests, on top of main cc7d4ffb4. Each percentage is a median paired change in user cycles compared with the original executable.
+
+| Corpus | Lanes | Initial producer | Capacity and byte marks | Capacity and packed bits |
+| --- | ---: | ---: | ---: | ---: |
+| lua | 1 | +0.403% | -1.030% | -0.935% |
+| lua | 8 | +0.417% | -0.958% | -1.002% |
+| sqlite | 1 | +0.158% | -1.452% | -1.463% |
+| sqlite | 8 | +0.058% | -1.304% | -1.617% |
+| musl | 1 | +1.827% | -1.014% | -0.970% |
+| musl | 8 | +0.652% | -0.964% | -1.042% |
+
+[Gate source, alternative implementations, mutation receipts, native checks, phase timings, linked-image hashes and complete-link results](packed-copy-marks.tar.xz)
