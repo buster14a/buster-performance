@@ -44,3 +44,7 @@ Both candidates reproduced all 1,063,172 original differential outputs. The REX 
 | recipe | 256 | 7.517 | 7.267 | 6.929 |
 
 The trailing-field variant improved the singleton from 97.569 ns in the existing vector implementation to 27.040 ns, below scalar’s 31.618 ns. It still missed scalar at two, four and eight instructions. [Source, exact samples and differential receipts](register-and-trailing-forms.tar.xz)
+
+## Testing segment overrides on address-size-limited forms
+
+The existing negative test on decoder branch `07bfd1a59` exercised zero instructions and failed its minimum-coverage assertion. Of the 520 catalogue form numbers marked as unable to accept an extra address-size prefix, 116 are unsegmented and none of those 116 passes the decoder's supported-form filter. Each of the three segment-override groups contains 40 supported row numbers. Enumerating encoded form numbers and preserving their segment override exercises 1,323, 1,306 and 1,300 encodings with seeds 1, 919 and 2161. The unmodified decoder passed all three runs. An intentional change accepting the extra prefix failed every one of the first seed’s 1,323 cases. GNU objdump and reassembly agreed on 13,319 catalogue and 10,001 generated instructions. [Test change, coverage census and complete native summaries](segmented-address-test.tar.xz)
