@@ -90,3 +90,15 @@ After the first partition, previous class membership already certifies every sta
 | Pressure | 6742 | 1.0242 | 0.9800 | 0.9923 | 1.0131 | 1.0343 | 1.0295 |
 
 Each of the three configurations reproduced all 1,371 baseline-vector objects. The independent cyclic-phi fixture and the official IR suites passed. All-pass whole-driver changes versus main from the three rounds were -7.16% to -7.08% on SQLite, -6.24% to -6.07% on Lua, -3.43% to -3.19% on musl. The largest all-pass and pressure size bins still exceed same-build scalar. [Pass ticks, production-driver tables, object counts and sanitizer results](singleton-phi.tar.xz)
+
+## Ordered numbering with proven singleton phis
+
+The three compiler callers that consume only the rewritten function may use a direct dominator traversal when all eligible phis have statically distinct predecessor/input fingerprints within their block. A collision retains the general cyclic solver. The exact census and complete refinement remain available to their existing callers. A new fixture compares production-mode output with the exact census across the deterministic cases and random loops. [Compiler revision](https://github.com/buster14a/buster/tree/d7b2255327f323f5904df7b82cd724b78074ec87)
+
+| Configuration | Calls | Vector/scalar | 0–15 | 16–63 | 64–255 | 256–1,023 | 1,024+ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default | 40 | 0.9564 | — | 1.0083 | 0.9936 | 0.9445 | 0.9556 |
+| All passes | 16654 | 0.9872 | 0.9382 | 0.9446 | 0.9541 | 0.9876 | 1.0173 |
+| Pressure | 6742 | 1.0105 | 0.9676 | 0.9604 | 0.9713 | 1.0086 | 1.0395 |
+
+Each of the three configurations reproduced all 1,371 baseline-vector objects. The independent cyclic-phi fixture and the official IR suites passed. All-pass whole-driver changes versus main from the three rounds were -7.57% to -7.32% on SQLite, -6.37% to -6.29% on Lua, -3.33% to -2.73% on musl. The largest all-pass and pressure size bins still exceed same-build scalar. [Pass ticks, production-driver tables, object counts and sanitizer results](ordered-phi.tar.xz)
