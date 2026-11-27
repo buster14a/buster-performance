@@ -64,3 +64,19 @@ The following counts use three independent medians at calls of 1, 2, 4, 8, 16, 6
 | vmem | vector | 7/7 | 35.394 | 17.763 |
 
 Three real Lua text sections also decoded completely in both implementations. The initial address trial missed the single-instruction scalar time on the Lua VM. A census of those misses identifies integer shifts, immediate moves, indexed memory without displacement and two-byte opcodes. Complete real-stream results and the coverage counts appear alongside the sources. The original table-byte counter excludes the experimental arrays. [Patches, measurements and independent checks](indexed-addresses-and-vector-operands.tar.xz)
+
+## Packing operand templates and indexing escaped integer forms
+
+The first integer-operand compiler grew from 198,496,800 to 217,424,864 executable bytes. Sharing identical 64-ModRM pages and recording eight-byte templates with shared shuffle controls reduced the image to 202,757,792 bytes. The smaller image decoded and printed all three Lua sections identically and passed the baked-table checks. On the captured sections, MOVZX, conditional branches and SETcc accounted for many remaining visits to the full lane decoder.
+
+Adding unprefixed 0F integer and common SIMD forms to the indexed operand decoder reached parity or faster in all 55 initial stream/size comparisons. The 9700X test alternated binary order over three processes at sizes 1, 2, 3, 4, 8, 16, 32, 64, 128, 256 and 1,024. Times below are ns/instruction. Ratios divide the new decoder by the shipping scalar decoder at the same count. The final escaped candidate includes further tables beyond the smaller image measured above.
+
+| Stream | Scalar singleton | Expanded decoder singleton | Eight-instruction ratio | Largest ratio across 11 sizes |
+| --- | ---: | ---: | ---: | ---: |
+| compiler | 31.613 | 9.505 | 0.913 | 0.942 |
+| vector | 35.438 | 17.675 | 0.515 | 0.536 |
+| lvm | 28.070 | 10.950 | 0.832 | 0.832 |
+| lcode | 27.491 | 7.900 | 0.805 | 0.913 |
+| ltable | 27.030 | 7.309 | 0.672 | 0.765 |
+
+Compared to the complete original lane decoder, all returned instruction bytes, counts, consumed lengths and statuses agreed on 3,342,336 integer cases, 3,342,336 escaped-opcode cases, 2,605,824 vector cases and 9,498,624 indexed-address cases. The native suite passed 113,317 checks. GNU objdump and GNU as agreed on both sets of 13,319 and 10,001 catalogue/generated instructions. The dense small-call gate and final baked-image comparisons are being measured separately. [Source changes, standalone drivers, exact observations and differential receipts](matched-and-escaped-operands.tar.xz)
