@@ -69,3 +69,17 @@ PR head `36b1aa04f` passed 2,452,086 and 2,455,422 seeded metadata checks, the d
 | tier1 | +0.085% | +0.050% | +0.038% |
 
 The small increases on five of the six whole-compiler comparisons keep the PR in draft while the balanced copy rotations run. [Explicit scalar samples, whole builds, alternate implementations and native suites](explicit-scalar-and-debug-builds.tar.xz)
+
+## Resolving debug rows into caller-provided storage
+
+The debug-row producer already reserves enough output slots for every source event. It now resolves the events directly into that storage. The resolver validates the descriptor, layout, source and frame rows, and the producer verifies the resolved counts before comparing the generated rows. This removes one full validation per function that uses the protocol.
+
+The comparison built main `cc7d4ffb4` and the exact source of PR #3677 at `ee578e6e4` on the 9700X. Both compilers passed the emission metadata, debug checker, debug output and GDB unwind suites. Their objects, stdout and diagnostics matched at both compiler tiers. Each timing cell is the median paired change in user cycles across seven rounds of six complete single-lane debug compilations.
+
+| Corpus | Objects per tier | Tier 0 | Tier 1 |
+| --- | ---: | ---: | ---: |
+| lua | 34 | -0.604% | -0.359% |
+| sqlite | 1 | -0.350% | -0.238% |
+| musl | 1,336 | -0.221% | -0.642% |
+
+The earlier explicit-scalar and automatic comparisons cover the same unchanged structural validation routine on all 1,272 size/shape/placement combinations. [Production diff, native test receipts, whole-build cycle samples and reproduction driver](debug-row-producer.tar.xz)
