@@ -80,3 +80,48 @@ Adding unprefixed 0F integer and common SIMD forms to the indexed operand decode
 | ltable | 27.030 | 7.309 | 0.672 | 0.765 |
 
 Compared to the complete original lane decoder, all returned instruction bytes, counts, consumed lengths and statuses agreed on 3,342,336 integer cases, 3,342,336 escaped-opcode cases, 2,605,824 vector cases and 9,498,624 indexed-address cases. The native suite passed 113,317 checks. GNU objdump and GNU as agreed on both sets of 13,319 and 10,001 catalogue/generated instructions. The dense small-call gate and final baked-image comparisons are being measured separately. [Source changes, standalone drivers, exact observations and differential receipts](matched-and-escaped-operands.tar.xz)
+
+## Dense call sizes and complete disassembler processes
+
+On the 9700X, the #3680 decoder beat shipping scalar in all 430 stream/size comparisons. Each cell used three paired processes with alternating order. Sizes cover every count from 1 through 64, then 22 counts through 1,024. Ratios use the median of the three paired times per instruction.
+
+| Stream | Sizes won | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: |
+| compiler | 86 | 0.910 | 0.992 |
+| vector | 86 | 0.396 | 0.563 |
+| lvm | 86 | 0.766 | 0.823 |
+| lcode | 86 | 0.878 | 0.916 |
+| ltable | 86 | 0.734 | 0.766 |
+
+On complete streams, the decoder and formatter ran separately from process startup. Times are median ns per instruction over three processes with 40 fixed iterations.
+
+| Stream | Scalar decode | Owner branch decode | PR decode | Scalar decode and format | Owner branch decode and format | PR decode and format |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| compiler | 7.509 | 7.412 | 5.007 | 24.408 | 23.602 | 25.123 |
+| vector | 26.806 | 9.696 | 9.855 | 47.506 | 28.291 | 31.459 |
+| lvm | 8.664 | 7.792 | 6.601 | 19.008 | 17.521 | 16.922 |
+| lcode | 6.728 | 7.492 | 6.173 | 17.055 | 17.387 | 16.462 |
+| ltable | 7.590 | 7.633 | 5.773 | 17.086 | 16.459 | 15.404 |
+
+The baked executables on the original lane branch and on #3680 produced identical listings for Lua's three complete text sections. The #3680 image is 204,858,744 bytes, up from 198,496,800. Its baked data occupies 15,160,704 bytes and rebuilt identically twice. Seven alternating rounds of six fresh processes used 8.90%, 8.85% and 20.72% more median paired user cycles on lvm, lcode and ltable, respectively, compared with the owner branch. Interning 16-record short pages and 256-record ModRM pages cut the image to 200,658,768 bytes. The smaller image still used 12.2%, 12.6% and 21.4% more cycles than the owner branch in a separate three-binary comparison. Both implementations passed the 113,317 disassembler checks and GNU binutils comparisons.
+
+A separate comparison included the shipping main executable at cc7d4ffb4, the owner-branch executable and the #3680 executable. Each command disassembled a file into /dev/null, pinned to CPU 2 under the machine lock. The values below are median elapsed microseconds and minor faults across 21 fresh processes per cell. The lvm8 input concatenates the complete lvm section eight times.
+
+| Input | Main µs | Main faults | Owner µs | Owner faults | PR µs | PR faults |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| empty | 1508 | 409 | 163 | 57 | 157 | 57 |
+| one | 1522 | 415 | 174 | 62 | 166 | 66 |
+| ltable | 1607 | 430 | 245 | 76 | 306 | 141 |
+| lcode | 1707 | 430 | 350 | 76 | 413 | 144 |
+| lvm | 1770 | 430 | 385 | 76 | 470 | 146 |
+| lvm8 | 3166 | 435 | 1670 | 81 | 1743 | 151 |
+
+The ordinary debug-build driver produced identical object files and diagnostics at both tiers on the owner branch and #3680. Median paired changes in user cycles across seven rounds of six full invocations follow.
+
+| Input | Object files per tier | Tier 0 | Tier 1 |
+| --- | ---: | ---: | ---: |
+| lua | 34 | -0.182% | +0.722% |
+| sqlite | 1 | -0.128% | +0.483% |
+| musl | 1336 | +0.008% | +0.253% |
+
+[Per-size observations, process measurements, phase timings, compiler image checks and the page-sharing experiment](dense-calls-and-process-startup.tar.xz)
