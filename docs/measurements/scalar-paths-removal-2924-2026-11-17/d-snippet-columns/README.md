@@ -29,13 +29,25 @@ The first two columns summarize five rounds of five runs for two production buil
 
 | Input | Three-build change | Baseline control | Same-path change | Same-image change |
 | --- | ---: | ---: | ---: | ---: |
-| one | +6.633% | +0.773% | pending | +0.000% |
-| ordinary | +0.885% | +0.260% | pending | -5.372% |
-| mixed | -6.250% | +0.877% | pending | -11.813% |
-| wide | pending | pending | pending | pending |
-| lua | pending | pending | pending | pending |
-| sqlite | pending | pending | pending | pending |
-| musl | pending | pending | pending | pending |
+| one | +6.633% | +0.773% | -3.268% | +0.000% |
+| ordinary | +0.885% | +0.260% | -1.717% | -5.372% |
+| mixed | -6.250% | +0.877% | -9.084% | -11.813% |
+| wide | -59.880% | -0.433% | -60.341% | -60.800% |
+| lua | +0.432% | +0.267% | pending | +0.155% |
+| sqlite | +0.064% | +0.033% | pending | -0.075% |
+| musl | -0.323% | +0.020% | pending | -0.091% |
+
+Running one copy of each production build for seven rounds of eight runs favors the candidate on all seven inputs, including the three quiet controls. The first three-build diagnostic run assigned two entries to the baseline executable. Reversing that choice assigns two entries to the candidate. The single-warning result changes sign with the duplicated executable. The four-copy same-path measurements balance both implementations, as does the direct A/B comparison below. The reverse control was also run for the 512 ordinary warnings. Each entry reports the median ratio of paired user cycles from the seven rounds.
+
+| Input | Equal-frequency A/B | Two candidate entries |
+| --- | ---: | ---: |
+| one | -0.415% | -2.392% |
+| ordinary | -2.051% | -4.286% |
+| mixed | -9.539% |  |
+| wide | -59.872% |  |
+| lua | -0.015% |  |
+| sqlite | -0.147% |  |
+| musl | -0.425% |  |
 
 ## Reproduction
 

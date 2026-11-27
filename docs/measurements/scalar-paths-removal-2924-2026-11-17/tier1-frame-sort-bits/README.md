@@ -58,3 +58,7 @@ Sixteen balanced same-path repeats gave these whole-compiler changes in user cyc
 | pooled | +0.213% | +0.112% | -0.028% |
 | direct | +0.176% | +0.232% | -0.091% |
 | dwords | +0.335% | +0.245% | -0.081% |
+
+## Initializing the prospective frame columns
+
+The next candidate kept the indexed planner and allocated the producer’s four aligned columns together. It initialized each field once. The four frame seeds, frame execution, Tier 1 emission and CFG checks passed. The SIMD source fixture certified 127 functions, including 33 vector instructions and 86 masks. All 1,371 objects and diagnostic streams matched. Across 16 balanced repeats, complete compilation changed by +0.097% on Lua, +0.246% on SQLite and -0.311% on musl. The whole-compiler gate remains open. [Producer, exact cycles and validation](prospective-columns.tar.xz)
