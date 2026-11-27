@@ -67,3 +67,15 @@ The emitter classifies each original instruction once while finding a span and r
 | Tier 1 | 81 | 81 | 0.8728 | 0.8778 | 0.8836 | 0.9420 |
 
 Each side ran in five new compiler processes. Pair calls in function order, take the median across processes for each call, then sum the call medians within each exact record count. The cold first invocation stays in the table. The three adapter builds emitted matching fixture objects in both tiers. The focused replay passed 2,305 checks and rejected ten mutations, including a shifted circular index and a dropped exchange. The hardware suites passed 21,779,895 Tier 0 cross-checks and 36,477 Tier 1 wide checks. [Raw per-call samples, size tables, focused test and mutation results](cached-span-adapters.tar.xz)
+
+
+### Whole compiler at the cached-window revision
+
+The same-path balanced trial compared two copies of the baseline and two copies of the candidate. Each group ran 16 repeats, rotating all four executables through the same path. Each repeat divides the sum of the two candidate cycle counts by the sum for the two baseline copies. The entries are median changes in user cycles. Every comparison favored the candidate.
+
+| Tier | SQLite | Lua | musl | Long-double fixture |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 0 | −0.332% | −0.031% | −0.071% | −1.902% |
+| Tier 1 | −0.030% | −0.065% | −0.057% | −0.596% |
+
+Each tier produced 1,372 byte-identical objects. Standard output and error also matched in every group. The counts include SQLite, 34 Lua units, 1,336 musl units and the long-double fixture. The full suites and per-size gate above used the same compiler source. [Four-way timings, independent object comparisons and suite summaries](cached-whole.tar.xz)
