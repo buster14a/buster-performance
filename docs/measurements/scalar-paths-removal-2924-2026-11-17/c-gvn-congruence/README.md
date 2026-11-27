@@ -78,3 +78,15 @@ Revision `fccbb1b87` searches groups of eight fingerprints, then checks the comp
 The all-pass vector total fell another 3.2% from the preceding candidate. The 12.0% same-build scalar lead still holds the deletion. Default vector and scalar are within 0.5% overall on 40 calls. Every candidate object matched main in every configuration. The vector and scalar solvers can internally traverse different instruction counts because their phi results differ.
 
 All-pass whole-compiler cycles improved against main in all nine measurements. Changes ranged from −6.39% to −6.23% on SQLite, −5.44% to −5.26% on Lua and −3.16% to −3.00% on musl. The default Lua measurements spread from −0.27% to +0.06%. All four official IR suites passed. Extract the archive and run the same pairing script with `head16:vector` and `head16:scalar`. [Pass ticks, driver tables, official checks and output counts](group-probe-logs.tar.xz)
+
+## Singleton phis and relative refinement keys
+
+After the first partition, previous class membership already certifies every static field. The solver rekeys changing operands, seeds singleton pending phis, wakes their users and checks availability only for repeated or unresolved values. [Compiler revision](https://github.com/buster14a/buster/tree/badb12f3a19bfd0f2a5c43293dc1b611132931fe)
+
+| Configuration | Calls | Vector/scalar | 0–15 | 16–63 | 64–255 | 256–1,023 | 1,024+ |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default | 40 | 0.9550 | — | 0.9997 | 0.9758 | 0.9306 | 0.9557 |
+| All passes | 16654 | 1.0146 | 0.9421 | 0.9702 | 0.9943 | 1.0190 | 1.0353 |
+| Pressure | 6742 | 1.0242 | 0.9800 | 0.9923 | 1.0131 | 1.0343 | 1.0295 |
+
+Each of the three configurations reproduced all 1,371 baseline-vector objects. The independent cyclic-phi fixture and the official IR suites passed. All-pass whole-driver changes versus main from the three rounds were -7.16% to -7.08% on SQLite, -6.24% to -6.07% on Lua, -3.43% to -3.19% on musl. The largest all-pass and pressure size bins still exceed same-build scalar. [Pass ticks, production-driver tables, object counts and sanitizer results](singleton-phi.tar.xz)

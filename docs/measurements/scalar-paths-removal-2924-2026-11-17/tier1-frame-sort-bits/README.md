@@ -27,7 +27,7 @@ Build each compiler with `./build.sh --config Release`. The shared-host `driver`
 
 ## Sparse index checks and cold placement
 
-The original draft also enters the radix when an indexed request lacks room for a column of uniqueness stamps. A bounded-scratch fixture forces this arm with 1–65, 96, 128 and 256 objects and two class distributions. At one object the draft exceeded baseline in four of six comparisons. Two or more objects passed every comparison.
+The original draft also enters the radix when an indexed request lacks room for a column of uniqueness stamps. A bounded-scratch fixture forces this arm with 1–64, 127, 256, 513 and 1,024 objects and two class distributions. At one object the draft exceeded baseline in four of six comparisons. Two or more objects passed every comparison.
 
 The follow-up skips uniqueness sorting for a single index, whose range is already checked by the header, and places the large radix in its own cold text section. All 408 sparse comparisons beat baseline, including the singleton. The 66 standard, 144 forced small-class and 1,086 dense comparisons at or above 33 objects also passed. Every captured plan matched, the four seeds of the frame suite and execution tests passed, and all 1,371 object files and both diagnostic streams matched.
 
