@@ -1,0 +1,159 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 3d7a2c9aa..55a6589e5 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -686,6 +686,8 @@ struct PPFileData
+     uint32_t record;
+     // First observed dependency + 1 in this unit, never in the shared cache; zero means unobserved.
+     uint32_t dependency;
++    // True after refinement proves that no replacement list in this file can contain #, ## or __VA_OPT__.
++    bool ordinary_replacement_lists;
+     uint32_t token_count;
+     // The exceptional tokens the lexer reads with an error (an invalid raw string literal's UNKNOWN token, or a token with
+     // a named UCN), sorted by token; emission waits until their source context is known.
+@@ -3895,6 +3897,7 @@ static PPPrepareStatus pp_prepare_whole(const PPPrepare* prepare, InternTable* t
+                                                           data->space, prepare->refine_flags, &progress);
+             if (refined)
+             {
++                data->ordinary_replacement_lists = progress.replacement == 0;
+                 pp_scan_named_ucn_chunks(data->bytes, data->length, chunks, 0, progress.scanned, trigraphs, &named);
+             }
+             scratch_end(scratch);
+@@ -4203,6 +4206,7 @@ static PPPrepareStatus pp_prepare_windows(const PPPrepare* prepare, InternTable*
+     }
+     if (result == PP_PREPARE_DONE)
+     {
++        data->ordinary_replacement_lists = progress.replacement == 0;
+         data->prepared = pp_directive_table_windowed(arena, data, directive_words, directive_words + word_room, directives);
+         result = data->prepared ? PP_PREPARE_DONE : PP_PREPARE_NO_MEMORY;
+         data->line_pages = pages;
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index ef75b5ba6..eb7d5c1df 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -726,6 +726,7 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+     data->raw_errors = record->raw_errors;
+     data->raw_error_count = record->raw_error_count;
+     data->directive_count = record->directive_count;
++    data->ordinary_replacement_lists = record->ordinary_replacement_lists;
+     data->directive_hash = record->directive_hash;
+     data->directive_end = record->directive_end;
+     data->directive_kind = record->directive_kind;
+@@ -1416,6 +1417,16 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
+ 
+ static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
+ {
++    // A one-token list has three possible marks. Compare its kind with all three at once.
++    if (end - begin == 1)
++    {
++        const __m128i marks = _mm_cvtsi32_si128(C_TOKEN_HASHHASH | (C_TOKEN_HASH << 8) | (C_TOKEN_RAW_IDENTIFIER << 16));
++        const __mmask16 match = _mm_cmpeq_epi8_mask(_mm_set1_epi8(kinds[begin] & 0x7f), marks);
++        *pastes = (match & 1) != 0;
++        *hashes = (match & 2) != 0;
++        *va_opt = (match & 4) != 0 && values[begin] == C_NAME_VA_OPT;
++        return;
++    }
+     uint64_t found_pastes = 0;
+     uint64_t found_hashes = 0;
+     uint64_t found_va_opt = 0;
+@@ -2325,7 +2336,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
+         // ## can't begin or end a replacement list, and in a function-like macro # must precede a parameter and
+         // __VA_OPT__ a '(' (pp_check_replacement_list): clang rejects such a definition when it reads it, used or not,
+         // at the first of these it finds, in that order. __VA_OPT__ outside a variadic macro is a warning.
+-        if (valid && macro.body_begin < macro.body_end)
++        if (valid && macro.body_begin < macro.body_end && !data->ordinary_replacement_lists)
+         {
+             bool pastes;
+             bool hashes;
+@@ -15905,6 +15916,7 @@ static void pp_forget_prepared(PPFileData* data, bool whole)
+         data->raw_errors = NULL;
+         data->raw_error_count = 0;
+         data->directive_count = 0;
++        data->ordinary_replacement_lists = false;
+         data->directive_hash = NULL;
+         data->directive_end = NULL;
+         data->directive_kind = NULL;
+diff --git a/src/buster/compiler/c_refine.c b/src/buster/compiler/c_refine.c
+index 77056c495..a45932ca1 100644
+--- a/src/buster/compiler/c_refine.c
++++ b/src/buster/compiler/c_refine.c
+@@ -446,7 +446,7 @@ static __attribute__((noinline)) uint64_t refine_step_splices(const uint8_t* sou
+ // others go to refine_step_splices; a block whose gaps hold none (most) asks once, not per step.
+ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, const uint8_t* kinds, const uint32_t* starts, const uint32_t* ends, uint64_t begin,
+                                     uint64_t end, uint32_t* values, uint64_t* space, uint32_t flags, const uint64_t* backslash_chunks, __m512i previous_ends,
+-                                    RefineIdentifiers* identifiers, const bool separate)
++                                    RefineIdentifiers* identifiers, const bool separate, uint64_t* replacement)
+ {
+     uint32_t identifier_count = 0;
+     // The block's gaps lie between the end of the token before it and the start of its last token.
+@@ -459,6 +459,9 @@ BUSTER_INLINE __m512i refine_pass_a(const uint8_t* source, uint64_t length, cons
+         const __mmask64 valid = _bzhi_u64(~0ull, (uint32_t)step_count);
+         const __m512i kind_vector = _mm512_maskz_loadu_epi8(valid, kinds + step);
+         const __mmask64 identifier = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_and_si512(kind_vector, _mm512_set1_epi8(0x7F)), _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++        // A replacement list ends before its next start of line. Only an inline # or ## can be in it.
++        _Static_assert((C_TOKEN_HASH & 1) == 0 && C_TOKEN_HASHHASH == C_TOKEN_HASH + 1, "adjacent replacement operators");
++        *replacement |= _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind_vector, _mm512_set1_epi8((char)0xfe)), _mm512_set1_epi8(C_TOKEN_HASH));
+         identifiers->masks[(step - begin) / BUSTER_REFINE_STEP_TOKENS] = identifier;
+         // The step's gaps lie between the end of the token before it and the start of its last token.
+         const uint32_t gaps_begin = (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(previous_ends, 3), 3);
+@@ -866,7 +869,7 @@ BUSTER_INLINE bool refine_pass_b(InternTable* table, const uint8_t* source, uint
+ 
+ // Pass C over tokens [begin, end) of the block: each identifier's id, from the dense array, into its token's value, 16
+ // tokens at a time (an expand of the next ids by the identifier mask, and a masked store).
+-BUSTER_INLINE void refine_pass_c(const RefineIdentifiers* identifiers, uint64_t begin, uint64_t end, uint32_t* values)
++BUSTER_INLINE void refine_pass_c(const RefineIdentifiers* identifiers, uint64_t begin, uint64_t end, uint32_t* values, uint64_t* replacement)
+ {
+     uint32_t position = 0;
+     for (uint64_t first = begin; first < end; first += BUSTER_REFINE_LANES)
+@@ -878,6 +881,7 @@ BUSTER_INLINE void refine_pass_c(const RefineIdentifiers* identifiers, uint64_t
+         // before the expand reads indeterminate tail values, even though the
+         // expand would discard those lanes afterward.
+         const __m512i ids = _mm512_maskz_loadu_epi32((__mmask16)_bzhi_u32(0xffff, live), identifiers->ids + position);
++        *replacement |= _mm512_cmpeq_epi32_mask(ids, _mm512_set1_epi32(C_NAME_VA_OPT));
+         const __m512i group_ids = _mm512_maskz_expand_epi32(lanes, ids);
+         _mm512_mask_storeu_epi32(values + first, lanes, group_ids);
+         position += live;
+@@ -920,6 +924,7 @@ struct RefineProgress
+     __m512i previous_ends;
+     uint64_t* backslash_chunks;
+     uint64_t scanned;
++    uint64_t replacement;
+ };
+ 
+ // The words refine_progress_begin needs for the backslash chunks of a source of `length` bytes.
+@@ -945,6 +950,7 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
+     __m512i previous_ends = progress->previous_ends;
+     uint64_t* backslash_chunks = progress->backslash_chunks;
+     uint64_t scanned = progress->scanned;
++    uint64_t replacement = progress->replacement;
+     bool result = true;
+     for (uint64_t block = begin; result && block < end; block += BUSTER_REFINE_BLOCK_TOKENS)
+     {
+@@ -953,11 +959,11 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
+         scanned = refine_scan_chunks(source, length, backslash_chunks, scanned, ends[block_end - 1], trigraphs);
+         if (values != ends)
+         {
+-            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, true);
++            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, true, &replacement);
+         }
+         else
+         {
+-            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, false);
++            previous_ends = refine_pass_a(source, length, kinds, starts, ends, block, block_end, values, space, flags, backslash_chunks, previous_ends, &identifiers, false, &replacement);
+         }
+         if (fused)
+         {
+@@ -981,11 +987,12 @@ BUSTER_INLINE bool refine_tokens_with(InternTable* table, const uint8_t* source,
+         }
+         if (result)
+         {
+-            refine_pass_c(&identifiers, block, block_end, values);
++            refine_pass_c(&identifiers, block, block_end, values, &replacement);
+         }
+     }
+     progress->previous_ends = previous_ends;
+     progress->scanned = scanned;
++    progress->replacement = replacement;
+     return result;
+ }
+ 

@@ -1,0 +1,204 @@
+diff --git a/src/buster/compiler/c_preprocessor.c b/src/buster/compiler/c_preprocessor.c
+index 3d7a2c9aa..65886f1ee 100644
+--- a/src/buster/compiler/c_preprocessor.c
++++ b/src/buster/compiler/c_preprocessor.c
+@@ -667,6 +667,13 @@ struct PPRawError
+     uint8_t kind;
+ };
+ 
++// Last token plus one for each operator that affects a replacement list. Comparing the three
++// positions with the parsed body start excludes the macro name and every formal parameter.
++typedef struct PPBodyPlaces
++{
++    uint32_t paste, hash, opt;
++} PPBodyPlaces;
++
+ struct PPFileData
+ {
+     uint64_t device;
+@@ -702,6 +709,7 @@ struct PPFileData
+     uint32_t* directive_hash;
+     uint32_t* directive_end;
+     uint8_t* directive_kind;
++    PPBodyPlaces* directive_body;
+     uint32_t* directive_next;
+     // The directives a skip must still report (BUSTER_PP_NOTE_*), in order: each one's index and notes. Most files have
+     // none (pp_note_directives).
+@@ -2945,8 +2953,55 @@ static bool pp_note_directives(Arena* arena, PPFileData* data)
+ // Each directive's kind and line end, then the conditional groups' pairing (pp_pair_conditionals_vector, or
+ // pp_pair_conditionals_scalar for the files it leaves), then the notes (pp_note_directives) where there can be any, in
+ // `arena` with the rest of the table.
++typedef struct PPBodyWord
++{
++    uint64_t paste, hash, opt;
++    uint32_t index;
++} PPBodyWord;
++
++static PPBodyPlaces pp_body_places(const PPFileData* data, uint32_t begin, uint32_t end, PPBodyWord* cache)
++{
++    PPBodyPlaces places = { 0 };
++    for (uint64_t word = (uint64_t)begin & ~UINT64_C(63); begin < end && word < end; word += 64)
++    {
++        if (cache->index != word)
++        {
++            cache->index = (uint32_t)word;
++            const __mmask64 lanes = _bzhi_u64(UINT64_MAX, data->token_count - (uint32_t)word < 64 ? data->token_count - (uint32_t)word : 64);
++            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, data->kinds + word), _mm512_set1_epi8(0x7f));
++            cache->paste = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_HASHHASH));
++            cache->hash = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(C_TOKEN_HASH));
++            cache->opt = 0;
++            const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
++            for (uint32_t offset = 0; offset < 64 && (identifiers >> offset) != 0; offset += 16)
++            {
++                const __mmask16 named = (__mmask16)(identifiers >> offset);
++                const __m512i ids = _mm512_maskz_loadu_epi32(named, data->values + word + offset);
++                cache->opt |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(named, ids, _mm512_set1_epi32(C_NAME_VA_OPT)) << offset;
++            }
++        }
++        const uint32_t last = end - (uint32_t)word;
++        const uint64_t active = _bzhi_u64(UINT64_MAX, last < 64 ? last : 64) & (UINT64_MAX << (begin > word ? begin - word : 0));
++        const uint64_t paste = cache->paste & active, hash = cache->hash & active, opt = cache->opt & active;
++        if (paste != 0)
++        {
++            places.paste = (uint32_t)(word + 64 - __builtin_clzll(paste));
++        }
++        if (hash != 0)
++        {
++            places.hash = (uint32_t)(word + 64 - __builtin_clzll(hash));
++        }
++        if (opt != 0)
++        {
++            places.opt = (uint32_t)(word + 64 - __builtin_clzll(opt));
++        }
++    }
++    return places;
++}
++
+ static bool pp_finish_directives(Arena* arena, PPFileData* data, const uint64_t* lines)
+ {
++    PPBodyWord cache = { .index = UINT32_MAX };
+     bool elifdef = false;
+     for (uint32_t d = 0; d < data->directive_count; d += 1)
+     {
+@@ -2960,6 +3015,11 @@ static bool pp_finish_directives(Arena* arena, PPFileData* data, const uint64_t*
+         }
+         data->directive_end[d] = end;
+         data->directive_kind[d] = kind;
++        if (kind == PP_DIRECTIVE_DEFINE)
++        {
++            const uint32_t begin = end - hash >= 3 ? hash + 3 : end;
++            data->directive_body[d] = pp_body_places(data, begin, end, &cache);
++        }
+         data->directive_next[d] = BUSTER_PP_NONE;
+         elifdef |= kind == PP_DIRECTIVE_ELIFDEF || kind == PP_DIRECTIVE_ELIFNDEF;
+     }
+@@ -3341,8 +3401,9 @@ static bool pp_directive_arrays(Arena* arena, PPFileData* data, uint32_t count)
+     data->directive_hash = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+     data->directive_end = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+     data->directive_kind = arena_push(arena, count + 1, 1);
++    data->directive_body = arena_push_array(arena, (uint64_t)count + 1, sizeof(PPBodyPlaces), _Alignof(PPBodyPlaces));
+     data->directive_next = arena_push_array(arena, count + 1, sizeof(uint32_t), 4);
+-    return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_next != 0;
++    return data->directive_hash != 0 && data->directive_end != 0 && data->directive_kind != 0 && data->directive_body != 0 && data->directive_next != 0;
+ }
+ 
+ // A file's directive table (#118) from its refined tokens, in `arena`: the directives (pp_scan_directives_vector), their
+diff --git a/src/buster/compiler/c_preprocessor_benchmark.c b/src/buster/compiler/c_preprocessor_benchmark.c
+index 68d54006d..08106f927 100644
+--- a/src/buster/compiler/c_preprocessor_benchmark.c
++++ b/src/buster/compiler/c_preprocessor_benchmark.c
+@@ -638,7 +638,7 @@ static bool pp_benchmark_defines_pass(PPBenchmarkTables* tables, uint32_t first_
+         {
+             if (data->directive_kind[d] == PP_DIRECTIVE_DEFINE)
+             {
+-                pp_define(pp, first_data + f, 0, data->directive_hash[d] + 2, data->directive_end[d]);
++                pp_define(pp, first_data + f, 0, d);
+                 sample->defines += 1;
+             }
+         }
+diff --git a/src/buster/compiler/c_preprocessor_impl.c b/src/buster/compiler/c_preprocessor_impl.c
+index ef75b5ba6..27a46ce3c 100644
+--- a/src/buster/compiler/c_preprocessor_impl.c
++++ b/src/buster/compiler/c_preprocessor_impl.c
+@@ -729,6 +729,7 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
+     data->directive_hash = record->directive_hash;
+     data->directive_end = record->directive_end;
+     data->directive_kind = record->directive_kind;
++    data->directive_body = record->directive_body;
+     data->directive_next = record->directive_next;
+     data->note_count = record->note_count;
+     data->note_directives = record->note_directives;
+@@ -1414,31 +1415,6 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
+     return result;
+ }
+ 
+-static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
+-{
+-    uint64_t found_pastes = 0;
+-    uint64_t found_hashes = 0;
+-    uint64_t found_va_opt = 0;
+-    for (uint32_t t = begin; t < end; t += 64)
+-    {
+-        const __mmask64 lanes = _bzhi_u64(~0ull, end - t < 64 ? end - t : 64);
+-        const __m512i kind = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, kinds + t), _mm512_set1_epi8(0x7F));
+-        found_pastes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASHHASH));
+-        found_hashes |= _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_HASH));
+-        // An identifier's value is its id; another token's is its end, which may equal __VA_OPT__'s id.
+-        const uint64_t identifiers = _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(C_TOKEN_RAW_IDENTIFIER));
+-        for (uint32_t j = 0; j < 4 && (identifiers >> (16 * j)) != 0; j += 1)
+-        {
+-            const __mmask16 named = (__mmask16)(identifiers >> (16 * j));
+-            const __m512i ids = _mm512_maskz_loadu_epi32(named, values + t + 16 * j);
+-            found_va_opt |= _mm512_mask_cmpeq_epi32_mask(named, ids, _mm512_set1_epi32(C_NAME_VA_OPT));
+-        }
+-    }
+-    *pastes = found_pastes != 0;
+-    *hashes = found_hashes != 0;
+-    *va_opt = found_va_opt != 0;
+-}
+-
+ // pp_scan_body_vector's scalar twin.
+ static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
+ {
+@@ -2274,8 +2250,10 @@ static __attribute__((noinline, cold)) void pp_defined_live(Preprocessor* pp, ui
+ 
+ // #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
+ // constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
+-static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
++static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t directive)
+ {
++    const uint32_t begin = pp->datas[data_index].directive_hash[directive] + 2;
++    const uint32_t end = pp->datas[data_index].directive_end[directive];
+     const PPFileData* data = &pp->datas[data_index];
+     const uint32_t location = base + (begin < data->token_count ? data->starts[begin] : data->length);
+     if (begin >= end)
+@@ -2332,7 +2310,11 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
+             bool va_opt;
+             if (BUSTER_VECTOR_PATH(pp->vectorized))
+             {
+-                pp_scan_body_vector(data->kinds, data->values, macro.body_begin, macro.body_end, &pastes, &hashes, &va_opt);
++                const __m128i last = _mm_maskz_loadu_epi32(7, &data->directive_body[directive]);
++                const __mmask8 flags = _mm_cmpgt_epu32_mask(last, _mm_set1_epi32((int)macro.body_begin));
++                pastes = (flags & 1) != 0;
++                hashes = (flags & 2) != 0;
++                va_opt = (flags & 4) != 0;
+             }
+             else
+             {
+@@ -11819,7 +11801,7 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
+         case PP_DIRECTIVE_NULL:
+             break;
+         case PP_DIRECTIVE_DEFINE:
+-            pp_define(pp, data_index, base, hash + 2, end);
++            pp_define(pp, data_index, base, d);
+             break;
+         case PP_DIRECTIVE_UNDEF:
+             // As clang: the name, then the line's end, then whether it undefines a builtin.
+@@ -15908,6 +15890,7 @@ static void pp_forget_prepared(PPFileData* data, bool whole)
+         data->directive_hash = NULL;
+         data->directive_end = NULL;
+         data->directive_kind = NULL;
++        data->directive_body = NULL;
+         data->directive_next = NULL;
+         data->note_count = 0;
+         data->note_directives = NULL;
