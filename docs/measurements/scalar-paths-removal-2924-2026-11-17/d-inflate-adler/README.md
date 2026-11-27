@@ -87,3 +87,17 @@ Both implementations decompressed each captured section to exactly the bytes ver
 | musl | 4,562 | 2,373,205 | +0.258% | -0.120% |
 
 The separately compiled musl comparison was slower by 0.258%. In the shared decompressor both checksum copies together were faster on all three corpora, including musl in each of the three processes. [Full observations, zlib cross-check, damaged-input checks and drivers](whole-stream-comparison.tar.xz)
+
+## Complete links with compressed debug input
+
+Clang compiled real Lua 5.4.8, a SQLite program that opens an in-memory database, and a program using five musl string implementations. Inputs used DWARF 4 and zlib-compressed debug sections. The host linker and both Buster versions produced working executables. Each Buster candidate executable was byte-for-byte identical to its baseline. GDB resolved the source line for lua_gettop, sqlite3_open and strspn in all three linkers’ outputs.
+
+The complete `link-foreign` command was timed on the 9700X at one and eight lanes. Each cell gives the median paired change in user cycles across seven rounds of six links. Python zlib separately validated each compressed input's declared plain length.
+
+| Input | Compiled objects | Compressed sections | Uncompressed bytes | One lane | Eight lanes |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 33 | 189 | 1,102,706 | -0.539% | -0.296% |
+| sqlite | 2 | 9 | 4,351,242 | -0.169% | -0.169% |
+| musl | 6 | 31 | 12,635 | -1.099% | -1.205% |
+
+[Input preparation, GDB output, binary hashes, paired cycles and reproduction driver](complete-foreign-links.tar.xz)
