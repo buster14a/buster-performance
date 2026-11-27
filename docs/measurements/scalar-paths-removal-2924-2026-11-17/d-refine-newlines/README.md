@@ -29,3 +29,15 @@ Both executables produced identical stdout and stderr for SQLite, all 34 Lua uni
 | musl | −0.01%, +0.42%, +0.23% | +0.01%, −0.14%, +0.46% | −0.11%, +0.01%, −0.14% | −0.02%, −0.12%, −0.02% |
 
 The isolated gate passed all 336 cells. SQLite took more cycles in each placement round, and Lua took more in each original round. The whole-driver gate stays open for this revision.
+
+## Same-binary and standalone follow-ups
+
+The same-binary experiment put the baseline, inline candidate and out-of-line candidate in one compiler. Seven rounds per corpus alternated the order of all three and a second selection of the baseline. The table compares median user cycles on CPU 2 under the exclusive lock.
+
+| Corpus | Baseline control | Inline candidate | Out-of-line candidate |
+| --- | ---: | ---: | ---: |
+| lua | +0.11% | +0.02% | +0.13% |
+| sqlite | +0.68% | +0.06% | +1.20% |
+| musl | +0.10% | -0.08% | +0.49% |
+
+Two further standalone builds kept the original output on the three corpora. Screening source chunks for plausible splices increased Lua cycles by 0.64–0.80% and musl by 0.91–1.50%. Restricting lookups to token lanes with continued gaps increased Lua cycles by 0.54–1.08%, with baseline controls of −0.06% to +0.50%. The per-size kernel improvement has yet to clear the whole-preprocessor gate. [Runs, source patches and hardware counters](followups.tar.xz)
