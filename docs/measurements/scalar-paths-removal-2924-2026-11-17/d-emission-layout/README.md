@@ -49,3 +49,23 @@ The timed entry point takes the metadata descriptor as a separate argument from 
 | control | slack | 629/636 | 1.000 | 1.077 |
 
 The caller variant met parity in all 1,272 size, shape and placement comparisons. The control uses two independent copies of baseline. The four column-pointer alternatives show that moving or reordering the check affects throughput. The separate correctness oracle compared each implementation on all 106,848 cases. ASan and UBSan passed on both caller implementations and the oracle caught eight deliberate defects in each. The native development build passed the metadata suite’s 2,452,019 checks, the debug suite, and GDB-backed unwind validation. [Sources, timing data and test receipts](metadata-entry.tar.xz)
+
+## Explicit scalar comparison and exact PR debug builds
+
+The malformed layouts were also measured through baseline’s explicit scalar entry point against the candidate’s ordinary entry point. For three of the four shapes a zero-row layout is valid. A null layout is invalid at every size. Each entry below covers all 159 sizes for each of the four shapes.
+
+| Candidate | Placement | Cells at parity or better | Median ratio | Worst ratio |
+| --- | --- | ---: | ---: | ---: |
+| caller | guard | 636/636 | 0.838 | 1.000 |
+| caller | slack | 636/636 | 0.839 | 1.000 |
+| control | guard | 600/636 | 0.938 | 1.091 |
+| control | slack | 613/636 | 0.938 | 1.091 |
+
+PR head `36b1aa04f` passed 2,452,086 and 2,455,422 seeded metadata checks, the debug suites and 7,621 unwind checks including an external GDB oracle. Both baseline and head reproduced 1,371 complete debug objects in each tier. The compilers used the same working directory, including for the DWARF compilation directory. Three corpora produced identical object bytes, stdout and stderr. Seven paired rounds used six runs per build.
+
+| Tier | Lua user cycles | SQLite user cycles | musl user cycles |
+| --- | ---: | ---: | ---: |
+| tier0 | -0.132% | +0.052% | +0.104% |
+| tier1 | +0.085% | +0.050% | +0.038% |
+
+The small increases on five of the six whole-compiler comparisons keep the PR in draft while the balanced copy rotations run. [Explicit scalar samples, whole builds, alternate implementations and native suites](explicit-scalar-and-debug-builds.tar.xz)

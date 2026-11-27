@@ -48,3 +48,19 @@ The trailing-field variant improved the singleton from 97.569 ns in the existing
 ## Testing segment overrides on address-size-limited forms
 
 The existing negative test on decoder branch `07bfd1a59` exercised zero instructions and failed its minimum-coverage assertion. Of the 520 catalogue form numbers marked as unable to accept an extra address-size prefix, 116 are unsegmented and none of those 116 passes the decoder's supported-form filter. Each of the three segment-override groups contains 40 supported row numbers. Enumerating encoded form numbers and preserving their segment override exercises 1,323, 1,306 and 1,300 encodings with seeds 1, 919 and 2161. The unmodified decoder passed all three runs. An intentional change accepting the extra prefix failed every one of the first seed’s 1,323 cases. GNU objdump and reassembly agreed on 13,319 catalogue and 10,001 generated instructions. [Test change, coverage census and complete native summaries](segmented-address-test.tar.xz)
+
+## Indexed addresses and SIMD operand extraction
+
+The address-table trial covers ordinary SIB addressing and complete escaped register forms with a mandatory prefix. Its statuses, lengths and full decoded records matched the earlier decoder for 9,498,624 additional indexed-address and escaped cases. The next implementation uses SIMD multishift to extract register numbers, vector source registers and decorations from VEX and EVEX encodings. The register trial handles register-direct operands. The memory trial also handles plain base/index addressing with the catalogue’s displacement scale. Both passed 2,605,824 differential cases derived from vector catalogue instructions, including malformed prefixes and truncation. GNU objdump and reassembly confirmed 13,319 catalogue instructions and 10,001 generated instructions on each variant.
+
+The following counts use three independent medians at calls of 1, 2, 4, 8, 16, 64 and 256 instructions. The existing scalar implementation was measured in each comparison. Units for singleton calls are ns per instruction.
+
+| Candidate | Stream | Sizes at parity or better | Scalar singleton | Candidate singleton |
+| --- | --- | ---: | ---: | ---: |
+| address | compiler | 7/7 | 31.568 | 12.378 |
+| vreg | compiler | 7/7 | 31.749 | 8.875 |
+| vreg | vector | 5/7 | 35.588 | 35.987 |
+| vmem | compiler | 7/7 | 31.466 | 8.724 |
+| vmem | vector | 7/7 | 35.394 | 17.763 |
+
+Three real Lua text sections also decoded completely in both implementations. The initial address trial missed the single-instruction scalar time on the Lua VM. A census of those misses identifies integer shifts, immediate moves, indexed memory without displacement and two-byte opcodes. Complete real-stream results and the coverage counts appear alongside the sources. The original table-byte counter excludes the experimental arrays. [Patches, measurements and independent checks](indexed-addresses-and-vector-operands.tar.xz)
