@@ -28,3 +28,24 @@ The native 9700X comparisons below use three locked Release repetitions per size
 | Aligned vector scan | slack | 155 | 134 | 155 | 157 |
 
 The packed pointer check matched or beat the old automatic route at all four malformed shapes in the protected placement. It lost on missing starts and both missing columns in the ordinary placement. The native suite passed 2,451,887 checks for both the packed and eager candidates, including frozen outcomes for every column-presence combination at counts 0–65. [Exact cycle samples, sources, census and oracle receipts](emission-layout.tar.xz)
+
+## Checking structure at the metadata entry point
+
+Both planning and resolution call the same metadata checker. It first validates the metadata descriptor, then rejects structural errors before either the scalar or vector row validator receives the layout. This preserves descriptor-error priority when both inputs are invalid. The row validators now receive every non-empty layout with both columns present.
+
+The timed entry point takes the metadata descriptor as a separate argument from the benchmark translation unit. At each size, the same executable alternates the actual baseline automatic call and candidate. It measures both a protected-page ending and an ordinary placement with accessible space after the columns. Cells include all 159 sizes for each of four shapes. Non-null empty layouts are valid in the three absent-column shapes. The null layout is always invalid.
+
+| Candidate | Placement | Cells at parity or better | Median ratio | Worst ratio |
+| --- | --- | ---: | ---: | ---: |
+| caller | guard | 636/636 | 0.909 | 1.000 |
+| caller | slack | 636/636 | 0.906 | 1.000 |
+| compact | guard | 0/636 | 1.421 | 1.607 |
+| compact | slack | 0/636 | 1.406 | 1.607 |
+| pointers | guard | 309/636 | 1.029 | 1.125 |
+| pointers | slack | 369/636 | 1.000 | 1.077 |
+| mask | guard | 633/636 | 0.909 | 1.017 |
+| mask | slack | 633/636 | 0.901 | 1.016 |
+| control | guard | 619/636 | 1.000 | 1.048 |
+| control | slack | 629/636 | 1.000 | 1.077 |
+
+The caller variant met parity in all 1,272 size, shape and placement comparisons. The control uses two independent copies of baseline. The four column-pointer alternatives show that moving or reordering the check affects throughput. The separate correctness oracle compared each implementation on all 106,848 cases. ASan and UBSan passed on both caller implementations and the oracle caught eight deliberate defects in each. The native development build passed the metadata suite’s 2,452,019 checks, the debug suite, and GDB-backed unwind validation. [Sources, timing data and test receipts](metadata-entry.tar.xz)
