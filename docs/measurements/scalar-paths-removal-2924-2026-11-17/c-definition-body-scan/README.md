@@ -25,3 +25,14 @@ The archive supplies the patch against the baseline above, the same-image instru
 The candidate marks `#`, `__VA_OPT__` and relevant parentheses in blocks of 16 tokens. Ordinary replacement tokens require no per-token visit during validation. The compiler baseline was `0a2c3034cf6093cda0f461e519ceb04484739259`. To reproduce, apply `marked.patch`, run `events.py` followed by `events-bench.py`, build Release, and use `events-qualified-run`. Its four executable names must live under `build/` so the preprocessor locates its resource headers.
 
 The 9700X results against scalar were optional 65/71, paste 19/72, stringize 70/73, parameter 48/74, literal 59/75. Each comparison uses median whole-preprocessor user cycles across five repetitions. For the untouched application corpora the median of five rounds was -0.447% on Lua, -0.121% on SQLite and +0.097% on musl. All outputs matched. Both the marked and event versions passed the preprocessor suite, including the Clang comparisons and fuzz cases. The remaining size losses keep this candidate experimental. [Candidate, shape generator, exact cycles and oracle receipts](replacement-events.tar.xz)
+
+## Cached body words and file-wide replacement facts
+
+The first implementation caches the hash, paste and optional-identifier masks for the most recently classified 64-token word. The second also carries two facts from token refinement into definition processing. Files without an optional replacement token can skip the identifier comparison. Both retain vector classification for the general case.
+
+The first five columns count body sizes at which the candidate matched or beat scalar in whole-preprocessor user cycles. The application columns give the median paired change across five rounds of five runs. The file-facts comparison uses separate production builds so the measured command pays the cost of producing the facts. The cache-only comparison selects the implementation in a common binary. All 365 output comparisons and both Clang-backed preprocessor suites passed. Each implementation still lost at individual sizes. [Reproduction, exact cycles, digests and oracle receipts](cached-body-words.tar.xz)
+
+| Candidate | Literal | Parameter | Stringize | Paste | Optional | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| cached | 37/75 | 43/74 | 72/73 | 34/72 | 68/71 | -0.380% | -0.123% | -0.007% |
+| facts | 0/75 | 1/74 | 53/73 | 0/72 | 49/71 | -0.804% | +0.033% | +0.006% |
