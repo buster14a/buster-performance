@@ -48,3 +48,7 @@ The corrected version reached parity or better in 2,466 of 2,610 cells across th
 | -3.231% | +0.081% | -0.579% | +0.214% |
 
 Values give the median paired change in user cycles from five rounds of six processes. [Patches, native timings and oracle drivers](padded-prefixes.tar.xz)
+
+## Precomputed token-kind mask
+
+This follow-up computes the set of prefix kinds that need splitting once for each tokenizer call. The corrected raw-string handling and newline-padding proof stay in place. The protected-page oracle matched all 31,320 fixed comparisons and 48,000 randomized streams. The three-round native medians met parity in 2,387 of 2,610 timing cells. The median ratio was 0.689 and the worst was 1.747. [Extracted functions, native per-size data and randomized test receipt](prefix-mask-table.tar.xz)
