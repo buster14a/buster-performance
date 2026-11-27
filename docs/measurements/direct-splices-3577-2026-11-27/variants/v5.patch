@@ -1,0 +1,280 @@
+--- a/src/buster/compiler/c_direct_lex.c
++++ b/src/buster/compiler/c_direct_lex.c
+@@ -2198,6 +2198,104 @@
+     return (fast_char_class[before] & 1u) != 0 || before == '.' || sign;
+ }
+ 
++// The text after the line splices that start at `p` (fast_skip_splices's), with the newlines they hold in *lines; `p`
++// where no splice starts there. Out of line and cold, as the skip of an inactive group asks it only where its masks see
++// a splice change what a line's first character is (#3577), or a literal it scans holds a backslash.
++static __attribute__((noinline, cold)) const uint8_t* fast_pass_splices(const uint8_t* p, const uint8_t* end, uint32_t* lines)
++{
++    const uint8_t* const joined = fast_skip_splices(p, end);
++    uint32_t newlines = 0;
++    for (const uint8_t* c = p; c < joined; c += 1)
++    {
++        newlines += *c == '\n' ? 1u : 0u;
++    }
++    *lines = newlines;
++    return joined;
++}
++
++// A skipped directive whose name a backslash follows, or which a backslash or a '/' follows after its '#' and blanks
++// (#3577): its name as the full pipeline reads it, past the line splices in it and the blanks, splices and block
++// comments before it (`#el\` + newline + `se` is an #else, `#\` + newline + `endif` an #endif, `#/**/else` an #else).
++// `p` is the first byte after the '#' and its blanks. Returns how many bytes from `p` the name ends, with *keyword the
++// conditional it is (FPP_KW_*, 0 for any other) and *lines the newlines before its end. A backslash in the name that
++// starts no splice (a UCN's), or a comment that doesn't end, leaves the direct path, and then the name runs to the
++// file's end. Out of line and cold: the skip of an inactive group asks it only where those bytes follow.
++static __attribute__((noinline, cold)) uint32_t fast_skipped_directive_name(FastPP* pp, const uint8_t* p, const uint8_t* end, uint8_t* keyword,
++                                                                            uint32_t* lines)
++{
++    const uint8_t* at = p;
++    uint32_t newlines = 0;
++    bool leave = false;
++    bool before = true;
++    while (before && !leave && at < end)
++    {
++        uint32_t spliced = 0;
++        const uint8_t* const joined = fast_pass_splices(at, end, &spliced);
++        newlines += spliced;
++        if (joined != at)
++        {
++            at = joined;
++        }
++        else if ((fast_char_class[*at] & 8u) != 0)
++        {
++            at += 1;
++        }
++        else if (*at == '/' && at + 1 < end && at[1] == '*')
++        {
++            uint32_t comment_lines = 0;
++            const uint8_t* const after = fast_skip_block_comment(at + 2, end, &comment_lines);
++            newlines += comment_lines;
++            leave = after == NULL;
++            at = after == NULL ? end : after;
++        }
++        else
++        {
++            before = false;
++        }
++    }
++    uint8_t name[8];
++    uint32_t length = 0;
++    bool more = true;
++    while (more && !leave && at < end)
++    {
++        if ((fast_char_class[*at] & 1u) != 0)
++        {
++            name[length & 7u] = *at;
++            length += 1;
++            at += 1;
++        }
++        else if (*at == '\\')
++        {
++            uint32_t spliced = 0;
++            const uint8_t* const joined = fast_pass_splices(at, end, &spliced);
++            newlines += spliced;
++            leave = joined == at;
++            at = joined;
++        }
++        else
++        {
++            more = false;
++        }
++    }
++    uint8_t kw = 0;
++    if (leave)
++    {
++        fast_pp_bail(pp, "directive name across a backslash in a skipped group");
++        at = end;
++    }
++    else if (length == 2u && memcmp(name, "if", 2) == 0) { kw = FPP_KW_IF; }
++    else if (length == 5u && memcmp(name, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
++    else if (length == 6u && memcmp(name, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
++    else if (length == 5u && memcmp(name, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
++    else if (length == 4u && memcmp(name, "else", 4) == 0) { kw = FPP_KW_ELSE; }
++    else if (length == 4u && memcmp(name, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
++    else if (length == 7u && memcmp(name, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
++    else if (length == 8u && memcmp(name, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
++    *keyword = kw;
++    *lines = newlines;
++    return (uint32_t)(at - p);
++}
++
+ // Lex ONE raw preprocessing token from [p, end), updating *line_count and *at_bol.
+ // Returns pointer past the lexed token (or end if FTOK_EOF).
+ // If stop_at_eol is true, returns FTOK_EOF upon reaching '\n' without consuming '\n'.
+@@ -2461,6 +2559,48 @@
+     return p;
+ }
+ 
++// A skipped directive's name, read from its '#' at `at`: the conditional it is (FPP_KW_*, 0 for any other directive),
++// where the name ends, and the newlines before that (a splice's or a comment's, #3577).
++typedef struct FastSkippedDirective FastSkippedDirective;
++struct FastSkippedDirective
++{
++    const uint8_t* next;
++    uint32_t keyword;
++    uint32_t lines;
++};
++
++// Out of line, so that the skip's loop keeps its registers: each skipped directive calls it once.
++static __attribute__((noinline)) FastSkippedDirective fast_skipped_directive(FastPP* pp, const uint8_t* at, const uint8_t* end)
++{
++    const uint8_t* next = fast_skip_hspace(at + 1, end);
++    uint8_t kw = 0;
++    uint32_t lines = 0;
++    if (next < end && (fast_char_class[*next] & 2u) != 0)
++    {
++        uint32_t len = fast_scan_ident_len(next, end);
++        if (len == 2u && next[0] == 'i' && next[1] == 'f') { kw = FPP_KW_IF; }
++        else if (len == 5u && memcmp(next, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
++        else if (len == 6u && memcmp(next, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
++        else if (len == 5u && memcmp(next, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
++        else if (len == 4u && memcmp(next, "else", 4) == 0) { kw = FPP_KW_ELSE; }
++        else if (len == 4u && memcmp(next, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
++        else if (len == 7u && memcmp(next, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
++        else if (len == 8u && memcmp(next, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
++        // #3577: a backslash after the name may be a line splice that the name goes on past.
++        if (__builtin_expect(next + len < end && next[len] == '\\', 0))
++        {
++            len = fast_skipped_directive_name(pp, next, end, &kw, &lines);
++        }
++        next += len;
++    }
++    else if (__builtin_expect(next < end && (*next == '\\' || *next == '/'), 0))
++    {
++        // #3577: a line splice or a comment before the name.
++        next += fast_skipped_directive_name(pp, next, end, &kw, &lines);
++    }
++    return (FastSkippedDirective){ .next = next, .keyword = kw, .lines = lines };
++}
++
+ // ---------------------------------------------------------------------------------------------------------------------
+ // The text of a conditional group that is not taken: nothing in it is lexed. fast_pp_skip_inactive looks for the
+ // directive that ends the group, 64 bytes at a time, and leaves the loop only at a '#' that is the first character of
+@@ -2559,6 +2699,21 @@
+         if (__builtin_expect(escaped != 0, 0))
+         {
+             ucns = (_mm512_cmpeq_epi8_mask(_mm512_or_si512(v, v_case), v_lower_u) | _mm512_cmpeq_epi8_mask(v, v_upper_n) | backslash) & escaped;
++            // #3577: a line splice's newline (after a backslash and any blanks) ends no line, but the line starts above
++            // take it for one. That misreads a line's first character only where the text after the splice, past its
++            // blanks, is a '#', a '/' or a backslash (the bytes whose first-ness the loop asks), or where the splice or
++            // those blanks reach the block's end; there each splice of the block is an event, read below.
++            unsigned long long run = 0;
++            const uint64_t run_out = _addcarry_u64(0, blank, escaped & blank, &run);
++            const __mmask64 spliced = nl & (escaped | run);
++            unsigned long long lead = 0;
++            const uint64_t lead_on = _addcarry_u64(0, blank, (spliced << 1) & blank, &lead);
++            const __mmask64 continued = ((spliced << 1) | lead) & ~blank;
++            __m512i opaque = v;
++            __asm__("" : "+v"(opaque));
++            const __mmask64 marks = _mm512_cmpeq_epi8_mask(opaque, v_hash) | _mm512_cmpeq_epi8_mask(opaque, v_slash) | backslash;
++            const uint64_t misread = (continued & marks) | lead_on | run_out | (spliced >> 63);
++            ucns |= misread != 0 ? escaped & (nl | blank) : 0u;
+         }
+         __mmask64 raws = 0;
+         uint64_t r_out = 0;
+@@ -2647,7 +2802,15 @@
+                     s += 1;
+                     while (s < end && *s != quote_char && *s != '\n')
+                     {
+-                        if (*s == '\\' && s + 1 < end)
++                        if (*s == '\\' && s + 1 < end && (fast_char_class[s[1]] & 8u) != 0)
++                        {
++                            // #3577: a line splice with blanks or "\r\n" before its newline goes on too.
++                            uint32_t splice_lines = 0;
++                            const uint8_t* const joined = fast_pass_splices(s, end, &splice_lines);
++                            line += splice_lines;
++                            s = joined != s ? joined : s + 2;
++                        }
++                        else if (*s == '\\' && s + 1 < end)
+                         {
+                             if (s[1] == '\n') { line += 1u; }
+                             s += 2;
+@@ -2665,44 +2828,33 @@
+ 
+             if (!decided && directive)
+             {
+-                next = fast_skip_hspace(at + 1, end);
+-                if (next < end && (fast_char_class[*next] & 2u) != 0)
++                const FastSkippedDirective read = fast_skipped_directive(pp, at, end);
++                const uint8_t kw = read.keyword;
++                next = read.next;
++                line += read.lines;
++                skipped_bad |= ((uint32_t)(kw == FPP_KW_ELIFDEF) | (uint32_t)(kw == FPP_KW_ELIFNDEF)) & (uint32_t)!pp->c23;
++                if (kw == FPP_KW_IF || kw == FPP_KW_IFDEF || kw == FPP_KW_IFNDEF)
+                 {
+-                    const uint32_t len = fast_scan_ident_len(next, end);
+-                    uint8_t kw = 0;
+-                    if (len == 2u && next[0] == 'i' && next[1] == 'f') { kw = FPP_KW_IF; }
+-                    else if (len == 5u && memcmp(next, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
+-                    else if (len == 6u && memcmp(next, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
+-                    else if (len == 5u && memcmp(next, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
+-                    else if (len == 4u && memcmp(next, "else", 4) == 0) { kw = FPP_KW_ELSE; }
+-                    else if (len == 4u && memcmp(next, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
+-                    else if (len == 7u && memcmp(next, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
+-                    else if (len == 8u && memcmp(next, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
+-                    next += len;
+-                    skipped_bad |= ((uint32_t)(kw == FPP_KW_ELIFDEF) | (uint32_t)(kw == FPP_KW_ELIFNDEF)) & (uint32_t)!pp->c23;
+-                    if (kw == FPP_KW_IF || kw == FPP_KW_IFDEF || kw == FPP_KW_IFNDEF)
+-                    {
+-                        nested += 1u;
+-                        skipped_bad |= (uint32_t)(nested > 63u);
+-                        nested_else &= ~(UINT64_C(1) << (nested & 63u));
+-                    }
+-                    else if (kw == FPP_KW_ENDIF)
+-                    {
+-                        if (nested == 0) { found_kw = kw; done = true; }
+-                        else { nested -= 1u; }
+-                    }
+-                    else if (nested == 0 && (kw == FPP_KW_ELSE || kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF))
+-                    {
+-                        found_kw = kw;
+-                        done = true;
+-                    }
+-                    else if (kw != 0)
+-                    {
+-                        // A nested #else or #elif: after its group's #else, the full pipeline's error.
+-                        const uint64_t level = UINT64_C(1) << (nested & 63u);
+-                        skipped_bad |= (uint32_t)((nested_else & level) != 0);
+-                        nested_else |= level & (UINT64_C(0) - (uint64_t)(kw == FPP_KW_ELSE));
+-                    }
++                    nested += 1u;
++                    skipped_bad |= (uint32_t)(nested > 63u);
++                    nested_else &= ~(UINT64_C(1) << (nested & 63u));
++                }
++                else if (kw == FPP_KW_ENDIF)
++                {
++                    if (nested == 0) { found_kw = kw; done = true; }
++                    else { nested -= 1u; }
++                }
++                else if (nested == 0 && (kw == FPP_KW_ELSE || kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF))
++                {
++                    found_kw = kw;
++                    done = true;
++                }
++                else if (kw != 0)
++                {
++                    // A nested #else or #elif: after its group's #else, the full pipeline's error.
++                    const uint64_t level = UINT64_C(1) << (nested & 63u);
++                    skipped_bad |= (uint32_t)((nested_else & level) != 0);
++                    nested_else |= level & (UINT64_C(0) - (uint64_t)(kw == FPP_KW_ELSE));
+                 }
+             }
+             else if (!decided && ucn)
+@@ -2718,7 +2870,12 @@
+                 }
+                 else
+                 {
+-                    next = at + 1;
++                    // #3577: a line splice is a blank, as a comment is: the line's first character may still follow it.
++                    uint32_t splice_lines = 0;
++                    const uint8_t* const joined = fast_pass_splices(at, end, &splice_lines);
++                    next = joined != at ? joined : at + 1;
++                    next_bol = joined != at && at_first ? 1u : 0u;
++                    line += splice_lines;
+                 }
+             }
+             else if (!decided)
