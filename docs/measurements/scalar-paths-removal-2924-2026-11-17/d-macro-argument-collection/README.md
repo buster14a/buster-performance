@@ -33,5 +33,11 @@ The following whole-corpus changes are medians over five rounds of five runs eac
 - arg-runs, sqlite, +1.128% user cycles.
 - arg-runs, lua, +1.139% user cycles.
 - arg-runs, musl, +0.044% user cycles.
+- arg-balanced, sqlite, +0.715% user cycles.
+- arg-balanced, lua, +1.210% user cycles.
+- arg-balanced, musl, +0.209% user cycles.
+- arg-final, sqlite, +0.545% user cycles.
+- arg-final, lua, +1.345% user cycles.
+- arg-final, musl, +0.544% user cycles.
 
 The per-size results retain the scalar route on main. The archive contains compiler patches, census rows, input and timing drivers, raw per-size timings and output digests. [Reproduction and results](argument-scans.tar.xz)
