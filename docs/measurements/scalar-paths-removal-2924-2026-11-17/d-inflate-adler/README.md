@@ -52,3 +52,26 @@ Processing the partial prefix first starts the checksum at one, so the prefix’
 | Prefix, constant modulus | 60 | 60 | 60 |
 
 The 64-byte prefix variants still lose for one, two and three bytes in each placement. [Sources, three sets of timings and independent correctness receipts](prefix-and-word-reductions.tar.xz)
+
+## Four-byte partial groups and paired full blocks
+
+The candidate starts with the partial block. A single dot product accumulates A and the weighted contribution to B in adjacent lanes. For the last one to three bytes, the loaded first, middle and last positions can coincide. A coefficient table gives each real byte its proper weight. Full 64-byte chunks run in pairs with two independent weighted accumulators. Both checksums are reduced modulo 65,521 after at most 4,096 chunks.
+
+| Prototype | Positive short length/placement cells at parity | All initial cells at parity |
+| --- | ---: | ---: |
+| word_gather | 168/189 | 405/438 |
+| word_bounded | 165/189 | 406/438 |
+| word_gather_mod | 174/189 | 414/438 |
+| word_bounded_mod | 171/189 | 410/438 |
+| loop_gather | 189/189 | 428/438 |
+| loop_bounded | 186/189 | 425/438 |
+| loop_gather_reduce | 186/189 | 426/438 |
+| loop_bounded_reduce | 183/189 | 419/438 |
+| full_skip | 189/189 | 434/438 |
+| full_pair | 186/189 | 435/438 |
+| full_odd | 189/189 | 438/438 |
+| full_after | 186/189 | 428/438 |
+
+The cleaned production source for the paired-block variant (`full_odd`) produced the same 840 bytes of optimized function text as the timed prototype using the local Release flags. The separately compiled production source met the gate in **6,177/6,177 size/placement comparisons** on the 9700X. Each cell is the median ratio across three processes, each using nine interleaved samples. The input covers every size 0–1,024, all 1,133 distinct lengths from 4,759 real compressed sections, and all 64 remainders at additional block boundaries. The longest input is 2,171,532 bytes. Placements start at a protected-page boundary, end at one, or start at offset 17. The median ratio across equally weighted cells was 0.548. The largest ratio was 0.9995. Those ratios measure the checksum function.
+
+The exact implementations in the complete compiler passed the two gzip-backed suites with 88,823 and 88,103 checks on both sides. The independent sanitizer run detected all nine deliberate changes to byte placement, weights, pair order, carry and modulus. [Complete timing series, baseline controls, implementation, fixtures and test receipts](four-byte-groups-and-block-pairs.tar.xz)
