@@ -19,3 +19,28 @@ Each entry is the median across three runs of the 21-pass synthetic compiler str
 The differential fixture checks all byte strings of length zero through two and 200,000 generated strings of length three through 64. It checks capacities zero through three for each string, including returned count, consumed bytes, status, and the entire returned decoded records. The two serialized outputs have SHA-256 `b6c895df8d78b3132527d8ff8a5759f323c337e8e987213e9491c38d93b3f72f`. The unrevised FWAIT table produced a different output.
 
 `runfixed` gives the exact shifts in run order, build command and shared-host baseline location. `mini.c` drives the published lane decoder and its benchmark. `short2.patch` is the candidate relative to the revision above. Run the driver inside the shared exclusive lock after placing these files in its working directory. [Measurements](results)
+
+## REX register forms and trailing fields
+
+The REX implementation bakes complete register-direct encodings after a REX prefix. It excludes FWAIT when later bytes can extend the instruction. The trailing-field implementation also bakes byte shuffles for ordinary integer ModRM forms carrying displacement or immediate bytes, plus near call and jump displacements. Unknown forms return to the shared lane decoder. The baked arrays increase table storage. The benchmark’s original printed table-byte counter omits these experimental arrays.
+
+Both candidates reproduced all 1,063,172 original differential outputs. The REX candidate also matched 786,432 combinations of register-direct inputs with varied trailing bytes. The trailing-field candidate matched 2,715,648 targeted cases including truncated inputs, positive and negative displacements, and immediates. Each comparison hashes complete records, offsets, counts, consumption and status. The 9700X ran the project’s 21-pass compiler stream benchmark three times per size and implementation under the exclusive lock.
+
+| Candidate | Instructions per call | Scalar ns/instruction | Existing vector | Candidate |
+| --- | ---: | ---: | ---: | ---: |
+| rex | 1 | 31.577 | 100.729 | 54.649 |
+| rex | 2 | 22.026 | 51.599 | 41.122 |
+| rex | 4 | 13.548 | 26.521 | 25.832 |
+| rex | 8 | 9.297 | 14.394 | 14.624 |
+| rex | 16 | 8.682 | 8.115 | 8.239 |
+| rex | 64 | 7.814 | 7.936 | 7.710 |
+| rex | 256 | 7.514 | 7.489 | 7.524 |
+| recipe | 1 | 31.618 | 97.569 | 27.040 |
+| recipe | 2 | 22.194 | 49.505 | 22.218 |
+| recipe | 4 | 13.579 | 25.955 | 16.084 |
+| recipe | 8 | 9.251 | 13.549 | 12.489 |
+| recipe | 16 | 8.607 | 7.830 | 8.507 |
+| recipe | 64 | 7.805 | 7.991 | 7.279 |
+| recipe | 256 | 7.517 | 7.267 | 6.929 |
+
+The trailing-field variant improved the singleton from 97.569 ns in the existing vector implementation to 27.040 ns, below scalar’s 31.618 ns. It still missed scalar at two, four and eight instructions. [Source, exact samples and differential receipts](register-and-trailing-forms.tar.xz)

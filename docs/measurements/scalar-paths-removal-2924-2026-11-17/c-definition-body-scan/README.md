@@ -1,5 +1,7 @@
 # Macro replacement-list classification on the Ryzen 7 9700X
 
+The cached-word results below have a known mask-boundary defect. [Reduced input and correction](#correction-for-files-with-more-than-255-remaining-tokens)
+
 The requested gate for `pp_define` includes short definitions, preparation and the complete preprocessor. The candidates below were applied separately to compiler `0a2c3034cf6093cda0f461e519ceb04484739259`. All timed runs used the shared exclusive lock and CPU 2. The scalar twin remains in the compiler.
 
 **Per-directive summaries.** The directive table recorded the last position plus one of each of three tokens within a definition. The parser could test those positions against the actual replacement-list start, including when the formal parameters contained a special name. The table builder cached the source word so neighboring definitions could share its classification. The Clang oracle passed, and each corpus produced the same preprocessing output. Across three interleaved rounds the whole preprocessor took 3.74–4.44% more user cycles on Lua, 1.48–2.08% more on SQLite, and 1.77–2.64% more on musl. [Candidate](prepared-candidate.patch)
@@ -56,3 +58,9 @@ The cached event implementation also checked whether the token source could cont
 | spelling | 0/75 | 0/74 | 37/73 | 0/72 | 40/71 | +1.719% | +0.329% | +3.302% |
 
 The remaining losses keep the definition-body scalar path in place. [Sources, exact size timings, output digests and checks](spelling-body-marks.tar.xz)
+
+## Correction for files with more than 255 remaining tokens
+
+The cached replacement-word prototype used the token count remaining in the file directly as the index for BZHI. The instruction reads the low eight bits of that index. At 256 remaining tokens it produced an empty mask, even though all 64 token slots in the word were live. The directive-marks and spelling variants inherit this expression. Their prior timing tables describe implementations with this correctness defect.
+
+A native test put an invalid paste at the start of a macro body and varied the number of following literal tokens. Clang and the production scalar path diagnosed all 26 inputs. The cached prototype silently accepted eight, for 252–255 and 508–511 padding tokens. The corrected expression uses a full mask whenever at least 64 tokens remain. [Exact inputs, both diagnostic streams, reproduction driver, fix and exit statuses](body-mask-boundaries.tar.xz)
