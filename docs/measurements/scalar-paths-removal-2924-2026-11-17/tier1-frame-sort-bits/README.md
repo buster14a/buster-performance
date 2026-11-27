@@ -32,3 +32,11 @@ The original draft also enters the radix when an indexed request lacks room for 
 The follow-up skips uniqueness sorting for a single index, whose range is already checked by the header, and places the large radix in its own cold text section. All 408 sparse comparisons beat baseline, including the singleton. The 66 standard, 144 forced small-class and 1,086 dense comparisons at or above 33 objects also passed. Every captured plan matched, the four seeds of the frame suite and execution tests passed, and all 1,371 object files and both diagnostic streams matched.
 
 Across 16 balanced same-path whole-driver repeats, Tier 1 took 0.154% more user cycles on Lua, 0.185% more on SQLite and 0.028% fewer on musl. The two baseline copies differed by +0.016%, −0.031% and −0.037% respectively. Lua and SQLite continue to hold the whole-compiler gate. [Patch, forced-scratch fixture and timing samples](cold-placement.tar.xz)
+
+## Store each event at its population-count rank
+
+The rank sort counts keys strictly below each event with eight-lane comparisons and mask population counts. It writes the event directly at the computed rank. The indexed planner can skip its uniqueness check for a singleton, and the large-frame radix runs outside the hot frame-planning code section. [Compiler revision](https://github.com/buster14a/buster/tree/c7fd5b82c6762296b6330d596a977bb3bb8bd1ec)
+
+All 66 standard comparisons, 144 forced small-class comparisons and 1,150 dense comparisons favored the candidate. In the sparse no-stamp experiment, 406 of 408 individual comparisons favored the candidate. All 136 size/distribution medians over three rounds favored it. On 4,505 captured frames the plans matched and ticks fell 12.2% on SQLite, 7.3% on Lua and 13.7% on musl. Empty-frame replay cost 1.006 times the baseline on SQLite and 1.003 on musl. The guarded permutation fixture passed 2,948 checks under ASan and UBSan and rejected ten mutations.
+
+The 16-repeat, balanced whole-compiler comparison with a separately rebuilt baseline used 0.202% more user cycles on Lua, 0.181% more on SQLite and 0.006% fewer on musl. Each repeat pools the two candidate copies and both baseline copies. The whole-driver gate remains open. [Planner timings, whole-driver controls, fixture and mutations](population-rank.tar.xz)

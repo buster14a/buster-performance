@@ -56,3 +56,14 @@ Compiler `c5524b066e13b504d996ca1cc109920bdaa5c31f` outlines the Tier 0 adapter.
 The actual adapter fixture starts five processes per arm and tier, each compiling 260 functions. Take the median for each function and sum by emitted record count. The outlined revision took 2.77% fewer adapter ticks than scalar overall in Tier 0 and 7.97% fewer in Tier 1. In Tier 0, 110/113 observed lengths met parity. Ratios for 18, 91 and 212 records were 1.403, 1.015 and 1.011. Tier 1 met parity in 80/81 lengths, with 1.139 at 36 records. Both 18 and 36 were the first adapter invocation in their respective compiler processes.
 
 A second experiment shares scratch reservations and carries a mask of proposed edits through replay and publication. That version met scalar in 108/113 Tier 0 lengths and 81/81 Tier 1 lengths. Both tiers produced identical fixture objects in the scalar, gather and candidate arms. Neither experiment clears both tiers' size gates. [Raw samples, compiler patch and reproduction](outlined-adapters.tar.xz)
+
+## Retain decoded forms through the transfer window
+
+The emitter classifies each original instruction once while finding a span and retains its kind in a 64-entry circular buffer. The independent replay still decodes the committed forms. Sparse proposal bits identify the exact instructions to publish. [Compiler revision](https://github.com/buster14a/buster/tree/b91825ce8b08b4e0644ee886195f2424b5874173)
+
+| Full adapter over 260 functions | Distinct record counts | Counts beating both controls | Total ticks / scalar | Total ticks / gather | Worst count / scalar | Worst count / gather |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Tier 0 | 113 | 113 | 0.9223 | 0.9189 | 0.9518 | 0.9893 |
+| Tier 1 | 81 | 81 | 0.8728 | 0.8778 | 0.8836 | 0.9420 |
+
+Each side ran in five new compiler processes. Pair calls in function order, take the median across processes for each call, then sum the call medians within each exact record count. The cold first invocation stays in the table. The three adapter builds emitted matching fixture objects in both tiers. The focused replay passed 2,305 checks and rejected ten mutations, including a shifted circular index and a dropped exchange. The hardware suites passed 21,779,895 Tier 0 cross-checks and 36,477 Tier 1 wide checks. [Raw per-call samples, size tables, focused test and mutation results](cached-span-adapters.tar.xz)
