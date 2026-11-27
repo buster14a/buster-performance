@@ -72,3 +72,13 @@ Three boundary diagnostics were checked at all 26 padding lengths on the correct
 Each 64-token cache word records the union of pastes, stringizes and optional-argument identifiers. The input bound uses all lanes when at least 64 tokens remain. The scalar and candidate produced identical output across five shape families and the three corpora. The patched compiler passed all 419 preprocessor fixtures and the independent boundary tests above.
 
 Against the scalar path the candidate reached parity on 300/365 individual sizes. Ordered by literal, parameter, stringize, paste and optional-argument bodies, the counts were 51/75, 63/74, 72/73, 47/72, 67/71. The medians over five pairs of five whole-compiler runs were -0.336% on Lua, -0.018% on SQLite and -0.605% on musl. The remaining losses keep this version experimental. [Patch, exact cell results, corpus samples, output digests and oracle](bounded-body-events.tar.xz)
+
+## Publishing a validated definition in one write
+
+On main `cc7d4ffb4`, the bounded event classifier wrote the completed macro directly into the expandable macro array and compared a single packed file/word cache key. The Clang oracle, expanded output, diagnostics and exit status agreed. The table reports per-shape counts of five-run medians at parity or faster and median paired whole-corpus user-cycle changes against scalar. The 58 losing sizes keep this candidate below the per-size gate.
+
+| Form | Literal | Parameter | Stringize | Paste | Optional | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| publish | 54/75 | 63/74 | 71/73 | 51/72 | 68/71 | -0.375% | -0.055% | -0.625% |
+
+[Per-size results, corpus controls, production patch and reproduction drivers](published-macro-records.tar.xz)

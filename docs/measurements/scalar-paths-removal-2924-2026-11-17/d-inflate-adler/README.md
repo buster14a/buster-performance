@@ -75,3 +75,15 @@ The candidate starts with the partial block. A single dot product accumulates A 
 The cleaned production source for the paired-block variant (`full_odd`) produced the same 840 bytes of optimized function text as the timed prototype using the local Release flags. The separately compiled production source met the gate in **6,177/6,177 size/placement comparisons** on the 9700X. Each cell is the median ratio across three processes, each using nine interleaved samples. The input covers every size 0–1,024, all 1,133 distinct lengths from 4,759 real compressed sections, and all 64 remainders at additional block boundaries. The longest input is 2,171,532 bytes. Placements start at a protected-page boundary, end at one, or start at offset 17. The median ratio across equally weighted cells was 0.548. The largest ratio was 0.9995. Those ratios measure the checksum function.
 
 The exact implementations in the complete compiler passed the two gzip-backed suites with 88,823 and 88,103 checks on both sides. The independent sanitizer run detected all nine deliberate changes to byte placement, weights, pair order, carry and modulus. [Complete timing series, baseline controls, implementation, fixtures and test receipts](four-byte-groups-and-block-pairs.tar.xz)
+
+## Whole-stream decompression
+
+Both implementations decompressed each captured section to exactly the bytes verified by Python zlib, and rejected a change to the stored checksum in every stream. Each timed traversal included the whole compressed input, output writes and checksum verification. On the 9700X, the complete separately compiled versions alternated order in 45 paired rounds. A second experiment used one compiled decompressor with four separately compiled checksum objects, two copies of each implementation, in a balanced four-way rotation for 48 rounds. Each observation covered six complete traversals.
+
+| Corpus | Compressed sections | Uncompressed bytes | Complete versions, TSC change | Shared decompressor, TSC change |
+| --- | ---: | ---: | ---: | ---: |
+| lua | 191 | 821,392 | -0.503% | -0.253% |
+| sqlite | 6 | 4,447,387 | -0.716% | -0.366% |
+| musl | 4,562 | 2,373,205 | +0.258% | -0.120% |
+
+The separately compiled musl comparison was slower by 0.258%. In the shared decompressor both checksum copies together were faster on all three corpora, including musl in each of the three processes. [Full observations, zlib cross-check, damaged-input checks and drivers](whole-stream-comparison.tar.xz)
