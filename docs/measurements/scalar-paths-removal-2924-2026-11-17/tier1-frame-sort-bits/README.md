@@ -62,3 +62,17 @@ Sixteen balanced same-path repeats gave these whole-compiler changes in user cyc
 ## Initializing the prospective frame columns
 
 The next candidate kept the indexed planner and allocated the producer’s four aligned columns together. It initialized each field once. The four frame seeds, frame execution, Tier 1 emission and CFG checks passed. The SIMD source fixture certified 127 functions, including 33 vector instructions and 86 masks. All 1,371 objects and diagnostic streams matched. Across 16 balanced repeats, complete compilation changed by +0.097% on Lua, +0.246% on SQLite and -0.311% on musl. The whole-compiler gate remains open. [Producer, exact cycles and validation](prospective-columns.tar.xz)
+
+## Indexed frame sorting on the base containing GVN and x87
+
+The Release build at PR head `a46ff0050` and the baseline at `7e28b4ed7` produced identical bytes in all 1,371 Tier 1 objects, stdout and stderr. The frame suite passed 1,175,093 checks and the execution suite passed 14,646. The paired measurement used seven rounds with six runs per image. The path-balanced measurement used 16 repeats of four individual samples. Two byte-identical baseline images and two byte-identical candidate images occupied the same executable path in balanced order. Each repeat contributes one ratio of the two candidate cycle counts added together to the two baseline counts added together.
+
+| Tier 1 corpus | Paired user cycles | Path-balanced user cycles | Baseline copy control | Candidate copy control |
+| --- | ---: | ---: | ---: | ---: |
+| lua | -0.235% | -0.059% | +0.047% | -0.030% |
+| sqlite | +0.119% | -0.035% | -0.037% | -0.023% |
+| musl | +0.156% | -0.080% | -0.060% | -0.038% |
+
+All three path-balanced medians were below baseline. The paired medians for SQLite and musl were positive. The whole-compiler changes are below a quarter percent under both protocols. The per-size and captured planner gains are reported above. An earlier SQLite run stopped before the copy rotation finished. Its partial values were discarded and all 64 SQLite samples were collected again on a filesystem with enough space.
+
+Two producer alternatives were also tested. Fusing the CFG scan with sliced frame rows measured +0.178%, +0.124%, -0.017% on Lua, SQLite and musl in the path-balanced test. Combining spill checks while emitting CFG constraints measured +0.067%, +0.095%, +0.047% in the seven-pair test. Neither change is in the PR. [Exact samples, drivers and test receipts](post-gvn-frame-rotation.tar.xz)
