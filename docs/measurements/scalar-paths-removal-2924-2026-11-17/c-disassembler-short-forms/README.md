@@ -155,3 +155,19 @@ The short-output experiment chose between decoding paths by output capacity and 
 The Lua VM trace classified 4,500 of 9,055 instructions as trailing-field records. The compact field representation improved fresh-process cycles over the submitted draft on all three inputs. The existing vector branch still led every comparison.
 
 [Reproduction patches, native tests, dispatch trace and paired process counters](continuation-runs-and-inline-fields.tar.xz)
+
+## Prefix rows and compact form dictionaries
+
+The first layout maps prefix/opcode pairs directly to ModRM pages. The second encodes a start in 32 bits and builds shared form and operand dictionaries one row at a time. The third extracts register fields from the start record. The patches in the archive apply successively on top of the direct-field layout above.
+
+Each candidate passed 113,317 native disassembler checks, including the GNU oracle, and the baked-table comparison. Four differential sweeps matched the submitted decoder, as did standard output and diagnostics on all three Lua binaries. The table gives median fresh-process user cycles relative to the existing vector branch across seven rounds of six runs per executable.
+
+| Layout | Executable bytes | Lua VM | Lua code generator | Lua tables |
+| --- | ---: | ---: | ---: | ---: |
+| Prefix and opcode rows | 202,804,968 | +5.068% | +2.037% | +10.802% |
+| Separate form and operand dictionaries | 198,591,392 | +5.455% | +4.362% | +10.012% |
+| Register fields in the start record | 198,593,216 | +5.851% | +6.887% | +12.821% |
+
+All three complete commands continued to use more cycles than the existing vector branch on each input.
+
+[Implementation patches, native test logs, sweep digests and complete process records](prefix-rows-and-dictionaries.tar.xz)

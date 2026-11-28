@@ -69,3 +69,22 @@ The direct packet variants change how the first names are loaded. Three other va
 Caching the first name removed the 365 losses previously observed above 16 fields in two variants. Exhausted records with one through five fields still had losses, and ordinary direct scans also paid for the additional descriptor check. These measurements time lookup on prebuilt descriptors. They exclude construction, replay and whole-compiler costs.
 
 [Native data for all six variants, descriptor construction and timing drivers](first-name-and-packet-comparisons.tar.xz)
+
+## Resolving direct names before promoted records in balanced whole compilations
+
+In each of eight rounds, two baseline labels and two candidate labels each ran four fresh compilations. The launch order rotated. The candidate column is the median ratio of the two candidate cycle counts combined to the two baseline counts combined. The last two columns compare the paired labels of the same executable and show variation within this experiment.
+
+| Tier | Corpus | Candidate user cycles | Rounds meeting baseline | Baseline label 2 vs. 1 | Candidate label 2 vs. 1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| tier0 | lua | +0.016% | 3/8 | +0.051% | +0.116% |
+| tier0 | sqlite | -0.082% | 5/8 | -0.051% | +0.125% |
+| tier0 | musl | -0.355% | 8/8 | -0.035% | +0.073% |
+| tier1 | lua | +0.160% | 0/8 | +0.053% | -0.009% |
+| tier1 | sqlite | +0.112% | 1/8 | -0.007% | -0.017% |
+| tier1 | musl | -0.045% | 7/8 | +0.066% | +0.027% |
+
+This alternative checks a direct name before visiting a promoted record. Both executables produced identical debug objects and diagnostics for all 1,371 translation units at each tier. The candidate median met baseline in three of the six configurations. All 48 process groups finished successfully.
+
+[Implementation patches, native type checks, five-round compilations and output hashes](resolved-lookup-source-and-outputs.tar.xz)
+
+[Round medians, complete process records and runner](resolved-lookup-balanced.tar.xz)
