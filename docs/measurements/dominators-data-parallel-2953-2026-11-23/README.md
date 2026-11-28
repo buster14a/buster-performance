@@ -57,3 +57,86 @@ The uninstrumented full Tier 1 compilation used five paired rounds of three proc
 | musl | +0.037% | -0.019% | -0.011% | -0.017% | +0.141% | +0.282% |
 
 [Source patches, fixture conversion, full compiler commands, mutation controls, correctness logs and raw measurements](natural-loop-edges.tar.xz)
+
+## Combined tree and natural-loop experiments
+
+The combined executable uses the natural-loop change from PR #3692 and a modified SEMI-NCA tree. DFS installs parents for single-predecessor blocks and collects joins. The solver initializes eight paired parent labels per vector store and resolves only the collected joins. Tree construction uses the existing CSR offsets to fill its children. This experimental tree retains the depth-dependent final climb.
+
+All native samples ran under the exclusive lock on CPU 2 of the 9700X. Each cell shows the median of three paired candidate/baseline cycle ratios. The first three columns compare with cc7d4ffb4 on 5,204 SQLite forms. The final two columns compare against the archived pre-#3455 scalar-loop compiler, SHA-256 `6e60ddafad95813175997cd42db5e2ef686f00d952d4619ab1b97b18b93d14af`, on all 7,806 original forms. For that comparison only, the candidate benchmark reader accepts the archived third form. The ordinary executable was also measured against the historical compiler on the synthetic suite.
+
+| SQLite row | Current tree | Current loops | Current all | Historical tree | Historical all |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| blocks[2,4) | -1.33% | -8.32% | -8.33% | -5.11% | -9.09% |
+| blocks[4,8) | -1.38% | -9.08% | -8.36% | -9.23% | -11.08% |
+| blocks[8,16) | -6.94% | -24.40% | -24.53% | -13.14% | -20.76% |
+| blocks[16,32) | -11.41% | -25.97% | -22.82% | -11.70% | -19.31% |
+| blocks[32,64) | -14.32% | -28.45% | -24.54% | -14.58% | -20.01% |
+| blocks[64,128) | -18.52% | -30.68% | -26.84% | -16.23% | -21.64% |
+| blocks[128,256) | -7.07% | -32.57% | -36.46% | -11.91% | -30.45% |
+| blocks[256,512) | -7.65% | -22.19% | -27.95% | -11.61% | -34.29% |
+| blocks[512,1024) | -7.40% | -18.12% | -15.58% | -9.67% | -23.41% |
+| blocks[1024,2048) | -7.86% | -9.74% | -7.41% | -10.17% | -11.24% |
+| largest-1 | -7.17% | -9.19% | -7.11% | -8.96% | -10.71% |
+| largest-2 | -8.23% | -10.71% | -8.28% | -10.83% | -11.30% |
+| largest-3 | -5.12% | -17.87% | -15.39% | -10.34% | -11.14% |
+| largest-4 | -8.41% | -18.35% | -15.82% | -8.55% | -23.92% |
+| largest-5 | -6.48% | -17.46% | -14.72% | -9.46% | -25.84% |
+| largest-6 | -6.82% | -17.49% | -14.89% | -9.38% | -25.40% |
+| largest-7 | -6.61% | -18.50% | -17.00% | -9.41% | -19.64% |
+| largest-8 | -7.38% | -19.11% | -17.27% | -9.64% | -20.97% |
+| all | -9.06% | -20.86% | -19.17% | -10.39% | -18.88% |
+
+| Synthetic shape and output | Against current compiler | Against historical compiler |
+| --- | ---: | ---: |
+| diamonds tree | -11.47% | -10.35% |
+| diamonds loops | -19.94% | -19.06% |
+| diamonds all | -17.92% | -16.24% |
+| nested tree | -13.79% | -12.85% |
+| nested loops | -25.43% | -94.79% |
+| nested all | -5.24% | -75.70% |
+| irreducible tree | -5.38% | -4.56% |
+| irreducible loops | -14.66% | -50.77% |
+| irreducible all | -6.18% | -44.78% |
+| dispatch tree | -0.58% | -0.21% |
+| dispatch loops | -32.16% | -17.83% |
+| dispatch all | -26.15% | -16.95% |
+| ladder tree | +2.30% | +7.64% |
+| ladder loops | -10.54% | -5.01% |
+| ladder all | +1.26% | +1.40% |
+| nested-ifs tree | +4.14% | +3.70% |
+| nested-ifs loops | -9.08% | -7.69% |
+| nested-ifs all | -9.89% | -8.72% |
+| fan-in tree | -3.55% | -0.96% |
+| fan-in loops | -13.90% | -10.19% |
+| fan-in all | -13.16% | -10.46% |
+
+The combined executable also passed the frozen suite with four seeds and the source producer with 22,641,582 comparisons over 5,204 SQLite forms. All 1,371 debug objects, diagnostic streams and standard output matched per configuration. Complete compile results are the median paired change in user cycles over five rounds of three processes.
+
+| Corpus | Default Tier 1 | All passes |
+| --- | ---: | ---: |
+| lua | -0.062% | -0.252% |
+| sqlite | -0.221% | -0.395% |
+| musl | -0.052% | -0.129% |
+
+### Deep DFS children dominated from above
+
+For each h the fixture has a chain numbered 0 through h. Block h and block 1 each have edges to the same h leaves. DFS descends the chain first. Every chain node has its preceding node as immediate dominator, and every leaf has block 1. The driver verifies every answer after every timing batch, outside the timed interval. The table reports timestamp-counter ticks per block for complete tree analysis, using seven warm samples per process and three measured processes.
+
+The first two implementations climb the previously built dominator tree. The next three compute deferred immediate dominators through Lengauer–Tarjan buckets and compressed minimum labels. The last four resolve semidominator thresholds only for vertices whose semidominator differs from their DFS parent. All seven alternatives passed the 46,597,165-check independent definition suite. The deep fixture distinguishes per-leaf climbing from shared computations. Each alternative still needs its own size and production qualification.
+
+| h | Parent | Modified SEMI-NCA | Buckets | Active buckets | Paired labels | Thresholds | Threshold bitmap | Lower links | Lower jumps |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 8 | 56.95 | 52.57 | 61.45 | 72.02 | 63.10 | 56.65 | 60.22 | 52.28 | 54.29 |
+| 16 | 58.38 | 54.65 | 55.94 | 66.51 | 56.80 | 52.95 | 54.73 | 49.41 | 49.90 |
+| 32 | 68.04 | 67.52 | 55.88 | 57.48 | 54.18 | 51.69 | 52.23 | 46.09 | 47.90 |
+| 64 | 103.06 | 104.32 | 55.40 | 56.88 | 55.52 | 51.04 | 51.44 | 45.85 | 46.03 |
+| 128 | 188.59 | 228.23 | 51.99 | 54.98 | 53.09 | 49.42 | 50.27 | 44.13 | 45.72 |
+| 256 | 485.47 | 484.98 | 50.48 | 51.97 | 50.23 | 47.71 | 47.55 | 42.64 | 44.59 |
+| 512 | 923.24 | 922.11 | 49.73 | 50.84 | 49.67 | 46.47 | 46.47 | 42.05 | 43.41 |
+| 1024 | 1799.32 | 1799.22 | 52.16 | 52.44 | 51.15 | 46.86 | 48.59 | 42.39 | 43.40 |
+| 2048 | 3549.12 | 3550.87 | 50.97 | 51.82 | 51.06 | 46.91 | 47.88 | 41.93 | 43.08 |
+| 4096 | 7051.19 | 7053.45 | 51.48 | 52.03 | 51.76 | 47.07 | 48.03 | 42.26 | 44.72 |
+| 8192 | 14066.32 | 14071.73 | 59.04 | 59.96 | 59.60 | 50.73 | 52.55 | 45.93 | 49.43 |
+| 16384 | 28122.41 | 28109.85 | 64.18 | 61.49 | 63.69 | 56.12 | 56.01 | 48.55 | 51.84 |
+
+[Compiler changes, historical reader adapter, independent deep-graph checks, build commands and paired raw results](combined-and-deep-joins.tar.xz)
