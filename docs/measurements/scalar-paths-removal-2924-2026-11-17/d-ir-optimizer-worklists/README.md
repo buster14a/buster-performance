@@ -81,3 +81,51 @@ The optimizer benchmark also timed large DAGs with eleven samples per executable
 Three further alternating pairs used the final shipping executable on the 16,388-instruction single-block DAG. Its median ratios were 0.9330 with SCCP alone and 0.9191 with all passes.
 
 [SCCP source changes, probes, native commands, correctness checks, raw cycles and object hashes](sccp-native.tar.xz)
+
+## CFG target resolution and layout ranks
+
+Five alternating paired rounds ran the complete verified Tier 1 pipeline on a locked Ryzen 7 9700X, using buster14a/buster@cc7d4ffb449c1f57d8d867c2ad2bf6dc6bfebc7f as the parent. Each input ran in one lane. Each cell reports the median of the five ratios of summed TSC ticks for that bin. Cleanup brackets thread-target resolution and layout ordering. Each pair produced identical function shapes, objects, standard output and diagnostics.
+
+| Input instructions | Pass configuration | Functions | Pipeline | Cleanup | Target resolution | Layout |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0–31 | default | 3,345 | 0.9837 | 0.8158 | 0.5729 | 0.9716 |
+| 0–31 | all | 3,618 | 0.9826 | 0.8121 | 0.5667 | 0.9552 |
+| 32–127 | default | 3,222 | 0.9883 | 0.8268 | 0.4457 | 0.9751 |
+| 32–127 | all | 3,353 | 0.9878 | 0.8330 | 0.4370 | 0.9800 |
+| 128–511 | default | 2,625 | 0.9898 | 0.8608 | 0.3922 | 0.9893 |
+| 128–511 | all | 2,414 | 0.9903 | 0.8595 | 0.3862 | 0.9893 |
+| 512–2,047 | default | 788 | 0.9924 | 0.8844 | 0.3662 | 0.9960 |
+| 512–2,047 | all | 651 | 0.9920 | 0.8829 | 0.3616 | 0.9955 |
+| 2,048–8,191 | default | 136 | 0.9942 | 0.8933 | 0.3201 | 0.9987 |
+| 2,048–8,191 | all | 82 | 0.9939 | 0.8870 | 0.3162 | 0.9955 |
+| 8,192+ | default | 8 | 0.9978 | 0.8831 | 0.2784 | 0.9971 |
+| 8,192+ | all | 6 | 0.9926 | 0.8849 | 0.2793 | 1.0026 |
+| Total | default | 10,124 | 0.9912 | 0.8617 | 0.4182 | 0.9889 |
+| Total | all | 10,124 | 0.9907 | 0.8579 | 0.4181 | 0.9865 |
+
+### End-to-end compilation
+
+The ordinary executables ran five paired rounds of three processes per side. Values are the paired changes in median user cycles. All objects with debug information and both output streams matched in every configuration.
+
+| Workload | Objects | Default | All passes |
+| --- | ---: | ---: | ---: |
+| lua | 34 | +0.060% | -0.023% |
+| sqlite | 1 | +0.037% | +0.114% |
+| musl | 1336 | -0.015% | +0.047% |
+
+### Independent target checks and captured inputs
+
+The probe captured 20,248 successor graphs in each pass configuration. Three randomized orders replayed the original and all four candidates against every target. The gathered component walk won all 61 populated block-count bins and workload totals over the two configurations.
+
+| Configuration | Workload | Graphs | Block references | Target cycles / parent |
+| --- | --- | ---: | ---: | ---: |
+| default | lua | 3,448 | 64,980 | 0.3005 |
+| default | sqlite | 9,036 | 308,626 | 0.2989 |
+| default | musl | 7,764 | 82,204 | 0.2747 |
+| all | lua | 3,448 | 65,998 | 0.3050 |
+| all | sqlite | 9,036 | 309,720 | 0.3132 |
+| all | musl | 7,764 | 83,052 | 0.2837 |
+
+The independent functional-graph oracle constructs nine shapes at 88 widths from zero to 8,192, including long cycles and chains feeding cycles. Under each of three seeds the five implementations passed 3,960 graph checks, 11,880 overlapping-output checks, 3,915 invalid-input checks and 425 exhausted-arena rollbacks. The guarded input ends immediately before an unreadable page. The gathered component walk beat the parent in 244 of 792 guarded shape/width timings. The compiler's synthetic IR benchmark won 98 of 120 measured shape/configuration rows. Full ratios are available in the archive. The optimizer passed the frozen seed with 358,076 checks and seeds 1, 133 and 789 with zero failures.
+
+[Source changes, instrumentation, commands, captured graphs, synthetic inputs, timings and checksums](cfg-native.tar.xz)
