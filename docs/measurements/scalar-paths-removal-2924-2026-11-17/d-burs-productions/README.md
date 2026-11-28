@@ -451,3 +451,15 @@ Compiler `5b1a0b681` reproduced all 168,865,267 returned plan bytes and all 2,74
 The archived native streams from the deferred-cost comparison reproduce the parent side. This archive supplies the new per-corpus byte counts and hashes, object and diagnostic manifests, candidate lists, source, native checks and mutation results.
 
 [Native results and verification scripts](widen-selector-productions.tar.xz)
+
+## End-to-end compilation with x87 productions
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane Tier 1 debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.327% | +0.113% |
+| sqlite | +0.208% | +0.064% |
+| musl | +0.015% | +0.068% |
+
+[Native compiler runs, input commands and object manifests](compile-extended.tar.xz)
