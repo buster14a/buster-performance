@@ -232,3 +232,47 @@ The complete compiler improved sizing on every row. Sizing plus encoding still t
 | musl | -0.035% | +0.149% |
 
 [Round-count changes, benchmark commands, GNU comparisons, object hashes and raw timing logs](round-count.tar.xz)
+
+## Offset updates from the paired rank table
+
+Four further implementations use the recorded branch ranks while applying prefix growths to the final offsets. A complete compiler build used the rank-lane implementation, which loads the compact entry spanning two sixteen-record packets. Each value below comes from three locked 9700X pairs with seeds 1, 133 and 789. Ranks and write give cycles per branch from the benchmark’s phase subtraction. The original archived scalar columns use three measurements of the same workload.
+
+| Workload | Sizing change | Sizing and encoding change | Ranks | Archived scalar ranks | Write | Archived scalar write |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| tier0-40 | -5.473% | -1.535% | -0.15 | 2.39 | 1.88 | 3.13 |
+| optimized-40 | -5.114% | -0.475% | -0.18 | 3.38 | 2.12 | 3.01 |
+| tier0-250 | -2.313% | -0.566% | 1.83 | 5.60 | 2.42 | 2.82 |
+| optimized-250 | -2.520% | -0.774% | 1.89 | 5.13 | 2.17 | 2.67 |
+| tier0-2000 | -1.342% | +1.254% | 2.91 | 5.59 | 1.68 | 1.66 |
+| optimized-2000 | -0.965% | +1.377% | 2.66 | 5.20 | 1.69 | 1.87 |
+| tier0-10000 | -1.362% | +2.352% | 2.93 | 4.59 | 2.42 | 2.61 |
+| optimized-10000 | -1.338% | +0.960% | 2.74 | 5.34 | 2.38 | 2.52 |
+| tier0-mix | -2.466% | -0.635% | 1.01 | 7.49 | 2.53 | 3.75 |
+| chain-forward | -0.292% | -0.199% | 3.38 | 5.87 | 2.56 | 2.68 |
+| chain-backward | -0.327% | -0.296% | 3.34 | 5.64 | 2.54 | 2.91 |
+
+The standalone values compare each implementation and its same-binary-layout harness parent. Each pair of columns gives sizing followed by sizing plus encoding.
+
+| Workload | Paired ranks size | With encode | Rank lanes size | With encode | Mark scan size | With encode | Byte adds size | With encode |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| tier0-40 | -6.377% | -2.036% | -5.183% | -2.748% | -5.922% | -3.910% | -6.725% | -3.637% |
+| optimized-40 | -6.672% | -1.698% | -6.442% | -2.240% | -6.634% | -2.122% | -6.821% | -2.277% |
+| tier0-250 | -2.540% | -2.008% | -2.896% | -1.966% | +0.119% | +1.955% | +0.190% | -0.730% |
+| optimized-250 | -2.779% | -0.448% | -2.820% | -1.637% | -0.306% | -0.034% | +0.111% | -0.205% |
+| tier0-2000 | -1.524% | -0.372% | -1.498% | -0.355% | +2.563% | +4.066% | +2.276% | +1.147% |
+| optimized-2000 | -1.630% | -0.471% | -1.087% | -1.032% | +2.628% | +4.290% | +2.265% | +1.684% |
+| tier0-10000 | -1.265% | -0.498% | -1.045% | +0.198% | +2.458% | +1.894% | +2.133% | +1.325% |
+| optimized-10000 | -1.509% | -0.949% | -1.509% | -0.835% | +1.917% | +1.571% | +1.418% | +0.818% |
+| tier0-mix | -2.876% | -1.538% | -2.924% | -1.726% | -1.285% | -0.599% | -1.619% | -1.810% |
+| chain-forward | -0.360% | -0.236% | -0.231% | -0.219% | +0.787% | +0.736% | +0.813% | +0.583% |
+| chain-backward | -0.429% | -0.480% | -0.394% | -0.623% | +0.669% | +0.365% | +0.567% | +0.131% |
+
+Complete debug compilations ran five paired rounds of three processes. Both output streams and all 1,371 object hashes matched per tier. The complete compiler passed 17,667 branch-sizing checks and 4,609 further checks, with all 404 generated functions matching GNU as at each of three seeds.
+
+| Workload | Tier 0 | Tier 1 |
+| --- | ---: | ---: |
+| lua | -0.132% | +0.013% |
+| sqlite | -0.130% | +0.049% |
+| musl | +0.172% | +0.075% |
+
+[Source variants, build commands, all raw timings, GNU results and object hashes](paired-offsets.tar.xz)

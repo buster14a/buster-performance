@@ -140,3 +140,51 @@ The first two implementations climb the previously built dominator tree. The nex
 | 16384 | 28122.41 | 28109.85 | 64.18 | 61.49 | 63.69 | 56.12 | 56.01 | 48.55 | 51.84 |
 
 [Compiler changes, historical reader adapter, independent deep-graph checks, build commands and paired raw results](combined-and-deep-joins.tar.xz)
+
+## Sparse back-edge sources
+
+DFS now marks a source when an outgoing edge reaches a discovered vertex that has not finished. The mask takes one bit per block and is allocated only for loop output. A candidate target is an ancestor when its preorder and reverse postorder are both at most the source’s. The analysis scans the outgoing edges of marked sources to identify natural headers and irreducibility witnesses. A reverse component walk runs only if a witness was found.
+
+All rows below are median ratios from three alternating pairs on the locked 9700X against the same uninstrumented parent. Each pair processed 5,204 current-form SQLite graphs. The four standalone prototypes mark source blocks, target blocks, target counts, or use reverse postorder directly. Their raw runs are included for comparison.
+
+| SQLite set | Loops | All outputs |
+| --- | ---: | ---: |
+| blocks[2,4) | -3.55% | -5.14% |
+| blocks[4,8) | -11.14% | -12.14% |
+| blocks[8,16) | -26.57% | -23.68% |
+| blocks[16,32) | -27.56% | -22.79% |
+| blocks[32,64) | -29.94% | -24.65% |
+| blocks[64,128) | -31.69% | -27.61% |
+| blocks[128,256) | -31.35% | -35.71% |
+| blocks[256,512) | -21.27% | -26.71% |
+| blocks[512,1024) | -18.63% | -15.14% |
+| blocks[1024,2048) | -10.50% | -8.95% |
+| largest-1 | -10.45% | -8.68% |
+| largest-2 | -11.26% | -9.02% |
+| largest-3 | -18.50% | -14.73% |
+| largest-4 | -18.59% | -15.43% |
+| largest-5 | -18.69% | -15.70% |
+| largest-6 | -18.64% | -15.55% |
+| largest-7 | -18.03% | -15.84% |
+| largest-8 | -18.25% | -16.29% |
+| all | -21.40% | -19.02% |
+
+| Synthetic shape | Tree | Loops | All outputs |
+| --- | ---: | ---: | ---: |
+| diamonds | +0.25% | -16.39% | -13.75% |
+| nested | +2.15% | -20.90% | -4.60% |
+| irreducible | -1.07% | -9.00% | -6.60% |
+| dispatch | -1.10% | -17.47% | -15.50% |
+| ladder | -2.39% | -26.79% | -0.00% |
+| nested-ifs | -4.51% | -27.43% | -19.62% |
+| fan-in | +2.49% | -21.39% | -17.35% |
+
+Complete Tier 1 debug compilations ran five pairs of three processes per configuration and corpus. All 1,371 objects in each configuration, standard output and diagnostics matched. The shipping executable passed 46,597,151 checks at seed 174 and seeds 1, 133 and 789. Its SQLite producer passed 22,641,582 checks on 5,204 forms and the checked-in IR producer passed 2,637 on 16 forms.
+
+| Workload | Default | All passes |
+| --- | ---: | ---: |
+| lua | +0.135% | -0.078% |
+| sqlite | +0.009% | -0.023% |
+| musl | -0.079% | -0.038% |
+
+[Sparse-source changes, four prototypes, native commands, outputs and raw timing](sparse-sources.tar.xz)
