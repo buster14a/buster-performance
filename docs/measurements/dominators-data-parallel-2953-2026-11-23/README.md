@@ -250,3 +250,50 @@ The current-form benchmark used 5,204 SQLite graphs. The historical comparison r
 All debug objects, stdout and diagnostics matched over the six ordinary compiler workloads. Each compiler ran five pairs of three processes. The source producer matched 22,641,582 checks on SQLite. Four seeds of the dominator differential suite passed. The separate deep-join graph has a known immediate dominator for every block. With a depth of 16,384 and 32,769 blocks, the locked median was 102.9 ticks per block, compared with 28,122 for the original unbounded climb. This test changes the number of joins and their distance to the semidominator together.
 
 [Implementations, recorded inputs, commands, ordinary object hashes and raw measurements](join-worklist.tar.xz)
+
+## Resolving already-known join parents
+
+The native compiler omits a second ancestor query when DFS has already stored the semidominator as the parent. During predecessor evaluation it also stops reducing a minimum once it reaches the entry block. Four variants passed the 32,769-block independent deep-join fixture. The standalone columns below give the number of groups meeting the matching parent across three paired runs.
+
+| Variant | SQLite tree | SQLite full analysis | Synthetic | Deep case, ticks per block |
+| --- | ---: | ---: | ---: | ---: |
+| earlyroots | 19/19 | 19/19 | 21/21 | 100.5 |
+| skipjoins | 19/19 | 19/19 | 21/21 | 102.7 |
+| rootpack | 17/19 | 19/19 | 19/21 | 103.5 |
+| trimjoins | 17/19 | 18/19 | 20/21 | 103.8 |
+
+The complete compiler used the second variant. Every one of the nineteen current SQLite sets improved for tree, loops, and full analysis. Every one of the nineteen historical sets improved for tree and full analysis, as did every historical synthetic comparison. Four frozen seeds passed. On the 5,204-graph SQLite source producer, 22,641,582 checks passed.
+
+| Synthetic graph and analysis | Current parent | Historical scalar |
+| --- | ---: | ---: |
+| diamonds tree | -10.09% | -6.97% |
+| diamonds loops | -22.67% | -22.53% |
+| diamonds all | -21.57% | -19.18% |
+| nested tree | -9.26% | -8.86% |
+| nested loops | -25.29% | -94.92% |
+| nested all | -5.37% | -75.89% |
+| irreducible tree | -3.44% | -2.48% |
+| irreducible loops | -8.23% | -50.23% |
+| irreducible all | -6.17% | -45.69% |
+| dispatch tree | -5.54% | -4.58% |
+| dispatch loops | -35.19% | -22.18% |
+| dispatch all | -27.03% | -4.59% |
+| ladder tree | +1.48% | -1.92% |
+| ladder loops | -26.39% | -27.29% |
+| ladder all | +1.02% | -1.43% |
+| nested-ifs tree | +1.81% | -0.53% |
+| nested-ifs loops | -27.09% | -26.45% |
+| nested-ifs all | -19.53% | -18.26% |
+| fan-in tree | -7.06% | -8.45% |
+| fan-in loops | -29.26% | -30.55% |
+| fan-in all | -21.46% | -21.08% |
+
+All six ordinary object manifests, standard outputs and diagnostics matched. Each cell below compares five paired rounds of three full compiler processes.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | -0.123% | -0.273% |
+| sqlite | -0.127% | -0.159% |
+| musl | -0.128% | -0.211% |
+
+[Measured sources, working implementations, raw native runs and object manifests](known-join-parents.tar.xz)
