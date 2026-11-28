@@ -24,3 +24,18 @@ Seven candidate implementations were compared to the production scalar fallback 
 Each cell is the median of three seeds, with seven alternating timing samples per seed. The seven shapes cover uniform depths 0, 2,047 and 2,048, monotone rises and falls, a rise followed by a fall, and mixed depths. Each seed verified 351,232 synthetic indices over 88 widths. The examined implementations still miss the per-size gate, so the scalar fallback remains on the production branch.
 
 [Input generator, captured parent arrays, source, commands, independent oracle and all per-size samples](parent-depth-native.tar.xz)
+
+## Searching each packet with minima for four, two and one neighbor
+
+The vector query advances within each eight-lane packet past neighbors whose minimum is still above the requested threshold. A second version compares unanswered lanes to the minimum of the pending stack before searching it. The adjacent-lane versions use this check with a linear lane scan or first resolve an entire packet from adjacent neighbors. Each implementation preserves the full unsigned depth.
+
+| Implementation | Cells at or below scalar | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: |
+| Four-, two- and one-lane minima | 0/616 | 1.8763 | 5.6667 |
+| Minima with a stack threshold check | 23/616 | 1.7179 | 5.6774 |
+| Adjacent-lane scan with a stack threshold check | 0/616 | 2.2119 | 9.0484 |
+| Try the immediate neighbor before the minima | 59/616 | 1.6679 | 3.4127 |
+
+All four reproduced the recorded parent of every token across 1,372 real and generated parser calls, including the declaration at depth 2,305. Three seeds each checked 351,232 synthetic indices and the independent full-width oracle. All four still exceed the scalar time at some sizes.
+
+[Implementations, independent oracle, replay checks and all three locked timing runs](packet-minima.tar.xz)

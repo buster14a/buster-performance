@@ -19,3 +19,15 @@ A zero-child goal selects the single concrete machine pattern. It covers uncondi
 The selected index and all available machine rules matched at all 1,006,223 nodes. The six runs also matched every object, standard output and diagnostic byte. The newly covered operations, summed across both configurations, were IR_BR (103,130), IR_PHI (46,725), IR_PARAM (28,782), IR_SYMBOL_ADDR (25,372), IR_RET (23,732), IR_LIFETIME (9,876), IR_BR_INDIRECT (328), IR_FENCE (22), IR_STACK_SAVE (14). The selector passed 1,530,046 checks and reproduced the frozen digest d15b788da26467e5 for 5,957 plans. Three pipeline seeds ran with the Clang cross-check. In a separate 19-node verified fixture, changing the baked grammar action, state, goal or missing production was detected even when the independent fallback could emit equivalent code.
 
 [Complete captures, candidate and probe patches, native tests, fixture mutations and object manifests](supported-records.tar.xz)
+
+## Complete source selection with single-pattern leaves
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9875 | 0.9875 | 0.9958 |
+| sqlite | 2,666 | 448,699 | 0.9815 | 0.9817 | 0.9985 |
+| musl | 2,756 | 235,335 | 0.9848 | 0.9849 | 0.9960 |
+
+[Inputs, native commands and all paired samples](supported-source-selection.tar.xz)
