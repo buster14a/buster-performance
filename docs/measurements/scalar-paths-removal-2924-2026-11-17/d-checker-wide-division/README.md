@@ -89,3 +89,17 @@ The guarded arithmetic oracle checked 11,162 cases and rejected all nine injecte
 The seven-way independent comparison found lower median cycles on all three Tier 1 corpora and on Tier 0 musl. Tier 0 Lua and SQLite still took 0.052% and 0.084% more user cycles than the mean of the two parent executables in the same rounds. [Independent rebuild controls and whole-compiler measurements](../whole-compile-rebuild/README.md)
 
 [Arithmetic timings, sources, protected-memory faults, native checker and Clang receipts](cold-division-arithmetic.tar.xz)
+
+## Compiler outputs and paired timings for the cold divider
+
+The candidate and original emitted identical debug objects, standard output and diagnostics for each workload at each tier. The cycle changes are median paired ratios over five rounds. Each executable ran three fresh one-lane compilations per round. The positive fixture has eight wide folds and the heavy fixture has 48 quotient/remainder pairs.
+
+| Workload | Objects per tier | Tier 0 compile | Tier 1 compile |
+| --- | ---: | ---: | ---: |
+| positive | 1 | -19.618% | -22.801% |
+| heavy | 1 | -25.579% | -25.233% |
+| lua | 34 | +0.005% | -0.180% |
+| sqlite | 1 | +0.020% | -0.103% |
+| musl | 1336 | -0.123% | -0.099% |
+
+[Object and stream hashes, process samples and runner](cold-division-compiler-outputs.tar.xz)
