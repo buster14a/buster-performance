@@ -21,3 +21,35 @@ The standalone Release-optimized native probes also compared nine parser issue f
 | restrict | 31 | 2 | 2 | 31 | 31 |
 
 [Candidate, fixture sources, per-snippet hashes, Clang suite and native logs](grouped-oracles.tar.xz)
+
+## Fallback declarations on compiler sources
+
+The parent compiler parsed each preprocessed translation unit on the locked 9700X. The probe recorded every flagged token in the ordinary item path and compared the vector roles, depths and parents with the columns after scalar repair. The tree comparison excludes whole-unit kernel failures. A matching tree alone does not establish that a fallback can be removed, since parsing also checks diagnostics and type-name visibility.
+
+| Corpus | Files | Tokens | Files reparsed | Items reparsed | Tokens reparsed | Items with changed tree columns | Items with identical columns | Whole units | Files with errors | Items with a flagged asm keyword |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lua | 34 | 571,903 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| sqlite | 1 | 716,136 | 1 | 6 | 8,391 | 5 | 1 | 0 | 0 | 0 |
+| musl | 1,336 | 5,039,561 | 553 | 7,570 | 398,386 | 0 | 7,570 | 0 | 0 | 6,982 |
+
+| Flagged input kind | Kind index | Occurrences |
+| --- | ---: | ---: |
+| STRING | 5 | 45,753 |
+| R_PAREN | 9 | 31,952 |
+| L_PAREN | 8 | 31,945 |
+| COLON | 47 | 20,191 |
+| COMMA | 51 | 19,760 |
+| ASM | 61 | 6,982 |
+| QUALIFIER | 55 | 6,236 |
+| NUMBER | 3 | 597 |
+| STORAGE | 58 | 587 |
+| L_BRACE | 10 | 12 |
+| GENERIC | 66 | 5 |
+| QUESTION | 46 | 5 |
+| TYPE | 52 | 5 |
+| STAR | 17 | 5 |
+| DEFAULT | 75 | 5 |
+| IDENTIFIER | 2 | 5 |
+| R_SQUARE | 7 | 5 |
+
+[Source inputs, native commands and per-token and declaration records](source-census.tar.xz)
