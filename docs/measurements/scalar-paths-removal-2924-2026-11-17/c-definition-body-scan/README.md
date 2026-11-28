@@ -142,3 +142,19 @@ This variant loads the next three token kinds alongside each packet. The stringi
 | Classify token neighbors in the same packet | 246/365 | 289/365 | -0.757% | -0.292% | -0.211% |
 
 [Per-size samples, corpus digests, process records and production patch](replacement-operator-neighbors.tar.xz)
+
+## Seven balanced rounds at each macro-body length
+
+Four aliases rotated launch order in each of seven rounds at every size. Two aliases used the scalar replacement-list scan and two used the contiguous sixteen-token vector implementation. For each input, the table uses the median of seven paired ratios of the combined vector counters to the combined scalar counters. Each definition-only observation uses the existing cycles-per-definition benchmark. Each complete-command observation is a median over four fresh preprocessing processes.
+
+| Body | Direct lengths meeting scalar | Slowest direct ratio | Complete lengths meeting scalar | Slowest complete ratio |
+| --- | ---: | ---: | ---: | ---: |
+| literal | 71/75 | 1.1903 | 73/75 | 1.0014 |
+| parameter | 69/74 | 1.2236 | 73/74 | 1.0028 |
+| stringize | 73/73 | 0.7190 | 73/73 | 0.9715 |
+| paste | 67/72 | 1.2239 | 70/72 | 1.0035 |
+| optional | 71/71 | 0.6585 | 71/71 | 0.9679 |
+
+Across all five body shapes, the vector method met scalar at 351 of 365 direct comparisons and 360 of 365 complete preprocessing comparisons.
+
+[Four-alias samples for every size and round, raw counters, runner and implementation patch](balanced-contiguous-body-lanes.tar.xz)
