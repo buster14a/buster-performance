@@ -88,3 +88,20 @@ This alternative checks a direct name before visiting a promoted record. Both ex
 [Implementation patches, native type checks, five-round compilations and output hashes](resolved-lookup-source-and-outputs.tar.xz)
 
 [Round medians, complete process records and runner](resolved-lookup-balanced.tar.xz)
+
+## Absence filters and bounded visible-name summaries
+
+The filter stores five membership bits in the exhausted tag descriptor. The summary experiment precomputes up to eight direct or promoted names and their top-level owner. A partial child stops collection from later siblings whose names it could shadow. The fallback still checks an unrepresented name in an incomplete summary. All six lookup variants matched the existing designator rules on all 3,150 cases per seed. The experiment times lookup on prepared tables. The summary prototype uses 68 extra bytes per fixture tag and excludes the cost of constructing them.
+
+| Candidate | All cases at or below baseline | Exhausted-index cases | Exhausted records above 16 fields |
+| --- | ---: | ---: | ---: |
+| Name filter with first-child mask | 2,471/3,150 | 2,418/2,884 | 2,190/2,555 |
+| Name filter with first anonymous group | 2,510/3,150 | 2,419/2,884 | 2,191/2,555 |
+| Name filter with eager promoted lookup | 2,445/3,150 | 2,382/2,884 | 2,156/2,555 |
+| Eight summarized names | 2,713/3,150 | 2,464/2,884 | 2,190/2,555 |
+| Eight names and a cached first query | 2,711/3,150 | 2,461/2,884 | 2,190/2,555 |
+| Eight names and a direct first-member comparison | 2,712/3,150 | 2,468/2,884 | 2,197/2,555 |
+
+Neither representation met the per-size requirement. The earlier first-name descriptor retained the best results on the records above 16 fields.
+
+[Complete native cycles, data construction and lookup implementations](initializer-name-summaries.tar.xz)

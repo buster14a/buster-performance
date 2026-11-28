@@ -55,3 +55,11 @@ Two key-generation candidates exercise the compiler's complete partition routine
 When vector constants shared both leading words or phis shared fixed fields, omitting supplemental hashes could send many distinct keys through the collision comparator. Hashing the exceptional operands across instructions reduced that cost. All candidates still had slower sizes on the 9700X.
 
 [Production patches, exact kernels, independent oracles and per-seed timings](key-generation-and-sort-comparisons.tar.xz)
+
+## Stable radix splits and complete pass drivers
+
+The radix candidate splits on the highest differing bit of the hash, then of successive key columns. Tied vector constants extend the key with six words. Tied phis extend it with classes in canonical predecessor order. Rows with differently ordered input lists still match. Stable masked compression partitions each group, and recursion visits the smaller subrange first to bound its stack. The independent oracle verified the order and classes in all 860 cases. The candidate met the parent in 73/860 three-seed timing comparisons, with median cycle ratio 6.5077.
+
+Separately, the fixed-column hash candidate passed the native GVN suite on three seeds and produced byte-identical optimizer pass reports on all three corpora. Five paired rounds of the complete pass driver gave cycle changes of +0.136% on Lua, -0.350% on SQLite and +1.046% on musl.
+
+[Implementation, stable-order oracle, GVN suite logs, complete pass reports and timing records](radix-and-pass-drivers.tar.xz)

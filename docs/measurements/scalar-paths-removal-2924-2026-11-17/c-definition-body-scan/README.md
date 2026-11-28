@@ -132,3 +132,13 @@ Both candidates passed the native Clang preprocessor comparisons. The four build
 | Four complete groups of sixteen | 335/365 | 205/365 | -0.458% | -0.450% | +0.258% |
 
 [Individual length results, workload hashes, process counters, Clang checks and reproduction patches](parameter-binding-and-complete-blocks.tar.xz)
+
+## Reading replacement operators and their following tokens together
+
+This variant loads the next three token kinds alongside each packet. The stringizing check compares the following identifier with the parameter, and the optional-argument check recognizes a parenthesized identifier while honoring the logical end of the macro body. All 365 outputs matched and the native Clang-backed suite passed. The source and timings include the complete compiler entry point and the definition-only benchmark.
+
+| Method | Definition-only sizes meeting scalar | Complete-command sizes meeting scalar | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Classify token neighbors in the same packet | 246/365 | 289/365 | -0.757% | -0.292% | -0.211% |
+
+[Per-size samples, corpus digests, process records and production patch](replacement-operator-neighbors.tar.xz)
