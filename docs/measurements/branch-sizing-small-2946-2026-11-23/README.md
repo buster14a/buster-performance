@@ -306,3 +306,23 @@ The whole builds used five rounds of three processes. Both compilers produced th
 Sizing followed by encoding matched or improved in 4 of eleven cells with paired ranks and 6 of eleven after outlining. Both complete binaries matched all 404 GNU as functions at each of three seeds and passed the protected-page column tests.
 
 [Source, native checks and every raw timing](sizing-compiler-boundaries.tar.xz)
+
+## Function boundaries in the isolated sizing harness
+
+Four function-boundary arrangements were checked at three seeds against GNU as. All 404 functions at each seed matched for every variant. Each pair of columns below shows the change in sizing alone and in sizing immediately followed by encoding.
+
+| Workload | Cold work size | With encode | Helper size | With encode | Small front size | With encode | Slim round size | With encode |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| tier0-40 | -7.138% | -4.079% | -6.521% | -3.589% | -7.265% | -3.891% | -6.910% | -4.069% |
+| optimized-40 | -6.385% | -2.455% | -5.326% | -1.755% | -6.453% | -2.195% | -6.930% | -2.082% |
+| tier0-250 | -1.721% | +0.910% | -1.530% | -1.476% | -2.250% | -1.456% | -2.238% | +0.504% |
+| optimized-250 | -2.313% | -0.068% | -2.536% | -1.273% | -2.819% | -0.361% | -2.882% | +3.305% |
+| tier0-2000 | -1.498% | +0.223% | -0.975% | -0.315% | -1.318% | -0.689% | -1.314% | -0.683% |
+| optimized-2000 | -2.018% | -1.638% | -1.357% | -0.792% | -1.463% | -1.009% | -1.115% | -1.332% |
+| tier0-10000 | -1.366% | -0.740% | -1.068% | -0.765% | -1.242% | -0.099% | -1.093% | -0.481% |
+| optimized-10000 | -1.299% | -0.634% | -1.130% | -0.343% | -1.420% | -0.756% | -1.130% | -0.326% |
+| tier0-mix | -3.008% | -1.583% | -2.646% | -1.526% | -3.198% | -2.440% | -2.685% | -1.675% |
+| chain-forward | -0.221% | -0.070% | -0.231% | -0.227% | -0.129% | -0.145% | -0.195% | -0.202% |
+| chain-backward | -0.261% | -0.345% | +0.015% | +0.148% | -0.210% | -0.193% | -0.230% | -0.369% |
+
+[Source, native checks and every raw timing](sizing-outlined.tar.xz)

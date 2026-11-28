@@ -209,3 +209,52 @@ The production `benchmark-tier1-select-source` command ran on Lua, SQLite and mu
 | musl | 2,756 | 235,335 | 0.9848 | 0.9847 | 0.9835 |
 
 [Inputs, native commands and all paired samples](earlyjump-source-selection.tar.xz)
+
+## Floating-point load, store and binary productions
+
+The grammar chooses a register or a foldable memory operand for floating add, subtract, multiply and divide. A right load takes priority. Add and multiply can use a left load. A store or load through a walked address retains its corresponding address pattern. The classifier also covers floating negation, undefined values and constants. The baked grammar has 1,029 states, 218 rules and 38,729 entries.
+
+Newly classified nodes are checked in their original dependency order, including any that a later expression absorbs. On a preliminary build, deferring a previously generic floating-point node reordered the production trace. The tables below are from the corrected build. Both executables used identical object output directories so their DWARF compilation-directory fields matched.
+
+| Passes | Corpus | Visited nodes | Parent maximal munch | Conversion version | Floating-point version |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 77,839 | 30,699 | 2,681 | 2,145 |
+| default | sqlite | 323,431 | 115,581 | 12,310 | 10,917 |
+| default | musl | 114,754 | 55,897 | 15,670 | 7,667 |
+| all | lua | 76,245 | 30,433 | 3,177 | 2,696 |
+| all | sqlite | 306,076 | 110,195 | 13,746 | 12,415 |
+| all | musl | 107,878 | 53,511 | 15,469 | 7,615 |
+
+The floating-point version reduced maximal-munch visits by 89.0% overall, to 43,455. All 1,006,223 full candidate lists and selected indices matched the parent in visit order. All 2,742 debug objects and both output streams were byte-identical. The frozen plans and 1,530,046 selector checks passed, along with emission, liveness, masks and three Clang-backed pipeline seeds.
+
+A 14-node verified function exercises a right-hand load, commuted left-hand load, a load with two uses, and both walked loads and stores. Changing the loaded side, the register rule or either address action caused its independent choice check to fail. The two existing 19-node fixtures also detected their eight changes to the direct and conversion rules. The optimized host fixture driver checked a further 7,362 nodes from 251 verified repository inputs.
+
+[Grammar and probe source, fixed fixtures, mutation results, per-node captures and object checksums](floating-productions.tar.xz)
+
+## Source selection with floating-point productions in dependency order
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9961 | 0.9960 | 1.0015 |
+| sqlite | 2,666 | 448,699 | 0.9940 | 0.9940 | 1.0051 |
+| musl | 2,756 | 235,335 | 0.9931 | 0.9930 | 1.0011 |
+
+[Inputs, native commands and all paired samples](ordered-source-selection.tar.xz)
+
+## Production selection by function size with single-pattern leaves
+
+Five alternating paired rounds ran single-lane Tier 1 compilation on the locked 9700X. Each measurement brackets verified instruction selection on a production function. For each size band, the table gives the median paired ratio of summed TSC ticks across Lua, SQLite and musl. The function order, instruction and block counts and selection status matched. All 2,742 debug-object checksums and both output streams matched within each paired round.
+
+| Input instructions | Default functions | Default change | All-pass functions | All-pass change |
+| --- | ---: | ---: | ---: | ---: |
+| 1–31 | 2,515 | -0.152% | 2,658 | -0.581% |
+| 32–127 | 1,994 | +0.856% | 2,134 | +0.796% |
+| 128–511 | 1,495 | +1.095% | 1,346 | +1.031% |
+| 512–2,047 | 436 | +0.344% | 336 | +0.355% |
+| 2,048–8,191 | 72 | +0.033% | 38 | +0.036% |
+| 8,192+ | 6 | -0.598% | 6 | -0.730% |
+| All | 6,518 | +0.420% | 6,518 | +0.516% |
+
+[Native paired measurements and commands](supported-functions.tar.xz)

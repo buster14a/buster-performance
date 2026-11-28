@@ -53,3 +53,21 @@ The parent compiler parsed each preprocessed translation unit on the locked 9700
 | R_SQUARE | 7 | 5 |
 
 [Source inputs, native commands and per-token and declaration records](source-census.tar.xz)
+
+## File-scope and block assembly statements
+
+The candidate recognizes file-scope assembly with string templates and block assembly statements whose operands and clobbers fit one 64-token window. It checks the statement boundary, modifier, parenthesis, strings, up to three operand sections and the terminator. An unresolved flag elsewhere in a declaration still sends that declaration to the repair parser.
+
+Four builds parsed every translation unit in the pinned Lua, SQLite and musl inputs using the same headers and predefines. The probes serialized all returned tree columns and diagnostics. Their SHA-256 hashes matched in each workload. The table counts top-level reparses and their tokens. The assembly operand checks removed 6,791 reparses in musl beyond the grouped-declarator change.
+
+| Corpus | Files | Input tokens | Parent items | Grouped names | File-scope asm | With block asm | Parent tokens reparsed | Final tokens reparsed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lua | 34 | 571,903 | 0 | 0 | 0 | 0 | 0 | 0 |
+| sqlite | 1 | 716,136 | 6 | 6 | 6 | 6 | 8,391 | 8,391 |
+| musl | 1,336 | 5,039,561 | 7,570 | 7,561 | 7,561 | 770 | 398,386 | 35,230 |
+
+The block candidate also matched the grouped-name revision on all 557 snippets at 64 token alignments, including their route counters. Separate differential cases covered 1,440 file-scope inputs and 6,076 block inputs in each of six C and GNU dialects. All serialized results matched their respective controls. Six faults in syntax validation changed a tree or diagnostic. Disabling either recognition path changed the positive fixtures' reparse counts. Both candidates passed the complete Clang-backed parser suite on the Ryzen 7 9700X.
+
+These are coverage and correctness measurements. The native per-size and whole-compile measurements run separately.
+
+[Production patch, probe and fixture generators, corpus hashes, per-file counters, fault results and native parser logs](assembly-statements.tar.xz)
