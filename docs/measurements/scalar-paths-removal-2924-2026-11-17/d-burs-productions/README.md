@@ -31,3 +31,32 @@ The production `benchmark-tier1-select-source` command ran on Lua, SQLite and mu
 | musl | 2,756 | 235,335 | 0.9848 | 0.9849 | 0.9960 |
 
 [Inputs, native commands and all paired samples](supported-source-selection.tar.xz)
+
+## Complete source selection including ABI-specific calls
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9870 | 0.9912 | 0.9946 |
+| sqlite | 2,666 | 448,699 | 0.9862 | 0.9858 | 0.9985 |
+| musl | 2,756 | 235,335 | 0.9840 | 0.9846 | 0.9960 |
+
+[Inputs, native commands and all paired samples](calls-source-selection.tar.xz)
+
+## ABI-specific call productions
+
+Three additional grammar leaves represent ordinary calls, inline assembly bodies and machine-row calls. The same ABI checks select their concrete kind for both the classifier and the independent candidate walk. The chosen grammar rule supplies that kind to the pattern builder.
+
+| Passes | Corpus | Selected nodes | Parent maximal munch | Candidate maximal munch | Reduction |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 77,839 | 30,699 | 4,957 | 83.9% |
+| default | sqlite | 323,431 | 115,581 | 25,461 | 78.0% |
+| default | musl | 114,754 | 55,897 | 20,203 | 63.9% |
+| all | lua | 76,245 | 30,433 | 4,740 | 84.4% |
+| all | sqlite | 306,076 | 110,195 | 21,830 | 80.2% |
+| all | musl | 107,878 | 53,511 | 18,488 | 65.5% |
+
+The selected index and all available machine rules matched at all 1,006,223 nodes. The six runs also matched every object, standard output and diagnostic byte. The newly covered operations, summed across both configurations, were IR_BR (103,130), IR_CALL (56,858), IR_PHI (46,725), IR_PARAM (28,782), IR_SYMBOL_ADDR (25,372), IR_RET (23,732), IR_LIFETIME (9,876), IR_CALL_INDIRECT (5,798), IR_BR_INDIRECT (328), IR_FENCE (22), IR_STACK_SAVE (14). The selector passed 1,530,046 checks and reproduced the frozen digest d15b788da26467e5 for 5,957 plans. Three pipeline seeds ran with the Clang cross-check. In a separate 19-node verified fixture, changing the baked grammar action, state, goal or missing production was detected even when the independent fallback could emit equivalent code. A second verified function exercised 16 ordinary calls. Mutating the call rule’s kind was detected at all 16 calls even though every node still selected a grammar production. The call fixture also detected changes to its action, state, goal and missing production.
+
+[Complete captures, candidate and probe patches, native tests, fixture mutations and object manifests](calls-records.tar.xz)
