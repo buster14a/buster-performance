@@ -381,3 +381,15 @@ The multi-packet parser at `1c111388e` met all 108 size comparisons against `cc7
 | parameters | 127 | 12,640 | 0.2212 | 0.1077 |
 
 [All native samples and the exact source and inputs](multi-packet-parser-sizes.tar.xz)
+
+## End-to-end compilation with inline assembly
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Tier 0 | Tier 1 |
+| --- | ---: | ---: |
+| lua | +0.179% | +0.296% |
+| sqlite | +0.047% | +0.237% |
+| musl | -1.447% | -0.796% |
+
+[Native compiler runs, input commands and object manifests](compile-inline.tar.xz)
