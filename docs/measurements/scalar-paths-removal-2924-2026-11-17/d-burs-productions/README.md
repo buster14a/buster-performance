@@ -413,3 +413,22 @@ The default selector canonicalizes operands and computes subtree costs after cho
 The six runs produced 13,036 successful plans, covering 2,364,459 nodes and 912,714 effective uses. Both builds produced the same 2,742 debug objects, stdout and diagnostics. The candidate and choice census recorded 1,006,223 equivalent visits, of which 19,716 used maximal munch on the candidate. The native frozen digest and 1,530,046 selector checks passed, as did the mask, liveness and emitter suites and three Clang-backed pipeline seeds. These source workloads exercised successful plan construction. Failure cases have separate coverage in the selector suite.
 
 [Native streams, object manifests, selection records, probe and verification scripts](deferred-cost-complete-plans.tar.xz)
+
+## Signed multiplication in the selector grammar
+
+The grammar covers bounded signed products in register and immediate forms. It also covers narrow results, floating-point casts, conditional branches and nonconstant divisors. Labeling uses the grammar’s child count and handles terminals directly. The fixed multiply regression checks both folded operand forms, wrapping arithmetic and a shared result. Forcing the ordinary extension broke two assertions.
+
+Compiler `911951a27` reproduced all 168,865,267 returned plan bytes and all 2,742 debug objects and diagnostic streams from `cc7d4ffb4`. Across 1,006,223 candidate lists the candidates kept the same order and the winner stayed the same. The original maximal-munch pass handled 396,316 of these visits. The deferred-cost baseline handled 19,716 and this revision handled 11,342. All three Clang-backed pipeline seeds passed.
+
+| Optimization passes | Corpus | Plans | Identical plan bytes | Candidate lists | Maximal-munch visits |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 1,095 | 11,244,889 | 77,839 | 796 |
+| default | sqlite | 2,668 | 66,046,641 | 323,431 | 3,024 |
+| default | musl | 2,755 | 15,035,978 | 114,754 | 1,398 |
+| all | lua | 1,095 | 9,299,167 | 76,245 | 1,035 |
+| all | sqlite | 2,668 | 54,779,635 | 306,076 | 3,352 |
+| all | musl | 2,755 | 12,458,957 | 107,878 | 1,737 |
+
+The archived native streams from the deferred-cost comparison reproduce the parent side. This archive supplies the new per-corpus byte counts and hashes, object and diagnostic manifests, candidate lists, source, native checks and mutation results.
+
+[Native results and verification scripts](product-selector-productions.tar.xz)
