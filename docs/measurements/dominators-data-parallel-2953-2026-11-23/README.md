@@ -312,3 +312,51 @@ Four standalone variants compare the active DFS frame in registers, finishing ch
 The predecessor-count variant met the parent in twenty of the twenty-one synthetic comparisons. Complete analysis on the ladder graph took 0.026% more cycles per block.
 
 [Implementations, fixtures, raw measurements and comparison](dfs-cursor-records.tar.xz)
+
+## Holding the active depth-first frame in registers
+
+DFS keeps the current block and its successor cursor in local variables. It saves a frame on descent and reads it back when the child completes. The resulting Release compiler passed four frozen seeds. Its SQLite producer passed 22,641,582 checks across 5,204 graphs. All nineteen SQLite sets improved over the parent for both loop analysis and complete analysis.
+
+| SQLite set | Loop analysis | Complete analysis |
+| --- | ---: | ---: |
+| blocks[2,4) | -4.364% | -4.628% |
+| blocks[4,8) | -14.427% | -14.969% |
+| blocks[8,16) | -29.177% | -25.963% |
+| blocks[16,32) | -29.383% | -23.934% |
+| blocks[32,64) | -32.270% | -25.379% |
+| blocks[64,128) | -33.818% | -29.750% |
+| blocks[128,256) | -37.874% | -38.675% |
+| blocks[256,512) | -28.085% | -31.558% |
+| blocks[512,1024) | -24.872% | -20.949% |
+| blocks[1024,2048) | -16.172% | -14.287% |
+| largest-1 | -15.610% | -13.807% |
+| largest-2 | -17.446% | -14.801% |
+| largest-3 | -24.624% | -20.226% |
+| largest-4 | -24.835% | -21.664% |
+| largest-5 | -24.013% | -21.355% |
+| largest-6 | -24.717% | -22.155% |
+| largest-7 | -24.615% | -22.511% |
+| largest-8 | -25.570% | -22.969% |
+| all | -24.279% | -21.248% |
+
+Three paired runs measured each synthetic case. The loop phase met the parent for every shape. Complete analysis on a ladder and tree analysis on two graphs still cost more.
+
+| Synthetic graph | Tree | Loops | All outputs |
+| --- | ---: | ---: | ---: |
+| diamonds | -7.765% | -20.955% | -19.182% |
+| nested | +1.789% | -19.625% | -4.057% |
+| irreducible | +0.203% | -6.325% | -5.145% |
+| dispatch | -2.178% | -18.021% | -13.817% |
+| ladder | -8.778% | -24.886% | +0.825% |
+| nested-ifs | -9.607% | -26.030% | -18.616% |
+| fan-in | -8.660% | -22.392% | -17.077% |
+
+All 2,742 debug objects, diagnostics and standard output matched. Each ordinary compiler cell is the median change in user cycles across five pairs of three processes per side.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | -0.265% | -0.309% |
+| sqlite | -0.186% | -0.259% |
+| musl | -0.124% | -0.182% |
+
+[Release source, native measurements, tests and output digests](natural-loop-active-frame.tar.xz)

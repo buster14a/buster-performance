@@ -96,3 +96,20 @@ Each cell compares five paired rounds of three ordinary compiler processes on th
 | musl | +0.056% | +0.107% |
 
 [Native compiler runs, input commands and object manifests](compile-calls.tar.xz)
+
+## Copy, negation and conversion productions
+
+A supported copy, integer negation or complement has one concrete machine pattern. Truncation is admitted when its producer cannot supply a second narrow-arithmetic pattern. Sign extension is admitted for terminal producers that cannot fold a load, truncation or signed arithmetic tree.
+
+| Passes | Corpus | Selected nodes | Parent maximal munch | Candidate maximal munch | Reduction |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 77,839 | 30,699 | 2,681 | 91.3% |
+| default | sqlite | 323,431 | 115,581 | 12,310 | 89.3% |
+| default | musl | 114,754 | 55,897 | 15,670 | 72.0% |
+| all | lua | 76,245 | 30,433 | 3,177 | 89.6% |
+| all | sqlite | 306,076 | 110,195 | 13,746 | 87.5% |
+| all | musl | 107,878 | 53,511 | 15,469 | 71.1% |
+
+The selected index and all available machine rules matched at all 1,006,223 nodes. The six runs also matched every object, standard output and diagnostic byte. The newly covered operations, summed across both configurations, were IR_BR (103,130), IR_CALL (56,858), IR_PHI (46,725), IR_PARAM (28,782), IR_SYMBOL_ADDR (25,372), IR_RET (23,732), IR_TRUNC (12,350), IR_SEXT (12,070), IR_LIFETIME (9,876), IR_COPY (7,096), IR_CALL_INDIRECT (5,798), IR_NEG (789), IR_BR_INDIRECT (328), IR_NOT (321), IR_FENCE (22), IR_STACK_SAVE (14). The selector passed 1,530,046 checks and reproduced the frozen digest d15b788da26467e5 for 5,957 plans. Three pipeline seeds ran with the Clang cross-check. In a separate 19-node verified fixture, changing the baked grammar action, state, goal or missing production was detected even when the independent fallback could emit equivalent code. A separate 19-node function exercises truncation, sign extension, copies, negation and complement. It detected all four mutations at all 19 nodes.
+
+[Complete captures, candidate and probe patches, native tests, fixture mutations and object manifests](converts-records.tar.xz)
