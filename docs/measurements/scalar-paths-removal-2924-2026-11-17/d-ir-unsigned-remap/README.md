@@ -91,3 +91,41 @@ The native unroll, optimizer and store-motion suites passed 5,962, 358,076 and 3
 | musl | 1336 | -0.291% | -0.102% | -0.008% |
 
 [Source, both per-size sweeps, guarded oracle, mutations, pass reports, object hashes and process logs](ir-range-extra-owners.tar.xz)
+
+## Short vector stores in the complete IR remapper
+
+For final packets of one to four instructions, the remapper packed the three operand columns into four-lane quarters, gathered once and stored each quarter directly. Both experiments compiled the actual IR translation units and opcode tables. The five-way run included the preceding revision and two other changes to mask generation. The two-way run compared the short stores directly with the untouched parent. Each cell is the median candidate/parent ratio for three seeds.
+
+| Executables in sweep | Candidate | Cells meeting parent | Median ratio | Slowest ratio |
+| ---: | --- | ---: | ---: | ---: |
+| 5 | Range and extra-operand detection | 720/720 | 0.7609 | 0.9881 |
+| 5 | Three four-lane columns | 720/720 | 0.7178 | 0.9691 |
+| 5 | Packed opcode classes | 720/720 | 0.7226 | 0.9854 |
+| 5 | Empty third-column shortcut | 720/720 | 0.7414 | 0.9926 |
+| 2 | Three four-lane columns | 720/720 | 0.7450 | 0.9722 |
+
+The short stores passed four new injected faults, all three native IR suites and the parent object checks for 1,371 files at each tier. In the debug-object comparison, both versions compiled from the same working directory. Both candidate layouts produced byte-identical optimizer pass reports. The complete pass driver took more cycles on each corpus for both layouts. The table gives median paired cycle changes across five rounds with three fresh processes per executable.
+
+| Candidate | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: |
+| Three four-lane columns | +0.520% | +0.210% | +1.044% |
+| Remap extra operands during the copy | +1.375% | +0.904% | +1.525% |
+
+[Source, both sweeps, injected faults, native suites, compiler pass reports and debug object hashes](ir-short-vector-stores.tar.xz)
+
+## Identifying rows with extra operands in balanced whole compilations
+
+In each of eight rounds, two baseline labels and two candidate labels each ran four fresh compilations. The launch order rotated. The candidate column is the median ratio of the two candidate cycle counts combined to the two baseline counts combined. The last two columns compare the paired labels of the same executable and show variation within this experiment.
+
+| Tier | Corpus | Candidate user cycles | Rounds meeting baseline | Baseline label 2 vs. 1 | Candidate label 2 vs. 1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| tier0 | lua | -0.098% | 6/8 | +0.059% | -0.142% |
+| tier0 | sqlite | -0.048% | 5/8 | +0.019% | -0.254% |
+| tier0 | musl | -0.078% | 5/8 | +0.062% | -0.002% |
+| tier1 | lua | +0.071% | 1/8 | -0.006% | -0.004% |
+| tier1 | sqlite | +0.186% | 0/8 | +0.024% | +0.030% |
+| tier1 | musl | -0.014% | 6/8 | +0.027% | +0.002% |
+
+The candidate median met baseline in 4 of the six configurations. All 48 process groups finished successfully.
+
+[Round medians, complete process records and runner](ir-extra-lists-balanced.tar.xz)

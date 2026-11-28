@@ -83,3 +83,15 @@ When a directive has no later line start in the last bitmap word, the line curso
 The updated table builder met baseline at 1,431 of 1,431 cells, across 159 lengths and nine distributions on the 9700X. The median paired ratio over three seeds was 0.5851 and the slowest was 0.9637.
 
 [Compiler patches, native Clang and fixed-oracle results, mutation outcomes and all per-size samples](directive-tables-unsigned-cursor.tar.xz)
+
+## Interleaved directive columns in complete preprocessing
+
+Each configuration matched the untouched parent’s preprocessor output and diagnostics. The first three columns give the median paired change in complete preprocessing user cycles over five rounds with three fresh processes per executable. The last two columns time the directive-table benchmark in cycles per token across three runs.
+
+| Corpus | Default | Forced whole file | 4 KiB windows | Parent table | Candidate table |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | -0.040% | -0.131% | +0.047% | 0.422 | 0.334 |
+| sqlite | +1.024% | +0.605% | +0.954% | 0.328 | 0.247 |
+| musl | +0.465% | +0.328% | +0.890% | 2.687 | 2.204 |
+
+[Compiler source, output digests, directive-table measurements and process logs](interleave-preprocessing.tar.xz)

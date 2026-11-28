@@ -103,3 +103,20 @@ The candidate and original emitted identical debug objects, standard output and 
 | musl | 1336 | -0.123% | -0.099% |
 
 [Object and stream hashes, process samples and runner](cold-division-compiler-outputs.tar.xz)
+
+## Cold wide division in balanced whole compilations
+
+In each of eight rounds, two baseline labels and two candidate labels each ran four fresh compilations. The launch order rotated. The candidate column is the median ratio of the two candidate cycle counts combined to the two baseline counts combined. The last two columns compare the paired labels of the same executable and show variation within this experiment.
+
+| Tier | Corpus | Candidate user cycles | Rounds meeting baseline | Baseline label 2 vs. 1 | Candidate label 2 vs. 1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| tier0 | lua | -0.102% | 7/8 | -0.107% | +0.013% |
+| tier0 | sqlite | +0.216% | 2/8 | +0.153% | -0.139% |
+| tier0 | musl | -0.173% | 8/8 | +0.036% | -0.046% |
+| tier1 | lua | -0.094% | 8/8 | +0.043% | +0.067% |
+| tier1 | sqlite | -0.055% | 7/8 | -0.009% | +0.029% |
+| tier1 | musl | -0.112% | 7/8 | -0.035% | -0.015% |
+
+The candidate median met baseline in 5 of the six configurations. All 48 process groups finished successfully.
+
+[Round medians, complete process records and runner](cold-division-balanced.tar.xz)
