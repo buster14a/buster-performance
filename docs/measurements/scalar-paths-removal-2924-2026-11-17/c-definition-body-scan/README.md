@@ -316,3 +316,36 @@ Each corpus used seven paired rounds. Percent changes use the median ratio of pr
 | Adjacent definition lines | musl | -1.312% | -0.849% |
 
 [Every size and round, source deltas, full corpus receipts and Clang comparisons](review-builds-and-command-cycles.tar.xz)
+
+## Adjacent definitions on the shipping file path
+
+Each definition still updates macro state before the next line, including poison checks and diagnostics. Definitions in ordinary file input can share the directive dispatch until text, a different directive, a fatal error or the end of the file. Argument collection processes one directive per step.
+
+Both builds met all four comparisons at all 365 sizes. The numbers below are the largest candidate/parent ratio over the 365 medians of three paired rounds. Each definition sample measured 21 passes. A complete-command round timed four fresh processes per executable. Each paired command produced identical stdout and stderr.
+
+| Build | Definition vs. scalar | Definition vs. default | Complete vs. scalar | Complete vs. default |
+| --- | ---: | ---: | ---: | ---: |
+| deflines | 0.92416 | 0.89324 | 0.99228 | 0.99034 |
+| delivery | 0.94617 | 0.90536 | 0.99984 | 0.99008 |
+
+The delivery build is PR #3686 commit `c2e25b4c9`. The final source-comment edit produced identical executable code (.text SHA-256 `e79834a1742355c10bb2a6ac4ba8b5effb173b5310935a511218f88f1869e68c`). Release preprocessing cycles on the three corpora changed as follows in the initial seven paired rounds.
+
+| Build | Corpus | Default | Scalar flag |
+| --- | --- | ---: | ---: |
+| deflines | lua | -0.635% | -0.776% |
+| deflines | sqlite | -0.335% | -0.046% |
+| deflines | musl | -3.968% | -3.026% |
+| delivery | lua | -0.445% | -0.728% |
+| delivery | sqlite | -0.152% | +0.012% |
+| delivery | musl | -3.646% | -2.844% |
+
+SQLite also has fourteen additional pairs on the final binary and seven pairs running the parent on both sides. All 21 candidate pairs count in the combined column.
+
+| SQLite mode | First 7 | Additional 14 | All 21 | Identical executable |
+| --- | ---: | ---: | ---: | ---: |
+| default | -0.152% | -0.276% | -0.222% | +0.072% |
+| scalar | +0.012% | -0.088% | -0.056% | +0.173% |
+
+The shipping executable passed all 422 deterministic cases and 256 generated cases against Clang, 240 windowed sources, 119,625 checks of window cuts and 1,041 directive-position checks. The untouched parent provided the nine new case, compile and print digests. The fixtures cover definitions separated by emitted text, argument collection, skipped groups, redefinition, poisoned names, an invalid paste, and an unterminated comment.
+
+[Source, every paired size, corpus receipts, independent expected outputs and oracle logs](adjacent-definitions-delivery.tar.xz)
