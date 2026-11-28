@@ -47,5 +47,19 @@ Five paired rounds of three processes per executable measured complete preproces
 | Corpus | Default -E | Whole-file -E | 4 KiB -E | Complete lexer cycles/byte |
 | --- | ---: | ---: | ---: | ---: |
 | lua | +0.562% | +0.238% | +0.359% | -0.092% |
+| sqlite | -0.204% | +0.107% | +0.070% | -0.213% |
+| musl | -0.132% | -0.150% | -0.117% | +0.469% |
 
 [Source changes, census, correctness controls, locked benchmark drivers and raw results](lexer-literal-kinds.tar.xz)
+
+## Keeping the ordinary token write small
+
+The inline combined mask tests for either prefixes or unknown lanes before calculating literal classes. The out-of-line candidate puts that same operation in a separate function, and the third candidate calculates a per-chunk literal mask. All three produced the same bytes on the protected tokenizer inputs and captured writes. Timing uses the same seeds, widths, rotations and reach criteria as above. Each cell gives the number of paired ratios at or below one and the median ratio.
+
+| Implementation | Full tokenizer | All captured inputs | Affected chunks only |
+| --- | ---: | ---: | ---: |
+| Out-of-line literal helper | 768/900 · 0.995× | 807/859 · 0.871× | 451/501 · 0.481× |
+| Inline combined literal mask | 572/900 · 0.996× | 859/859 · 0.679× | 501/501 · 0.357× |
+| Separate chunk literal mask | 815/900 · 0.994× | 660/859 · 0.675× | 501/501 · 0.361× |
+
+[Variants, complete-tokenizer and writer runs](literal-mask-guards.tar.xz)
