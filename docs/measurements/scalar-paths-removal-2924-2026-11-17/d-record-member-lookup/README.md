@@ -52,3 +52,20 @@ These comparisons measure the initializer's distinct lookup rule. A direct name 
 | Test promoted children while scanning | 2,414/3,150 | 2,190/2,555 | 0.2478 |
 
 For each method, 365 of the 2,555 cells over 16 fields still lost. Hits in the first member were sensitive to the cost of setting up the vector comparison. [Complete samples, population counts by lookup route and fixture](initializer-designator-gates.tar.xz)
+
+## First-packet latency and tag descriptors
+
+The direct packet variants change how the first names are loaded. Three other variants cache the first direct member name in the tag’s existing lookup word and use the exponent byte to distinguish an exhausted index. The experiment materialized a second descriptor view of the same records for the candidate. The baseline kept the original table. The three tagged runs used three different name ranges, including identifiers with the top bit set. Each result matched the original initializer rule, including a query for name zero.
+
+| Method | All sizes and shapes meeting baseline | All exhausted-index cases meeting baseline | Exhausted records above 16 fields meeting baseline |
+| --- | ---: | ---: | ---: |
+| Full vector first packet | 2,421/3,150 | 2,415/2,884 | 2,190/2,555 |
+| Right-aligned short packet | 2,397/3,150 | 2,390/2,884 | 2,190/2,555 |
+| Four-name opening packet | 2,414/3,150 | 2,414/2,884 | 2,190/2,555 |
+| Cached name and first eligible child mask | 2,826/3,150 | 2,826/2,884 | 2,555/2,555 |
+| Cached name and first unnamed group | 2,827/3,150 | 2,827/2,884 | 2,555/2,555 |
+| Cached name and eager promoted lookup | 2,824/3,150 | 2,824/2,884 | 2,553/2,555 |
+
+Caching the first name removed the 365 losses previously observed above 16 fields in two variants. Exhausted records with one through five fields still had losses, and ordinary direct scans also paid for the additional descriptor check. These measurements time lookup on prebuilt descriptors. They exclude construction, replay and whole-compiler costs.
+
+[Native data for all six variants, descriptor construction and timing drivers](first-name-and-packet-comparisons.tar.xz)
