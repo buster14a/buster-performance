@@ -314,3 +314,61 @@ Each cell compares five paired rounds of three ordinary compiler processes on th
 | musl | -0.058% | -0.081% |
 
 [Native compiler runs, input commands and object manifests](compile-float.tar.xz)
+
+## Signed widening loads
+
+Sign extension can fold a single-use signed load into the machine instruction. The new production distinguishes a foldable load from a register input, including an address the selector walks and a memory barrier between the load and extension. Calls and terminators also bypass unused candidate-slot initialization. The baked grammar has 1,031 states, 220 rules and 38,792 entries.
+
+| Passes | Corpus | Visited nodes | Parent maximal munch | Floating-point revision | Signed-load revision |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 77,839 | 30,699 | 2,145 | 1,249 |
+| default | sqlite | 323,431 | 115,581 | 10,917 | 4,952 |
+| default | musl | 114,754 | 55,897 | 7,667 | 6,126 |
+| all | lua | 76,245 | 30,433 | 2,696 | 1,804 |
+| all | sqlite | 306,076 | 110,195 | 12,415 | 7,191 |
+| all | musl | 107,878 | 53,511 | 7,615 | 6,212 |
+
+Across the six compilations the revision reduced maximal-munch visits from 396,316 to 27,534 (93.1%). All 1,006,223 complete candidate rule lists and chosen indices matched the parent in visit order. All 2,742 debug objects and both output streams matched. The compiler passed the 5,957-plan frozen digest, 1,530,046 selector checks and three Clang-backed pipeline seeds. The independent 16-node function caught all three signed-load faults. The original direct, conversion and floating-point fixtures caught their 13 injected faults. A further 251 verified repository IR inputs covered 7,362 nodes.
+
+[Probe and production source, oracle inputs, native checks, full candidate traces and object manifests](signed-widening-loads.tar.xz)
+
+## Synthetic instruction widths with conversions
+
+The production benchmark generated each shape at fifteen step counts on the locked Ryzen 7 9700X. The table gives the median of three paired changes in TSC ticks per IR instruction. Instruction counts, output records and bytes, spill and reload counts and both reported memory peaks matched in every pair. The candidate met the parent in 28 of 45 selection cells and 17 of 45 complete cells.
+
+| Requested steps | chain selection | chain complete | pressure selection | pressure complete | wide selection | wide complete |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | -0.867% | -0.381% | +0.460% | +1.764% | -3.517% | +0.453% |
+| 2 | -0.779% | -0.277% | -2.358% | +1.466% | -3.144% | +1.454% |
+| 7 | -0.832% | +0.781% | -0.153% | +0.782% | -3.160% | -1.195% |
+| 15 | -1.235% | +0.449% | +0.587% | +0.077% | -2.682% | -0.546% |
+| 16 | -0.845% | +1.843% | +0.507% | +1.601% | +1.294% | -0.187% |
+| 17 | -1.147% | +1.654% | -0.455% | +0.091% | -3.657% | -0.421% |
+| 31 | -1.171% | +0.101% | +2.522% | +0.307% | -3.760% | -0.113% |
+| 32 | -0.752% | +4.434% | +1.818% | +1.361% | -3.088% | +3.928% |
+| 63 | -0.842% | -0.511% | +1.859% | +0.236% | -0.572% | +1.137% |
+| 64 | -1.385% | +0.130% | +1.878% | -0.040% | -1.009% | +2.365% |
+| 127 | -1.576% | -0.579% | +1.311% | -0.919% | -1.070% | +0.285% |
+| 256 | -1.507% | -1.360% | +2.375% | +0.526% | -0.450% | +0.386% |
+| 1024 | -0.230% | -1.121% | +2.291% | +1.300% | +0.799% | +2.958% |
+| 2048 | +0.749% | -1.380% | +2.038% | -0.243% | +1.195% | +0.564% |
+| 8192 | -1.336% | -2.777% | +0.648% | -0.748% | +1.310% | +0.579% |
+
+[Native paired measurements and commands](converts-widths.tar.xz)
+
+## Long double operations
+
+The selector now classifies x87 operations from the result and operand types in each vector of IR instructions. Long double phis use the existing direct phi production. The baked grammar has 1,032 states, 221 rules and 38,823 entries.
+
+| Passes | Corpus | Visited nodes | Signed-load maximal munch | Long double maximal munch |
+| --- | --- | ---: | ---: | ---: |
+| default | lua | 77,839 | 1,249 | 1,249 |
+| default | sqlite | 323,431 | 4,952 | 4,952 |
+| default | musl | 114,754 | 6,126 | 1,824 |
+| all | lua | 76,245 | 1,804 | 1,804 |
+| all | sqlite | 306,076 | 7,191 | 7,191 |
+| all | musl | 107,878 | 6,212 | 2,696 |
+
+The number of maximal-munch visits fell from 396,316 on the original build to 19,716 (95.0% fewer). All 1,006,223 candidate rule lists and chosen indices matched in visit order. All 2,742 debug objects and both output streams matched. The native suite passed the 5,957-plan frozen digest, 1,530,046 selector checks, and three Clang-backed pipeline seeds. A separate 21-node function required 17 x87 classifications. Changing the rule action or kind caused 17 mismatches. Dropping the extended-precision load from that class failed the count independently. The 251 verified repository IR inputs covered 7,362 nodes. These counts measure grammar coverage and correctness. Timing results have their own tables.
+
+[Source, fixtures, faults, native logs, candidate traces and object manifests](long-double-productions.tar.xz)
