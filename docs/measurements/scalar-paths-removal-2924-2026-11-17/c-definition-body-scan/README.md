@@ -82,3 +82,17 @@ On main `cc7d4ffb4`, the bounded event classifier wrote the completed macro dire
 | publish | 54/75 | 63/74 | 71/73 | 51/72 | 68/71 | -0.375% | -0.055% | -0.625% |
 
 [Per-size results, corpus controls, production patch and reproduction drivers](published-macro-records.tar.xz)
+
+## Validating replacement operators and publishing known definitions
+
+All three variants used native Release builds on the 9700X and matched the macro outputs and diagnostics across the five sweep families, the three corpora and the Clang-backed preprocessor suite. The operator variant recognizes valid one-parameter stringizing and simple optional expressions while scanning. The publication variant also sets the known live macro directly and filters diagnostic-history lookups. The table counts five-run process medians that meet the scalar cost at each length. Its final columns give median paired changes in whole-corpus user cycles over five rounds.
+
+| Candidate | Literal | Parameter | Stringize | Paste | Optional | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Index 64 directives | 52/75 | 50/74 | 70/73 | 33/72 | 67/71 | +0.873% | -0.005% | +0.168% |
+| Validate operator operands | 30/75 | 44/74 | 73/73 | 34/72 | 71/71 | -0.351% | -0.102% | +0.113% |
+| Publish known live definitions | 54/75 | 60/74 | 73/73 | 54/72 | 71/71 | -0.319% | -0.141% | -0.621% |
+
+The publication implementation met the end-to-end limit in 312 of 365 cells. The separate 21-pass definition-only measurement met it in 351 cells, including all literal, stringizing and optional-expression lengths. Five parameter lengths and nine paste lengths remained slower in that measurement. The scalar route remains in production.
+
+[Source changes, per-size counters, corpus results and oracle logs](definition-publication-and-operators.tar.xz)
