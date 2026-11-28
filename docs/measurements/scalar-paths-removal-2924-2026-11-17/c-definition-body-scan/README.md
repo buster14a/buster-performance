@@ -289,3 +289,30 @@ The corpus comparison used seven paired rounds with four fresh processes per exe
 | musl | -1.176% | -0.469% |
 
 [Source, oracle receipts, per-size medians, output hashes and native process logs](remainder-macro-definitions.tar.xz)
+
+## The reviewed scanner and two changes to definition dispatch
+
+The 365 input shapes were measured on each compiled review image, including after a test driver changed its window sizes. Each count is the number of input shapes whose median of three paired ratios met its parent. Each complete command ran four fresh processes per executable per pair. Every output and diagnostic stream agreed. The direct definition timings used 21 passes per process.
+
+| Build | Definitions vs. scalar | Definitions vs. default | Complete vs. scalar | Complete vs. default | Worst complete vs. scalar | Worst complete vs. default |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Review before window-test adjustment | 365 | 365 | 295 | 320 | +1.703% | +1.408% |
+| PR b221c08aa | 365 | 365 | 316 | 330 | +0.931% | +5.033% |
+| Operator flags returned together | 365 | 365 | 354 | 359 | +0.685% | +1.061% |
+| Adjacent definition lines | 365 | 365 | 355 | 358 | +0.838% | +0.240% |
+
+Each corpus used seven paired rounds. Percent changes use the median ratio of process user cycles. The corpora contain 34 Lua translation units, the SQLite amalgamation, and 1,336 musl translation units.
+
+| Build | Corpus | Default | Scalar flag |
+| --- | --- | ---: | ---: |
+| PR b221c08aa | lua | -0.082% | -0.517% |
+| PR b221c08aa | sqlite | +0.114% | -0.186% |
+| PR b221c08aa | musl | -0.407% | +0.272% |
+| Operator flags returned together | lua | -0.159% | -0.216% |
+| Operator flags returned together | sqlite | -0.038% | -0.016% |
+| Operator flags returned together | musl | -0.566% | +0.193% |
+| Adjacent definition lines | lua | -0.067% | -0.385% |
+| Adjacent definition lines | sqlite | +0.134% | +0.116% |
+| Adjacent definition lines | musl | -1.312% | -0.849% |
+
+[Every size and round, source deltas, full corpus receipts and Clang comparisons](review-builds-and-command-cycles.tar.xz)

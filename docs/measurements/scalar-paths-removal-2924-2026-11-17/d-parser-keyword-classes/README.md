@@ -26,3 +26,15 @@ The first isolated harness reconstructed the role table and spilled input vector
 A separate parser diagnostic surfaced in 120 mutations. The original and vector-refinement compilers had the same three mismatches. The standalone repair for the missing opening parenthesis after `_BitInt` and `_ExtInt` matched the first Clang error and its location on all 15 controls, including six where the original differed. Repeating the 120 mutations with the repair produced zero mismatches. Its final native suite passed 557 Clang snippets, 2,000 generated streams, 35,648 alignment inputs and 320 driver runs, including the fixed carets.
 
 [Source changes, raw cycle samples, Clang results and production parser receipts](keyword-refinement-and-diagnostics.tar.xz)
+
+## Full compiles with the keyword refinement
+
+Each round compiled with debug information and one lane, in three fresh processes per executable. The table shows the median change in user cycles over five paired rounds. All 1,371 objects matched the parent byte for byte in each tier, along with stdout and stderr. The candidate used more cycles in each of the six comparisons.
+
+| Corpus | Objects | Tier 0 | Tier 1 |
+| --- | ---: | ---: | ---: |
+| lua | 34 | +0.512% | +0.633% |
+| sqlite | 1 | +0.099% | +0.543% |
+| musl | 1336 | +0.304% | +0.294% |
+
+[Object manifests, native process logs and source](compressed-keywords-production-compiles.tar.xz)
