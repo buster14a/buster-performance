@@ -360,3 +360,57 @@ All 2,742 debug objects, diagnostics and standard output matched. Each ordinary 
 | musl | -0.124% | -0.182% |
 
 [Release source, native measurements, tests and output digests](natural-loop-active-frame.tar.xz)
+
+## Predecessor flags in the complete dominator implementation
+
+Before DFS the candidate classifies sixteen consecutive predecessor counts per packet. The flags occupy the future child-offset workspace. The complete compiler was compared with cc7d4ffb4 and the archived scalar-loop compiler on the locked 9700X. Each cell gives the median paired change in core cycles across three rounds. The historical benchmark uses its original 7,806 SQLite forms. The archival compiler binary retained its published checksum. Rebuilding the CFG exporter at 0be4045eea42e8b3c8bcbf4ae20d823003f6437a and restoring the recorded corpus path reproduced the original input SHA-256, `dde6529090a5641b935330fc8f5632a19651c1999194531dd2d30052740e0d98`.
+
+| SQLite set | Current tree | Current loops | Current combined | Historical tree | Historical combined |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| blocks[2,4) | -5.30% | -8.78% | -7.72% | -8.12% | -9.53% |
+| blocks[4,8) | -3.35% | -11.36% | -10.09% | -10.10% | -13.59% |
+| blocks[8,16) | -7.18% | -30.37% | -29.13% | -11.45% | -23.30% |
+| blocks[16,32) | -9.09% | -31.69% | -26.29% | -8.58% | -22.04% |
+| blocks[32,64) | -11.69% | -34.09% | -28.37% | -10.01% | -22.78% |
+| blocks[64,128) | -12.57% | -35.91% | -31.46% | -10.48% | -24.40% |
+| blocks[128,256) | -2.10% | -32.41% | -38.24% | -5.75% | -37.66% |
+| blocks[256,512) | -1.76% | -22.40% | -26.87% | -5.07% | -34.84% |
+| blocks[512,1024) | -2.76% | -19.12% | -16.12% | -5.54% | -23.28% |
+| blocks[1024,2048) | -3.89% | -10.68% | -8.65% | -7.61% | -10.45% |
+| largest-1 | -3.42% | -10.24% | -8.46% | -6.87% | -9.68% |
+| largest-2 | -4.73% | -11.84% | -9.39% | -8.48% | -10.49% |
+| largest-3 | -3.26% | -19.94% | -16.83% | -8.67% | -10.47% |
+| largest-4 | -4.70% | -21.22% | -17.15% | -4.10% | -24.95% |
+| largest-5 | -1.13% | -17.68% | -14.24% | -8.29% | -27.41% |
+| largest-6 | -1.47% | -17.53% | -14.18% | -7.56% | -26.66% |
+| largest-7 | -5.63% | -22.50% | -20.16% | -4.58% | -17.65% |
+| largest-8 | -6.17% | -23.29% | -20.55% | -4.72% | -17.61% |
+| all | -7.33% | -25.26% | -22.62% | -7.40% | -21.53% |
+
+| Synthetic graph and output | Current parent | Historical scalar |
+| --- | ---: | ---: |
+| diamonds tree | -12.19% | -8.23% |
+| diamonds loops | -23.36% | -21.71% |
+| diamonds all | -21.86% | -19.21% |
+| nested tree | -9.59% | -9.96% |
+| nested loops | -24.85% | -94.90% |
+| nested all | -5.23% | -75.91% |
+| irreducible tree | -3.45% | -6.72% |
+| irreducible loops | -7.78% | -49.09% |
+| irreducible all | -5.52% | -45.37% |
+| dispatch tree | -4.35% | -4.64% |
+| dispatch loops | -34.17% | -21.22% |
+| dispatch all | -28.06% | -17.98% |
+| ladder tree | -6.21% | -5.88% |
+| ladder loops | -27.22% | -29.24% |
+| ladder all | +0.61% | -1.17% |
+| nested-ifs tree | -7.33% | -6.59% |
+| nested-ifs loops | -27.88% | -27.94% |
+| nested-ifs all | -19.38% | -18.07% |
+| fan-in tree | -16.73% | -17.60% |
+| fan-in loops | -31.89% | -33.97% |
+| fan-in all | -23.63% | -21.69% |
+
+The candidate met 20 of 21 current synthetic cells and 21 of 21 historical cells. Four native frozen seeds passed. The SQLite producer checked 22,641,582 answers across 5,204 forms.
+
+[Shipping source under test, two complete baseline comparisons and the reproduced input](predecessor-flags-production.tar.xz)

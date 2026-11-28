@@ -220,3 +220,30 @@ The current PR builder exceeded scalar in the following expanded-harness cells. 
 - guarded-search, 16,384 tokens, shape 12, ratio 1.0244.
 
 [Source, commands, checks and every timing sample](guarded-line-successors.tar.xz)
+
+## Integrating the table builder with conditional pairing
+
+Main at 5f5302828 includes conditional pairing and shared note storage from PR #3694. The integrated candidate keeps the early return for tables without conditionals and uses the destination arena when acquiring scratch for the pairing stack. The complete compiler passed 422 fixed cases, 256 generated Clang comparisons and all 176 header configurations. Window preparation matched on 240 sources, 119,628 cuts and 1,051 directive-position checks.
+
+The table below compares against the current main table builder in the same optimized harness on the locked 9700X. All 2,226 cells matched for positions, line ends, kinds, conditional links, notes and include guards. Ratios compare three paired seeds.
+
+| Table builder | Cells meeting main | Median ratio | Slowest cell |
+| --- | ---: | ---: | ---: |
+| Integrated draft | 2,224/2,226 | 0.7353 | 1.0376 |
+| Guarded line-word search | 2,224/2,226 | 0.7168 | 1.0453 |
+| Complete token blocks | 2,226/2,226 | 0.7325 | 0.9398 |
+| Complete blocks and guarded search | 2,226/2,226 | 0.7079 | 0.9918 |
+
+The guarded cursor and fixed-answer table oracle passed 65 cases on each of the prior block-scanner and guarded-search implementations. All nine block-scanner mutations and thirteen guarded-search mutations were detected. The protected inputs catch reads past the final token packet and the final line-bitmap packet, including an already-exhausted cursor.
+
+### Complete preprocessing before conditional pairing landed
+
+The guarded-search compiler was also compared against cc7d4ffb4. Every complete preprocessor output and diagnostic byte matched. The first three columns show median changes in user cycles over five paired rounds of three fresh processes per side. The last two give median table-builder cycles per token. The positive SQLite cells keep this version below the full acceptance gate.
+
+| Corpus | Default | Forced whole file | 4 KiB windows | Parent table | Candidate table |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | -0.440% | -0.626% | -0.421% | 0.422 | 0.320 |
+| sqlite | +0.047% | -0.201% | +0.535% | 0.323 | 0.248 |
+| musl | -0.372% | -0.421% | -0.231% | 2.674 | 2.178 |
+
+[Integrated source, guarded size matrix, fixed-answer mutations, whole-preprocessing samples and test logs](integrated-conditional-pairs.tar.xz)

@@ -113,3 +113,99 @@ A supported copy, integer negation or complement has one concrete machine patter
 The selected index and all available machine rules matched at all 1,006,223 nodes. The six runs also matched every object, standard output and diagnostic byte. The newly covered operations, summed across both configurations, were IR_BR (103,130), IR_CALL (56,858), IR_PHI (46,725), IR_PARAM (28,782), IR_SYMBOL_ADDR (25,372), IR_RET (23,732), IR_TRUNC (12,350), IR_SEXT (12,070), IR_LIFETIME (9,876), IR_COPY (7,096), IR_CALL_INDIRECT (5,798), IR_NEG (789), IR_BR_INDIRECT (328), IR_NOT (321), IR_FENCE (22), IR_STACK_SAVE (14). The selector passed 1,530,046 checks and reproduced the frozen digest d15b788da26467e5 for 5,957 plans. Three pipeline seeds ran with the Clang cross-check. In a separate 19-node verified fixture, changing the baked grammar action, state, goal or missing production was detected even when the independent fallback could emit equivalent code. A separate 19-node function exercises truncation, sign extension, copies, negation and complement. It detected all four mutations at all 19 nodes.
 
 [Complete captures, candidate and probe patches, native tests, fixture mutations and object manifests](converts-records.tar.xz)
+
+## Synthetic instruction widths with single-pattern leaves
+
+The production benchmark generated each shape at fifteen step counts on the locked Ryzen 7 9700X. The table gives the median of three paired changes in TSC ticks per IR instruction. Instruction counts, output records and bytes, spill and reload counts and both reported memory peaks matched in every pair. The candidate met the parent in 26 of 45 selection cells and 25 of 45 complete cells.
+
+| Requested steps | chain selection | chain complete | pressure selection | pressure complete | wide selection | wide complete |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | -5.274% | -0.591% | -3.183% | +0.912% | -5.009% | -0.822% |
+| 2 | -4.953% | +0.173% | -2.146% | +1.169% | -5.667% | -1.297% |
+| 7 | +0.114% | -0.401% | -0.331% | +0.949% | -3.911% | -1.804% |
+| 15 | +0.704% | +2.411% | +0.914% | +1.364% | +1.036% | +1.835% |
+| 16 | +0.022% | -0.293% | -0.084% | -1.085% | -1.787% | -1.814% |
+| 17 | +1.108% | +1.142% | +0.702% | +0.635% | -1.423% | -1.710% |
+| 31 | -0.065% | -0.305% | +0.844% | +0.195% | +0.081% | -0.057% |
+| 32 | +0.267% | +0.361% | +0.224% | +1.037% | -0.350% | -2.744% |
+| 63 | -1.616% | -1.422% | -0.218% | -2.416% | +4.027% | -1.966% |
+| 64 | -1.213% | -1.382% | -0.457% | +0.380% | +4.164% | -1.685% |
+| 127 | -0.480% | -0.026% | -0.041% | -0.304% | +6.177% | +1.270% |
+| 256 | -0.129% | -0.634% | -0.300% | +0.285% | +7.082% | +0.126% |
+| 1024 | -0.671% | -1.253% | +0.222% | +0.459% | +6.043% | +1.485% |
+| 2048 | -2.624% | -0.149% | -0.831% | -0.089% | +2.721% | +0.779% |
+| 8192 | -1.128% | -0.115% | -0.671% | +0.129% | +0.663% | -0.529% |
+
+[Native paired measurements and commands](supported-widths.tar.xz)
+
+## End-to-end compilation with conversion rules
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane Tier 1 debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.140% | -0.029% |
+| sqlite | +0.153% | -0.010% |
+| musl | +0.008% | +0.012% |
+
+[Native compiler runs, input commands and object manifests](compile-converts.tar.xz)
+
+## Synthetic instruction widths with ABI-specific calls
+
+The production benchmark generated each shape at fifteen step counts on the locked Ryzen 7 9700X. The table gives the median of three paired changes in TSC ticks per IR instruction. Instruction counts, output records and bytes, spill and reload counts and both reported memory peaks matched in every pair. The candidate met the parent in 23 of 45 selection cells and 15 of 45 complete cells.
+
+| Requested steps | chain selection | chain complete | pressure selection | pressure complete | wide selection | wide complete |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | -3.692% | +3.174% | +0.180% | +2.002% | -0.646% | +1.981% |
+| 2 | +2.258% | +3.078% | +2.747% | +2.431% | -2.204% | +1.946% |
+| 7 | +3.513% | +1.989% | +4.008% | +2.059% | -0.998% | -0.241% |
+| 15 | +1.819% | +2.284% | +2.561% | +1.084% | -0.256% | +1.414% |
+| 16 | +1.739% | +2.268% | +1.404% | +0.340% | +2.057% | +2.855% |
+| 17 | +2.188% | +1.617% | +2.662% | +0.917% | -1.582% | +0.118% |
+| 31 | -0.148% | +0.728% | +2.034% | +1.371% | -4.581% | +0.425% |
+| 32 | -0.043% | +0.306% | +2.002% | +0.464% | -2.915% | +0.053% |
+| 63 | -1.427% | -0.584% | +2.038% | -0.310% | -0.995% | +1.819% |
+| 64 | -1.337% | -1.561% | +1.681% | -1.557% | +1.048% | +0.224% |
+| 127 | -1.450% | -0.093% | +1.403% | +0.630% | +0.623% | +1.655% |
+| 256 | -2.908% | -1.389% | +1.539% | -0.828% | -0.679% | +1.352% |
+| 1024 | -1.475% | -0.971% | +1.565% | -0.694% | -0.924% | +1.356% |
+| 2048 | -0.816% | -0.878% | +0.339% | -0.820% | -1.856% | +0.721% |
+| 8192 | -0.547% | -1.100% | -0.176% | -0.402% | -0.052% | -0.306% |
+
+[Native paired measurements and commands](calls-widths.tar.xz)
+
+## Source selection with floating-point productions and deferred visits
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9924 | 0.9925 | 0.9971 |
+| sqlite | 2,666 | 448,699 | 0.9921 | 0.9922 | 1.0007 |
+| musl | 2,756 | 235,335 | 0.9922 | 0.9921 | 0.9948 |
+
+[Inputs, native commands and all paired samples](float-source-selection.tar.xz)
+
+## Source selection with initialization limited to populated candidate slots
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9965 | 0.9966 | 0.9961 |
+| sqlite | 2,666 | 448,699 | 0.9981 | 0.9985 | 0.9996 |
+| musl | 2,756 | 235,335 | 0.9961 | 0.9962 | 0.9969 |
+
+[Inputs, native commands and all paired samples](candidateinit-source-selection.tar.xz)
+
+## Source selection with early control-flow classification
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9874 | 0.9873 | 0.9766 |
+| sqlite | 2,666 | 448,699 | 0.9896 | 0.9895 | 0.9859 |
+| musl | 2,756 | 235,335 | 0.9848 | 0.9847 | 0.9835 |
+
+[Inputs, native commands and all paired samples](earlyjump-source-selection.tar.xz)
