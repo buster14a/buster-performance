@@ -258,3 +258,35 @@ Five alternating paired rounds ran single-lane Tier 1 compilation on the locked 
 | All | 6,518 | +0.420% | 6,518 | +0.516% |
 
 [Native paired measurements and commands](supported-functions.tar.xz)
+
+## Production selection by function size with ABI-specific calls
+
+Five alternating paired rounds ran single-lane Tier 1 compilation on the locked 9700X. Each measurement brackets verified instruction selection on a production function. For each size band, the table gives the median paired ratio of summed TSC ticks across Lua, SQLite and musl. The function order, instruction and block counts and selection status matched. All 2,742 debug-object checksums and both output streams matched within each paired round.
+
+| Input instructions | Default functions | Default change | All-pass functions | All-pass change |
+| --- | ---: | ---: | ---: | ---: |
+| 1–31 | 2,515 | +1.474% | 2,658 | +1.173% |
+| 32–127 | 1,994 | +0.285% | 2,134 | +0.944% |
+| 128–511 | 1,495 | +0.256% | 1,346 | +0.597% |
+| 512–2,047 | 436 | +0.038% | 336 | +0.177% |
+| 2,048–8,191 | 72 | -0.046% | 38 | -0.041% |
+| 8,192+ | 6 | -0.080% | 6 | -0.083% |
+| All | 6,518 | +0.362% | 6,518 | +0.387% |
+
+[Native paired measurements and commands](calls-functions.tar.xz)
+
+## Production selection by function size with conversions
+
+Five alternating paired rounds ran single-lane Tier 1 compilation on the locked 9700X. Each measurement brackets verified instruction selection on a production function. For each size band, the table gives the median paired ratio of summed TSC ticks across Lua, SQLite and musl. The function order, instruction and block counts and selection status matched. All 2,742 debug-object checksums and both output streams matched within each paired round.
+
+| Input instructions | Default functions | Default change | All-pass functions | All-pass change |
+| --- | ---: | ---: | ---: | ---: |
+| 1–31 | 2,515 | -1.347% | 2,658 | -0.896% |
+| 32–127 | 1,994 | -0.143% | 2,134 | +0.308% |
+| 128–511 | 1,495 | +0.530% | 1,346 | +0.746% |
+| 512–2,047 | 436 | +0.544% | 336 | +0.667% |
+| 2,048–8,191 | 72 | +0.457% | 38 | +0.361% |
+| 8,192+ | 6 | +0.436% | 6 | +0.450% |
+| All | 6,518 | +0.295% | 6,518 | +0.456% |
+
+[Native paired measurements and commands](converts-functions.tar.xz)

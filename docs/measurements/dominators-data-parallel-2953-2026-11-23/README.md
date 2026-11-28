@@ -414,3 +414,15 @@ Before DFS the candidate classifies sixteen consecutive predecessor counts per p
 The candidate met 20 of 21 current synthetic cells and 21 of 21 historical cells. Four native frozen seeds passed. The SQLite producer checked 22,641,582 answers across 5,204 forms.
 
 [Shipping source under test, two complete baseline comparisons and the reproduced input](predecessor-flags-production.tar.xz)
+
+## Whole compilation with predecessor flags
+
+Each cell compares five paired rounds of three complete single-lane compiler processes. The instrument-free compilers produced the same debug objects on all 1,371 translation units with each pass configuration. Their stdout and diagnostics also matched. The figures are median paired changes in user cycles on the 9700X.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | -0.151% | -0.395% |
+| sqlite | -0.171% | -0.355% |
+| musl | -0.232% | -0.376% |
+
+[Command, object manifests and full native samples](predecessor-flags-whole.tar.xz)

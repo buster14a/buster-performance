@@ -71,3 +71,19 @@ The block candidate also matched the grouped-name revision on all 557 snippets a
 These are coverage and correctness measurements. The native per-size and whole-compile measurements run separately.
 
 [Production patch, probe and fixture generators, corpus hashes, per-file counters, fault results and native parser logs](assembly-statements.tar.xz)
+
+## Static parameter bounds and pointer casts in asm operands
+
+The parent flagged the initial `static` and first constant in named array parameters such as `char buf[static 15 + 3 * sizeof(int)]`. The candidate verifies the parameter and its brackets, then checks every token in the constant expression using packet masks. Only those first two flags are covered by that check. An independent change handles memory operands such as `"m"(*(void *volatile *)p)`. After validating the pointer type, the parser compresses the remaining token kinds into the same operand checker used for plain dereferences.
+
+| Corpus | Files | Parent reparses | Plain asm | With array bounds | With pointer casts | Parent tokens reparsed | Final tokens reparsed |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lua | 34 | 0 | 0 | 0 | 0 | 0 | 0 |
+| sqlite | 1 | 6 | 6 | 6 | 6 | 8,391 | 8,391 |
+| musl | 1,336 | 7,570 | 770 | 198 | 7 | 398,386 | 4,294 |
+
+The candidate matched every returned tree, traversal column and diagnostic in the three corpora. Seven musl declarations in seven files still reached the repair parser. SQLite retained its six reparses. The two changes also preserved the results and route counts of all 35,648 aligned parser snippets.
+
+The bounds tests covered 5,705 sources and the asm operand tests covered 10,885 sources, each in six dialects. The parent and candidate produced byte-identical serialized results. The 9700X parser suite passed with Clang, including eleven fixed trees. Eight mutations to the bound checks, pointer grammar, unresolved-flag handling or positive coverage changed the expected results. Four changed a tree or diagnostic and the other four changed route counts.
+
+[Compiler patch, positive and negative cases, source generators, per-file counters and result hashes](bounds-and-casts.tar.xz)
