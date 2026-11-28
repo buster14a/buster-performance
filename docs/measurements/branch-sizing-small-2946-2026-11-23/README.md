@@ -140,3 +140,67 @@ long branches; every other check 0 failed (`logs/cross-check.log`). The new
 small-functions check (every record count up to 608, a branch every 1 to 4
 records, far targets) fails 269 of its 17,667 checks on a one-lane mutation of
 the register build that the random functions catch only 7 times.
+
+## Direct target growth and isolated record writes
+
+The complete compiler uses 16-lane target comparisons for functions with fewer than 512 records and at most 16 branches. It computes each target’s growth directly from the long branches. Only entry to the worklist requires numerical ranks. All-short functions with one packet scatter their final displacements during setup. The other functions count their long branches by packet and publish the final records in branch order.
+
+The table gives the production benchmark’s median phase differences in cycles per branch. Each whole-path change divides candidate cycles by parent cycles for the same seed and takes the median of the three paired ratios. The archived scalar columns are the original three-process measurements. The executable baseline is cc7d4ffb4. Negative near-zero phase differences occur because two separate benchmark runs estimate each phase.
+
+| Row | Scalar ranks | New ranks | Scalar write | New write | Sizing | Sizing and encoding |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| tier0-40 | 2.39 | -0.14 | 3.13 | 2.23 | -7.834% | -3.955% |
+| optimized-40 | 3.38 | -0.19 | 3.01 | 2.25 | -6.347% | -1.910% |
+| tier0-250 | 5.60 | 1.94 | 2.82 | 2.53 | -0.620% | -0.636% |
+| optimized-250 | 5.13 | 2.00 | 2.67 | 2.32 | -1.035% | -1.366% |
+| tier0-2000 | 5.59 | 2.96 | 1.66 | 1.98 | -0.237% | +1.353% |
+| optimized-2000 | 5.20 | 2.67 | 1.87 | 2.01 | +0.030% | +1.652% |
+| tier0-10000 | 4.59 | 2.96 | 2.61 | 2.55 | -0.668% | -0.354% |
+| optimized-10000 | 5.34 | 2.79 | 2.52 | 2.48 | -0.339% | -0.190% |
+| tier0-mix | 7.49 | 1.05 | 3.75 | 2.77 | -2.265% | -1.566% |
+| chain-forward | 5.87 | 3.34 | 2.68 | 2.70 | -0.169% | -0.082% |
+| chain-backward | 5.64 | 3.38 | 2.91 | 2.66 | -0.072% | -0.041% |
+
+The first replay runs both writers on identical prepared columns for every function. Its same-binary control uses the parent writer for both labels. The second replay also models the one-packet scatter for all-short functions, loading the already prepared record indices and displacements from memory. In the compiler these values are already in registers. Each replay resets the records, alternates order nine times per seed, validates every final form and displacement, checks the total long branches and records user cycles and instructions. The “packet” writer extracts form changes from a packet mask. The submitted “separate count” writer counts masks before storing.
+
+| Row | Identical writer control | Both writers called, packet | Both writers called, separate count | With all-short scatter, packet | With all-short scatter, separate count |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| tier0-40 | -1.136% | -0.131% | -0.192% | -20.406% | -24.405% |
+| optimized-40 | -1.133% | +5.973% | +6.759% | -16.060% | -17.801% |
+| tier0-250 | +0.098% | -1.505% | +0.614% | -3.494% | -1.803% |
+| optimized-250 | +0.263% | -3.935% | -0.467% | -2.463% | -2.159% |
+| tier0-2000 | -0.586% | -10.655% | -1.704% | -7.780% | -3.439% |
+| optimized-2000 | -0.459% | -16.275% | -5.160% | -13.345% | -6.068% |
+| tier0-10000 | -0.204% | -2.980% | +0.827% | -3.538% | -0.138% |
+| optimized-10000 | -0.111% | -5.485% | +0.205% | -4.947% | +0.059% |
+| tier0-mix | +0.663% | -3.943% | -4.613% | -8.103% | -5.879% |
+| chain-forward | -2.089% | -4.413% | +2.158% | +5.112% | -0.084% |
+| chain-backward | -1.317% | -5.733% | -3.395% | +4.596% | -2.022% |
+
+The standalone builds use the production benchmark source with the same two candidate implementations. They measure how much whole-path results vary between the standalone and completely linked executables.
+
+| Row | Packet sizing | Packet sizing and encoding | Separate count sizing | Separate count sizing and encoding |
+| --- | ---: | ---: | ---: | ---: |
+| tier0-40 | -6.803% | -3.346% | -7.535% | -3.931% |
+| optimized-40 | -6.668% | -1.641% | -6.918% | -2.097% |
+| tier0-250 | -0.762% | +1.041% | -1.170% | -1.574% |
+| optimized-250 | -1.251% | -1.118% | -1.958% | -1.831% |
+| tier0-2000 | -0.525% | -1.170% | -0.422% | -0.811% |
+| optimized-2000 | -0.332% | +1.660% | -0.543% | -0.542% |
+| tier0-10000 | -0.347% | -0.756% | -0.743% | -0.398% |
+| optimized-10000 | -0.085% | -0.592% | -0.424% | -0.172% |
+| tier0-mix | -2.568% | -2.138% | -2.728% | -2.332% |
+| chain-forward | -0.247% | -0.183% | -0.175% | -0.169% |
+| chain-backward | -0.112% | -0.434% | -0.169% | -0.107% |
+
+Five paired rounds measured three fresh full debug compilations per executable in every round. Each candidate produced the same 1,371 debug objects, stdout and diagnostics at each tier. Each passed three seeded branch suites, including the GNU assembler byte comparison on 404 functions per seed, forced worklists, guarded inputs and scratch exhaustion.
+
+| Corpus | Objects | Packet Tier 0 | Packet Tier 1 | Separate count Tier 0 | Separate count Tier 1 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 34 | +0.201% | +0.290% | +0.016% | +0.425% |
+| sqlite | 1 | -0.071% | +0.173% | -0.243% | +0.203% |
+| musl | 1336 | +0.069% | +0.115% | -0.163% | +0.363% |
+
+All eleven rank phases cleared the archived scalar values. On both 40-record rows the isolated final write and the complete sizing-and-encoding path improved. The 2,000-record rows used more cycles for sizing and encoding in the shipping compiler, and all three whole Tier 1 compiles used more cycles. The direct-span change remains under qualification.
+
+[Compiler patch, benchmark sources, GNU checks, object hashes and raw native samples](direct-target-growth.tar.xz)
