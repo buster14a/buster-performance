@@ -63,3 +63,18 @@ The inline combined mask tests for either prefixes or unknown lanes before calcu
 | Separate chunk literal mask | 815/900 · 0.994× | 660/859 · 0.675× | 501/501 · 0.361× |
 
 [Variants, complete-tokenizer and writer runs](literal-mask-guards.tar.xz)
+
+## Complete compiler qualification for the writer guard
+
+Each executable ran against the same uninstrumented parent on CPU 2 of the locked Ryzen 7 9700X. The preprocessing values are paired changes in user cycles across five rounds of three processes. The lexer value is the median change in cycles per byte over three pairs. All token streams, preprocessed output hashes and diagnostics matched. Both compilers passed twelve seeded lexer runs with 200,000 fuzz inputs per run, 419 preprocessing fixtures, the lane determinism comparison and 128 Clang fuzz checks.
+
+| Implementation | Corpus | Default preprocessing | Whole file | 4 KiB window | Lexer |
+| --- | --- | ---: | ---: | ---: | ---: |
+| lookup | lua | +0.562% | +0.238% | +0.359% | -0.092% |
+| lookup | sqlite | -0.204% | +0.107% | +0.070% | -0.213% |
+| lookup | musl | -0.132% | -0.150% | -0.117% | +0.469% |
+| guarded | lua | +0.725% | +0.501% | +0.538% | +0.554% |
+| guarded | sqlite | +0.226% | +0.032% | +0.317% | +0.107% |
+| guarded | musl | -0.435% | -0.026% | -0.388% | +0.237% |
+
+[Commands, fixed-seed results, comparison hashes and timings](writer-compiler.tar.xz)

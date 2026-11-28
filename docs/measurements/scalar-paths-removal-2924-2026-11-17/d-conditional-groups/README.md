@@ -92,3 +92,30 @@ For links alone, the carry implementation beat the original dispatcher in all 97
 The submitted full compiler passed 419 frozen cases, all 128 Clang fuzz comparisons, and the 1/2/3/8-lane determinism suite. The native corpus reached the original escape on four of the seven targeted source fixtures, including legally balanced 30,032-level nesting.
 
 [Implementations, paired stage measurements, checks and full-compiler build](pairing-notes.tar.xz)
+
+## Complete preprocessor and conditional diagnostics
+
+The compiler containing the joint note allocation and the earlier sparse bit-stack compiler were each measured against the uninstrumented parent on the locked 9700X. The preprocessing columns are paired changes in median user cycles over five rounds of three processes. The directive-table column gives the paired change in cycles per token across three alternating rounds. Output hashes and diagnostics matched for every workload and window size.
+
+| Implementation | Corpus | Default | Whole file | 4 KiB window | Directive table |
+| --- | --- | ---: | ---: | ---: | ---: |
+| pool | lua | -1.501% | -1.571% | -1.499% | -20.567% |
+| pool | sqlite | -0.352% | -0.304% | -0.347% | -13.678% |
+| pool | musl | -0.633% | -0.853% | -0.905% | -26.451% |
+| bits | lua | -1.412% | -1.418% | -1.315% | -21.277% |
+| bits | sqlite | -0.190% | -0.286% | -0.521% | -6.854% |
+| bits | musl | -0.448% | -0.186% | -0.228% | -26.572% |
+
+The seven source cases include a 30,032-level nest and unmatched, unclosed or duplicate directives. Both compilers matched parent output, diagnostics and exit status in the default and whole-file modes. Diagnostics and exit status also matched Clang on all seven. The counters below report the original dispatcher’s reach. Each compiler passed all 419 fixed fixtures, the determinism check across 1/2/3/8 lanes, and 128 Clang fuzz comparisons.
+
+| Source | Refusals | Refused records | Successful pairings requiring notes | Clang exit status |
+| --- | ---: | ---: | ---: | ---: |
+| balanced | 0 | 0 | 0 | 0 |
+| depth-30032 | 1 | 60064 | 0 | 0 |
+| late-orphan | 1 | 68 | 0 | 1 |
+| orphan-else | 1 | 2 | 0 | 1 |
+| orphan-endif | 1 | 1 | 0 | 1 |
+| second-else | 0 | 0 | 1 | 1 |
+| unclosed | 0 | 0 | 1 | 1 |
+
+[Compiler sources, commands, streams, hashes and timings](compiler-corpus.tar.xz)
