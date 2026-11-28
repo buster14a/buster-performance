@@ -204,3 +204,31 @@ Five paired rounds measured three fresh full debug compilations per executable i
 All eleven rank phases cleared the archived scalar values. On both 40-record rows the isolated final write and the complete sizing-and-encoding path improved. The 2,000-record rows used more cycles for sizing and encoding in the shipping compiler, and all three whole Tier 1 compiles used more cycles. The direct-span change remains under qualification.
 
 [Compiler patch, benchmark sources, GNU checks, object hashes and raw native samples](direct-target-growth.tar.xz)
+
+## Counting long branches in the relaxation round
+
+The stable round already has the mask of promoted branches for every packet. Counting the mask there removes a pass over growths before the final record stores. The complete compiler and two standalone builds measured the same eleven workloads against their respective parent. All percentages are medians of three paired seed ratios. The second standalone implementation also scatters final displacements and promotes the long record forms by masked gather and scatter.
+
+| Row | Compiler sizing | Compiler sizing and encoding | Standalone sizing | Standalone sizing and encoding | Standalone scatter sizing | Standalone scatter sizing and encoding |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| tier0-40 | -4.116% | -1.075% | -6.398% | -1.848% | -4.636% | -2.410% |
+| optimized-40 | -4.147% | +0.061% | -6.172% | -0.110% | -3.525% | -0.380% |
+| tier0-250 | -0.455% | +0.636% | -1.573% | +7.224% | +3.106% | +11.936% |
+| optimized-250 | -1.275% | -0.532% | -2.473% | +6.644% | +3.668% | +9.336% |
+| tier0-2000 | -0.523% | +2.297% | -0.708% | -1.891% | +5.346% | +1.359% |
+| optimized-2000 | -0.634% | +2.196% | -1.175% | -0.668% | +5.549% | +3.488% |
+| tier0-10000 | -0.919% | +1.273% | -1.168% | -0.100% | +3.462% | +2.907% |
+| optimized-10000 | -1.080% | +0.844% | -1.220% | -0.968% | +3.593% | +2.057% |
+| tier0-mix | -1.400% | +0.151% | -2.851% | -2.147% | -0.171% | +1.152% |
+| chain-forward | -0.334% | -0.148% | -0.113% | -0.194% | +0.658% | +0.556% |
+| chain-backward | -0.210% | -0.049% | -0.246% | -0.185% | +0.936% | +0.759% |
+
+The complete compiler improved sizing on every row. Sizing plus encoding still took more cycles on both 2,000-record rows. The six production comparisons below used five paired rounds of three processes and verified every debug object, stdout and stderr. The three GNU assembler comparisons matched on all 404 functions per seed.
+
+| Corpus | Tier 0 | Tier 1 |
+| --- | ---: | ---: |
+| lua | -0.160% | +0.174% |
+| sqlite | -0.188% | +0.190% |
+| musl | -0.035% | +0.149% |
+
+[Round-count changes, benchmark commands, GNU comparisons, object hashes and raw timing logs](round-count.tar.xz)
