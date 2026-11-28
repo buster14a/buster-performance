@@ -40,3 +40,15 @@ Each of eight rounds launched two aliases of each Release executable. The launch
 Three of the six medians increased. The whole-compile gate remains open.
 
 [Round-level counters, complete process records and runner](four-label-compile-control.tar.xz)
+
+## Initializer designators with an exhausted index
+
+These comparisons measure the initializer's distinct lookup rule. A direct name takes precedence over names promoted from anonymous members, and a successful promoted lookup returns its outer member. The fixture spans 90 widths through 8,192 fields, five record layouts, and seven requests including a zero name, a miss and a duplicate in a promoted child. Each candidate matched the baseline for all 3,150 cases. Every record over 16 fields used the exhausted-index path. The last column is the median candidate/baseline cycle ratio on those records. Each cell uses the median of three seed ratios on the 9700X.
+
+| Method | All cells meeting baseline | Exhausted records over 16 fields meeting baseline | Median ratio over 16 fields |
+| --- | ---: | ---: | ---: |
+| Retain the first eligible child mask | 2,419/3,150 | 2,190/2,555 | 0.2238 |
+| Retain the first unnamed group | 2,420/3,150 | 2,190/2,555 | 0.2121 |
+| Test promoted children while scanning | 2,414/3,150 | 2,190/2,555 | 0.2478 |
+
+For each method, 365 of the 2,555 cells over 16 fields still lost. Hits in the first member were sensitive to the cost of setting up the vector comparison. [Complete samples, population counts by lookup route and fixture](initializer-designator-gates.tar.xz)

@@ -31,3 +31,7 @@ The guarded oracle rejected nine deliberate changes covering borrow propagation,
 Each compile comparison used five paired rounds of three complete invocations. Both source programs also produced identical static-data dumps with the baseline and candidate.
 
 [Native measurements, sources, mutation results and guarded oracle](wide-division-native.tar.xz)
+
+## Exported constants and diagnostic checks
+
+Both native compiler tiers emitted the same values as Clang for all 100 exported integers. The ELF check reads the named objects and compares the bits in their declared C widths. The smaller input exports four signed and unsigned quotient or remainder values. The larger input exports 96 values at 769 bits. The baseline, candidate and Clang also rejected constant division by zero, remainder by zero and signed division of the minimum value by −1. The baseline and candidate diagnostics matched byte for byte. [Inputs, ELF objects, comparison program and diagnostics](clang-exported-results.tar.xz)
