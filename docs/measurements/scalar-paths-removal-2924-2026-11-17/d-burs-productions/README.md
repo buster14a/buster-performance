@@ -60,3 +60,27 @@ Three additional grammar leaves represent ordinary calls, inline assembly bodies
 The selected index and all available machine rules matched at all 1,006,223 nodes. The six runs also matched every object, standard output and diagnostic byte. The newly covered operations, summed across both configurations, were IR_BR (103,130), IR_CALL (56,858), IR_PHI (46,725), IR_PARAM (28,782), IR_SYMBOL_ADDR (25,372), IR_RET (23,732), IR_LIFETIME (9,876), IR_CALL_INDIRECT (5,798), IR_BR_INDIRECT (328), IR_FENCE (22), IR_STACK_SAVE (14). The selector passed 1,530,046 checks and reproduced the frozen digest d15b788da26467e5 for 5,957 plans. Three pipeline seeds ran with the Clang cross-check. In a separate 19-node verified fixture, changing the baked grammar action, state, goal or missing production was detected even when the independent fallback could emit equivalent code. A second verified function exercised 16 ordinary calls. Mutating the call rule’s kind was detected at all 16 calls even though every node still selected a grammar production. The call fixture also detected changes to its action, state, goal and missing production.
 
 [Complete captures, candidate and probe patches, native tests, fixture mutations and object manifests](calls-records.tar.xz)
+
+## End-to-end compilation with single-pattern leaves
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane Tier 1 debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.240% | +0.144% |
+| sqlite | +0.248% | +0.206% |
+| musl | +0.091% | +0.128% |
+
+[Native compiler runs, input commands and object manifests](compile-supported.tar.xz)
+
+## Complete source selection including conversions
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9958 | 0.9931 | 0.9958 |
+| sqlite | 2,666 | 448,699 | 0.9921 | 0.9921 | 0.9994 |
+| musl | 2,756 | 235,335 | 0.9948 | 0.9948 | 0.9968 |
+
+[Inputs, native commands and all paired samples](converts-source-selection.tar.xz)

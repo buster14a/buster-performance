@@ -54,3 +54,21 @@ The independent matrix places each input against an unreadable page. Ten byte di
 The complete compiler improves substantially on SQLite in the explicit dialects, but several Lua and musl comparisons and many raw input sizes remain slower. The deletion is under qualification.
 
 [Sources, commands, reach counters, frozen oracles, protected inputs and native process logs](dollar-punctuation-native.tar.xz)
+
+## Sharing the dialect loops
+
+Both dollar modes share the same vector loop. The lexer first checks whether the remaining source contains a dollar byte. All 27 preprocessor output digests and diagnostic streams matched the parent. Each cell reports the median change in user cycles over five pairs of three processes per side. 8 of the 27 measurements met the parent. Three lexer seeds and the Clang preprocessor suite passed.
+
+| Dialect | Input | Default window | Whole file | 4 KiB window |
+| --- | --- | ---: | ---: | ---: |
+| default | lua | +0.028% | +0.081% | +0.135% |
+| default | sqlite | -0.188% | +0.012% | +0.408% |
+| default | musl | +1.066% | +0.964% | +0.918% |
+| nodollars | lua | +0.091% | -0.154% | +3.295% |
+| nodollars | sqlite | -33.961% | -32.501% | -28.142% |
+| nodollars | musl | +0.673% | +0.785% | +1.785% |
+| asm | lua | +0.013% | +0.227% | +3.848% |
+| asm | sqlite | -35.073% | -32.938% | -28.832% |
+| asm | musl | +0.847% | +0.377% | +1.634% |
+
+[Candidate, native comparisons and test outputs](common-preprocessing.tar.xz)

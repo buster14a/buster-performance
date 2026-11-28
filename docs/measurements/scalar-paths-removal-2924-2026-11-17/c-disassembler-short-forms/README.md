@@ -183,3 +183,15 @@ The decoder stores the most frequent record for a group of sixteen start keys an
 The medians cover seven rounds of six fresh processes for each executable and input.
 
 [Source, baked-table and GNU tests, listing digests and process records](grouped-start-records.tar.xz)
+
+## Uniform and interned decoder start records
+
+The decoder resolves uniform opcode or high-nibble groups directly and shares identical sequences for the remaining groups. The complete executable measured 198,597,544 bytes, compared with 198,496,800 bytes for the existing vector executable and 204,858,744 bytes for the submitted escape decoder. The native GNU-backed suite passed 113,317 checks. All four differential sweeps and the three disassembly listings matched the submitted decoder, including diagnostics.
+
+| Measurement | Lua VM | Lua code generator | Lua tables |
+| --- | ---: | ---: | ---: |
+| Fresh-process user cycles vs. the existing vector branch | +9.137% | +7.988% | +15.140% |
+
+The medians cover seven rounds of six fresh processes for each executable and input.
+
+[Source, baked-table and GNU tests, listing digests and process records](radix-start-records.tar.xz)

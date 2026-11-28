@@ -297,3 +297,18 @@ All six ordinary object manifests, standard outputs and diagnostics matched. Eac
 | musl | -0.128% | -0.211% |
 
 [Measured sources, working implementations, raw native runs and object manifests](known-join-parents.tar.xz)
+
+## Grouping predecessor counts before depth-first search
+
+Four standalone variants compare the active DFS frame in registers, finishing child leaves on discovery, classifying sets of sixteen predecessor counts before the walk, and combining the first and third changes. Each passed the independent dominator suite and the deep-join fixture through 32,769 blocks. Three paired rounds ran on the locked 9700X.
+
+| Implementation | SQLite tree sets | SQLite full sets | Synthetic cases | All SQLite graphs, tree | All SQLite graphs, full | Deep fixture, ticks/block |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| activeframe | 19/19 | 19/19 | 19/21 | -10.37% | -25.97% | 105.3 |
+| closeleaves | 19/19 | 19/19 | 18/21 | -9.43% | -24.81% | 101.6 |
+| joinflags | 19/19 | 19/19 | 20/21 | -7.07% | -23.37% | 104.1 |
+| frameflags | 19/19 | 19/19 | 20/21 | -9.62% | -25.28% | 106.2 |
+
+The predecessor-count variant met the parent in twenty of the twenty-one synthetic comparisons. Complete analysis on the ladder graph took 0.026% more cycles per block.
+
+[Implementations, fixtures, raw measurements and comparison](dfs-cursor-records.tar.xz)
