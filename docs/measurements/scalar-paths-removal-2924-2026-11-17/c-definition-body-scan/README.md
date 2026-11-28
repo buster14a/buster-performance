@@ -349,3 +349,11 @@ SQLite also has fourteen additional pairs on the final binary and seven pairs ru
 The shipping executable passed all 422 deterministic cases and 256 generated cases against Clang, 240 windowed sources, 119,625 checks of window cuts and 1,041 directive-position checks. The untouched parent provided the nine new case, compile and print digests. The fixtures cover definitions separated by emitted text, argument collection, skipped groups, redefinition, poisoned names, an invalid paste, and an unterminated comment.
 
 [Source, every paired size, corpus receipts, independent expected outputs and oracle logs](adjacent-definitions-delivery.tar.xz)
+
+## The embedded-directive warning exposed by the macro control
+
+A separate compiler change issues Clang’s embedded-directive diagnostic during function-like macro argument collection. The controls cover accepted directives, unconditional rejections, conditional skipping, builtin operands, command-line options, and pragma push and pop. The parent differed on the targeted diagnostic in 64 of 126 runs. The corrected compiler matched Clang’s message, position, severity and option in all 126, including the cases where Clang stays quiet. All 126 exit statuses matched. Complete stderr matched in 96 runs. Thirty retained an additional pre-existing difference in a macro expansion note, a malformed line marker diagnostic, or the scratch-space note for an invalid builtin pragma.
+
+The complete caret suite matched Clang in all 86 cases, including the three new invocations. All 419 frozen preprocessing cases and 128 generated Clang comparisons passed.
+
+[Inputs, compiler changes, expected and actual stderr, exit codes and full suite logs](embedded-directive-diagnostic-controls.tar.xz)
