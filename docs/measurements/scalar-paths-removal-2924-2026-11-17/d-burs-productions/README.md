@@ -432,3 +432,22 @@ Compiler `911951a27` reproduced all 168,865,267 returned plan bytes and all 2,74
 The archived native streams from the deferred-cost comparison reproduce the parent side. This archive supplies the new per-corpus byte counts and hashes, object and diagnostic manifests, candidate lists, source, native checks and mutation results.
 
 [Native results and verification scripts](product-selector-productions.tar.xz)
+
+## Signed bitwise operations and chained extensions in the selector grammar
+
+The grammar covers signed widening of I32 bitwise operations, arithmetic shifts, negation, nested extensions including folded loads, and a truncation followed by an extension. The regression checks seven node positions and the effect of shared uses. Four deliberate changes to coverage, bitwise selection, chaining and projection failed the fixture.
+
+Compiler `5b1a0b681` reproduced all 168,865,267 returned plan bytes and all 2,742 debug objects and diagnostic streams from `cc7d4ffb4`. Across 1,006,223 candidate lists the candidates kept the same order and the winner stayed the same. The original maximal-munch pass handled 396,316 of these visits. The deferred-cost baseline handled 19,716 and this revision handled 8,766. All three Clang-backed pipeline seeds passed.
+
+| Optimization passes | Corpus | Plans | Identical plan bytes | Candidate lists | Maximal-munch visits |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 1,095 | 11,244,889 | 77,839 | 500 |
+| default | sqlite | 2,668 | 66,046,641 | 323,431 | 2,304 |
+| default | musl | 2,755 | 15,035,978 | 114,754 | 1,124 |
+| all | lua | 1,095 | 9,299,167 | 76,245 | 735 |
+| all | sqlite | 2,668 | 54,779,635 | 306,076 | 2,636 |
+| all | musl | 2,755 | 12,458,957 | 107,878 | 1,467 |
+
+The archived native streams from the deferred-cost comparison reproduce the parent side. This archive supplies the new per-corpus byte counts and hashes, object and diagnostic manifests, candidate lists, source, native checks and mutation results.
+
+[Native results and verification scripts](widen-selector-productions.tar.xz)
