@@ -255,3 +255,129 @@ The previous revision reparsed 544 tagged-association declarations, 224 long gen
 The frozen native parser suite passed against Clang, including 561 snippets and 35,904 alignments. A permanent 653-token fixture exercises all three recognizers and a malformed 89-token expression requires the original diagnostic at token 86. An additional 5,004 generated sources crossed packet boundaries in valid and malformed expressions under three language modes. Each had 2,779 rejected sources, and 2,225 fewer declarations needed scalar reparsing. All diagnostic and tree streams matched. The 28,870 generic variants under eight language modes and 14,742 boundary/context cases under three modes also retained their outputs. Five independent mutations discarded the previous value, a spanning type, a string, a `sizeof` opener or an operator at a packet boundary. Each broke the expected routing on a fixed witness.
 
 [Production changes, raw size trees, corpus manifests, fixtures and mutant results](multi-packet-generic-literals-and-bounds.tar.xz)
+
+## Native cycles for multi-packet declarations
+
+The multi-packet parser at `1c111388e` met all 108 size comparisons against `cc7d4ffb4` on the 9700X. Both sides ran alternately in three paired rounds with 21 parser samples per input per round. Each candidate file reported zero fallback declarations and tokens. These figures measure the complete vector parser after preprocessing. All ratios divide candidate cycles per token by parent cycles per token.
+
+| Family | Sizes at parity or faster | Minimum ratio | Median ratio | Maximum ratio |
+| --- | ---: | ---: | ---: | ---: |
+| associations | 18/18 | 0.2799 | 0.2973 | 0.3042 |
+| selection | 18/18 | 0.2896 | 0.3047 | 0.3196 |
+| ordinary | 18/18 | 0.9500 | 0.9697 | 0.9957 |
+| qualifiers | 18/18 | 0.2456 | 0.3029 | 0.9959 |
+| literal | 18/18 | 0.2693 | 0.2834 | 0.2945 |
+| parameters | 18/18 | 0.2212 | 0.2524 | 0.2680 |
+
+| Family | Size | Tokens | Core cycles/token ratio | Instructions/token ratio |
+| --- | ---: | ---: | ---: | ---: |
+| associations | 0 | 576 | 0.2799 | 0.1714 |
+| associations | 1 | 768 | 0.2859 | 0.1719 |
+| associations | 2 | 960 | 0.2916 | 0.1738 |
+| associations | 3 | 1,152 | 0.2955 | 0.1743 |
+| associations | 4 | 1,344 | 0.2980 | 0.1750 |
+| associations | 7 | 1,920 | 0.3042 | 0.1759 |
+| associations | 8 | 2,112 | 0.3020 | 0.1762 |
+| associations | 9 | 2,304 | 0.3037 | 0.1758 |
+| associations | 15 | 3,456 | 0.3032 | 0.1754 |
+| associations | 16 | 3,648 | 0.3035 | 0.1749 |
+| associations | 17 | 3,840 | 0.2992 | 0.1744 |
+| associations | 31 | 6,528 | 0.2966 | 0.1724 |
+| associations | 32 | 6,720 | 0.3004 | 0.1735 |
+| associations | 33 | 6,912 | 0.2986 | 0.1732 |
+| associations | 63 | 12,672 | 0.2931 | 0.1714 |
+| associations | 64 | 12,864 | 0.2948 | 0.1720 |
+| associations | 65 | 13,056 | 0.2958 | 0.1718 |
+| associations | 127 | 24,960 | 0.2925 | 0.1708 |
+| selection | 0 | 704 | 0.2905 | 0.1740 |
+| selection | 1 | 768 | 0.2896 | 0.1731 |
+| selection | 2 | 832 | 0.2937 | 0.1739 |
+| selection | 3 | 896 | 0.2952 | 0.1736 |
+| selection | 4 | 960 | 0.2938 | 0.1737 |
+| selection | 7 | 1,152 | 0.2970 | 0.1733 |
+| selection | 8 | 1,216 | 0.2995 | 0.1734 |
+| selection | 9 | 1,280 | 0.3000 | 0.1727 |
+| selection | 15 | 1,664 | 0.3021 | 0.1730 |
+| selection | 16 | 1,728 | 0.3086 | 0.1731 |
+| selection | 17 | 1,792 | 0.3073 | 0.1726 |
+| selection | 31 | 2,688 | 0.3194 | 0.1742 |
+| selection | 32 | 2,752 | 0.3182 | 0.1739 |
+| selection | 33 | 2,816 | 0.3196 | 0.1734 |
+| selection | 63 | 4,736 | 0.3155 | 0.1693 |
+| selection | 64 | 4,800 | 0.3131 | 0.1692 |
+| selection | 65 | 4,864 | 0.3120 | 0.1689 |
+| selection | 127 | 8,832 | 0.3091 | 0.1660 |
+| ordinary | 0 | 352 | 0.9605 | 0.8727 |
+| ordinary | 1 | 416 | 0.9500 | 0.8865 |
+| ordinary | 2 | 480 | 0.9582 | 0.8967 |
+| ordinary | 3 | 544 | 0.9642 | 0.9057 |
+| ordinary | 4 | 608 | 0.9680 | 0.9128 |
+| ordinary | 7 | 800 | 0.9701 | 0.9298 |
+| ordinary | 8 | 864 | 0.9693 | 0.9338 |
+| ordinary | 9 | 928 | 0.9770 | 0.9377 |
+| ordinary | 15 | 1,312 | 0.9640 | 0.9536 |
+| ordinary | 16 | 1,376 | 0.9687 | 0.9555 |
+| ordinary | 17 | 1,440 | 0.9691 | 0.9573 |
+| ordinary | 31 | 2,336 | 0.9708 | 0.9724 |
+| ordinary | 32 | 2,400 | 0.9815 | 0.9729 |
+| ordinary | 33 | 2,464 | 0.9739 | 0.9735 |
+| ordinary | 63 | 4,384 | 0.9890 | 0.9841 |
+| ordinary | 64 | 4,448 | 0.9926 | 0.9843 |
+| ordinary | 65 | 4,512 | 0.9899 | 0.9845 |
+| ordinary | 127 | 8,480 | 0.9957 | 0.9914 |
+| qualifiers | 0 | 192 | 0.9959 | 1.0006 |
+| qualifiers | 1 | 320 | 0.2456 | 0.1289 |
+| qualifiers | 2 | 512 | 0.2561 | 0.1363 |
+| qualifiers | 3 | 704 | 0.2680 | 0.1437 |
+| qualifiers | 4 | 896 | 0.2806 | 0.1464 |
+| qualifiers | 7 | 1,472 | 0.2941 | 0.1516 |
+| qualifiers | 8 | 1,664 | 0.2959 | 0.1523 |
+| qualifiers | 9 | 1,856 | 0.2997 | 0.1533 |
+| qualifiers | 15 | 3,008 | 0.3025 | 0.1545 |
+| qualifiers | 16 | 3,200 | 0.3019 | 0.1545 |
+| qualifiers | 17 | 3,392 | 0.3033 | 0.1547 |
+| qualifiers | 31 | 6,080 | 0.3076 | 0.1552 |
+| qualifiers | 32 | 6,272 | 0.3078 | 0.1551 |
+| qualifiers | 33 | 6,464 | 0.3085 | 0.1552 |
+| qualifiers | 63 | 12,224 | 0.3038 | 0.1555 |
+| qualifiers | 64 | 12,416 | 0.3064 | 0.1555 |
+| qualifiers | 65 | 12,608 | 0.3070 | 0.1555 |
+| qualifiers | 127 | 24,512 | 0.3062 | 0.1557 |
+| literal | 0 | 672 | 0.2693 | 0.1535 |
+| literal | 1 | 736 | 0.2705 | 0.1540 |
+| literal | 2 | 800 | 0.2733 | 0.1541 |
+| literal | 3 | 864 | 0.2738 | 0.1532 |
+| literal | 4 | 928 | 0.2715 | 0.1532 |
+| literal | 7 | 1,120 | 0.2760 | 0.1519 |
+| literal | 8 | 1,184 | 0.2760 | 0.1520 |
+| literal | 9 | 1,248 | 0.2721 | 0.1514 |
+| literal | 15 | 1,632 | 0.2863 | 0.1508 |
+| literal | 16 | 1,696 | 0.2858 | 0.1508 |
+| literal | 17 | 1,760 | 0.2856 | 0.1504 |
+| literal | 31 | 2,656 | 0.2908 | 0.1488 |
+| literal | 32 | 2,720 | 0.2945 | 0.1509 |
+| literal | 33 | 2,784 | 0.2923 | 0.1496 |
+| literal | 63 | 4,704 | 0.2848 | 0.1425 |
+| literal | 64 | 4,768 | 0.2858 | 0.1439 |
+| literal | 65 | 4,832 | 0.2854 | 0.1431 |
+| literal | 127 | 8,800 | 0.2821 | 0.1382 |
+| parameters | 0 | 512 | 0.2595 | 0.1305 |
+| parameters | 1 | 544 | 0.2680 | 0.1386 |
+| parameters | 2 | 640 | 0.2564 | 0.1310 |
+| parameters | 3 | 736 | 0.2636 | 0.1332 |
+| parameters | 4 | 832 | 0.2518 | 0.1289 |
+| parameters | 7 | 1,120 | 0.2540 | 0.1281 |
+| parameters | 8 | 1,216 | 0.2517 | 0.1254 |
+| parameters | 9 | 1,312 | 0.2529 | 0.1268 |
+| parameters | 15 | 1,888 | 0.2540 | 0.1236 |
+| parameters | 16 | 1,984 | 0.2531 | 0.1222 |
+| parameters | 17 | 2,080 | 0.2529 | 0.1232 |
+| parameters | 31 | 3,424 | 0.2418 | 0.1170 |
+| parameters | 32 | 3,520 | 0.2394 | 0.1156 |
+| parameters | 33 | 3,616 | 0.2403 | 0.1160 |
+| parameters | 63 | 6,496 | 0.2263 | 0.1109 |
+| parameters | 64 | 6,592 | 0.2277 | 0.1104 |
+| parameters | 65 | 6,688 | 0.2275 | 0.1107 |
+| parameters | 127 | 12,640 | 0.2212 | 0.1077 |
+
+[All native samples and the exact source and inputs](multi-packet-parser-sizes.tar.xz)
