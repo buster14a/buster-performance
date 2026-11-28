@@ -107,3 +107,23 @@ Each configuration matched the untouched parent’s preprocessor output and diag
 | musl | -0.490% | -0.334% | +0.023% | 2.683 | 2.180 |
 
 [Compiler source, output digests, directive-table measurements and process logs](bounded-preprocessing.tar.xz)
+
+## Complete bitmap words and an end-of-file line marker in complete preprocessing
+
+The logical end of the token stream is a marked line start. This also gives the final complete bitmap word its own terminating slot. The full-width scanner uses ordinary loads for complete words and a masked load for the last partial word. A fixed-answer table oracle checked 52 fixtures and rejected 13 changes, including a load that crossed the protected end of its input. The Clang comparisons passed. The table gives median paired ratios across three seeds on the 9700X.
+
+| Scanner | Cells meeting parent | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: |
+| Bounded cursor | 1431/1,431 | 0.5873 | 0.9662 |
+| End marker | 1431/1,431 | 0.5289 | 0.9672 |
+| End marker and unmasked complete words | 1431/1,431 | 0.5053 | 0.9697 |
+
+Each configuration matched the untouched parent’s preprocessor output and diagnostics. The first three columns give the median paired change in complete preprocessing user cycles over five rounds with three fresh processes per executable. The last two columns time the directive-table benchmark in cycles per token across three runs.
+
+| Corpus | Default | Forced whole file | 4 KiB windows | Parent table | Candidate table |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | -0.979% | -1.158% | -0.672% | 0.425 | 0.297 |
+| sqlite | +0.889% | +0.092% | +0.464% | 0.324 | 0.233 |
+| musl | -0.534% | -0.584% | -0.377% | 2.678 | 1.986 |
+
+[Compiler source, output digests, directive-table measurements and process logs](fullscan-preprocessing.tar.xz)

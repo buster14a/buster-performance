@@ -120,3 +120,32 @@ In each of eight rounds, two baseline labels and two candidate labels each ran f
 The candidate median met baseline in 5 of the six configurations. All 48 process groups finished successfully.
 
 [Round medians, complete process records and runner](cold-division-balanced.tar.xz)
+
+## Reusing the materialized dividend for the second output
+
+The caller reused the materialized dividend as its temporary quotient or remainder. This removed one arena allocation. Both sides of the small comparison included copying the same input limbs into writable storage before division. Each cell is the median paired ratio over three seeds. The two sizes below three limbs go through the ordinary narrow folder and are excluded.
+
+| Layout | Cells meeting scalar | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: |
+| Dividend becomes remainder | 456/473 | 0.0291 | 1.4191 |
+| Dividend becomes quotient | 455/473 | 0.0294 | 1.4406 |
+| Separate scratch input, current vector core | 455/473 | 0.0294 | 1.4307 |
+
+GMP independently verified both outputs at each of 37 larger widths through 131,072 limbs, for eleven operand shapes in each orientation. As in the previous large sweep, an interrupted scalar batch supplies a conservative upper bound on the ratio.
+
+| Caller operation | Cells meeting scalar | Slowest ratio or upper bound | Interrupted scalar batches |
+| --- | ---: | ---: | ---: |
+| quotient | 407/407 | 0.5888 | 1353 |
+| remainder | 407/407 | 0.6023 | 1353 |
+
+The native checker passed 838,227 checks. Clang agreed on 100 exported data values at each tier and rejected all three erroneous expressions. All 1,371 ordinary debug objects per tier and both explicit wide fixtures matched the parent, as did stdout and diagnostics. The table gives the median of five paired whole-compile cycle measurements.
+
+| Workload | Objects | Tier 0 | Tier 1 |
+| --- | ---: | ---: | ---: |
+| positive | 1 | -20.056% | -6.366% |
+| heavy | 1 | -25.343% | -24.237% |
+| lua | 34 | +0.086% | +0.328% |
+| sqlite | 1 | +0.080% | +0.134% |
+| musl | 1336 | -0.073% | +0.315% |
+
+[Production patch, arithmetic fixtures, GMP and compiler comparisons, hashes and process counters](wide-division-reused-dividend.tar.xz)

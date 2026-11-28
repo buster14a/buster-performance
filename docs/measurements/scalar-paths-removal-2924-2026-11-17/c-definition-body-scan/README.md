@@ -262,3 +262,30 @@ The corpus comparison used seven paired rounds with four fresh processes per exe
 | musl | -0.936% | -0.423% |
 
 [Source, oracle receipts, per-size medians, output hashes and native process logs](releasebody-macro-definitions.tar.xz)
+
+## In-bounds overlapping identifiers in the final token word
+
+The definition benchmark invokes the sole production path. The parent compiler provided the three frozen digests for the boundary fixture, including the printed output. Clang and the fixed expected tokens also matched. On the final partial word of 17 to 63 tokens, the first and last complete identifier vectors can overlap. Their masks preserve the original token positions.
+
+The parent is the untouched native Release compiler at cc7d4ffb4. Each size used three rounds of the 21-pass definition benchmark and three rounds of four fresh whole preprocessing processes per executable. The table counts sizes where the median paired candidate/parent cycle ratio was at most 1. The parent’s original scalar mode and original default vector mode were measured separately. Every output digest and diagnostic stream matched.
+
+| Body | Sizes | Define vs. scalar | Define vs. default | Complete vs. scalar | Complete vs. default |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| literal | 75 | 75 | 75 | 72 | 75 |
+| parameter | 74 | 74 | 74 | 71 | 74 |
+| paste | 72 | 72 | 72 | 71 | 70 |
+| stringize | 73 | 73 | 73 | 73 | 73 |
+| optional | 71 | 71 | 71 | 71 | 71 |
+| All | 365 | 365 | 365 | 358 | 363 |
+
+All definition cells met the parent scalar timing.
+
+The corpus comparison used seven paired rounds with four fresh processes per executable and matching output and diagnostics.
+
+| Corpus | Default preprocessing | Scalar flag |
+| --- | ---: | ---: |
+| lua | -0.778% | -0.984% |
+| sqlite | +0.026% | -0.042% |
+| musl | -1.176% | -0.469% |
+
+[Source, oracle receipts, per-size medians, output hashes and native process logs](remainder-macro-definitions.tar.xz)
