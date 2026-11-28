@@ -96,3 +96,16 @@ All three variants used native Release builds on the 9700X and matched the macro
 The publication implementation met the end-to-end limit in 312 of 365 cells. The separate 21-pass definition-only measurement met it in 351 cells, including all literal, stringizing and optional-expression lengths. Five parameter lengths and nine paste lengths remained slower in that measurement. The scalar route remains in production.
 
 [Source changes, per-size counters, corpus results and oracle logs](definition-publication-and-operators.tar.xz)
+
+## Packing interned identifiers and streaming full interior words
+
+The packed variant narrows four 16-token identifier vectors with signed and unsigned saturation before comparing against the optional replacement token. The interior variant processes 64 complete body tokens directly and parses common complete parameter lists once. Each passed the Clang-backed preprocessor suite and the 365 output and diagnostic comparisons. The two size columns count comparisons meeting scalar. Corpus values are complete-command user cycles relative to scalar.
+
+| Layout | Definition-only lengths | Complete-command lengths | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Packed identifier comparisons | 352/365 | 320/365 | -0.362% | +0.057% | -0.943% |
+| Stream complete interior words | 353/365 | 337/365 | -0.646% | -0.108% | -0.700% |
+
+A separate attempt to add NULL to the predefined interned names changed recorded diagnostic and token digests. It failed the preprocessor suite and received no performance qualification.
+
+[Per-length cycles, corpus checks, source and oracle receipts](packed-identifiers-and-interior-words.tar.xz)
