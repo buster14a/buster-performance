@@ -53,3 +53,25 @@ The second compiler keeps up to eight mask pairs in local storage and obtains sc
 The current extractor still wins on most window distributions. The complete preprocessor also uses more cycles for several workloads. The replacement remains experimental.
 
 [Harnesses, patches, per-size measurements, process logs, Clang results and output hashes](native-directive-measurements.tar.xz)
+
+## Directive masks, column placement and eight-lane line ends
+
+The retained-mask implementation scans the token kinds once and shares position extraction with the windowed compiler. It also records which directive kinds occurred. A file with no conditionals can finish without visiting the pairing and note scans. The second layout places the byte-sized kinds between the 32-bit end and link columns. The third layout resolves eight line ends at a time.
+
+The timing driver compared all table fields, notes and guard results at 159 lengths and nine token distributions. Each cell is the median paired candidate/baseline timing ratio for three seeds. In this four-way run, two layouts met baseline at all 1,431 cells. The earlier two-way run of the retained-mask layout missed two alternating inputs at 4,095 and 4,096 tokens.
+
+| Layout | Cells meeting baseline | Median cycle ratio | Slowest cycle ratio |
+| --- | ---: | ---: | ---: |
+| Retained masks and adjacent 32-bit columns | 1431/1,431 | 0.5852 | 0.9602 |
+| Kinds between end and link columns | 1431/1,431 | 0.5899 | 0.9637 |
+| Eight simultaneous line-end searches | 1340/1,431 | 0.7166 | 3.8360 |
+
+The first layout also ran in the complete compiler. All nine preprocessing configurations matched the original's output SHA-256 and diagnostics. Each percentage is the median of five paired rounds with three processes per binary. The last two columns give the median complete directive-table benchmark over three runs.
+
+| Corpus | Default | Forced whole file | 4 KiB windows | Parent cycles/token | Retained cycles/token |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | -1.255% | -1.152% | -0.803% | 0.424 | 0.334 |
+| sqlite | +0.103% | -0.442% | +0.326% | 0.329 | 0.248 |
+| musl | -0.847% | -0.825% | -0.405% | 2.681 | 2.195 |
+
+[Source, native table sweep, Clang-backed suite, compiler outputs and cycle logs](retained-masks-and-line-ends.tar.xz)

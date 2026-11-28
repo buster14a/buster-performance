@@ -37,3 +37,21 @@ Three seeded comparisons covered the 86 lengths in the archive from zero to 2,04
 | Reverse with full-range aliases | 76/86 | 0.2074 | 3.6323 |
 
 [Shared-worker counters, timings, production patches, oracle and runners](reach-and-phi-fingerprints.tar.xz)
+
+## Complete partitions and sorted completion
+
+Two sort candidates rank or sort eight initial rows together and merge groups by comparing vector packets with the other run's head. A separate stable-order oracle checked the class number and sorted position of every input row. The 860 cells cover 86 lengths and ten distributions, including all-equal hashes, distinct metadata under hash collisions, vector constants differing only in the last word and reordered phi inputs. Order and hash arrays end at protected pages.
+
+Two key-generation candidates exercise the compiler's complete partition routine. One omits supplemental hashes and resolves every tie by checking complete operands. The other hashes vector constants and unordered phi predecessor/class pairs across independent instructions. A generated equivalence relation checks class membership in both directions and checks the class count independently of the assigned labels. Both bounded probing and forced sorting ran on twelve layouts at each of 86 lengths, with three seeds per cell. The 12 include two independently generated ordinary relative-key workloads.
+
+| Candidate and comparison | Cells meeting parent | Median cycle ratio | Slowest cycle ratio |
+| --- | ---: | ---: | ---: |
+| Packet ranks before merging | 96/860 | 3.2078 | 33.8182 |
+| Eight-lane sorting network before merging | 43/860 | 3.3067 | 74.5000 |
+| Fixed-column hashes and complete collision checks | 411/2,064 | 1.4694 | 19.4293 |
+| Same fixed-column version in the three-way comparison | 408/2,064 | 1.5021 | 18.8251 |
+| Exceptional hashing across instructions in a packet | 555/2,064 | 1.1867 | 4.7485 |
+
+When vector constants shared both leading words or phis shared fixed fields, omitting supplemental hashes could send many distinct keys through the collision comparator. Hashing the exceptional operands across instructions reduced that cost. All candidates still had slower sizes on the 9700X.
+
+[Production patches, exact kernels, independent oracles and per-seed timings](key-generation-and-sort-comparisons.tar.xz)
