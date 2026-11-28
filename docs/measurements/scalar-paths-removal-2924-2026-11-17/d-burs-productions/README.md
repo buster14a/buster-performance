@@ -84,3 +84,15 @@ The production `benchmark-tier1-select-source` command ran on Lua, SQLite and mu
 | musl | 2,756 | 235,335 | 0.9948 | 0.9948 | 0.9968 |
 
 [Inputs, native commands and all paired samples](converts-source-selection.tar.xz)
+
+## End-to-end compilation with ABI-specific call rules
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane Tier 1 debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.130% | +0.025% |
+| sqlite | +0.233% | +0.094% |
+| musl | +0.056% | +0.107% |
+
+[Native compiler runs, input commands and object manifests](compile-calls.tar.xz)
