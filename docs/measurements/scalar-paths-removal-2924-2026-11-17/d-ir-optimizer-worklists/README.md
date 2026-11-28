@@ -129,3 +129,45 @@ The probe captured 20,248 successor graphs in each pass configuration. Three ran
 The independent functional-graph oracle constructs nine shapes at 88 widths from zero to 8,192, including long cycles and chains feeding cycles. Under each of three seeds the five implementations passed 3,960 graph checks, 11,880 overlapping-output checks, 3,915 invalid-input checks and 425 exhausted-arena rollbacks. The guarded input ends immediately before an unreadable page. The gathered component walk beat the parent in 244 of 792 guarded shape/width timings. The compiler's synthetic IR benchmark won 98 of 120 measured shape/configuration rows. Full ratios are available in the archive. The optimizer passed the frozen seed with 358,076 checks and seeds 1, 133 and 789 with zero failures.
 
 [Source changes, instrumentation, commands, captured graphs, synthetic inputs, timings and checksums](cfg-native.tar.xz)
+
+## Resolving components inside a vector register
+
+A packet contains sixteen block IDs. When every successor stays inside its own packet, four pointer doublings determine which cycle each lane reaches. The minimum ID on that cycle is its canonical representative. The pass validates all successors before writing output, processes overlapping packets in memmove order, and keeps the linear component walk for cross-packet graphs. Three other implementations also compress internal paths in mixed packets. They carry the minimum interior ID through each compressed edge so a cycle crossing packets keeps its original representative.
+
+Each run used a locked 9700X. Independent guard-page oracles covered nine graph shapes at 88 widths from zero through 8,192. At each of three seeds the four implementations and the parent passed 3,960 target checks, 11,880 shifted/aliased outputs and 3,915 invalid-input rollbacks. In 369 exhausted-arena cases the call failed and restored the arena and output. Self-contained inputs could complete without an allocation. Captured default and all-pass graphs also matched the parent target at every block.
+
+| Implementation | Guarded timings at or below parent | Captured bins and totals at or below parent | Median captured ratio |
+| --- | ---: | ---: | ---: |
+| Packet-contained graphs | 391/792 | 61/61 | 0.219 |
+| Compress within packets, walk components | 449/792 | 61/61 | 0.309 |
+| Compress within packets, use stack | 445/792 | 61/61 | 0.310 |
+| Compress within packets, select walk by component | 450/792 | 61/61 | 0.300 |
+
+The first implementation also ran through the complete compiler. Each row below contains the five-round paired median, summing ticks over all functions in each instruction-count bin. Timings use the same stage boundaries as the earlier CFG comparison.
+
+| Instructions | Configuration | Functions | Verified pipeline | Cleanup | Targets | Layout |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0–31 | default | 3,345 | 0.9932 | 0.8105 | 0.5445 | 0.9751 |
+| 0–31 | all | 3,618 | 1.0023 | 0.9114 | 0.5581 | 1.1163 |
+| 32–127 | default | 3,222 | 0.9890 | 0.8154 | 0.3756 | 0.9850 |
+| 32–127 | all | 3,353 | 0.9975 | 0.8847 | 0.3898 | 1.0704 |
+| 128–511 | default | 2,625 | 0.9910 | 0.8543 | 0.3599 | 0.9906 |
+| 128–511 | all | 2,414 | 0.9959 | 0.8857 | 0.3890 | 1.0226 |
+| 512–2,047 | default | 788 | 0.9937 | 0.8918 | 0.3684 | 1.0016 |
+| 512–2,047 | all | 651 | 0.9957 | 0.8958 | 0.3879 | 1.0050 |
+| 2,048–8,191 | default | 136 | 0.9957 | 0.8938 | 0.3351 | 0.9970 |
+| 2,048–8,191 | all | 82 | 0.9958 | 0.8924 | 0.3423 | 0.9983 |
+| 8,192+ | default | 8 | 0.9976 | 0.8871 | 0.2844 | 0.9980 |
+| 8,192+ | all | 6 | 0.9949 | 0.8880 | 0.2836 | 1.0005 |
+| Total | default | 10,124 | 0.9926 | 0.8588 | 0.3912 | 0.9922 |
+| Total | all | 10,124 | 0.9963 | 0.8926 | 0.4119 | 1.0337 |
+
+| Complete compiler | Debug objects | Default | All passes |
+| --- | ---: | ---: | ---: |
+| lua | 34 | -0.208% | -0.021% |
+| sqlite | 1 | -0.068% | +0.082% |
+| musl | 1,336 | -0.119% | -0.025% |
+
+All six output manifests matched. Five of six ordinary compilation cells improved. All-pass SQLite used +0.082% more user cycles. The frozen optimizer seed passed 358,076 checks with zero failures, and three further seeds passed. The verified optimizer's synthetic benchmarks improved in 114 of 120 shape and size cells. The remaining misses keep the replacement under qualification.
+
+[Source, commands, guarded oracles, per-stage samples, debug object hashes and ordinary compilation timings](cfg-packet-components.tar.xz)
