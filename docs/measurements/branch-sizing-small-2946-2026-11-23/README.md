@@ -276,3 +276,33 @@ Complete debug compilations ran five paired rounds of three processes. Both outp
 | musl | +0.172% | +0.075% |
 
 [Source variants, build commands, all raw timings, GNU results and object hashes](paired-offsets.tar.xz)
+
+## Paired ranks and cold expansion in complete compilers
+
+The first complete compiler uses paired branch ranks. The second keeps those ranks and moves the uncommon expansion work out of the ordinary path. The benchmark runs the same seed on the same input for each executable, in alternating order, under the 9700X lock. Each change below is the median of three paired ratios.
+
+| Workload | Paired ranks, size | With encoding | Outlined work, size | With encoding |
+| --- | ---: | ---: | ---: | ---: |
+| tier0-40 | -3.540% | +0.010% | -6.475% | -0.315% |
+| optimized-40 | -3.114% | +1.569% | -4.411% | -0.269% |
+| tier0-250 | -1.844% | -0.113% | -1.382% | +0.227% |
+| optimized-250 | -2.745% | -1.240% | -2.095% | -0.600% |
+| tier0-2000 | -1.025% | +1.648% | -1.451% | +2.485% |
+| optimized-2000 | -1.178% | +1.154% | -1.419% | +1.197% |
+| tier0-10000 | -1.166% | +2.293% | -1.244% | +2.078% |
+| optimized-10000 | -1.395% | +1.108% | -1.416% | +1.308% |
+| tier0-mix | -2.423% | +0.404% | -2.590% | -0.892% |
+| chain-forward | -0.293% | -0.268% | -0.518% | -0.400% |
+| chain-backward | -0.459% | -0.276% | -0.215% | -0.280% |
+
+The whole builds used five rounds of three processes. Both compilers produced the same debug objects, standard output and diagnostics on all six workloads.
+
+| Corpus | Paired Tier 0 | Paired Tier 1 | Outlined Tier 0 | Outlined Tier 1 |
+| --- | ---: | ---: | ---: | ---: |
+| lua | -0.047% | +0.109% | +0.175% | +0.281% |
+| sqlite | -0.188% | +0.077% | -0.136% | +0.211% |
+| musl | +0.017% | -0.108% | +0.112% | +0.067% |
+
+Sizing followed by encoding matched or improved in 4 of eleven cells with paired ranks and 6 of eleven after outlining. Both complete binaries matched all 404 GNU as functions at each of three seeds and passed the protected-page column tests.
+
+[Source, native checks and every raw timing](sizing-compiler-boundaries.tar.xz)

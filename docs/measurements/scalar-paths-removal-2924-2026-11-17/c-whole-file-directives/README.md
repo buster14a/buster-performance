@@ -151,3 +151,34 @@ The current PR builder exceeded scalar in the following expanded-harness cells. 
 - paired-lines, 16,384 tokens, shape 11, ratio 1.0352.
 
 [Source, commands, checks and every timing sample](directive-line-ranks.tar.xz)
+
+## Word-level successor queries and full token blocks
+
+The line successor first examines the remaining bits of the current word, then searches eight line words together. The token scan compares full blocks without a tail mask and masks the final partial block.
+
+Fourteen token distributions span 159 lengths, including zero, every packet boundary in the original matrix, and 16,384 tokens. Each candidate was checked at every cell against the parent for positions, ends, kinds, conditional links, notes and the include guard. Per-cell times are the median of three paired ratios from the locked Ryzen 7 9700X.
+
+| Builder | Original distributions | Five mixed line-start distributions | All | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Current PR | 1,431/1,431 | 782/795 | 2,213/2,226 | 0.7109 | 1.0427 |
+| Masked line-word successor | 1,431/1,431 | 795/795 | 2,226/2,226 | 0.6538 | 0.9776 |
+| Full unmasked token blocks | 1,431/1,431 | 795/795 | 2,226/2,226 | 0.7100 | 0.9581 |
+| Both changes | 1,431/1,431 | 795/795 | 2,226/2,226 | 0.6507 | 0.9666 |
+
+The current PR builder exceeded scalar in the following expanded-harness cells. Shape 11 places a line start every 521 tokens and marks two of each three starts as directives.
+
+- word-search, 513 tokens, shape 12, ratio 1.0134.
+- word-search, 767 tokens, shape 12, ratio 1.0136.
+- word-search, 1,023 tokens, shape 12, ratio 1.0024.
+- word-search, 1,024 tokens, shape 12, ratio 1.0083.
+- word-search, 1,025 tokens, shape 12, ratio 1.0123.
+- word-search, 2,047 tokens, shape 12, ratio 1.0412.
+- word-search, 2,048 tokens, shape 12, ratio 1.0427.
+- word-search, 2,049 tokens, shape 12, ratio 1.0358.
+- word-search, 8,191 tokens, shape 12, ratio 1.0211.
+- word-search, 8,192 tokens, shape 12, ratio 1.0130.
+- word-search, 8,193 tokens, shape 12, ratio 1.0161.
+- word-search, 16,384 tokens, shape 11, ratio 1.0263.
+- word-search, 16,384 tokens, shape 12, ratio 1.0066.
+
+[Source, commands, checks and every timing sample](line-word-successors.tar.xz)
