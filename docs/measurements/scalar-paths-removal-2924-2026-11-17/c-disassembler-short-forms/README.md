@@ -125,3 +125,19 @@ The ordinary debug-build driver produced identical object files and diagnostics 
 | musl | 1336 | +0.008% | +0.253% |
 
 [Per-size observations, process measurements, phase timings, compiler image checks and the page-sharing experiment](dense-calls-and-process-startup.tar.xz)
+
+## Factoring instruction fields and dispatching from the first two bytes
+
+The register fields of ModRM records repeat across many opcodes. Interning those pages separately reduced the baked executable to within 68,632 bytes of the existing vector branch. The second layout puts a short-form record or a continuation descriptor in each two-byte entry. It can dispatch directly to the indexed addressing recipe. Each build passed the four full-record differential sweeps, the 113,317-case native test including the GNU oracle, the post-link baking test, and byte-for-byte listing comparisons.
+
+The existing vector branch occupied 198,496,800 bytes. The table gives complete fresh-process user cycles relative to that branch over seven rounds of six invocations. Each round also included the version currently published in #3680.
+
+| Layout | Baked executable bytes | Lua VM | Lua code generator | Lua tables |
+| --- | ---: | ---: | ---: | ---: |
+| Separate form and register pages | 198,565,432 | +10.515% | +11.820% | +13.650% |
+| Two-byte continuation descriptors | 198,582,560 | +7.286% | +8.153% | +11.335% |
+| Shared compact direct records | 198,599,936 | +6.888% | +7.318% | +10.803% |
+
+The samples also record minor faults per process. The cycle profile covers 768 separate invocations of each sampled executable and stream. All measured layouts still take more cycles for these commands than the existing vector branch.
+
+[Build patches, native correctness results, paired process counters and sampling profiles](continuation-and-register-pages.tar.xz)

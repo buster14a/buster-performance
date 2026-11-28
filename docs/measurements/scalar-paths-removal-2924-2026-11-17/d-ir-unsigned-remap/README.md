@@ -34,3 +34,20 @@ The complete pass reports matched byte for byte. All debug objects and diagnosti
 | musl | 1336 | -0.059% | +0.144% | +0.057% |
 
 [Raw site runs, candidate sources, mutation results, driver counters, object hashes and complete-process samples](remap-evidence.tar.xz)
+
+## Repeated whole-compile controls
+
+Each of eight rounds launched two aliases of each Release executable. The launch order rotated across rounds. Each alias contributed its median user cycles from four complete compilations. The table shows the median of the eight ratios of the two candidate cycle counts combined to the two baseline counts combined.
+
+| Tier | Corpus | Complete compile cycles |
+| --- | --- | ---: |
+| tier0 | lua | +0.039% |
+| tier0 | sqlite | +0.174% |
+| tier0 | musl | +0.081% |
+| tier1 | lua | +0.232% |
+| tier1 | sqlite | +0.226% |
+| tier1 | musl | +0.048% |
+
+All six comparisons used more cycles with the candidate. The complete-compile gate remains open.
+
+[Round-level counters, complete process records and runner](four-label-compile-control.tar.xz)
