@@ -51,3 +51,20 @@ Each of eight rounds launched two aliases of each Release executable. The launch
 All six comparisons used more cycles with the candidate. The complete-compile gate remains open.
 
 [Round-level counters, complete process records and runner](four-label-compile-control.tar.xz)
+
+## Remapping neighboring IR ranges together in balanced whole compilations
+
+In each of eight rounds, two baseline labels and two candidate labels each ran four fresh compilations. The launch order rotated. The candidate column is the median ratio of the two candidate cycle counts combined to the two baseline counts combined. The last two columns compare the paired labels of the same executable and show variation within this experiment.
+
+| Tier | Corpus | Candidate user cycles | Rounds meeting baseline | Baseline label 2 vs. 1 | Candidate label 2 vs. 1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| tier0 | lua | +0.063% | 2/8 | -0.226% | +0.159% |
+| tier0 | sqlite | -0.102% | 6/8 | +0.199% | +0.086% |
+| tier0 | musl | +0.107% | 1/8 | -0.022% | +0.046% |
+| tier1 | lua | +0.291% | 0/8 | +0.005% | +0.004% |
+| tier1 | sqlite | +0.101% | 0/8 | +0.032% | +0.018% |
+| tier1 | musl | +0.162% | 0/8 | +0.016% | +0.010% |
+
+The candidate median met baseline in 1 of the six configurations. All 48 process groups finished successfully.
+
+[Round medians, complete process records and runner](contiguous-remap-balanced.tar.xz)

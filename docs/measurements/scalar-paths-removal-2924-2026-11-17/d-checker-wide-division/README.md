@@ -79,3 +79,13 @@ In each of eight rounds, two baseline labels and two candidate labels each ran f
 The candidate median met baseline in 4 of the six configurations. All 48 process groups finished successfully.
 
 [Round medians, complete process records and runner](wide-digits-balanced.tar.xz)
+
+## Wide division with a cold, non-inlined entry
+
+Placing the divider among the compiler's cold functions changes code generation and placement. On the native 9700X, its small-width candidate/baseline ratio met the original bit-at-a-time divider in 473/473 legal size/shape combinations through 129 limbs. The median ratio was 0.0266 and the slowest was 0.9365. At 37 larger widths through 131,072 limbs, all 407 measured ratios or conservative upper bounds were at or below 0.5886. GMP checked quotient and remainder. Of these cells, 200 had exact baseline timings throughout and 207 had baseline timeouts throughout. The timer interrupted 1,353 baseline batches.
+
+The guarded arithmetic oracle checked 11,162 cases and rejected all nine injected faults. The native checker passed 838,223 checks. Clang agreed on all 100 exported values at each compiler tier and rejected the three erroneous expressions. The new and original compilers emitted identical diagnostics on the erroneous inputs.
+
+The seven-way independent comparison found lower median cycles on all three Tier 1 corpora and on Tier 0 musl. Tier 0 Lua and SQLite still took 0.052% and 0.084% more user cycles than the mean of the two parent executables in the same rounds. [Independent rebuild controls and whole-compiler measurements](../whole-compile-rebuild/README.md)
+
+[Arithmetic timings, sources, protected-memory faults, native checker and Clang receipts](cold-division-arithmetic.tar.xz)
