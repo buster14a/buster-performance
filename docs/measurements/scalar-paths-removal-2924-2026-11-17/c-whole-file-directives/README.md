@@ -182,3 +182,41 @@ The current PR builder exceeded scalar in the following expanded-harness cells. 
 - word-search, 16,384 tokens, shape 12, ratio 1.0066.
 
 [Source, commands, checks and every timing sample](line-word-successors.tar.xz)
+
+## Checking the exhausted line cursor
+
+The complete-block scanner and the eight-word successor search were rerun with the successor returning immediately if its caller has reached the end. This preserves the original empty-input and out-of-range contract before the first bitmap read.
+
+Fourteen token distributions span 159 lengths, including zero, every packet boundary in the original matrix, and 16,384 tokens. Each candidate was checked at every cell against the parent for positions, ends, kinds, conditional links, notes and the include guard. Per-cell times are the median of three paired ratios from the locked Ryzen 7 9700X.
+
+| Builder | Original distributions | Five mixed line-start distributions | All | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Current PR | 1,431/1,431 | 775/795 | 2,206/2,226 | 0.7144 | 1.0463 |
+| Masked line-word successor | 1,431/1,431 | 795/795 | 2,226/2,226 | 0.6573 | 0.9806 |
+| Full unmasked token blocks | 1,431/1,431 | 795/795 | 2,226/2,226 | 0.7182 | 0.9652 |
+| Complete blocks and guarded successor | 1,431/1,431 | 795/795 | 2,226/2,226 | 0.6722 | 0.9922 |
+
+The current PR builder exceeded scalar in the following expanded-harness cells. Shape 11 places a line start every 521 tokens and marks two of each three starts as directives. Shape 12 takes three out of four pseudorandom line-start values.
+
+- guarded-search, 511 tokens, shape 12, ratio 1.0146.
+- guarded-search, 512 tokens, shape 12, ratio 1.0099.
+- guarded-search, 513 tokens, shape 12, ratio 1.0300.
+- guarded-search, 767 tokens, shape 12, ratio 1.0188.
+- guarded-search, 768 tokens, shape 12, ratio 1.0051.
+- guarded-search, 769 tokens, shape 12, ratio 1.0130.
+- guarded-search, 1,023 tokens, shape 12, ratio 1.0239.
+- guarded-search, 1,024 tokens, shape 12, ratio 1.0178.
+- guarded-search, 1,025 tokens, shape 12, ratio 1.0008.
+- guarded-search, 2,047 tokens, shape 12, ratio 1.0463.
+- guarded-search, 2,048 tokens, shape 12, ratio 1.0440.
+- guarded-search, 2,049 tokens, shape 12, ratio 1.0432.
+- guarded-search, 4,095 tokens, shape 12, ratio 1.0287.
+- guarded-search, 4,096 tokens, shape 12, ratio 1.0223.
+- guarded-search, 4,097 tokens, shape 12, ratio 1.0183.
+- guarded-search, 8,191 tokens, shape 12, ratio 1.0225.
+- guarded-search, 8,192 tokens, shape 12, ratio 1.0320.
+- guarded-search, 8,193 tokens, shape 12, ratio 1.0336.
+- guarded-search, 16,384 tokens, shape 11, ratio 1.0267.
+- guarded-search, 16,384 tokens, shape 12, ratio 1.0244.
+
+[Source, commands, checks and every timing sample](guarded-line-successors.tar.xz)
