@@ -141,3 +141,17 @@ The existing vector branch occupied 198,496,800 bytes. The table gives complete 
 The samples also record minor faults per process. The cycle profile covers 768 separate invocations of each sampled executable and stream. All measured layouts still take more cycles for these commands than the existing vector branch.
 
 [Build patches, native correctness results, paired process counters and sampling profiles](continuation-and-register-pages.tar.xz)
+
+## Consecutive catalogue records and direct addressing fields
+
+The short-output experiment chose between decoding paths by output capacity and serves only as a timing control. The consecutive-record experiment consumes catalogue entries until it encounters a general form. The direct-field experiment stores complete addressing templates for unprefixed opcodes in the existing two-byte table. The latter two use the same decoding procedure across call sizes. Each layout passed the native disassembler suite, baking, differential sweeps and direct listing comparisons. The three cycle columns compare complete fresh-process commands with the existing vector branch over seven paired rounds of six runs.
+
+| Layout | Baked executable bytes | Lua VM | Lua code generator | Lua tables |
+| --- | ---: | ---: | ---: | ---: |
+| Short-output experiment | 198,605,440 | +2.781% | +3.562% | +8.102% |
+| Consecutive catalogue records | 198,602,680 | +8.425% | +6.420% | +11.313% |
+| Direct opcode and ModRM fields | 198,589,304 | +4.251% | +2.428% | +7.851% |
+
+The Lua VM trace classified 4,500 of 9,055 instructions as trailing-field records. The compact field representation improved fresh-process cycles over the submitted draft on all three inputs. The existing vector branch still led every comparison.
+
+[Reproduction patches, native tests, dispatch trace and paired process counters](continuation-runs-and-inline-fields.tar.xz)

@@ -109,3 +109,15 @@ The packed variant narrows four 16-token identifier vectors with signed and unsi
 A separate attempt to add NULL to the predefined interned names changed recorded diagnostic and token digests. It failed the preprocessor suite and received no performance qualification.
 
 [Per-length cycles, corpus checks, source and oracle receipts](packed-identifiers-and-interior-words.tar.xz)
+
+## Comparing identifiers in contiguous replacement-list tokens
+
+The scanner loads sixteen contiguous token kinds and interned names, checks stringizing and optional parameters in place, and shares the existing macro publication path. Native Clang tests and all 365 output comparisons passed. Each size is a separate comparison with the scalar body scan. The corpus columns give complete-command user cycles.
+
+| Layout | Definition-only lengths | Complete-command lengths | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Contiguous 16-token comparisons | 352/365 | 356/365 | -1.010% | -0.116% | -0.947% |
+
+The nine complete-command losses and thirteen definition-only losses keep this candidate below the required per-size gate.
+
+[Per-length counters, corpus output hashes, build patch and tests](contiguous-body-lanes.tar.xz)

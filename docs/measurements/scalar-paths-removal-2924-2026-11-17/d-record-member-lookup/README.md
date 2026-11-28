@@ -23,3 +23,20 @@ All 1,371 objects and both output streams matched at each optimization tier. The
 | musl | +0.010% | +0.052% |
 
 [Source changes, runner, saturation counts, per-case timings, object hashes and mutation receipts](record-member-evidence.tar.xz)
+
+## Repeated whole-compile controls
+
+Each of eight rounds launched two aliases of each Release executable. The launch order rotated across rounds. Each alias contributed its median user cycles from four complete compilations. The table shows the median of the eight ratios of the two candidate cycle counts combined to the two baseline counts combined.
+
+| Tier | Corpus | Complete compile cycles |
+| --- | --- | ---: |
+| tier0 | lua | +0.018% |
+| tier0 | sqlite | -0.156% |
+| tier0 | musl | +0.078% |
+| tier1 | lua | +0.108% |
+| tier1 | sqlite | -0.060% |
+| tier1 | musl | -0.002% |
+
+Three of the six medians increased. The whole-compile gate remains open.
+
+[Round-level counters, complete process records and runner](four-label-compile-control.tar.xz)
