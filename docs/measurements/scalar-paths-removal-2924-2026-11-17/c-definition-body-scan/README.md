@@ -158,3 +158,13 @@ Four aliases rotated launch order in each of seven rounds at every size. Two ali
 Across all five body shapes, the vector method met scalar at 351 of 365 direct comparisons and 360 of 365 complete preprocessing comparisons.
 
 [Four-alias samples for every size and round, raw counters, runner and implementation patch](balanced-contiguous-body-lanes.tar.xz)
+
+## Detecting the optional-argument identifier during refinement
+
+Identifier refinement compares the identifiers it interns with the optional-argument name and records its presence in the prepared file. Macro definitions in a file with no such token can skip all identifier loads. The scalar and control executables come from the preceding build, so the complete command comparison charges the candidate for producing the new fact. Each of the 365 output pairs and the native Clang suite passed.
+
+| Method | Definition-only sizes meeting scalar | Complete-command sizes meeting scalar | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Carry optional-identifier presence from refinement | 364/365 | 114/365 | -0.148% | +0.561% | -0.199% |
+
+[Per-size samples, corpus digests, process records and production patch](optional-name-from-refinement.tar.xz)
