@@ -426,3 +426,122 @@ Each cell compares five paired rounds of three complete single-lane compiler pro
 | musl | -0.232% | -0.376% |
 
 [Command, object manifests and full native samples](predecessor-flags-whole.tar.xz)
+
+## Dominance frontiers on long and short ancestor walks
+
+Both variants build dominance frontiers for the same complete dominator implementation. Each comparison used three alternating paired rounds under the exclusive lock on the 9700X. Percentages give the median paired change in core cycles. The current parent read 5,204 SQLite forms. The historical compiler read the reproduced export of 7,806 forms. Each candidate passed four native frozen seeds and the SQLite producer's 22,641,582 independent checks.
+
+| Variant | Baseline | Output | Groups at parity or faster | Largest change |
+| --- | --- | --- | ---: | ---: |
+| upspan | current | tree | 17/19 | +2.28% |
+| upspan | current | loops | 19/19 | -8.52% |
+| upspan | current | all | 16/19 | +3.16% |
+| upspan | current | synthetic | 19/21 | +11.39% |
+| upspan | historical | tree | 19/19 | -3.54% |
+| upspan | historical | all | 15/19 | +3.12% |
+| upspan | historical | synthetic | 19/21 | +1.08% |
+| shortclimb | current | tree | 19/19 | -2.43% |
+| shortclimb | current | loops | 19/19 | -8.09% |
+| shortclimb | current | all | 19/19 | -8.22% |
+| shortclimb | current | synthetic | 20/21 | +2.80% |
+| shortclimb | historical | tree | 19/19 | -5.39% |
+| shortclimb | historical | all | 19/19 | -10.62% |
+| shortclimb | historical | synthetic | 21/21 | -1.31% |
+
+### Vectorized spans
+
+| SQLite group | Current tree | Current loops | Current combined | Historical tree | Historical combined |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| blocks[2,4) | +2.28% | -8.52% | -1.63% | -8.64% | -4.70% |
+| blocks[4,8) | +0.59% | -10.53% | -2.67% | -8.15% | -4.44% |
+| blocks[8,16) | -6.20% | -30.16% | -23.13% | -11.96% | -16.87% |
+| blocks[16,32) | -5.38% | -31.08% | -20.24% | -5.85% | -13.70% |
+| blocks[32,64) | -8.77% | -34.11% | -19.71% | -8.19% | -14.03% |
+| blocks[64,128) | -13.48% | -36.54% | -23.40% | -7.27% | -15.26% |
+| blocks[128,256) | -3.39% | -31.14% | -28.59% | -3.99% | -26.49% |
+| blocks[256,512) | -2.01% | -21.29% | -16.84% | -6.03% | -22.67% |
+| blocks[512,1024) | -3.06% | -18.81% | -3.08% | -3.75% | -9.67% |
+| blocks[1024,2048) | -2.86% | -11.22% | +2.51% | -5.85% | +2.21% |
+| largest-1 | -2.02% | -10.66% | +3.16% | -4.90% | +3.12% |
+| largest-2 | -3.91% | -11.63% | +2.48% | -6.72% | +2.23% |
+| largest-3 | -2.17% | -19.20% | -3.39% | -5.74% | +2.16% |
+| largest-4 | -3.84% | -19.27% | -3.72% | -4.64% | -11.95% |
+| largest-5 | -0.93% | -17.45% | -2.75% | -5.69% | -13.86% |
+| largest-6 | -1.94% | -17.41% | -2.38% | -4.86% | -13.16% |
+| largest-7 | -4.65% | -21.86% | -6.68% | -3.54% | -4.92% |
+| largest-8 | -4.71% | -22.12% | -7.07% | -4.44% | -4.82% |
+| all | -5.45% | -24.52% | -16.91% | -6.29% | -14.34% |
+
+| Synthetic graph and output | Current parent | Historical scalar |
+| --- | ---: | ---: |
+| diamonds tree | -10.39% | -7.10% |
+| diamonds loops | -22.35% | -19.76% |
+| diamonds all | -6.85% | -4.61% |
+| nested tree | -8.03% | -5.93% |
+| nested loops | -23.51% | -94.73% |
+| nested all | -79.40% | -94.74% |
+| irreducible tree | +1.52% | +1.08% |
+| irreducible loops | -5.12% | -46.87% |
+| irreducible all | +11.39% | -35.35% |
+| dispatch tree | -0.40% | +0.49% |
+| dispatch loops | -33.26% | -18.15% |
+| dispatch all | -30.32% | -21.23% |
+| ladder tree | -6.69% | -7.21% |
+| ladder loops | -26.52% | -24.85% |
+| ladder all | -97.40% | -97.44% |
+| nested-ifs tree | -6.50% | -5.77% |
+| nested-ifs loops | -26.32% | -26.27% |
+| nested-ifs all | -6.19% | -3.20% |
+| fan-in tree | -15.86% | -17.89% |
+| fan-in loops | -29.44% | -29.72% |
+| fan-in all | -15.77% | -13.33% |
+
+### Short ancestor walks
+
+| SQLite group | Current tree | Current loops | Current combined | Historical tree | Historical combined |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| blocks[2,4) | -5.35% | -8.09% | -8.22% | -9.77% | -10.62% |
+| blocks[4,8) | -4.75% | -10.61% | -10.14% | -8.43% | -13.19% |
+| blocks[8,16) | -7.34% | -31.84% | -30.29% | -13.59% | -24.34% |
+| blocks[16,32) | -8.66% | -32.88% | -28.28% | -10.39% | -23.27% |
+| blocks[32,64) | -10.37% | -36.14% | -29.54% | -12.39% | -24.06% |
+| blocks[64,128) | -9.97% | -38.33% | -33.25% | -11.47% | -26.01% |
+| blocks[128,256) | -2.89% | -34.28% | -40.18% | -8.02% | -39.42% |
+| blocks[256,512) | -3.41% | -23.82% | -30.12% | -9.08% | -35.82% |
+| blocks[512,1024) | -4.47% | -20.60% | -18.98% | -7.45% | -23.84% |
+| blocks[1024,2048) | -5.50% | -12.56% | -11.38% | -10.08% | -13.28% |
+| largest-1 | -5.33% | -12.00% | -10.91% | -9.29% | -12.75% |
+| largest-2 | -6.99% | -13.11% | -12.11% | -10.37% | -13.35% |
+| largest-3 | -5.40% | -21.03% | -19.38% | -10.46% | -13.67% |
+| largest-4 | -7.78% | -21.85% | -20.98% | -7.35% | -26.02% |
+| largest-5 | -2.62% | -17.79% | -17.44% | -9.54% | -28.17% |
+| largest-6 | -2.43% | -18.36% | -17.03% | -8.75% | -27.29% |
+| largest-7 | -4.96% | -23.60% | -23.00% | -6.62% | -19.39% |
+| largest-8 | -5.34% | -24.95% | -23.26% | -5.39% | -19.22% |
+| all | -6.25% | -25.87% | -23.47% | -8.84% | -22.74% |
+
+| Synthetic graph and output | Current parent | Historical scalar |
+| --- | ---: | ---: |
+| diamonds tree | -9.22% | -8.65% |
+| diamonds loops | -24.32% | -23.21% |
+| diamonds all | -23.73% | -22.38% |
+| nested tree | -10.63% | -10.42% |
+| nested loops | -24.68% | -94.83% |
+| nested all | -5.29% | -75.75% |
+| irreducible tree | -3.64% | -4.65% |
+| irreducible loops | -11.23% | -50.93% |
+| irreducible all | -8.74% | -46.76% |
+| dispatch tree | -5.01% | -6.45% |
+| dispatch loops | -29.83% | -12.38% |
+| dispatch all | -21.84% | -12.64% |
+| ladder tree | -6.01% | -7.23% |
+| ladder loops | -29.12% | -29.19% |
+| ladder all | +2.80% | -1.31% |
+| nested-ifs tree | -5.90% | -5.37% |
+| nested-ifs loops | -28.49% | -28.03% |
+| nested-ifs all | -22.56% | -20.12% |
+| fan-in tree | -14.35% | -16.48% |
+| fan-in loops | -32.25% | -31.97% |
+| fan-in all | -25.40% | -23.99% |
+
+[Candidate source, original inputs and all paired measurements](frontier-walks-production.tar.xz)
