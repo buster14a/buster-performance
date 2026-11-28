@@ -171,3 +171,15 @@ Each candidate passed 113,317 native disassembler checks, including the GNU orac
 All three complete commands continued to use more cycles than the existing vector branch on each input.
 
 [Implementation patches, native test logs, sweep digests and complete process records](prefix-rows-and-dictionaries.tar.xz)
+
+## Sharing a common start record among sixteen neighboring keys
+
+The decoder stores the most frequent record for a group of sixteen start keys and a bitmap of exceptions. The complete executable measured 198,613,056 bytes. The native GNU-backed suite passed 113,317 checks. All four differential sweeps and the three disassembly listings matched the submitted decoder, including diagnostics.
+
+| Measurement | Lua VM | Lua code generator | Lua tables |
+| --- | ---: | ---: | ---: |
+| Fresh-process user cycles vs. the existing vector branch | +8.638% | +8.870% | +15.058% |
+
+The medians cover seven rounds of six fresh processes for each executable and input.
+
+[Source, baked-table and GNU tests, listing digests and process records](grouped-start-records.tar.xz)

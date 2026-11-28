@@ -68,3 +68,26 @@ In each of eight rounds, two baseline labels and two candidate labels each ran f
 The candidate median met baseline in 1 of the six configurations. All 48 process groups finished successfully.
 
 [Round medians, complete process records and runner](contiguous-remap-balanced.tar.xz)
+
+## Copying adjacent ranges and identifying rows that own extra operands
+
+The remap combines an instruction range and its terminator when their output positions are adjacent. The opcode lookup also reports whether a range contains an instruction with a separate operand list. The caller can skip its second scan when the range has none. The guarded fixtures cover all five owning opcodes, ordinary arithmetic, absent operands and padding. They rejected 14 deliberate changes.
+
+The second timing harness compiles both implementations from their full compiler translation units, including the actual IrFunction layout and opcode tables. Each harness compares 90 lengths, four opcode distributions and two map extents. Each cell is the median paired ratio over three seeds.
+
+| Timing harness | Map | Cells meeting baseline | Median ratio | Slowest ratio |
+| --- | --- | ---: | ---: | ---: |
+| Reduced fixture layout | Narrow | 360/360 | 0.9001 | 0.9654 |
+| Reduced fixture layout | Full unsigned | 360/360 | 0.6272 | 0.9321 |
+| Compiler translation units | Narrow | 360/360 | 0.9129 | 0.9866 |
+| Compiler translation units | Full unsigned | 359/360 | 0.6871 | 1.0158 |
+
+The native unroll, optimizer and store-motion suites passed 5,962, 358,076 and 394 checks. Each pair of complete pass reports matched byte for byte. Both tiers produced the same debug objects, standard output and diagnostics. The timing columns give median paired user-cycle changes across five rounds with three fresh processes per executable.
+
+| Corpus | Objects per tier | Optimizer pass driver | Tier 0 compile | Tier 1 compile |
+| --- | ---: | ---: | ---: | ---: |
+| lua | 34 | -0.188% | -0.155% | +0.090% |
+| sqlite | 1 | -0.464% | -0.110% | +0.214% |
+| musl | 1336 | -0.291% | -0.102% | -0.008% |
+
+[Source, both per-size sweeps, guarded oracle, mutations, pass reports, object hashes and process logs](ir-range-extra-owners.tar.xz)

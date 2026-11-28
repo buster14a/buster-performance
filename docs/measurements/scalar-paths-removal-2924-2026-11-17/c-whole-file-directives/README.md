@@ -75,3 +75,11 @@ The first layout also ran in the complete compiler. All nine preprocessing confi
 | musl | -0.847% | -0.825% | -0.405% | 2.681 | 2.195 |
 
 [Source, native table sweep, Clang-backed suite, compiler outputs and cycle logs](retained-masks-and-line-ends.tar.xz)
+
+## Line ends at the final unsigned token
+
+When a directive has no later line start in the last bitmap word, the line cursor can advance past the largest 32-bit token position. The updated implementation widens the cursor. A sparse-bitmap fixture checks the last marked line, exhaustion in the same word and a directive on the last logical token. The native Clang suite passed its 240 windowed sources, 24 complete units and 64 generated C17 and C23 cases each. A second table oracle passed 52 fixed fixtures and rejected nine deliberate changes to positions, ends, kinds, links, notes and guards.
+
+The updated table builder met baseline at 1,431 of 1,431 cells, across 159 lengths and nine distributions on the 9700X. The median paired ratio over three seeds was 0.5851 and the slowest was 0.9637.
+
+[Compiler patches, native Clang and fixed-oracle results, mutation outcomes and all per-size samples](directive-tables-unsigned-cursor.tar.xz)
