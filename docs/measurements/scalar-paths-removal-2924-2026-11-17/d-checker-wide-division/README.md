@@ -62,3 +62,20 @@ All 1,371 ordinary `-g -c` objects matched the baseline byte for byte in each ti
 | tier1 | musl | 1,336 | -0.024% |
 
 [Per-object hashes, both streams, process timings and runner](both-tier-compilations.tar.xz)
+
+## Baseline and wide quotient digits in balanced whole compilations
+
+In each of eight rounds, two baseline labels and two candidate labels each ran four fresh compilations. The launch order rotated. The candidate column is the median ratio of the two candidate cycle counts combined to the two baseline counts combined. The last two columns compare the paired labels of the same executable and show variation within this experiment.
+
+| Tier | Corpus | Candidate user cycles | Rounds meeting baseline | Baseline label 2 vs. 1 | Candidate label 2 vs. 1 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| tier0 | lua | -0.008% | 4/8 | -0.063% | -0.104% |
+| tier0 | sqlite | -0.337% | 7/8 | -0.034% | -0.163% |
+| tier0 | musl | -0.190% | 6/8 | -0.041% | -0.147% |
+| tier1 | lua | +0.053% | 0/8 | -0.049% | -0.018% |
+| tier1 | sqlite | -0.006% | 4/8 | -0.063% | +0.048% |
+| tier1 | musl | +0.140% | 1/8 | +0.045% | +0.122% |
+
+The candidate median met baseline in 4 of the six configurations. All 48 process groups finished successfully.
+
+[Round medians, complete process records and runner](wide-digits-balanced.tar.xz)
