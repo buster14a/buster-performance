@@ -372,3 +372,44 @@ The selector now classifies x87 operations from the result and operand types in 
 The number of maximal-munch visits fell from 396,316 on the original build to 19,716 (95.0% fewer). All 1,006,223 candidate rule lists and chosen indices matched in visit order. All 2,742 debug objects and both output streams matched. The native suite passed the 5,957-plan frozen digest, 1,530,046 selector checks, and three Clang-backed pipeline seeds. A separate 21-node function required 17 x87 classifications. Changing the rule action or kind caused 17 mismatches. Dropping the extended-precision load from that class failed the count independently. The 251 verified repository IR inputs covered 7,362 nodes. These counts measure grammar coverage and correctness. Timing results have their own tables.
 
 [Source, fixtures, faults, native logs, candidate traces and object manifests](long-double-productions.tar.xz)
+
+## Source selection with x87 productions
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9885 | 0.9886 | 0.9831 |
+| sqlite | 2,666 | 448,699 | 0.9844 | 0.9843 | 0.9925 |
+| musl | 2,756 | 235,335 | 0.9901 | 0.9899 | 0.9870 |
+
+[Inputs, native commands and all paired samples](extended-source-selection.tar.xz)
+
+## Source selection with deferred candidate costs
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9849 | 0.9852 | 0.9874 |
+| sqlite | 2,666 | 448,699 | 0.9880 | 0.9883 | 0.9960 |
+| musl | 2,756 | 235,335 | 0.9902 | 0.9897 | 0.9937 |
+
+[Inputs, native commands and all paired samples](chosen-source-selection.tar.xz)
+
+## Complete selector plans with deferred costs
+
+The default selector canonicalizes operands and computes subtree costs after choosing a pattern. The explicitly costed selector still prices every candidate and reuses the winning pattern. The parent is `cc7d4ffb4` and the candidate is `59c73da8a`. Each compiler wrote all semantic fields of every returned plan to a binary stream in function order. The encoder includes error status, estimates, workspace size, symbol access, pattern payloads, per-node costs, covered flags and effective uses. Each native pair passed byte comparison. The independent reader verified both native hashes, every record boundary and each final effective-use offset.
+
+| Passes | Workload | Successful plans | Plan nodes | Effective uses | Identical bytes |
+| --- | --- | ---: | ---: | ---: | ---: |
+| default | lua | 1,095 | 183,343 | 69,703 | 11,244,889 |
+| default | sqlite | 2,668 | 909,955 | 291,259 | 66,046,641 |
+| default | musl | 2,755 | 232,741 | 91,733 | 15,035,978 |
+| all | lua | 1,095 | 147,713 | 73,185 | 9,299,167 |
+| all | sqlite | 2,668 | 704,953 | 293,285 | 54,779,635 |
+| all | musl | 2,755 | 185,754 | 93,549 | 12,458,957 |
+
+The six runs produced 13,036 successful plans, covering 2,364,459 nodes and 912,714 effective uses. Both builds produced the same 2,742 debug objects, stdout and diagnostics. The candidate and choice census recorded 1,006,223 equivalent visits, of which 19,716 used maximal munch on the candidate. The native frozen digest and 1,530,046 selector checks passed, as did the mask, liveness and emitter suites and three Clang-backed pipeline seeds. These source workloads exercised successful plan construction. Failure cases have separate coverage in the selector suite.
+
+[Native streams, object manifests, selection records, probe and verification scripts](deferred-cost-complete-plans.tar.xz)
