@@ -122,13 +122,13 @@ The nine complete-command losses and thirteen definition-only losses keep this c
 
 [Per-length counters, corpus output hashes, build patch and tests](contiguous-body-lanes.tar.xz)
 
-## Binding parameters and scanning complete groups of token kinds
+## Checking previous macro definitions and scanning complete groups of token kinds
 
-Both candidates passed the native Clang preprocessor comparisons. The four builds produced identical standard output and diagnostics for Lua, SQLite and musl, and the shape driver compared output for 365 macro bodies. The complete-block scanner handles 64 token kinds at once and reads four groups of 16 identifier values when needed. The definition-only comparison includes all three runs of the benchmark mode for each body length (scalar, candidate and process control). The complete-command comparison uses the per-mode median of five fresh invocations.
+Both candidates passed the native Clang preprocessor comparisons. The four builds produced identical standard output and diagnostics for Lua, SQLite and musl, and the shape driver compared output for 365 macro bodies. The first candidate checks the macro-presence bit before reading the previous definition and skips identifier loads in groups with no names. The complete-block scanner handles 64 token kinds at once and reads four groups of 16 identifier values when needed. The definition-only comparison includes all three runs of the benchmark mode for each body length (scalar, candidate and process control). The complete-command comparison uses the per-mode median of five fresh invocations.
 
 | Method | Definition-only sizes meeting scalar | Complete-command sizes meeting scalar | Lua | SQLite | musl |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Parameter binding during classification | 348/365 | 286/365 | -0.557% | -0.063% | -0.584% |
+| Guarded redefinition check and masked identifier loads | 348/365 | 286/365 | -0.557% | -0.063% | -0.584% |
 | Four complete groups of sixteen | 335/365 | 205/365 | -0.458% | -0.450% | +0.258% |
 
 [Individual length results, workload hashes, process counters, Clang checks and reproduction patches](parameter-binding-and-complete-blocks.tar.xz)
