@@ -99,3 +99,21 @@ Each cell compares five paired rounds of three ordinary compiler processes on th
 | musl | -0.081% | +0.034% |
 
 [Native compiler runs, input commands and object manifests](compile-grouped.tar.xz)
+
+## Generic selections, qualified parameters and grouped function definitions
+
+The vector parser validates qualifier-only parameter arrays, addressed pointer compound literals and grouped function definitions. The secondary operator pass pairs a generic association’s colon at its own nesting level and retains nested conditional-expression pairs. The bounded selection check recognizes the type or default at each association, checks the raw closing punctuation, and verifies operand adjacency and the final operand. Other forms still reach the existing parser. Two new diagnostics freeze the closing punctuation for inline assembly, and two more cover malformed generic selections.
+
+| Corpus | Translation units | Tokens | Original declaration reparses | Static bounds and asm casts | Qualified parameters and pointer forms | With generic selections |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| lua | 34 | 571,903 | 0 | 0 | 0 | 0 |
+| sqlite | 1 | 716,136 | 6 | 6 | 5 | 0 |
+| musl | 1,336 | 5,039,561 | 7,570 | 7 | 0 | 0 |
+
+No declaration or whole unit reached the scalar parser in these three corpora. Each corpus retained the original serialized tree and diagnostics. The five SQLite function bodies that previously needed reparsing have three corrected roles and seven corrected parent links each. Other real sources and error-recovery views may still use the fallback.
+
+The 9700X Clang-backed suite passed 561 snippets, sixteen fixed trees, 35,904 aligned inputs, generated streams, deep nesting and the driver checks. The old and new parsers gave byte-identical results on the original 557 snippets at all 64 alignments. The four new negative snippets were checked at all alignments against the parent before recording the revised alignment digest. The other frozen batches retained their digests.
+
+The qualifier, compound literal and function-pointer matrix covered 32,055 sources per dialect across six dialects. The generic selection matrix covered 28,870 per dialect across eight dialects. All 2,736 delimiter mutations retained their trees and diagnostics. A separate matrix included 14,742 cases per dialect at packet boundaries and in surrounding declaration and expression contexts, comparing preprocessing status and diagnostics as well as parser outputs. Ten deliberate faults changed trees, diagnostics or fallback counts.
+
+[Compiler patches, source generators, per-file counters and digests, fault results and native suite logs](generic-selections-and-delimiters.tar.xz)
