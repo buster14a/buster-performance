@@ -393,3 +393,13 @@ Each cell compares five paired rounds of three ordinary compiler processes on th
 | musl | -1.447% | -0.796% |
 
 [Native compiler runs, input commands and object manifests](compile-inline.tar.xz)
+
+## Inline assembly fields across packet boundaries
+
+The candidate checks inline-assembly templates, output and input operands, pointer casts and clobbers across packet boundaries. An operand’s predecessor distinguishes an outer dereference from stars inside a type name. The validator checks the complete operand and its separator even when those tokens occupy different 64-token packets.
+
+Each of 5,724 independently generated files ran under GNU17, C23 and C89. Complete parse results, diagnostics, tree columns and traversal matched the preceding parser. In each dialect 1,612 declarations no longer required reparsing. The cases included 3,566 rejected inputs under GNU17 and C23 and 3,555 under C89. All 1,371 Lua, SQLite and musl inputs kept the same result and zero fallback declarations. The normal native parser suite passed its Clang-backed checks.
+
+The permanent 454-token fixture spans the template, output operands, input pointer cast and clobbers. One inserted number in the pointer cast produced one expected-right-parenthesis diagnostic at token 318, as on the parent. Four deliberate faults were detected. Thirteen malformed cases exposed a dropped separator when a new packet began. The three remaining faults each changed 137 cases.
+
+[Complete results, pinned input trees, native test log and candidate source](asm-field-crossings.tar.xz)
