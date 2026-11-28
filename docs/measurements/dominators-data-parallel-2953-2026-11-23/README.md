@@ -188,3 +188,65 @@ Complete Tier 1 debug compilations ran five pairs of three processes per configu
 | musl | -0.079% | -0.038% |
 
 [Sparse-source changes, four prototypes, native commands, outputs and raw timing](sparse-sources.tar.xz)
+
+## Join worklist with bounded ancestor climbs
+
+The combined compiler records DFS parents, numbers join blocks once in preorder and seeds the compressed parent/least-label links eight at a time. Incoming edges are examined only at joins. The final ancestor queries use at most four ordinary parent hops before consulting cached jump links. The jump lengths coalesce when two adjacent jumps have equal lengths. Cache entries are populated only for vertices actually queried. The tree output reuses cumulative offsets to place children and the loop pass uses the sparse back-edge source set.
+
+The current-form benchmark used 5,204 SQLite graphs. The historical comparison retained all 7,806 original records and ran the archived scalar compiler. The compatibility build changes only the export reader’s form count. Entries are the median change in cycles per block over three paired rounds on CPU 2 of the locked Ryzen 7 9700X.
+
+| SQLite set | Current tree | Current loops | Current all | Historical tree | Historical all |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| blocks[2,4) | -5.13% | -11.87% | -10.52% | -8.89% | -11.34% |
+| blocks[4,8) | -5.06% | -12.36% | -10.38% | -8.91% | -13.18% |
+| blocks[8,16) | -7.48% | -31.20% | -30.25% | -15.37% | -24.44% |
+| blocks[16,32) | -10.08% | -33.63% | -29.66% | -11.75% | -23.14% |
+| blocks[32,64) | -10.63% | -35.76% | -31.47% | -12.82% | -23.68% |
+| blocks[64,128) | -13.59% | -37.68% | -33.43% | -13.20% | -24.95% |
+| blocks[128,256) | -4.27% | -32.88% | -39.04% | -6.84% | -37.53% |
+| blocks[256,512) | -3.69% | -22.57% | -28.08% | -6.97% | -33.50% |
+| blocks[512,1024) | -4.60% | -19.75% | -16.95% | -6.13% | -21.83% |
+| blocks[1024,2048) | -5.11% | -11.56% | -9.80% | -8.10% | -9.67% |
+| largest-1 | -4.24% | -10.59% | -9.25% | -7.80% | -8.02% |
+| largest-2 | -6.17% | -11.96% | -10.37% | -8.59% | -9.28% |
+| largest-3 | -5.02% | -20.56% | -17.15% | -8.99% | -9.53% |
+| largest-4 | -5.27% | -20.26% | -18.02% | -4.74% | -24.22% |
+| largest-5 | -2.98% | -18.50% | -16.19% | -7.17% | -25.09% |
+| largest-6 | -4.07% | -17.88% | -15.71% | -6.43% | -25.08% |
+| largest-7 | -7.85% | -23.60% | -21.21% | -4.43% | -18.69% |
+| largest-8 | -8.66% | -24.45% | -21.81% | -5.56% | -18.24% |
+| all | -6.94% | -26.54% | -23.74% | -8.91% | -22.05% |
+
+| Synthetic analysis | Current parent | Historical scalar |
+| --- | ---: | ---: |
+| diamonds tree | -14.33% | -12.39% |
+| diamonds loops | -26.62% | -24.59% |
+| diamonds all | -24.46% | -21.73% |
+| nested tree | -9.81% | -9.25% |
+| nested loops | -25.02% | -94.90% |
+| nested all | -5.45% | -75.65% |
+| irreducible tree | -2.11% | +0.14% |
+| irreducible loops | -9.60% | -49.81% |
+| irreducible all | -7.27% | -46.34% |
+| dispatch tree | +3.28% | +2.27% |
+| dispatch loops | -21.21% | -9.92% |
+| dispatch all | -16.86% | -8.09% |
+| ladder tree | -1.37% | -2.64% |
+| ladder loops | -24.91% | -25.28% |
+| ladder all | +1.90% | -2.26% |
+| nested-ifs tree | -3.96% | -4.14% |
+| nested-ifs loops | -27.36% | -27.05% |
+| nested-ifs all | -19.12% | -17.82% |
+| fan-in tree | -14.18% | -12.05% |
+| fan-in loops | -29.59% | -30.98% |
+| fan-in all | -22.90% | -20.22% |
+
+| Tier 1 corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | -0.129% | -0.226% |
+| sqlite | -0.217% | -0.349% |
+| musl | -0.138% | -0.240% |
+
+All debug objects, stdout and diagnostics matched over the six ordinary compiler workloads. Each compiler ran five pairs of three processes. The source producer matched 22,641,582 checks on SQLite. Four seeds of the dominator differential suite passed. The separate deep-join graph has a known immediate dominator for every block. With a depth of 16,384 and 32,769 blocks, the locked median was 102.9 ticks per block, compared with 28,122 for the original unbounded climb. This test changes the number of joins and their distance to the semidominator together.
+
+[Implementations, recorded inputs, commands, ordinary object hashes and raw measurements](join-worklist.tar.xz)
