@@ -95,3 +95,15 @@ Each configuration matched the untouched parent’s preprocessor output and diag
 | musl | +0.465% | +0.328% | +0.890% | 2.687 | 2.204 |
 
 [Compiler source, output digests, directive-table measurements and process logs](interleave-preprocessing.tar.xz)
+
+## Interleaved columns with an unsigned line cursor in complete preprocessing
+
+Each configuration matched the untouched parent’s preprocessor output and diagnostics. The first three columns give the median paired change in complete preprocessing user cycles over five rounds with three fresh processes per executable. The last two columns time the directive-table benchmark in cycles per token across three runs.
+
+| Corpus | Default | Forced whole file | 4 KiB windows | Parent table | Candidate table |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | -0.784% | -0.944% | -0.552% | 0.422 | 0.331 |
+| sqlite | +0.137% | -0.221% | +0.199% | 0.333 | 0.249 |
+| musl | -0.490% | -0.334% | +0.023% | 2.683 | 2.180 |
+
+[Compiler source, output digests, directive-table measurements and process logs](bounded-preprocessing.tar.xz)

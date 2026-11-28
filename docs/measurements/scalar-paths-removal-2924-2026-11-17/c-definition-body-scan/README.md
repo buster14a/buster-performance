@@ -168,3 +168,40 @@ Identifier refinement compares the identifiers it interns with the optional-argu
 | Carry optional-identifier presence from refinement | 364/365 | 114/365 | -0.148% | +0.561% | -0.199% |
 
 [Per-size samples, corpus digests, process records and production patch](optional-name-from-refinement.tar.xz)
+
+## Complete macro body words with optional-name presence from refinement
+
+This experiment uses the identifier-presence result from refinement with complete 64-token loads, four direct identifier comparisons and a 16-token tail. The complete preprocessing command includes the cost of discovering the name during refinement. The native Clang checks and all 365 output comparisons passed.
+
+| Method | Definition-only sizes meeting scalar | Complete-command sizes meeting scalar | Lua | SQLite | musl |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Complete token words with known optional-name presence | 363/365 | 109/365 | +0.135% | +0.334% | +0.068% |
+
+[Parent and candidate timings, per-length results, command output hashes and source](optional-name-and-full-words.tar.xz)
+
+## A single production scanner against the untouched compiler
+
+The compiler runs the vector scanner directly with the previous benchmark dispatcher retained. A page-guarded oracle checked 364,694 individual placements over eleven operator and identifier shapes and rejected six deliberate changes. Removing the inner-name test alone left the scanner’s classification unchanged: the nested name was still discovered on its own lane. The revised closing-delimiter fault changed the classification and the oracle caught it.
+
+The parent is the untouched native Release compiler at cc7d4ffb4. Each size used three rounds of the 21-pass definition benchmark and three rounds of four fresh whole preprocessing processes per executable. The table counts sizes where the median paired candidate/parent cycle ratio was at most 1. The parent’s original scalar mode and original default vector mode were measured separately. Every output digest and diagnostic stream matched.
+
+| Body | Sizes | Define vs. scalar | Define vs. default | Complete vs. scalar | Complete vs. default |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| literal | 75 | 75 | 61 | 75 | 70 |
+| parameter | 74 | 72 | 60 | 74 | 73 |
+| paste | 72 | 67 | 54 | 66 | 70 |
+| stringize | 73 | 73 | 73 | 73 | 73 |
+| optional | 71 | 71 | 71 | 71 | 71 |
+| All | 365 | 358 | 319 | 359 | 357 |
+
+Definition-only losses against the original scalar scanner were parameter 33 (+0.36%), parameter 49 (+1.14%), paste 256 (+0.87%), paste 33 (+2.69%), paste 40 (+0.35%), paste 49 (+1.96%), paste 56 (+1.13%).
+
+The corpus comparison used seven paired rounds with four fresh processes per executable and matching output and diagnostics.
+
+| Corpus | Default preprocessing | Scalar flag |
+| --- | ---: | ---: |
+| lua | -0.301% | -0.556% |
+| sqlite | -0.058% | +0.022% |
+| musl | -1.278% | -0.445% |
+
+[Source, oracle receipts, per-size medians, output hashes and native process logs](normal-macro-definitions.tar.xz)
