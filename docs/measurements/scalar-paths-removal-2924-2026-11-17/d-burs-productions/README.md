@@ -463,3 +463,27 @@ Each cell compares five paired rounds of three ordinary compiler processes on th
 | musl | +0.015% | +0.068% |
 
 [Native compiler runs, input commands and object manifests](compile-extended.tar.xz)
+
+## End-to-end compilation with deferred candidate costs
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane Tier 1 debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.018% | -0.045% |
+| sqlite | -0.035% | +0.064% |
+| musl | +0.147% | +0.136% |
+
+[Native compiler runs, input commands and object manifests](compile-chosen.tar.xz)
+
+## Source selection with narrow results and signed multiply productions
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9916 | 0.9920 | 0.9907 |
+| sqlite | 2,666 | 448,699 | 0.9969 | 0.9966 | 0.9997 |
+| musl | 2,756 | 235,335 | 0.9977 | 0.9976 | 0.9970 |
+
+[Inputs, native commands and all paired samples](product-source-selection.tar.xz)
