@@ -245,3 +245,13 @@ The inputs contain 576 declarations per family. Some measurements still include 
 | parameters | 576 | 0 |
 
 [Source, input generator outputs and all native measurements](generic-parser-sizes.tar.xz)
+
+## Generic selections, pointer literals and minimum array bounds across packets
+
+At `1c111388e` the recognizers carry expression state across 64-token packets. Tagged `struct`, `union` and `enum` types can appear in associations and casts. A type beginning in one packet and ending in the next is removed from the expression masks at both ends. The pointer initializer carries the preceding string or operator. Minimum bounds track numbers and the stages of `sizeof(type)` across packet boundaries.
+
+The previous revision reparsed 544 tagged-association declarations, 224 long generic expressions and 192 long pointer literals across the 108 sizes. This revision reparsed zero declarations in all six families. Their parser outputs were byte-identical to the original compiler. The 1,371 source files also retained their complete trees and diagnostics with zero fallback declarations and whole units.
+
+The frozen native parser suite passed against Clang, including 561 snippets and 35,904 alignments. A permanent 653-token fixture exercises all three recognizers and a malformed 89-token expression requires the original diagnostic at token 86. An additional 5,004 generated sources crossed packet boundaries in valid and malformed expressions under three language modes. Each had 2,779 rejected sources, and 2,225 fewer declarations needed scalar reparsing. All diagnostic and tree streams matched. The 28,870 generic variants under eight language modes and 14,742 boundary/context cases under three modes also retained their outputs. Five independent mutations discarded the previous value, a spanning type, a string, a `sizeof` opener or an operator at a packet boundary. Each broke the expected routing on a fixed witness.
+
+[Production changes, raw size trees, corpus manifests, fixtures and mutant results](multi-packet-generic-literals-and-bounds.tar.xz)
