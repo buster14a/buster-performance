@@ -55,3 +55,40 @@ The conflict-detection compiler passed all 419 frozen fixtures, 128 Clang fuzz c
 Several mixed or dense inputs still take more cycles than the scalar stack. These results qualify individual inputs and leave the per-size gate open.
 
 [Source changes, original baselines, independent checks, per-size samples, paired commands and raw native process measurements](pairing-native.tar.xz)
+
+## Pair links and complete directive notes
+
+The new pairer uses the carry bits of a 64-bit add to find continuations following their last local opener. Packed conditional ranks match writers to their following directives, and masked stores write the link columns at the original directive indices. Groups extending beyond a packet use a stack of unsigned indices. The implementation records whether a file contains an unterminated group or a middle directive following an else.
+
+Pairing alone and complete pairing with diagnostic notes have different contracts. The isolated link-only control below uses the original stack, which produces links but lacks the flag that selects the notes pass. In the complete stage the forced scalar path calls the notes pass after its stack walk, as the production fallback does. The original dispatcher takes its usual fast path or scalar escape. Every complete stage produces exactly the same links, sorted note indices and note bytes at each of 89 lengths and 11 input shapes. The three seeds use the same input across all four interleaved implementations.
+
+Each cell gives the number of per-size/input ratios at or below one, followed by the median ratio. Three independently seeded rounds run nine rotating interleaved batches per cell on CPU 2 of the locked 9700X. The last two columns cover the 572 cells in which at least one seed actually refused the original vector implementation. All 979 cells remain in the first two columns.
+
+| Complete stage | Forced scalar with notes | Original dispatcher with notes | Reached versus scalar | Reached versus dispatcher |
+| --- | ---: | ---: | ---: | ---: |
+| Carry links with the original notes pass | 926/979 · 0.302× | 979/979 · 0.189× | 542/572 · 0.140× | 572/572 · 0.108× |
+| Traverse notes by group links | 961/979 · 0.216× | 979/979 · 0.180× | 568/572 · 0.139× | 572/572 · 0.109× |
+| Reuse the pairing scratch for note bytes | 971/979 · 0.209× | 979/979 · 0.202× | 572/572 · 0.134× | 572/572 · 0.112× |
+| Count notes when recording them | 976/979 · 0.200× | 979/979 · 0.199× | 572/572 · 0.134× | 572/572 · 0.112× |
+| Allocate both final note columns together | 979/979 · 0.213× | 979/979 · 0.191× | 572/572 · 0.150× | 572/572 · 0.119× |
+| Also batch unterminated openers in files without an endif | 977/979 · 0.215× | 979/979 · 0.193× | 572/572 · 0.147× | 572/572 · 0.116× |
+
+| Final implementation by shape | Forced scalar with notes | Original dispatcher with notes |
+| --- | ---: | ---: |
+| Other directives | 89/89 · 0.041× | 89/89 · 0.196× |
+| Only orphan ends | 89/89 · 0.031× | 89/89 · 0.026× |
+| Only orphan middles | 89/89 · 0.041× | 89/89 · 0.029× |
+| Trailing orphan end | 89/89 · 0.041× | 89/89 · 0.027× |
+| Orphan end, open, else, end | 89/89 · 0.234× | 89/89 · 0.144× |
+| Deep opens, then closes | 89/89 · 0.380× | 89/89 · 0.257× |
+| Open, elif, else, end | 89/89 · 0.394× | 89/89 · 0.249× |
+| Open and repeated else | 89/89 · 0.727× | 89/89 · 0.487× |
+| Sparse regular groups | 89/89 · 0.252× | 89/89 · 0.224× |
+| Dense random conditionals | 89/89 · 0.538× | 89/89 · 0.383× |
+| Sparse random conditionals | 89/89 · 0.236× | 89/89 · 0.189× |
+
+For links alone, the carry implementation beat the original dispatcher in all 979 cells and met the bare scalar stack in 863. The note-aware comparison includes the work performed by the fallback's actual caller. Each seed also passed 15,516 independent link and note-presence checks over randomized inputs, deep groups, boundary sizes and orphan directives.
+
+The submitted full compiler passed 419 frozen cases, all 128 Clang fuzz comparisons, and the 1/2/3/8-lane determinism suite. The native corpus reached the original escape on four of the seven targeted source fixtures, including legally balanced 30,032-level nesting.
+
+[Implementations, paired stage measurements, checks and full-compiler build](pairing-notes.tar.xz)
