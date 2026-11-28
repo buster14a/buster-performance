@@ -127,3 +127,27 @@ Each configuration matched the untouched parent’s preprocessor output and diag
 | musl | -0.534% | -0.584% | -0.377% | 2.678 | 1.986 |
 
 [Compiler source, output digests, directive-table measurements and process logs](fullscan-preprocessing.tar.xz)
+
+## Directive ends from consecutive line ranks
+
+The line-rank experiments derive each directive end by projecting marked hashes into ordered line-start bits, shifting by one and projecting back. An outstanding directive carries across empty bitmap words. The paired implementations materialize the position and end columns together.
+
+Fourteen token distributions span 159 lengths, including zero, every packet boundary in the original matrix, and 16,384 tokens. Each candidate was checked at every cell against the parent for positions, ends, kinds, conditional links, notes and the include guard. Per-cell times are the median of three paired ratios from the locked Ryzen 7 9700X.
+
+| Builder | Original distributions | Five mixed line-start distributions | All | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Current PR, rank experiment | 1,431/1,431 | 794/795 | 2,225/2,226 | 0.7200 | 1.0398 |
+| Ends during scan | 1,429/1,431 | 756/795 | 2,185/2,226 | 0.5650 | 1.2750 |
+| Ends after scan | 1,429/1,431 | 765/795 | 2,194/2,226 | 0.5866 | 1.2937 |
+| Sparse line ranks | 1,431/1,431 | 751/795 | 2,182/2,226 | 0.5637 | 1.2201 |
+| Current PR, paired experiment | 1,431/1,431 | 794/795 | 2,225/2,226 | 0.7069 | 1.0352 |
+| Paired words | 1,430/1,431 | 778/795 | 2,208/2,226 | 0.5780 | 1.0724 |
+| One-bit fast path | 1,422/1,431 | 773/795 | 2,195/2,226 | 0.5755 | 1.1261 |
+| Enumerated bits | 1,419/1,431 | 771/795 | 2,190/2,226 | 0.7026 | 1.1465 |
+
+The current PR builder exceeded scalar in the following expanded-harness cells. Shape 11 places a line start every 521 tokens and marks two of each three starts as directives.
+
+- line-ranks, 16,384 tokens, shape 11, ratio 1.0398.
+- paired-lines, 16,384 tokens, shape 11, ratio 1.0352.
+
+[Source, commands, checks and every timing sample](directive-line-ranks.tar.xz)

@@ -171,3 +171,36 @@ The first implementation also ran through the complete compiler. Each row below 
 All six output manifests matched. Five of six ordinary compilation cells improved. All-pass SQLite used +0.082% more user cycles. The frozen optimizer seed passed 358,076 checks with zero failures, and three further seeds passed. The verified optimizer's synthetic benchmarks improved in 114 of 120 shape and size cells. The remaining misses keep the replacement under qualification.
 
 [Source, commands, guarded oracles, per-stage samples, debug object hashes and ordinary compilation timings](cfg-packet-components.tar.xz)
+
+## Kept blocks and competing layout edges
+
+The builder compresses reachable canonical blocks into their original order. It gathers dominator ranks for up to sixteen candidates and installs each winning outgoing edge immediately. An equal rank keeps the earlier source. Cycle detection visits kept blocks in order. Five alternating paired rounds used the same per-function instrumentation on the 9700X. Across 10,124 functions per configuration, each output object, diagnostic stream and sequence of function shapes matched the parent. Each ratio below divides the summed candidate ticks in that bin by the corresponding parent ticks, then takes the median of the pairs.
+
+| Instructions | Passes | Functions | Verified pipeline | CFG cleanup | Target resolution | Layout |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0–31 | default | 3,345 | 0.9888 | 0.7773 | 0.5829 | 0.8997 |
+| 0–31 | all | 3,618 | 1.0172 | 0.7579 | 0.5796 | 0.8636 |
+| 32–127 | default | 3,222 | 0.9792 | 0.6655 | 0.4227 | 0.7598 |
+| 32–127 | all | 3,353 | 0.9961 | 0.6657 | 0.4159 | 0.7597 |
+| 128–511 | default | 2,625 | 0.9789 | 0.6636 | 0.3857 | 0.7422 |
+| 128–511 | all | 2,414 | 0.9840 | 0.6648 | 0.3861 | 0.7411 |
+| 512–2,047 | default | 788 | 0.9806 | 0.6630 | 0.3826 | 0.7226 |
+| 512–2,047 | all | 651 | 0.9812 | 0.6594 | 0.3783 | 0.7200 |
+| 2,048–8,191 | default | 136 | 0.9823 | 0.6521 | 0.3434 | 0.7090 |
+| 2,048–8,191 | all | 82 | 0.9830 | 0.6513 | 0.3385 | 0.7119 |
+| 8,192+ | default | 8 | 0.9842 | 0.6370 | 0.2966 | 0.7018 |
+| 8,192+ | all | 6 | 0.9856 | 0.6378 | 0.2851 | 0.7040 |
+| Total | default | 10,124 | 0.9812 | 0.6722 | 0.4190 | 0.7456 |
+| Total | all | 10,124 | 0.9879 | 0.6710 | 0.4196 | 0.7452 |
+
+Ordinary compilers without probes ran five rounds of three processes. Debug objects, diagnostics and stdout matched on all six workloads.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.041% | -0.053% |
+| sqlite | -0.031% | -0.060% |
+| musl | +0.032% | +0.027% |
+
+The layout improved in 12 of twelve bins, the verified pipeline in 11 of twelve, and the synthetic optimizer in 70 of 120 comparisons. Seed 139 passed 358,076 frozen checks. Three further seeds passed.
+
+[Patch, harnesses, complete compiler samples, per-function ticks and object manifests](cfg-layout-proposals.tar.xz)
