@@ -149,3 +149,18 @@ The native checker passed 838,227 checks. Clang agreed on 100 exported data valu
 | musl | 1336 | -0.073% | +0.315% |
 
 [Production patch, arithmetic fixtures, GMP and compiler comparisons, hashes and process counters](wide-division-reused-dividend.tar.xz)
+
+## Compare and divide on a writable dividend
+
+The ordinary folder materializes its operands before starting division. Each routine in this comparison pays for a copy of the dividend into writable storage. The six alternatives reuse that storage for the remainder. All three seeds ran eleven operand distributions at each of 43 eligible widths, from 3 through 129 limbs. Each ratio divides candidate cycles by scalar cycles for the same seed and cell. The table summarizes the median across seeds for each cell.
+
+| Routine | Cells meeting scalar | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: |
+| Forward comparison | 458/473 | 0.0291 | 1.4476 |
+| Reverse comparison | 466/473 | 0.0296 | 1.2261 |
+| Count both lengths during reverse comparison | 467/473 | 0.0294 | 1.2261 |
+| Clear quotient during comparison | 466/473 | 0.0283 | 1.3198 |
+| Outline normalized quotient estimation | 466/473 | 0.0283 | 1.3164 |
+| Keep the comparison entry hot | 466/473 | 0.0283 | 1.3164 |
+
+[Compiler flags, implementations, checked driver, raw cycle counts and summary script](wide-division-in-place-comparison.tar.xz)
