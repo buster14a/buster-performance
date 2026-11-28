@@ -1,25 +1,25 @@
 # Dollar punctuation in the lexer and preprocessor
 
-The parent is buster14a/buster@cc7d4ffb449c1f57d8d867c2ad2bf6dc6bfebc7f. The original preprocessor scans the existing token range for dollars and re-tokenizes matching contiguous runs when `-fno-dollars-in-identifiers` or assembler-with-cpp makes the dollar sign punctuation. A counter records complete scans and the work in the rare positive cases. All twelve preprocessing invocations exited successfully.
+The parent is buster14a/buster@cc7d4ffb449c1f57d8d867c2ad2bf6dc6bfebc7f. The original preprocessor scans the existing token range for dollars and re-tokenizes matching contiguous runs when `-fno-dollars-in-identifiers` or assembler-with-cpp makes the dollar sign punctuation. A counter records complete scans and the work in the rare positive cases. The whole-file restart counter records the split routine abandoning a partial result. The final two columns include other scalar callers using the same flag, including those in assembler mode. All twelve preprocessing invocations exited successfully.
 
-| Input | Dialect | Scan calls | Token rows | Positive byte scans | Calls with a run | Bytes in runs | Scalar re-lex calls |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| lua | default | 0 | 0 | 0 | 0 | 0 | 0 |
-| lua | nodollars | 3,101 | 1,551,479 | 8 | 0 | 0 | 0 |
-| lua | asm | 3,053 | 1,412,499 | 8 | 0 | 0 | 0 |
-| sqlite | default | 0 | 0 | 0 | 0 | 0 | 0 |
-| sqlite | nodollars | 160 | 1,234,862 | 2 | 1 | 33 | 0 |
-| sqlite | asm | 156 | 1,230,352 | 2 | 1 | 33 | 0 |
-| musl | default | 0 | 0 | 0 | 0 | 0 | 0 |
-| musl | nodollars | 23,153 | 16,498,273 | 203 | 0 | 0 | 0 |
-| musl | asm | 23,153 | 16,503,617 | 203 | 0 | 0 | 0 |
-| dense | default | 0 | 0 | 0 | 0 | 0 | 0 |
-| dense | nodollars | 2 | 1,804 | 1 | 1 | 49 | 0 |
-| dense | asm | 2 | 1,808 | 1 | 1 | 49 | 0 |
+| Input | Dialect | Scan calls | Token rows | Positive byte scans | Calls with a run | Bytes in runs | Whole-file restarts | All flagged scalar lexes | Bytes in flagged scalar lexes |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| lua | default | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| lua | nodollars | 3,101 | 1,551,479 | 8 | 0 | 0 | 0 | 0 | 0 |
+| lua | asm | 3,053 | 1,412,499 | 8 | 0 | 0 | 0 | 588 | 1,176 |
+| sqlite | default | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| sqlite | nodollars | 160 | 1,234,862 | 2 | 1 | 33 | 0 | 6 | 33 |
+| sqlite | asm | 156 | 1,230,352 | 2 | 1 | 33 | 0 | 625 | 2,402 |
+| musl | default | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| musl | nodollars | 23,153 | 16,498,273 | 203 | 0 | 0 | 0 | 0 | 0 |
+| musl | asm | 23,153 | 16,503,617 | 203 | 0 | 0 | 0 | 0 | 0 |
+| dense | default | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 |
+| dense | nodollars | 2 | 1,804 | 1 | 1 | 49 | 0 | 10 | 49 |
+| dense | asm | 2 | 1,808 | 1 | 1 | 49 | 0 | 10 | 49 |
 
 ## Complete preprocessing
 
-The candidate passes the dialect to initial tokenization and removes the post-tokenization split. The vector property and kind tables distinguish dollar punctuation, and C++ standard literal-suffix recognition observes the same boundary. The fixture freezes Clang's raw tokens and checks kinds, start-of-line flags and both extents at 65 offsets across a lexer chunk boundary. Three 200,000-input lexer seeds passed. The Clang-backed preprocessor suite passed 419 fixed cases, 240 windowed sources, 24 complete units and 128 generated cases for each of C17 and C23.
+The candidate passes the dialect to initial tokenization and removes the post-tokenization split. The vector property and kind tables distinguish dollar punctuation, and C++ standard literal-suffix recognition observes the same boundary. The fixture freezes Clang's raw tokens and checks kinds, start-of-line flags and both extents at 65 offsets across a lexer chunk boundary. This fixture rejected four deliberate errors in word classification, output kind, suffix extent and forcing the entire source through scalar tokenization. Three 200,000-input lexer seeds passed. The Clang-backed preprocessor suite passed 419 fixed cases, 240 windowed sources, 24 complete units and 128 generated cases for each of C17 and C23.
 
 Five paired rounds ran three processes per side on CPU 2 of the locked Ryzen 7 9700X. Each cell is the median change in user cycles. Preprocessed output SHA-256 and diagnostics matched separately in every cell. The parent always uses whole-file preparation in the two explicit dollar-punctuation dialects. The candidate also honors windowed preparation in those dialects.
 
