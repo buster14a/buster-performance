@@ -129,3 +129,24 @@ In each of eight rounds, two baseline labels and two candidate labels each ran f
 The candidate median met baseline in 4 of the six configurations. All 48 process groups finished successfully.
 
 [Round medians, complete process records and runner](ir-extra-lists-balanced.tar.xz)
+
+## Limiting the short operand store to four instructions
+
+All methods used the actual IR translation units, two map extents, four opcode distributions and 90 lengths. Each cell is the median paired ratio across three seeds. The four-lane form passed all 720 combinations and all three native suites. Its complete optimizer reports matched byte for byte.
+
+| Method | Cells meeting parent | Median ratio | Slowest ratio |
+| --- | ---: | ---: | ---: |
+| Remap with extra-operand detection | 720/720 | 0.7310 | 0.9866 |
+| Four-lane stores through length four | 720/720 | 0.7228 | 0.9791 |
+| Store columns directly for short tails | 719/720 | 0.7445 | 1.0670 |
+| Group two operand columns | 713/720 | 0.7999 | 1.2360 |
+
+The first timing column measures the four-lane form in the complete pass driver. The last two columns measure the preceding quarter-store implementation in complete compilations across five paired rounds. Both compilers ran from the same directory and produced identical debug objects, standard output and diagnostics on all 1,371 translation units in each tier.
+
+| Corpus | Short form pass driver | Preceding quarter stores, Tier 0 | Preceding quarter stores, Tier 1 |
+| --- | ---: | ---: | ---: |
+| lua | +0.382% | +0.026% | +0.240% |
+| sqlite | -0.503% | -0.366% | +0.296% |
+| musl | +1.201% | +0.051% | +0.077% |
+
+[All samples, report and object comparisons, sources and suites](ir-short-tail-and-objects.tar.xz)
