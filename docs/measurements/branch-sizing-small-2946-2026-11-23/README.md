@@ -326,3 +326,47 @@ Four function-boundary arrangements were checked at three seeds against GNU as. 
 | chain-backward | -0.261% | -0.345% | +0.015% | +0.148% | -0.210% | -0.193% | -0.230% | -0.369% |
 
 [Source, native checks and every raw timing](sizing-outlined.tar.xz)
+
+## Branch sizing with a small entry function in the complete compiler
+
+The complete compiler retains paired branch ranks and keeps the table-based rank builder and vector offset writer out of line. Three interleaved parent/candidate pairs on the locked 9700X used seeds 1, 133 and 789. The emitted bytes matched GNU as for all 404 functions at each seed. The candidate improved sizing alone and sizing followed by encoding in all eleven workloads. Changes are median paired ratios.
+
+| Workload | Sizing cycles/branch | With encoding |
+| --- | ---: | ---: |
+| tier0-40 | -6.893% | -3.207% |
+| optimized-40 | -6.397% | -1.935% |
+| tier0-250 | -1.810% | -1.109% |
+| optimized-250 | -2.839% | -1.894% |
+| tier0-2000 | -1.072% | -1.281% |
+| optimized-2000 | -1.116% | -1.560% |
+| tier0-10000 | -1.113% | -0.721% |
+| optimized-10000 | -1.191% | -1.082% |
+| tier0-mix | -3.122% | -1.039% |
+| chain-forward | -0.237% | -0.285% |
+| chain-backward | -0.429% | -0.312% |
+
+Five paired rounds of three whole compiler processes under the same lock produced the same 2,742 debug objects, standard output and diagnostics. Five whole-compilation medians improved. Tier 0 SQLite took 0.063% more user cycles.
+
+| Corpus | Tier 0 user cycles | Tier 1 user cycles |
+| --- | ---: | ---: |
+| lua | -0.053% | -0.313% |
+| sqlite | +0.063% | -0.216% |
+| musl | -0.141% | -0.372% |
+
+The historical scalar phase measurements used three processes on the same CPU. Ranks and write are differences between benchmark phases, in core cycles per branch.
+
+| Workload | Scalar ranks | Candidate ranks | Scalar write | Candidate write |
+| --- | ---: | ---: | ---: | ---: |
+| tier0-40 | 2.39 | -0.21 | 3.13 | 1.34 |
+| optimized-40 | 3.38 | -0.26 | 3.01 | 2.02 |
+| tier0-250 | 5.60 | 1.81 | 2.82 | 2.23 |
+| optimized-250 | 5.13 | 1.94 | 2.67 | 2.05 |
+| tier0-2000 | 5.59 | 2.93 | 1.66 | 1.70 |
+| optimized-2000 | 5.20 | 2.68 | 1.87 | 1.72 |
+| tier0-10000 | 4.59 | 2.95 | 2.61 | 2.39 |
+| optimized-10000 | 5.34 | 2.75 | 2.52 | 2.37 |
+| tier0-mix | 7.49 | 0.98 | 3.75 | 2.48 |
+| chain-forward | 5.87 | 3.50 | 2.68 | 2.52 |
+| chain-backward | 5.64 | 3.44 | 2.91 | 2.53 |
+
+[Source, native checks and every raw timing](full-compiler-small-front.tar.xz)
