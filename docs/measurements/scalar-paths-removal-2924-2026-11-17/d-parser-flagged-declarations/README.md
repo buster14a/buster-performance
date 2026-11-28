@@ -87,3 +87,15 @@ The candidate matched every returned tree, traversal column and diagnostic in th
 The bounds tests covered 5,705 sources and the asm operand tests covered 10,885 sources, each in six dialects. The parent and candidate produced byte-identical serialized results. The 9700X parser suite passed with Clang, including eleven fixed trees. Eight mutations to the bound checks, pointer grammar, unresolved-flag handling or positive coverage changed the expected results. Four changed a tree or diagnostic and the other four changed route counts.
 
 [Compiler patch, positive and negative cases, source generators, per-file counters and result hashes](bounds-and-casts.tar.xz)
+
+## End-to-end compilation with grouped function names
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Tier 0 | Tier 1 |
+| --- | ---: | ---: |
+| lua | +0.171% | +0.332% |
+| sqlite | +0.075% | +0.232% |
+| musl | -0.081% | +0.034% |
+
+[Native compiler runs, input commands and object manifests](compile-grouped.tar.xz)

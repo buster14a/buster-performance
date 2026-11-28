@@ -247,3 +247,15 @@ The guarded-search compiler was also compared against cc7d4ffb4. Every complete 
 | musl | -0.372% | -0.421% | -0.231% | 2.674 | 2.178 |
 
 [Integrated source, guarded size matrix, fixed-answer mutations, whole-preprocessing samples and test logs](integrated-conditional-pairs.tar.xz)
+
+## Unmasked full token blocks before conditional pairing
+
+The parent is cc7d4ffb4. The scanner loads each complete 64-token packet directly and uses a mask for the tail. Each cell is the median paired change in user cycles over five rounds of three fresh processes. All nine output and diagnostic comparisons matched.
+
+| Corpus | Default | Whole file | 4 KiB windows | Parent table cycles/token | Candidate table cycles/token |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | -1.044% | -0.818% | -0.733% | 0.421 | 0.312 |
+| sqlite | +0.029% | -0.109% | -0.142% | 0.326 | 0.245 |
+| musl | -0.329% | -0.155% | -0.019% | 2.671 | 2.164 |
+
+[Native commands, per-round user cycles, table samples and output digests](blockscan-whole.tar.xz)

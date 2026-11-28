@@ -237,3 +237,11 @@ Ordinary compilers without probes ran five rounds of three processes. Debug obje
 The layout improved in 12 of twelve bins, the verified pipeline in 12 of twelve, and the synthetic optimizer in 83 of 120 comparisons. Seed 139 passed 358,076 frozen checks. Three further seeds passed.
 
 [Patch, harnesses, complete compiler samples, per-function ticks and object manifests](cfg-layout-packed.tar.xz)
+
+## Exact block order when every selected edge is already adjacent
+
+A layout candidate keeps the original order when every selected edge connects consecutive retained blocks. The native comparison called the parent and candidate with identical inputs. It compared the complete order, retained count, error, scratch mark and output canaries. It also independently checked that each reachable, unthreaded block was present once and entry came first.
+
+The locked 9700X passed 37,888 comparisons across 74 block counts from zero through 513. The inputs included holes in the retained block list, competing predecessors, cycles, indirect branches, conditional alternatives and exhausted scratch arenas. Two hand-written three-block graphs checked the expected order 0, 2, 1. Disabling the nonadjacent-edge flag for an unconditional edge failed the first graph. Disabling it for a conditional edge failed the second.
+
+[Compared source, fixed and generated graphs, injected errors and native results](adjacent-layout-oracle.tar.xz)

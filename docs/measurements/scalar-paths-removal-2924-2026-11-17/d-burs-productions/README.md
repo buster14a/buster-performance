@@ -290,3 +290,27 @@ Five alternating paired rounds ran single-lane Tier 1 compilation on the locked 
 | All | 6,518 | +0.295% | 6,518 | +0.456% |
 
 [Native paired measurements and commands](converts-functions.tar.xz)
+
+## Source selection with signed load and floating-point productions
+
+The production `benchmark-tier1-select-source` command ran on Lua, SQLite and musl with the Release compilers on the 9700X. Each ratio divides the candidate’s measurement per IR instruction by the parent’s, then takes the median of three paired rounds. Both compiled the same set of functions. The bottom-up rewrite checks reported zero mismatches and zero uncovered nodes.
+
+| Corpus | Selected functions | Instructions | Wall time | Core cycles | Retired instructions |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| lua | 1,096 | 97,441 | 0.9857 | 0.9859 | 0.9826 |
+| sqlite | 2,666 | 448,699 | 0.9867 | 0.9867 | 0.9920 |
+| musl | 2,756 | 235,335 | 0.9897 | 0.9897 | 0.9881 |
+
+[Inputs, native commands and all paired samples](signloads-source-selection.tar.xz)
+
+## End-to-end compilation with floating-point load and binary rules
+
+Each cell compares five paired rounds of three ordinary compiler processes on the locked 9700X. The table gives the median change in user cycles for a single-lane Tier 1 debug build relative to the parent. All 2,742 objects, standard output and diagnostics matched.
+
+| Corpus | Default passes | All passes |
+| --- | ---: | ---: |
+| lua | +0.052% | -0.078% |
+| sqlite | +0.109% | +0.055% |
+| musl | -0.058% | -0.081% |
+
+[Native compiler runs, input commands and object manifests](compile-float.tar.xz)
